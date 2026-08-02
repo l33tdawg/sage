@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/l33tdawg/sage/internal/auth"
-	"github.com/l33tdawg/sage/internal/tlsca"
+	mcpserver "github.com/l33tdawg/sage/internal/mcp"
 )
 
 // runHook is the dispatcher for `sage-gui hook <subcommand>`.
@@ -281,57 +281,50 @@ func hookSignedRequest(method, path string, body []byte) ([]byte, error) {
 	return respBody, nil
 }
 
-// loadHookSeed resolves the Ed25519 seed for hook calls, following the same
-// priority as runMCP():
-//  1. SAGE_IDENTITY_PATH
-//  2. SAGE_AGENT_KEY
-//  3. Per-project key derived from CWD
-//  4. Default ~/.sage/agent.key
+// loadHookSeed resolves the exact same ordinary-agent identity as runMCP.
+// Hooks must never fall back from a missing project identity to the node
+// operator/CEREBRUM Root key: doing so would let a lifecycle script borrow
+// authority that the paired MCP session does not have.
 //
-// Returns an error (not nil) when no key file exists — the shell wrapper
-// treats that as "soft-fail to nudge", which is the right behavior for a
-// machine that has SAGE installed but not yet registered.
+// Returns an error (not nil) when the selected key is missing or malformed —
+// the shell wrapper treats that as "soft-fail to nudge", which is the right
+// behavior until the MCP process has created/registered its project key.
 func loadHookSeed() ([]byte, error) {
-	candidates := []string{
-		os.Getenv("SAGE_IDENTITY_PATH"),
-		os.Getenv("SAGE_AGENT_KEY"),
-	}
-
-	if cwd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(providerProjectAgentDir(SageHome(), cwd, os.Getenv("SAGE_PROVIDER")), "agent.key"))
-	}
-	candidates = append(candidates, filepath.Join(SageHome(), "agent.key"))
-
-	for _, raw := range candidates {
-		if raw == "" {
-			continue
-		}
-		p := filepath.Clean(expandTilde(raw))
-		data, err := os.ReadFile(p) //nolint:gosec // path from trusted resolution chain
+	keyPath, _ := configuredMCPIdentityEnv()
+	if keyPath == "" {
+		cwd, err := os.Getwd()
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("resolve project directory for hook identity: %w", err)
 		}
-		switch len(data) {
-		case ed25519.SeedSize:
-			return data, nil
-		case ed25519.PrivateKeySize:
-			return data[:ed25519.SeedSize], nil
-		}
+		keyPath = implicitMCPIdentityPath(
+			SageHome(), cwd, os.Getenv("SAGE_PROVIDER"), os.Getenv("SAGE_PROJECT"),
+		)
 	}
-	return nil, fmt.Errorf("no usable agent key found")
+	keyPath = filepath.Clean(expandTilde(keyPath))
+	data, err := os.ReadFile(keyPath) //nolint:gosec // path from trusted identity resolution
+	if err != nil {
+		return nil, fmt.Errorf("load hook identity %s: %w", keyPath, err)
+	}
+	switch len(data) {
+	case ed25519.SeedSize:
+		return data, nil
+	case ed25519.PrivateKeySize:
+		return data[:ed25519.SeedSize], nil
+	default:
+		return nil, fmt.Errorf(
+			"load hook identity %s: invalid Ed25519 key length %d",
+			keyPath, len(data),
+		)
+	}
 }
 
 // hookBaseURL returns the SAGE node URL, preferring the env override but
-// falling back to https://localhost:8443 (quorum mode) or http://localhost:8080
-// (personal mode) based on whether the certs directory is populated.
+// falling back to the same TLS-address-aware node URL as the MCP server.
 func hookBaseURL() string {
 	if v := os.Getenv("SAGE_API_URL"); v != "" {
 		return v
 	}
-	if tlsca.CertsExist(filepath.Join(SageHome(), "certs")) {
-		return "https://localhost:8443"
-	}
-	return "http://localhost:8080"
+	return mcpserver.DefaultBaseURL()
 }
 
 // firstNonEmpty returns the first non-empty string from the arguments.

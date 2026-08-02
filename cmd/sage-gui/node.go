@@ -1127,11 +1127,11 @@ func runServe(startupProof string) (rerr error) {
 		})
 	}
 
-	// v7.1: tell the REST layer which ed25519 public key identifies the local
-	// node operator. Requests signed with this key bypass the cross-agent
-	// visibility filter so the v7.0 SessionStart-hook prefetch returns
-	// useful context on nodes where the LLM agent is registered separately.
-	// Skip if agent.key is unreadable; the bypass simply stays off.
+	// Tell the REST layer which ed25519 public key identifies the local node
+	// operator. This preserves the explicit operator scope for legacy direct
+	// REST administration; project lifecycle hooks use their ordinary-agent
+	// workspace key and never inherit this identity. Skip if agent.key is
+	// unreadable; the separate operator compatibility scope simply stays off.
 	operatorAgentID, operatorIDErr := readNodeOperatorKey(cfg.AgentKey)
 	if operatorIDErr == nil && operatorAgentID != "" {
 		restServer.SetNodeOperatorID(operatorAgentID)
@@ -1154,7 +1154,7 @@ func runServe(startupProof string) (rerr error) {
 				logger.Info().Int("count", confirmed).Msg("reconciled pending MCP token identities")
 			}
 		})
-		logger.Info().Str("operator_id", operatorAgentID[:16]+"...").Msg("node operator key registered for hook read-scope bypass")
+		logger.Info().Str("operator_id", operatorAgentID[:16]+"...").Msg("node operator key registered for direct REST compatibility scope")
 	} else if operatorIDErr != nil {
 		logger.Warn().Err(operatorIDErr).Msg("node operator key unavailable")
 	}
@@ -1640,6 +1640,7 @@ func runServe(startupProof string) (rerr error) {
 			PostV20ForNextTx:    app.IsAppV20ActiveForNextTx,
 			PostV22ForNextTx:    app.IsAppV22ActiveForNextTx,
 			PostV23ForNextTx:    app.IsAppV23ActiveForNextTx,
+			PostV26ForNextTx:    app.IsAppV26ActiveForNextTx,
 			PostV8ForAccess:     app.IsPostV8Fork,
 			MessageNotifier: func(targetAgentID string, notification federation.AgentMessageNotification) {
 				if mcpHTTPTransport == nil {
@@ -2064,7 +2065,7 @@ func runServe(startupProof string) (rerr error) {
 		// stale rows immediately instead of waiting a full interval.
 		const (
 			pipeSweepInterval   = 5 * time.Minute
-			pipeRetentionWindow = 24 * time.Hour // terminal rows deleted this long after creation
+			pipeRetentionWindow = 24 * time.Hour // terminal metadata retained this long after terminal/read transition
 			pipeStalenessWindow = 48 * time.Hour // non-terminal rows force-expired past this age
 		)
 		// Boot one-shot pipeline reconciliation — mirror the ResolveChallengedMemories
@@ -2119,14 +2120,26 @@ func runServe(startupProof string) (rerr error) {
 	}
 
 	// A replacement binary keeps its rollback copy until this exact process has
-	// answered health with its own boot ID and expected version. Failure enters
-	// the same full cleanup path below; main then atomically restores .old.
+	// answered health with its own boot ID and expected version. A failed proof
+	// exits without downgrading the executable: an older binary may be unable to
+	// read chain state that the replacement has already advanced.
 	if startupErr == nil {
 		if execPath, pathErr := os.Executable(); pathErr == nil {
 			if resolved, resolveErr := filepath.EvalSymlinks(execPath); resolveErr == nil {
 				execPath = resolved
 			}
-			if web.PendingUpdateVersion(execPath) == "" {
+			pendingVersion := web.PendingUpdateVersion(execPath)
+			if pendingVersion == "" {
+				execPath = ""
+			} else if !pendingUpdateMatchesRunningVersion(pendingVersion, version) {
+				// A legacy one-line marker can survive a crash before executable
+				// activation, but it has no captured rollback version with which to
+				// prove that state. Preserve the evidence without turning a runnable
+				// old release into a readiness-failure restart loop.
+				logger.Warn().
+					Str("pending_version", pendingVersion).
+					Str("running_version", version).
+					Msg("pending update does not match running binary — preserving recovery state without confirmation")
 				execPath = ""
 			}
 			if execPath != "" {
@@ -2150,7 +2163,7 @@ func runServe(startupProof string) (rerr error) {
 					}
 				}
 				if startupErr != nil {
-					logger.Error().Err(startupErr).Msg("updated process failed readiness proof — preparing rollback")
+					logger.Error().Err(startupErr).Msg("updated process failed readiness proof — pending update remains for operator recovery")
 				}
 			}
 		}
@@ -2253,6 +2266,12 @@ func runServe(startupProof string) (rerr error) {
 		return errCoordinatedRestart
 	}
 	return nil
+}
+
+func pendingUpdateMatchesRunningVersion(pending, running string) bool {
+	pending = strings.TrimPrefix(strings.TrimSpace(pending), "v")
+	running = strings.TrimPrefix(strings.TrimSpace(running), "v")
+	return pending != "" && running != "" && pending != "dev" && running != "dev" && pending == running
 }
 
 func stateSyncRecoveryActionName(action statesync.RecoveryAction) string {
@@ -3662,7 +3681,7 @@ func mcpBearerSignerLookup(
 // the configured agent_key_file, accepting either the 32-byte seed or the 64-byte expanded
 // private-key form (matches mountMCPHTTPTransport's existing parse). Empty
 // string + nil error means the file isn't present — the caller treats that as
-// "no operator key, hook bypass stays off."
+// "no operator compatibility identity; ordinary agent hooks are unaffected."
 func readNodeOperatorKey(path string) (string, error) {
 	path = filepath.Clean(expandTilde(path))
 	data, err := os.ReadFile(path) //nolint:gosec // path under operator's own home dir

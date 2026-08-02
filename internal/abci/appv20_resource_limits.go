@@ -353,7 +353,7 @@ func validateAppV20TxResources(parsed *tx.ParsedTx) error { //nolint:gocyclo // 
 		}
 	case tx.TxTypeDomainReassign:
 		if p := parsed.DomainReassign; p != nil {
-			return appV20Identifiers(id("domain", p.Domain), id("new owner id", p.NewOwnerID), id("parent domain", p.ParentDomain), id("proposal id", p.ProposalID))
+			return appV20Identifiers(id("domain", p.Domain), id("new owner id", p.NewOwnerID), id("parent domain", p.ParentDomain), id("proposal id", p.ProposalID), id("expected owner id", p.ExpectedOwnerID))
 		}
 	case tx.TxTypeCoCommitSubmit:
 		if p := parsed.CoCommitSubmit; p != nil {

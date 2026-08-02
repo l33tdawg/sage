@@ -232,6 +232,7 @@ func TestPrepareAppV20StateSyncBackupPreservesValidAppV26GroupAuthority(t *testi
 	root := deterministicScopedAgent(9)
 	member := deterministicScopedAgent(41)
 	manager := deterministicScopedAgent(73)
+	retiring := deterministicScopedAgent(89)
 	require.NoError(t, source.RegisterAgentWithCapabilities(
 		root.id, "CEREBRUM", store.AppV23RoleAdmin, "", "", "", 1, 0,
 	))
@@ -241,6 +242,10 @@ func TestPrepareAppV20StateSyncBackupPreservesValidAppV26GroupAuthority(t *testi
 	require.NoError(t, source.RegisterAgentWithCapabilities(
 		manager.id, "manager", store.AppV23RoleMember, "", "", "", 3, 0,
 	))
+	require.NoError(t, source.RegisterAgentWithCapabilities(
+		retiring.id, "retiring", store.AppV23RoleMember, "", "", "", 3, 0,
+	))
+	require.NoError(t, source.RegisterDomain("retiring-owned", retiring.id, "", 3))
 	seedTestGovernanceDelegationDomain(t, source)
 	require.NoError(t, source.MarkUpgradeApplied(appV20UpgradeName, 20, 1))
 	require.NoError(t, source.MarkUpgradeApplied(appV21UpgradeName, 21, 2))
@@ -269,8 +274,23 @@ func TestPrepareAppV20StateSyncBackupPreservesValidAppV26GroupAuthority(t *testi
 	require.NoError(t, source.ValidateAppV23State())
 	require.NoError(t, source.MarkUpgradeApplied(appV24UpgradeName, 24, 5))
 	require.NoError(t, source.MarkUpgradeApplied(appV25UpgradeName, 25, 6))
-	require.NoError(t, source.MigrateAppV26AccessGroupAuthorities())
+	require.NoError(t, source.MigrateAppV26AccessGroupAuthorities(7))
 	require.NoError(t, source.MarkUpgradeApplied(appV26UpgradeName, 26, 7))
+	require.NoError(t, source.MutateAppV26AccessGroup(
+		currentRoot.id, "state-sync-team", "State Sync Team", groupMembers,
+		store.AppV26GroupAuthorityReadWriteModify, 1, false, 8,
+	))
+	retiringEnrollment, err := source.GetAppV23Enrollment(retiring.id)
+	require.NoError(t, err)
+	retiringRole, err := source.GetAppV23Role(retiring.id)
+	require.NoError(t, err)
+	require.NoError(t, source.ApproveAppV23LocalAgent(store.AppV23LocalEnrollment{
+		AgentID: retiring.id, ApprovedBy: currentRoot.id,
+		RootGeneration: 3, Profile: retiringEnrollment.Profile,
+		HomeDomain: retiringEnrollment.HomeDomain, Clearance: retiringEnrollment.Clearance,
+		Capabilities: retiringEnrollment.Capabilities, Active: false, UpdatedHeight: 8,
+		RetireOwnedDomainsToRoot: true,
+	}, store.AppV23RoleMember, retiringEnrollment.Revision, retiringRole.Revision))
 	require.NoError(t, source.ValidateAppV26AccessGroupAuthorities())
 
 	state := &AppState{Height: 8, EpochNum: poe.EpochNumber(8)}
@@ -315,7 +335,17 @@ func TestPrepareAppV20StateSyncBackupPreservesValidAppV26GroupAuthority(t *testi
 	require.Len(t, groups, 1)
 	require.Equal(t, "state-sync-team", groups[0].GroupID)
 	require.Equal(t, groupMembers, groups[0].Members)
-	require.Equal(t, store.AppV26GroupAuthorityRead, groups[0].MemberAuthority)
+	require.Equal(t, store.AppV26GroupAuthorityReadWriteModify, groups[0].MemberAuthority)
+	require.Equal(t, uint64(2), groups[0].Revision)
+	domainOwner, err := prepared.GetDomainOwner("retiring-owned")
+	require.NoError(t, err)
+	require.Equal(t, root.id, domainOwner,
+		"state sync must preserve Root's current authority over a retired agent's domains")
+	ownerHistory, err := prepared.ListAppV26DomainOwnershipHistory("retiring-owned")
+	require.NoError(t, err)
+	require.Len(t, ownerHistory, 1)
+	require.Equal(t, retiring.id, ownerHistory[0].PreviousOwner)
+	require.Equal(t, root.id, ownerHistory[0].NewOwner)
 	require.NoError(t, prepared.ValidateAppV26AccessGroupAuthorities())
 	require.NoError(t, prepared.CloseBadger())
 
@@ -343,7 +373,7 @@ func TestPrepareAppV20StateSyncBackupAcceptsExactAppV26ActivationHeight(t *testi
 	require.NoError(t, source.MarkUpgradeApplied(appV23UpgradeName, 23, 4))
 	require.NoError(t, source.MarkUpgradeApplied(appV24UpgradeName, 24, 5))
 	require.NoError(t, source.MarkUpgradeApplied(appV25UpgradeName, 25, 6))
-	require.NoError(t, source.MigrateAppV26AccessGroupAuthorities())
+	require.NoError(t, source.MigrateAppV26AccessGroupAuthorities(7))
 	require.NoError(t, source.MarkUpgradeApplied(appV26UpgradeName, 26, 7))
 
 	// A snapshot emitted by Commit(H) is already a complete app-v26 image. The

@@ -626,18 +626,13 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 			writeError(w, http.StatusBadRequest, "target_agent_id and domain are required")
 			return
 		}
-		if h.appV23IsRootIdentity(req.SourceAgentID) ||
-			h.appV23IsRootIdentity(req.TargetAgentID) {
+		if h.appV23IsRootIdentity(req.TargetAgentID) {
 			writeAppV23AccessError(w, http.StatusForbidden, "root_agent_surface_forbidden",
-				"CEREBRUM Root is not an agent and cannot be targeted by domain reassignment.")
+				"CEREBRUM Root cannot be targeted by domain reassignment. Root may transfer a currently Root-owned domain to an active local agent through this governed recovery flow.")
 			return
 		}
 		if isCerebrumInternalMemoryDomain(req.Domain) {
 			writeError(w, http.StatusNotFound, "domain not found")
-			return
-		}
-		if req.SourceAgentID == req.TargetAgentID {
-			writeError(w, http.StatusBadRequest, "source and target agent cannot be the same")
 			return
 		}
 		// The new owner must be a registered agent.
@@ -645,12 +640,37 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 			writeError(w, http.StatusBadRequest, "target agent not found in registry")
 			return
 		}
+		if h.appV26IsActive() {
+			eligible, eligibilityErr := h.appV26LegacyRecoveryTargetEligible(req.TargetAgentID)
+			if eligibilityErr != nil {
+				writeError(w, http.StatusServiceUnavailable, "target agent authority state unavailable")
+				return
+			}
+			if !eligible {
+				writeError(w, http.StatusConflict, "target must be an active Standard or Companion local agent")
+				return
+			}
+		}
 		// The domain must exist on-chain (else there is nothing to reassign).
+		// Source is only a local-mirror cleanup hint, but it must still match the
+		// canonical owner when supplied. An omitted source is resolved from chain
+		// state so Search/recovery never guess ownership from immutable authorship.
 		if h.BadgerStore != nil {
-			if _, err := h.BadgerStore.GetDomainOwner(req.Domain); err != nil {
+			owner, ownerErr := h.BadgerStore.GetDomainOwner(req.Domain)
+			if ownerErr != nil {
 				writeError(w, http.StatusBadRequest, "domain not found on-chain: "+req.Domain)
 				return
 			}
+			if req.SourceAgentID != "" && req.SourceAgentID != owner {
+				writeAppV23AccessError(w, http.StatusConflict, "owner_changed",
+					"domain ownership changed after this screen loaded; refresh and review the current owner before transferring")
+				return
+			}
+			req.SourceAgentID = owner
+		}
+		if req.SourceAgentID == req.TargetAgentID {
+			writeError(w, http.StatusBadRequest, "current owner and target agent cannot be the same")
+			return
 		}
 
 		var steps []reassignStep
@@ -675,14 +695,19 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 		}
 		adminID := agentIDForKey(adminKey)
 		postAppV20 := h.AppV20ActiveFn != nil && h.AppV20ActiveFn()
+		expectedOwnerID := ""
+		if h.appV26IsActive() {
+			expectedOwnerID = req.SourceAgentID
+		}
 
 		// Step 1: propose. Payload is the DomainReassign body the executing tx
 		// must reproduce byte-for-byte (parity check).
 		payload, mErr := json.Marshal(tx.DomainReassign{
-			Domain:       req.Domain,
-			NewOwnerID:   req.TargetAgentID,
-			ParentDomain: "",
-			OpenToShared: false,
+			Domain:          req.Domain,
+			NewOwnerID:      req.TargetAgentID,
+			ParentDomain:    "",
+			OpenToShared:    false,
+			ExpectedOwnerID: expectedOwnerID,
 		})
 		if mErr != nil {
 			fail(http.StatusInternalServerError, "propose", "encode payload: "+mErr.Error())
@@ -793,11 +818,12 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 		reassignTx := &tx.ParsedTx{
 			Type: tx.TxTypeDomainReassign,
 			DomainReassign: &tx.DomainReassign{
-				Domain:       req.Domain,
-				NewOwnerID:   req.TargetAgentID,
-				ParentDomain: "",
-				ProposalID:   proposalID,
-				OpenToShared: false,
+				Domain:          req.Domain,
+				NewOwnerID:      req.TargetAgentID,
+				ParentDomain:    "",
+				ProposalID:      proposalID,
+				OpenToShared:    false,
+				ExpectedOwnerID: expectedOwnerID,
 			},
 		}
 		var reassignHash, reassignLog string
@@ -819,12 +845,18 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 		steps = append(steps, reassignStep{Name: "reassign", TxHash: reassignHash, OK: true})
 		purged := parsePurgedGrantsWeb(reassignLog)
 
-		// Step 5: grant the new owner explicit level-3 access (ownership alone
-		// does not imply access; the reassign purged all grants). Must be signed
-		// AS B. If B's key is not local, defer to B's own node.
+		// Historical chains issued a redundant self-grant after reassignment.
+		// App-v26 owner authority is evaluated directly from the canonical owner
+		// row, so the new owner has immediate read/write/modify authority (subject
+		// to its hard profile/capability limits) without possessing its key here.
+		// Only unrelated direct grants are purged by the reassignment CAS.
 		grantDeferred := false
 		grantMsg := ""
-		if h.ResolveAgentKeyFn != nil {
+		ownerAccess := "ownership"
+		if h.appV26IsActive() {
+			steps = append(steps, reassignStep{Name: "owner_access", OK: true})
+		} else if h.ResolveAgentKeyFn != nil {
+			ownerAccess = "legacy_self_grant"
 			if ownerKey, ok := h.ResolveAgentKeyFn(req.TargetAgentID); ok {
 				grantTx := &tx.ParsedTx{
 					Type: tx.TxTypeAccessGrant,
@@ -847,6 +879,7 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 				steps = append(steps, reassignStep{Name: "grant", OK: false, Error: "deferred: " + grantMsg})
 			}
 		} else {
+			ownerAccess = "legacy_self_grant"
 			grantDeferred = true
 			grantMsg = "no local key resolver available, so the owner must grant itself domain access"
 			steps = append(steps, reassignStep{Name: "grant", OK: false, Error: "deferred: " + grantMsg})
@@ -857,7 +890,7 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 		// add it (read+write) to the new owner's, so the Agents matrix does not
 		// show a stale grant a later save would try to re-issue. Best-effort;
 		// on-chain state (above) is authoritative.
-		if req.SourceAgentID != "" {
+		if req.SourceAgentID != "" && !h.appV23IsRootIdentity(req.SourceAgentID) {
 			h.mirrorDomainAccessSet(r.Context(), agentStore, req.SourceAgentID, req.Domain, false)
 		}
 		h.mirrorDomainAccessSet(r.Context(), agentStore, req.TargetAgentID, req.Domain, true)
@@ -869,7 +902,7 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 				break
 			}
 		}
-		msg := fmt.Sprintf("Domain %q ownership transferred to %s. %d prior grants purged, so the source agent's access grant on this domain is revoked. Authorship is unchanged.", req.Domain, shortID(req.TargetAgentID), purged)
+		msg := fmt.Sprintf("Domain %q ownership transferred to %s. The new owner has immediate access through ownership. %d unrelated prior grants were purged, and authorship is unchanged.", req.Domain, shortID(req.TargetAgentID), purged)
 		if grantMsg != "" {
 			msg = msg + " Note: " + grantMsg + "."
 		}
@@ -891,6 +924,7 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 			"steps":          steps,
 			"purged_grants":  purged,
 			"grant_deferred": grantDeferred,
+			"owner_access":   ownerAccess,
 			"source":         req.SourceAgentID,
 			"target":         req.TargetAgentID,
 			"domain":         req.Domain,

@@ -72,6 +72,103 @@ func (m *Manager) pipelineDrain(ctx context.Context, ss *store.SQLiteStore) {
 	}
 }
 
+func (m *Manager) receiptDrain(ctx context.Context, ss *store.SQLiteStore) {
+	events, err := ss.ListPendingFederatedReceiptOutbox(ctx, time.Now().UTC(), pipeDrainLimit)
+	if err != nil {
+		if !errors.Is(err, store.ErrPipeContentUnavailable) {
+			m.logger.Warn().Err(err).Msg("receipt-v2 outbox scan failed")
+		}
+		return
+	}
+	sem := make(chan struct{}, pipeDrainConcurrency)
+	var wg sync.WaitGroup
+	for _, event := range events {
+		if ctx.Err() != nil {
+			break
+		}
+		event := event
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			m.deliverReceiptEvent(ctx, ss, event)
+		}()
+	}
+	wg.Wait()
+	if len(events) == pipeDrainLimit {
+		m.nudgeSync()
+	}
+}
+
+func (m *Manager) deliverReceiptEvent(parent context.Context, ss *store.SQLiteStore, outbox *store.FederatedReceiptOutbox) {
+	ctx, cancel := context.WithTimeout(parent, pipeDeliveryTimeout)
+	defer cancel()
+	if outbox == nil || m.postV26ForNextTx == nil || !m.postV26ForNextTx() {
+		return
+	}
+	deliveryCtx, releaseDelivery, err := m.beginLinkedDelivery(ctx, outbox.SenderChainID)
+	if err != nil {
+		m.recordReceiptDeliveryError(ss, outbox, err, "")
+		return
+	}
+	defer releaseDelivery()
+	// Receipt evidence was already exact-recipient verified and atomically
+	// admitted before it entered this outbox. It carries no payload. Do not
+	// re-run mutable content authorization here: after revoke, an exact retry of
+	// an already accepted receipt must remain deliverable/recognizable by the
+	// sender. Mutual peer authentication still binds the delivery channel.
+	_, err = m.ActiveAgreement(outbox.SenderChainID)
+	if err != nil {
+		m.recordReceiptDeliveryError(ss, outbox, err, "")
+		return
+	}
+	event := &PipeReceiptEvent{
+		Version: PipeReceiptVersion, EventID: outbox.EventID, MessageID: outbox.MessageID,
+		RecipientPipeID: outbox.RecipientPipeID, SenderChainID: outbox.SenderChainID,
+		RecipientChainID: outbox.RecipientChainID, SenderAgentID: outbox.SenderAgentID,
+		RecipientAgentID: outbox.RecipientAgentID, ContentDigest: outbox.ContentDigest,
+		Kind: outbox.Kind, EventAt: outbox.EventAt, PolicyEpoch: outbox.PolicyEpoch,
+		AgreementID: outbox.AgreementID, ContactID: outbox.ContactID,
+		ContactRevision: outbox.ContactRevision, AuthorizationMode: outbox.AuthorizationMode,
+		RelationDigest: outbox.RelationDigest, Proof: outbox.Proof,
+	}
+	if _, err := m.PushPipeReceiptV2(deliveryCtx, outbox.SenderChainID, event); err != nil {
+		terminalState := ""
+		var httpErr *pipeEventHTTPError
+		if errors.As(err, &httpErr) {
+			switch httpErr.Status {
+			case http.StatusNotFound, http.StatusNotImplemented:
+				terminalState = "unsupported"
+			case http.StatusBadRequest, http.StatusForbidden, http.StatusConflict,
+				http.StatusGone, http.StatusUnprocessableEntity:
+				terminalState = "failed"
+			}
+		}
+		m.recordReceiptDeliveryError(ss, outbox, err, terminalState)
+		return
+	}
+	if err := ss.MarkFederatedReceiptOutboxDelivered(context.Background(), outbox.EventID); err != nil {
+		m.logger.Warn().Err(err).Str("event_id", outbox.EventID).Msg("receipt-v2 delivery was not recorded")
+	}
+}
+
+func (m *Manager) recordReceiptDeliveryError(
+	ss *store.SQLiteStore, event *store.FederatedReceiptOutbox, deliveryErr error, terminalState string,
+) {
+	if event == nil {
+		return
+	}
+	delay := pipelineRetryDelay(event.Attempts)
+	if terminalState == "" && time.Now().UTC().Add(delay).After(event.ExpiresAt) {
+		terminalState = "failed"
+	}
+	if err := ss.RecordFederatedReceiptOutboxFailure(context.Background(), event.EventID,
+		deliveryErr.Error(), time.Now().UTC().Add(delay), terminalState); err != nil {
+		m.logger.Warn().Err(err).Str("event_id", event.EventID).Msg("receipt-v2 delivery failure was not recorded")
+	}
+}
+
 func (m *Manager) deliverPipelineEvent(parent context.Context, ss *store.SQLiteStore, outbox *store.PipelineTransportOutbox) {
 	ctx, cancel := context.WithTimeout(parent, pipeDeliveryTimeout)
 	defer cancel()
@@ -214,6 +311,22 @@ func (m *Manager) deliverPipelineEvent(parent context.Context, ss *store.SQLiteS
 		}
 		if markErr := ss.MarkPipelineTransportDelivered(context.Background(), outbox.EventID); markErr != nil {
 			m.logger.Warn().Err(markErr).Str("event_id", outbox.EventID).Msg("pipeline transport delivery was not recorded")
+			return
+		}
+		if outbox.EventKind == "send" && outbox.ReceiptProtocolVersion == PipeReceiptVersion {
+			binding := store.FederatedReceiptBinding{
+				MessageID: outbox.EventID, LocalPipeID: outbox.PipeID,
+				SenderChainID: m.localChainID, RecipientChainID: outbox.RemoteChainID,
+				SenderAgentID: outbox.SourceAgentID, RecipientAgentID: outbox.TargetAgentID,
+				ContentDigest: event.ReceiptContentDigest, PolicyEpoch: outbox.PolicyEpoch,
+				AgreementID: outbox.AgreementID, ContactID: outbox.ContactID,
+				ContactRevision: outbox.ContactRevision, AuthorizationMode: outbox.AuthorizationMode,
+				RelationDigest: linkedMessageRelationDigest(event.LinkedRelation),
+			}
+			if _, receiptErr := ss.RecordFederatedReceiptDelivery(context.Background(), binding, time.Now().UTC()); receiptErr != nil {
+				m.logger.Warn().Err(receiptErr).Str("event_id", outbox.EventID).
+					Msg("receipt-v2 peer admission was not recorded")
+			}
 		}
 		return
 	}
@@ -243,6 +356,31 @@ func (m *Manager) recordPipelineDeliveryError(ss *store.SQLiteStore, event *stor
 	}
 	if err := ss.RecordPipelineTransportFailure(context.Background(), event.EventID, deliveryErr.Error(), time.Now().UTC().Add(delay), terminal); err != nil {
 		m.logger.Warn().Err(err).Str("event_id", event.EventID).Msg("pipeline transport failure was not recorded")
+	}
+	if terminal && event.EventKind == "send" && event.ReceiptProtocolVersion == PipeReceiptVersion {
+		msg, err := ss.GetPipeline(context.Background(), event.PipeID)
+		if err != nil {
+			return
+		}
+		kind := "failed"
+		if !time.Now().UTC().Before(event.ExpiresAt) {
+			kind = "expired"
+		} else if errors.Is(deliveryErr, ErrFederatedPipeInvalid) {
+			kind = "revoked"
+		}
+		binding := store.FederatedReceiptBinding{
+			MessageID: event.EventID, LocalPipeID: event.PipeID,
+			SenderChainID: m.localChainID, RecipientChainID: event.RemoteChainID,
+			SenderAgentID: event.SourceAgentID, RecipientAgentID: event.TargetAgentID,
+			ContentDigest: pipeReceiptContentDigest(event.EventID, m.localChainID, event.RemoteChainID, msg),
+			PolicyEpoch:   event.PolicyEpoch, AgreementID: event.AgreementID,
+			ContactID: event.ContactID, ContactRevision: event.ContactRevision,
+			AuthorizationMode: event.AuthorizationMode,
+			RelationDigest:    pipelineStoredRelationDigest(event.LinkedRelation),
+		}
+		if _, err := ss.RecordFederatedReceiptTerminal(context.Background(), binding, kind, time.Now().UTC()); err != nil {
+			m.logger.Warn().Err(err).Str("event_id", event.EventID).Msg("receipt-v2 terminal state was not recorded")
+		}
 	}
 }
 
@@ -314,8 +452,9 @@ func (m *Manager) buildPipelineEvent(ctx context.Context, ss *store.SQLiteStore,
 		CreatedAt: outbox.CreatedAt, ExpiresAt: outbox.ExpiresAt,
 		PolicyEpoch: outbox.PolicyEpoch, AgreementID: outbox.AgreementID,
 		ContactID: outbox.ContactID, ContactRevision: outbox.ContactRevision,
-		AuthorizationMode: outbox.AuthorizationMode,
-		Proof:             outbox.Proof,
+		AuthorizationMode:      outbox.AuthorizationMode,
+		ReceiptProtocolVersion: outbox.ReceiptProtocolVersion,
+		Proof:                  outbox.Proof,
 	}
 	if outbox.AuthorizationMode == LinkedMessageAuthorizationMode {
 		event.LinkedRelation, err = decodeLinkedMessageRelation(outbox.LinkedRelation)
@@ -361,10 +500,18 @@ func (m *Manager) buildPipelineEvent(ctx context.Context, ss *store.SQLiteStore,
 			target.ContactID != outbox.ContactID || target.ContactRevision != outbox.ContactRevision ||
 			target.AgentID != outbox.TargetAgentID || target.ChainID != outbox.RemoteChainID ||
 			target.AuthorizationMode != outbox.AuthorizationMode ||
-			!linkedMessageRelationEqual(target.LinkedRelation, event.LinkedRelation) {
+			!linkedMessageRelationEqual(target.LinkedRelation, event.LinkedRelation) ||
+			target.ReceiptProtocolVersion != outbox.ReceiptProtocolVersion {
 			return nil, true, ErrFederatedPipeInvalid
 		}
 		event.Intent, event.Payload = msg.Intent, msg.Payload
+		if outbox.ReceiptProtocolVersion == PipeReceiptVersion {
+			event.ReceiptContentDigest = pipeReceiptContentDigest(
+				event.EventID, event.SourceChainID, event.DestinationChainID, msg,
+			)
+		} else if outbox.ReceiptProtocolVersion != 0 {
+			return nil, true, ErrFederatedPipeInvalid
+		}
 	case "result":
 		if msg.SourceChainID != outbox.RemoteChainID || msg.DestinationChainID != "" || msg.Status != "completed" ||
 			msg.ToAgent != outbox.SourceAgentID || msg.FromAgent != outbox.TargetAgentID || msg.SourcePipeID == "" {

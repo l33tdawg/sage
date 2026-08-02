@@ -86,6 +86,7 @@ func (h *DashboardHandler) RegisterNetworkRoutes(r chi.Router) {
 	r.Post("/v1/dashboard/network/reassign-domain-ownership", h.handleReassignDomainOwnership(agentStore))
 	r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/network/access", h.handleAppV23AccessState(agentStore))
 	r.With(h.cerebrumOperatorGate).Put("/v1/dashboard/network/access/agents/{id}/policy", h.handleAppV23AgentPolicy())
+	r.With(h.cerebrumOperatorGate).Put("/v1/dashboard/network/access/agents/{id}/name", h.handleAppV26AgentDisplayName())
 	r.With(h.cerebrumOperatorGate).Put("/v1/dashboard/network/access/groups/{groupID}", h.handleAppV23AccessGroupPut())
 	r.With(h.cerebrumOperatorGate).Delete("/v1/dashboard/network/access/groups/{groupID}", h.handleAppV23AccessGroupDelete())
 	r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/network/access/linked-readers", h.handleAppV23LinkedReadersList())
@@ -498,6 +499,18 @@ func (h *DashboardHandler) handleUpdateAgent(agentStore store.AgentStore) http.H
 			writeCEREBRUMOperatorForbidden(w, "Changing agent permissions requires operator authority.")
 			return
 		}
+		// app-v26 makes an agent's operator-facing display label consensus
+		// governed and treats its registered identity and boot purpose as
+		// immutable provenance. Keeping this legacy SQLite-only path open would
+		// let the Agents page display a name that consensus never committed, or
+		// rewrite the purpose used to explain why a principal was enrolled. The
+		// dedicated Access Controls endpoint copies every immutable field from
+		// current consensus state and changes only Name.
+		if h.appV26IsActive() && (req.Name != nil || req.BootBio != nil) {
+			writeAppV23AccessError(w, http.StatusGone, "governed_agent_metadata_required",
+				"App-v26 display names are changed through Access Controls. Registered identity and boot purpose are immutable.")
+			return
+		}
 		overrides := make(map[string]adminOverrideExpectation, len(req.AdminOverride))
 		if len(req.AdminOverride) > 0 {
 			// The genesis key is a human/operator capability. A cryptographically
@@ -753,11 +766,19 @@ func (h *DashboardHandler) handleRemoveAgent(agentStore store.AgentStore) http.H
 			writeAppV23AccessError(w, http.StatusNotFound, "agent_not_found", "Agent not found.")
 			return
 		}
+		enrollment, err := h.BadgerStore.GetAppV23Enrollment(id)
+		if err != nil {
+			writeAppV23AccessError(w, http.StatusServiceUnavailable, "enrollment_state_unavailable",
+				"Consensus enrollment state could not be verified; the local agent record was left unchanged.")
+			return
+		}
 		// Deletion is deliberately idempotent. A prior request may already have
 		// committed the on-chain deactivation and updated the local projection
 		// before the browser lost its response; retrying must settle the UI, not
-		// send the operator back into an endless "removing" state.
-		if agent.Status == "removed" {
+		// send the operator back into an endless "removing" state.  Consensus is
+		// authoritative, though: a stale local "removed" row must never hide an
+		// active enrollment or leave live authority invisible to CEREBRUM.
+		if agent.Status == "removed" && (enrollment == nil || !enrollment.Active) {
 			writeJSONResp(w, http.StatusOK, map[string]any{
 				"ok": true, "status": "removed", "already_removed": true,
 				"consensus_active": false, "redeploy_required": false,
@@ -772,8 +793,7 @@ func (h *DashboardHandler) handleRemoveAgent(agentStore store.AgentStore) http.H
 			})
 			return
 		}
-		enrollment, err := h.BadgerStore.GetAppV23Enrollment(id)
-		if err != nil || enrollment == nil {
+		if enrollment == nil {
 			// Directory-only / historical records have never held an active
 			// app-v23 standing. There is no on-chain authority to revoke, so
 			// finish the local projection removal instead of making an otherwise

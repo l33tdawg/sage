@@ -486,6 +486,17 @@ jobs:
           sha256sum -c checksums.txt
           sha256sum -c sage-gui-linux-amd64.tar.gz.sha256
 
+      - name: Exercise exact packaged Linux binary through updater swap
+        env:
+          RELEASE_VERSION: ${{ needs.release-metadata.outputs.version }}
+          SAGE_PACKAGED_UPDATE_ARCHIVE: ${{ github.workspace }}/dist/sage-gui_${{ needs.release-metadata.outputs.version }}_linux_amd64.tar.gz
+          SAGE_PACKAGED_UPDATE_VERSION: ${{ needs.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          test -f "${SAGE_PACKAGED_UPDATE_ARCHIVE}"
+          test ! -L "${SAGE_PACKAGED_UPDATE_ARCHIVE}"
+          go test ./web -run '^TestLinuxPackagedBinarySwapEndToEnd$' -count=1
+
       - name: Upload private GoReleaser assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -617,6 +628,25 @@ jobs:
           APP_PATH="dist/macos-${ARCH_LABEL}/SAGE.app"
           DMG_PATH="dist/macos-${ARCH_LABEL}/SAGE-${SAGE_VERSION}-macOS-${ARCH_LABEL}.dmg"
           codesign --verify --deep --strict --verbose=2 "${APP_PATH}"
+          app_identity=$(codesign -dv --verbose=4 "${APP_PATH}" 2>&1)
+          printf '%s\n' "${app_identity}" | grep -Fx "Identifier=com.sage.brain"
+          printf '%s\n' "${app_identity}" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+          for leaf_spec in \
+            "${APP_PATH}/Contents/MacOS/sage-gui:sage-gui" \
+            "${APP_PATH}/Contents/MacOS/sage-tray:com.sage.brain"; do
+            leaf=${leaf_spec%:*}
+            expected_identifier=${leaf_spec##*:}
+            test -f "${leaf}" && test ! -L "${leaf}" && test -x "${leaf}"
+            test "$(stat -f '%Lp' "${leaf}")" = 755
+            codesign --verify --strict --verbose=2 "${leaf}"
+            leaf_identity=$(codesign -dv --verbose=4 "${leaf}" 2>&1)
+            printf '%s\n' "${leaf_identity}" | grep -Fx "Identifier=${expected_identifier}"
+            printf '%s\n' "${leaf_identity}" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+          done
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP_PATH}/Contents/Info.plist")" = com.sage.brain
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${APP_PATH}/Contents/Info.plist")" = sage-tray
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${APP_PATH}/Contents/Info.plist")" = "${SAGE_VERSION#v}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP_PATH}/Contents/Info.plist")" = "${SAGE_VERSION#v}"
           xcrun stapler validate "${DMG_PATH}"
 
           MOUNT_POINT=$(mktemp -d)
@@ -627,7 +657,79 @@ jobs:
           trap cleanup_mount EXIT
           hdiutil attach -readonly -nobrowse -mountpoint "${MOUNT_POINT}" "${DMG_PATH}"
           codesign --verify --deep --strict --verbose=2 "${MOUNT_POINT}/SAGE.app"
+          app_identity=$(codesign -dv --verbose=4 "${MOUNT_POINT}/SAGE.app" 2>&1)
+          printf '%s\n' "${app_identity}" | grep -Fx "Identifier=com.sage.brain"
+          printf '%s\n' "${app_identity}" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+          for leaf_spec in \
+            "${MOUNT_POINT}/SAGE.app/Contents/MacOS/sage-gui:sage-gui" \
+            "${MOUNT_POINT}/SAGE.app/Contents/MacOS/sage-tray:com.sage.brain"; do
+            leaf=${leaf_spec%:*}
+            expected_identifier=${leaf_spec##*:}
+            test -f "${leaf}" && test ! -L "${leaf}" && test -x "${leaf}"
+            test "$(stat -f '%Lp' "${leaf}")" = 755
+            codesign --verify --strict --verbose=2 "${leaf}"
+            leaf_identity=$(codesign -dv --verbose=4 "${leaf}" 2>&1)
+            printf '%s\n' "${leaf_identity}" | grep -Fx "Identifier=${expected_identifier}"
+            printf '%s\n' "${leaf_identity}" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+          done
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${MOUNT_POINT}/SAGE.app/Contents/Info.plist")" = "${SAGE_VERSION#v}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${MOUNT_POINT}/SAGE.app/Contents/Info.plist")" = "${SAGE_VERSION#v}"
           spctl --assess --type execute --verbose=4 "${MOUNT_POINT}/SAGE.app"
+
+          bundle_byte_manifest() {
+            local bundle_root=$1
+            (
+              cd "${bundle_root}"
+              find . -type f -print | LC_ALL=C sort | while IFS= read -r rel; do
+                hash=$(shasum -a 256 "${rel}" | awk '{print $1}')
+                mode=$(stat -f '%Lp' "${rel}")
+                printf 'F %s %s %s\n' "${mode}" "${hash}" "${rel}"
+              done
+              find . -type l -print | LC_ALL=C sort | while IFS= read -r rel; do
+                mode=$(stat -f '%Lp' "${rel}")
+                printf 'L %s %s -> %s\n' "${mode}" "${rel}" "$(readlink "${rel}")"
+              done
+            )
+          }
+          COPY_VERIFY_ROOT=$(mktemp -d "${RUNNER_TEMP}/sage-updater-copy.XXXXXX")
+          test -w "${COPY_VERIFY_ROOT}"
+          copy_device=$(df "${COPY_VERIFY_ROOT}" | awk 'END { print $1 }')
+          test -n "${copy_device}"
+          /usr/sbin/diskutil info "${copy_device}" | grep -Eq 'File System Personality:[[:space:]]+APFS'
+          trap 'rm -rf "${COPY_VERIFY_ROOT}"; cleanup_mount' EXIT
+          COPY_VERIFY_APP="${COPY_VERIFY_ROOT}/SAGE.app"
+          /usr/bin/ditto "${MOUNT_POINT}/SAGE.app" "${COPY_VERIFY_APP}"
+          bundle_byte_manifest "${MOUNT_POINT}/SAGE.app" > "${COPY_VERIFY_ROOT}/mounted.manifest"
+          bundle_byte_manifest "${COPY_VERIFY_APP}" > "${COPY_VERIFY_ROOT}/copied.manifest"
+          diff -u "${COPY_VERIFY_ROOT}/mounted.manifest" "${COPY_VERIFY_ROOT}/copied.manifest"
+          codesign --verify --deep --strict --verbose=2 "${COPY_VERIFY_APP}"
+          app_identity=$(codesign -dv --verbose=4 "${COPY_VERIFY_APP}" 2>&1)
+          printf '%s\n' "${app_identity}" | grep -Fx "Identifier=com.sage.brain"
+          printf '%s\n' "${app_identity}" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+          for leaf_spec in \
+            "${COPY_VERIFY_APP}/Contents/MacOS/sage-gui:sage-gui" \
+            "${COPY_VERIFY_APP}/Contents/MacOS/sage-tray:com.sage.brain"; do
+            leaf=${leaf_spec%:*}
+            expected_identifier=${leaf_spec##*:}
+            test -f "${leaf}" && test ! -L "${leaf}" && test -x "${leaf}"
+            test "$(stat -f '%Lp' "${leaf}")" = 755
+            codesign --verify --strict --verbose=2 "${leaf}"
+            leaf_identity=$(codesign -dv --verbose=4 "${leaf}" 2>&1)
+            printf '%s\n' "${leaf_identity}" | grep -Fx "Identifier=${expected_identifier}"
+            printf '%s\n' "${leaf_identity}" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+          done
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${COPY_VERIFY_APP}/Contents/Info.plist")" = com.sage.brain
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${COPY_VERIFY_APP}/Contents/Info.plist")" = sage-tray
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${COPY_VERIFY_APP}/Contents/Info.plist")" = "${SAGE_VERSION#v}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${COPY_VERIFY_APP}/Contents/Info.plist")" = "${SAGE_VERSION#v}"
+          version_output=$("${COPY_VERIFY_APP}/Contents/MacOS/sage-gui" version)
+          test "$(printf '%s\n' "${version_output}" | awk 'NR == 1 { print $1 }')" = sage-gui
+          test "$(printf '%s\n' "${version_output}" | awk 'NR == 1 { print $2 }')" = "${SAGE_VERSION#v}"
+          spctl --assess --type execute --verbose=4 "${COPY_VERIFY_APP}"
+          codesign --verify --deep --strict --verbose=2 "${COPY_VERIFY_APP}"
+          codesign --verify --strict --verbose=2 "${COPY_VERIFY_APP}/Contents/MacOS/sage-gui"
+          codesign --verify --strict --verbose=2 "${COPY_VERIFY_APP}/Contents/MacOS/sage-tray"
+          rm -rf "${COPY_VERIFY_ROOT}"
           cleanup_mount
           trap - EXIT
 
@@ -1140,19 +1242,26 @@ jobs:
           }
 
           for arch in arm64 x86_64; do
-            download_draft_asset "SAGE-${RELEASE_TAG}-macOS-${arch}.dmg"
-            download_draft_asset "SAGE-${RELEASE_TAG}-macOS-${arch}.dmg.sha256"
+            for dmg_name in \
+              "SAGE-${RELEASE_TAG}-macOS-${arch}.dmg" \
+              "SAGE-macOS-${arch}.dmg"; do
+              download_draft_asset "${dmg_name}"
+              download_draft_asset "${dmg_name}.sha256"
+            done
           done
 
           for arch in arm64 x86_64; do
-            dmg="staged-macos/SAGE-${RELEASE_TAG}-macOS-${arch}.dmg"
+            for dmg_name in \
+              "SAGE-${RELEASE_TAG}-macOS-${arch}.dmg" \
+              "SAGE-macOS-${arch}.dmg"; do
+            dmg="staged-macos/${dmg_name}"
             checksum="${dmg}.sha256"
-            test -s "${dmg}"
-            test -s "${checksum}"
-            (
-              cd staged-macos
-              shasum -a 256 -c "$(basename "${checksum}")"
-            )
+            test -f "${dmg}" && test ! -L "${dmg}" && test -s "${dmg}"
+            test -f "${checksum}" && test ! -L "${checksum}" && test -s "${checksum}"
+            read -r published_hash published_name checksum_extra < "${checksum}"
+            test -z "${checksum_extra:-}"
+            test "${published_name}" = "$(basename "${dmg}")"
+            test "${published_hash}" = "$(shasum -a 256 "${dmg}" | awk '{print $1}')"
 
             mount_point=$(mktemp -d)
             cleanup_mount() {
@@ -1162,16 +1271,94 @@ jobs:
             trap cleanup_mount EXIT
             hdiutil attach -readonly -nobrowse -mountpoint "${mount_point}" "${dmg}"
             codesign --verify --deep --strict --verbose=4 "${mount_point}/SAGE.app"
+            app_identity=$(codesign -dv --verbose=4 "${mount_point}/SAGE.app" 2>&1)
+            printf '%s\n' "${app_identity}" | grep -Fx "Identifier=com.sage.brain"
+            printf '%s\n' "${app_identity}" | grep -Fx "TeamIdentifier=2N7GKZ8D8Z"
+            for leaf_spec in \
+              "${mount_point}/SAGE.app/Contents/MacOS/sage-gui:sage-gui" \
+              "${mount_point}/SAGE.app/Contents/MacOS/sage-tray:com.sage.brain"; do
+              leaf=${leaf_spec%:*}
+              expected_identifier=${leaf_spec##*:}
+              test -f "${leaf}" && test ! -L "${leaf}" && test -x "${leaf}"
+              test "$(stat -f '%Lp' "${leaf}")" = 755
+              codesign --verify --strict --verbose=2 "${leaf}"
+              leaf_identity=$(codesign -dv --verbose=4 "${leaf}" 2>&1)
+              printf '%s\n' "${leaf_identity}" | grep -Fx "Identifier=${expected_identifier}"
+              printf '%s\n' "${leaf_identity}" | grep -Fx "TeamIdentifier=2N7GKZ8D8Z"
+            done
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${mount_point}/SAGE.app/Contents/Info.plist")" = com.sage.brain
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${mount_point}/SAGE.app/Contents/Info.plist")" = sage-tray
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${mount_point}/SAGE.app/Contents/Info.plist")" = "${RELEASE_TAG#v}"
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${mount_point}/SAGE.app/Contents/Info.plist")" = "${RELEASE_TAG#v}"
             spctl --assess --type execute --verbose=4 "${mount_point}/SAGE.app"
+
+            bundle_byte_manifest() {
+              local bundle_root=$1
+              (
+                cd "${bundle_root}"
+                find . -type f -print | LC_ALL=C sort | while IFS= read -r rel; do
+                  hash=$(shasum -a 256 "${rel}" | awk '{print $1}')
+                  mode=$(stat -f '%Lp' "${rel}")
+                  printf 'F %s %s %s\n' "${mode}" "${hash}" "${rel}"
+                done
+                find . -type l -print | LC_ALL=C sort | while IFS= read -r rel; do
+                  mode=$(stat -f '%Lp' "${rel}")
+                  printf 'L %s %s -> %s\n' "${mode}" "${rel}" "$(readlink "${rel}")"
+                done
+              )
+            }
+            copy_verify_root=$(mktemp -d "${RUNNER_TEMP}/sage-staged-copy.XXXXXX")
+            test -w "${copy_verify_root}"
+            copy_device=$(df "${copy_verify_root}" | awk 'END { print $1 }')
+            test -n "${copy_device}"
+            /usr/sbin/diskutil info "${copy_device}" | grep -Eq 'File System Personality:[[:space:]]+APFS'
+            trap 'rm -rf "${copy_verify_root}"; cleanup_mount' EXIT
+            copy_verify_app="${copy_verify_root}/SAGE.app"
+            /usr/bin/ditto "${mount_point}/SAGE.app" "${copy_verify_app}"
+            bundle_byte_manifest "${mount_point}/SAGE.app" > "${copy_verify_root}/mounted.manifest"
+            bundle_byte_manifest "${copy_verify_app}" > "${copy_verify_root}/copied.manifest"
+            diff -u "${copy_verify_root}/mounted.manifest" "${copy_verify_root}/copied.manifest"
+            codesign --verify --deep --strict --verbose=2 "${copy_verify_app}"
+            app_identity=$(codesign -dv --verbose=4 "${copy_verify_app}" 2>&1)
+            printf '%s\n' "${app_identity}" | grep -Fx "Identifier=com.sage.brain"
+            printf '%s\n' "${app_identity}" | grep -Fx "TeamIdentifier=2N7GKZ8D8Z"
+            for leaf_spec in \
+              "${copy_verify_app}/Contents/MacOS/sage-gui:sage-gui" \
+              "${copy_verify_app}/Contents/MacOS/sage-tray:com.sage.brain"; do
+              leaf=${leaf_spec%:*}
+              expected_identifier=${leaf_spec##*:}
+              test -f "${leaf}" && test ! -L "${leaf}" && test -x "${leaf}"
+              test "$(stat -f '%Lp' "${leaf}")" = 755
+              codesign --verify --strict --verbose=2 "${leaf}"
+              leaf_identity=$(codesign -dv --verbose=4 "${leaf}" 2>&1)
+              printf '%s\n' "${leaf_identity}" | grep -Fx "Identifier=${expected_identifier}"
+              printf '%s\n' "${leaf_identity}" | grep -Fx "TeamIdentifier=2N7GKZ8D8Z"
+            done
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${copy_verify_app}/Contents/Info.plist")" = com.sage.brain
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${copy_verify_app}/Contents/Info.plist")" = sage-tray
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${copy_verify_app}/Contents/Info.plist")" = "${RELEASE_TAG#v}"
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${copy_verify_app}/Contents/Info.plist")" = "${RELEASE_TAG#v}"
+            version_output=$("${copy_verify_app}/Contents/MacOS/sage-gui" version)
+            test "$(printf '%s\n' "${version_output}" | awk 'NR == 1 { print $1 }')" = sage-gui
+            test "$(printf '%s\n' "${version_output}" | awk 'NR == 1 { print $2 }')" = "${RELEASE_TAG#v}"
+            spctl --assess --type execute --verbose=4 "${copy_verify_app}"
+            codesign --verify --deep --strict --verbose=2 "${copy_verify_app}"
+            codesign --verify --strict --verbose=2 "${copy_verify_app}/Contents/MacOS/sage-gui"
+            codesign --verify --strict --verbose=2 "${copy_verify_app}/Contents/MacOS/sage-tray"
+            rm -rf "${copy_verify_root}"
             xcrun stapler validate "${dmg}"
             cleanup_mount
             trap - EXIT
+            done
           done
 
   publish-docker-version:
     name: Publish Immutable Docker Version
     runs-on: ubuntu-latest
-    needs: [stage-github-release, release-metadata]
+    # PyPI and MCP versions are immutable. Do not begin any public publication
+    # until the exact DMGs uploaded to the private draft have passed the final
+    # writable-copy, launch, signature, Team ID, and notarization checks.
+    needs: [stage-github-release, verify-staged-macos-release, release-metadata]
     permissions:
       contents: read
       packages: write

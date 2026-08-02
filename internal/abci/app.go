@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
@@ -3522,6 +3523,16 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 			return &abcitypes.ResponseCheckTx{Code: 110, Log: "access denied"}, nil
 		}
 	}
+	// app-v26 also appends the expected-owner CAS binding to the existing
+	// DomainReassign wire payload. A v25 validator re-encodes the historical
+	// body without that trailing field while verifying the outer signature, so
+	// admitting the extended form before H+1 would create a mixed-version
+	// interpretation. Keep it out of the mempool through activation height H;
+	// the consensus handler independently requires it once app-v26 is active.
+	if parsedTx.Type == tx.TxTypeDomainReassign && parsedTx.DomainReassign != nil &&
+		!app.IsAppV26ActiveForNextTx() && parsedTx.DomainReassign.ExpectedOwnerID != "" {
+		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown app-v26 domain owner binding"}, nil
+	}
 	if parsedTx.LocalElevation != nil && !app.isAppV23ActiveForNextTx() {
 		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown app-v23 elevation envelope"}, nil
 	}
@@ -4284,7 +4295,7 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 					req.Height, predecessorErr,
 				)
 			}
-			if migrateErr := app.badgerStore.MigrateAppV26AccessGroupAuthorities(); migrateErr != nil {
+			if migrateErr := app.badgerStore.MigrateAppV26AccessGroupAuthorities(req.Height); migrateErr != nil {
 				return nil, fmt.Errorf(
 					"sage: refuse app-v26 activation with invalid Access Group state: %w",
 					migrateErr,
@@ -8999,13 +9010,14 @@ func (app *SageApp) processAgentUpdate(parsedTx *tx.ParsedTx, height int64, bloc
 		return &abcitypes.ExecTxResult{Code: 62, Log: "missing agent update payload"}
 	}
 
-	// Verify agent identity — only the agent itself can update its own metadata.
+	// Verify agent identity. Ordinary agents may still update only themselves.
+	// Starting at app-v26 H+1, current CEREBRUM Root or an active delegated
+	// Admin may change another local agent's mutable display name. That narrow
+	// operator path must preserve the target's boot bio byte-for-byte; generic
+	// AgentUpdate must never become an operator metadata rewrite primitive.
 	senderCredentialID, err := app.verifyCurrentAgentIdentity(parsedTx, height)
 	if err != nil {
 		return &abcitypes.ExecTxResult{Code: 62, Log: fmt.Sprintf("agent identity verification failed: %v", err)}
-	}
-	if isRoot, rootErr := app.appV23IsRootIdentity(senderCredentialID, height); rootErr != nil || isRoot {
-		return appV23ControlDenied()
 	}
 	senderID, err := app.appV23PrincipalIDForCredential(senderCredentialID, height)
 	if err != nil {
@@ -9020,20 +9032,40 @@ func (app *SageApp) processAgentUpdate(parsedTx *tx.ParsedTx, height int64, bloc
 		targetID = senderID
 	}
 
-	// Self-update only
-	if senderID != targetID {
-		return &abcitypes.ExecTxResult{Code: 63, Log: fmt.Sprintf("access denied: %s cannot update agent %s", shortConsensusID(senderID), shortConsensusID(targetID))}
-	}
-
 	// Agent must be registered
 	if !app.badgerStore.IsAgentRegistered(targetID) {
 		return &abcitypes.ExecTxResult{Code: 64, Log: fmt.Sprintf("agent %s not registered", shortConsensusID(targetID))}
 	}
-	if app.appV20StrictFinalize {
-		current, getErr := app.badgerStore.GetRegisteredAgent(targetID)
-		if getErr != nil {
-			return &abcitypes.ExecTxResult{Code: 65, Log: fmt.Sprintf("agent record lookup failed: %v", getErr)}
+	current, getErr := app.badgerStore.GetRegisteredAgent(targetID)
+	if getErr != nil {
+		return &abcitypes.ExecTxResult{Code: 65, Log: fmt.Sprintf("agent record lookup failed: %v", getErr)}
+	}
+
+	operatorRename := senderID != targetID
+	if operatorRename {
+		if !app.postAppV26Rules(height) {
+			return &abcitypes.ExecTxResult{Code: 63, Log: fmt.Sprintf("access denied: %s cannot update agent %s", shortConsensusID(senderID), shortConsensusID(targetID))}
 		}
+		isRootTarget, rootTargetErr := app.appV23IsRootIdentity(targetID, height)
+		if rootTargetErr != nil || isRootTarget {
+			return appV23ControlDenied()
+		}
+		root, _, role, actorErr := app.appV23Actor(senderCredentialID)
+		if actorErr != nil || root == nil || role == nil ||
+			(senderCredentialID != root.CredentialID && role.Role != store.AppV23RoleAdmin) {
+			return appV23ControlDenied()
+		}
+		if !utf8.ValidString(upd.Name) || strings.TrimSpace(upd.Name) != upd.Name || upd.Name == "" || len(upd.Name) > 128 {
+			return &abcitypes.ExecTxResult{Code: 63, Log: "access denied: operator display name must be 1-128 trimmed UTF-8 bytes"}
+		}
+		if upd.BootBio != current.BootBio {
+			return &abcitypes.ExecTxResult{Code: 63, Log: "access denied: operator display-name update must preserve the agent boot bio"}
+		}
+	} else if isRoot, rootErr := app.appV23IsRootIdentity(senderCredentialID, height); rootErr != nil || isRoot {
+		// Root is sovereign authority, never an editable ordinary agent.
+		return appV23ControlDenied()
+	}
+	if app.appV20StrictFinalize {
 		candidate := *current
 		candidate.Name = upd.Name
 		candidate.BootBio = upd.BootBio
@@ -10470,10 +10502,19 @@ func (app *SageApp) ProcessProposal(_ context.Context, req *abcitypes.RequestPro
 	if !app.postAppV26Fork(req.Height) {
 		for _, rawTx := range req.Txs {
 			parsedTx, decodeErr := tx.DecodeTx(rawTx)
-			if decodeErr == nil && parsedTx.Type == tx.TxTypeAccessGroupMutate &&
-				parsedTx.AccessGroupMutate != nil &&
-				parsedTx.AccessGroupMutate.MemberAuthority != "" {
-				return &abcitypes.ResponseProcessProposal{Status: abcitypes.ResponseProcessProposal_REJECT}, nil
+			if decodeErr == nil {
+				switch parsedTx.Type {
+				case tx.TxTypeAccessGroupMutate:
+					if parsedTx.AccessGroupMutate != nil &&
+						parsedTx.AccessGroupMutate.MemberAuthority != "" {
+						return &abcitypes.ResponseProcessProposal{Status: abcitypes.ResponseProcessProposal_REJECT}, nil
+					}
+				case tx.TxTypeDomainReassign:
+					if parsedTx.DomainReassign != nil &&
+						parsedTx.DomainReassign.ExpectedOwnerID != "" {
+						return &abcitypes.ResponseProcessProposal{Status: abcitypes.ResponseProcessProposal_REJECT}, nil
+					}
+				}
 			}
 		}
 	}
@@ -11862,6 +11903,10 @@ func (app *SageApp) processDomainReassign(parsedTx *tx.ParsedTx, height int64, b
 	if payload.Domain != req.Domain || payload.NewOwnerID != req.NewOwnerID || payload.OpenToShared != req.OpenToShared {
 		return &abcitypes.ExecTxResult{Code: 83, Log: "proposal body mismatch (domain/new_owner/open_to_shared)"}
 	}
+	if app.postAppV26Rules(height) &&
+		(payload.ParentDomain != req.ParentDomain || payload.ExpectedOwnerID != req.ExpectedOwnerID) {
+		return &abcitypes.ExecTxResult{Code: 83, Log: "proposal body mismatch (parent_domain/expected_owner)"}
+	}
 	if app.postAppV22Rules(height) {
 		if isRoot, rootErr := app.appV23IsRootIdentity(req.NewOwnerID, height); rootErr != nil || isRoot {
 			return appV23ControlDenied()
@@ -11898,9 +11943,20 @@ func (app *SageApp) processDomainReassign(parsedTx *tx.ParsedTx, height int64, b
 	}
 
 	// Existence + parent consistency.
-	existingOwner, existingParent, _, domErr := app.badgerStore.GetDomainOwnerAndMeta(req.Domain)
+	existingOwner, existingParent, existingCreatedHeight, domErr := app.badgerStore.GetDomainOwnerAndMeta(req.Domain)
 	if domErr != nil {
 		return &abcitypes.ExecTxResult{Code: 86, Log: fmt.Sprintf("domain not found: %s", req.Domain)}
+	}
+	if app.postAppV26Rules(height) {
+		if req.ExpectedOwnerID == "" {
+			return &abcitypes.ExecTxResult{Code: 87, Log: "domain reassign: expected owner is required under app-v26"}
+		}
+		if req.ExpectedOwnerID != existingOwner {
+			return &abcitypes.ExecTxResult{Code: 87, Log: fmt.Sprintf(
+				"domain owner changed: expected=%s current=%s",
+				shortConsensusID(req.ExpectedOwnerID), shortConsensusID(existingOwner),
+			)}
+		}
 	}
 	if req.ParentDomain != "" && req.ParentDomain != existingParent {
 		return &abcitypes.ExecTxResult{Code: 87, Log: fmt.Sprintf(
@@ -11910,7 +11966,7 @@ func (app *SageApp) processDomainReassign(parsedTx *tx.ParsedTx, height int64, b
 	if parent == "" {
 		parent = existingParent
 	}
-	if app.postAppV20Fork(height) {
+	if app.postAppV20Fork(height) && !app.postAppV26Rules(height) {
 		grantCount, exceeded, countErr := app.badgerStore.CountGrantsByDomainUpTo(req.Domain, maxAppV20DomainReassignGrantPurge)
 		if countErr != nil {
 			return &abcitypes.ExecTxResult{Code: 89, Log: fmt.Sprintf("grant invalidation preflight failed: %v", countErr)}
@@ -11927,7 +11983,14 @@ func (app *SageApp) processDomainReassign(parsedTx *tx.ParsedTx, height int64, b
 	// active local principal's required home-domain invariant atomically and
 	// folds dynamic shared-domain promotion into the same guarded write.
 	var transferErr error
-	if app.postAppV23Rules(height) {
+	purged := 0
+	if app.postAppV26Rules(height) {
+		purged, transferErr = app.badgerStore.TransferDomainAppV26CAS(
+			req.Domain, req.NewOwnerID, parent, req.ExpectedOwnerID,
+			req.ProposalID, height, req.OpenToShared,
+			maxAppV20DomainReassignGrantPurge,
+		)
+	} else if app.postAppV23Rules(height) {
 		transferErr = app.badgerStore.TransferDomainAppV23(
 			req.Domain, req.NewOwnerID, parent, height, req.OpenToShared,
 		)
@@ -11935,18 +11998,34 @@ func (app *SageApp) processDomainReassign(parsedTx *tx.ParsedTx, height int64, b
 		transferErr = app.badgerStore.TransferDomain(req.Domain, req.NewOwnerID, parent, height)
 	}
 	if transferErr != nil {
+		if errors.Is(transferErr, store.ErrAppV26DomainOwnerChanged) {
+			return &abcitypes.ExecTxResult{Code: 87, Log: "domain owner changed during transfer"}
+		}
+		if errors.Is(transferErr, store.ErrAppV26DomainOwnerUnchanged) {
+			return &abcitypes.ExecTxResult{Code: 87, Log: "current owner and target agent cannot be the same"}
+		}
+		if errors.Is(transferErr, store.ErrAppV26GrantLimitExceeded) {
+			return &abcitypes.ExecTxResult{Code: 89, Log: fmt.Sprintf(
+				"domain has more than %d grants; app-v20 reassignment limit is %d — revoke grants before retrying",
+				maxAppV20DomainReassignGrantPurge, maxAppV20DomainReassignGrantPurge,
+			)}
+		}
 		return &abcitypes.ExecTxResult{Code: 88, Log: fmt.Sprintf("transfer failed: %v", transferErr)}
 	}
 
 	// Invalidate ALL grants on the domain — the previous owner's
 	// chain-of-trust does not survive the reassignment. The new owner
-	// must re-grant explicitly.
-	purged, purgeErr := app.badgerStore.DeleteGrantsByDomain(req.Domain)
-	if purgeErr != nil {
-		app.logger.Error().Err(purgeErr).Str("domain", req.Domain).Msg("failed to purge grants on domain reassignment")
-		// Continue — chain ownership has already flipped; the purge is
-		// best-effort cleanup. A future reassign or revoke can complete
-		// the cleanup; we don't roll back the transfer.
+	// must re-grant explicitly. App-v26 performs this in the same transaction
+	// as the owner CAS/history/shared-state change; historical replay retains
+	// the old two-step behavior.
+	if !app.postAppV26Rules(height) {
+		var purgeErr error
+		purged, purgeErr = app.badgerStore.DeleteGrantsByDomain(req.Domain)
+		if purgeErr != nil {
+			app.logger.Error().Err(purgeErr).Str("domain", req.Domain).Msg("failed to purge grants on domain reassignment")
+			// Historical behavior: transfer already committed and grant cleanup
+			// remains best-effort. App-v26 never enters this branch.
+		}
 	}
 
 	// Optionally promote the domain to shared via the on-chain sentinel.
@@ -11959,8 +12038,10 @@ func (app *SageApp) processDomainReassign(parsedTx *tx.ParsedTx, height int64, b
 	}
 
 	// Mark proposal consumed — one-shot semantics.
-	if cErr := app.badgerStore.SetState(consumedKey, []byte{1}); cErr != nil {
-		app.logger.Error().Err(cErr).Str("proposal_id", req.ProposalID).Msg("failed to mark proposal consumed")
+	if !app.postAppV26Rules(height) {
+		if cErr := app.badgerStore.SetState(consumedKey, []byte{1}); cErr != nil {
+			app.logger.Error().Err(cErr).Str("proposal_id", req.ProposalID).Msg("failed to mark proposal consumed")
+		}
 	}
 
 	// Mirror the new ownership to the offchain store. The chain is
@@ -11969,13 +12050,17 @@ func (app *SageApp) processDomainReassign(parsedTx *tx.ParsedTx, height int64, b
 	// today, so the mirror's owner column will lag — that's acceptable
 	// for v8.0; a follow-up commit can add an UpsertDomain path if
 	// dashboards need eventual consistency.
+	pendingCreatedHeight := height
+	if app.postAppV26Rules(height) {
+		pendingCreatedHeight = existingCreatedHeight
+	}
 	app.pendingWrites = append(app.pendingWrites, pendingWrite{
 		writeType: "domain_register",
 		data: &store.DomainEntry{
 			DomainName:    req.Domain,
 			OwnerAgentID:  req.NewOwnerID,
 			ParentDomain:  parent,
-			CreatedHeight: height,
+			CreatedHeight: pendingCreatedHeight,
 			CreatedAt:     blockTime,
 		},
 	})

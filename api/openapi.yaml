@@ -1002,6 +1002,36 @@ components:
           type: string
           format: date-time
 
+    AgentDirectoryEntry:
+      type: object
+      required: [agent_id, name, registered_name, status]
+      description: Minimal signed local recipient identity; contains no RBAC or memory totals.
+      properties:
+        agent_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        name:
+          type: string
+          description: Mutable display name.
+        registered_name:
+          type: string
+          description: Immutable name sealed at first registration.
+        provider:
+          type: string
+        status:
+          type: string
+          enum: [active]
+
+    AgentLookupEntry:
+      allOf:
+        - $ref: "#/components/schemas/AgentDirectoryEntry"
+        - type: object
+          required: [match_kind]
+          properties:
+            match_kind:
+              type: string
+              enum: [exact, substring]
+
     ValidatorScore:
       type: object
       required:
@@ -1522,6 +1552,15 @@ components:
             When true, also writes the on-chain `shared_domain:<name>`
             sentinel so post-fork access checks treat the domain as
             catch-all-writable.
+        expected_owner_id:
+          type: string
+          pattern: "^[0-9a-fA-F]{64}$"
+          description: >-
+            App-v26 ownership compare-and-swap binding. Must be the exact
+            Hex(64) current owner observed before the governance proposal was
+            created; the proposal and execution transaction bind the same
+            value, and consensus rejects a stale transfer if ownership changed
+            before execution. Omit this field on pre-app-v26 chains.
 
     DomainReassignResponse:
       type: object
@@ -1775,6 +1814,12 @@ components:
         federation_contact_revision:
           type: string
           description: Target-specific federation authorization revision; unrelated contact changes do not invalidate exact-address queued work.
+        receipt_protocol_version:
+          type: integer
+          enum: [2]
+          description: >-
+            Present only on an imported federated inbox item when both peers
+            negotiated federated-pipeline-receipts-v2.
 
     MessageSendRequest:
       type: object
@@ -1947,6 +1992,113 @@ components:
         terminal_reason:
           type: string
           enum: [completed, expired, failed]
+
+    FederatedPipeReceiptChallenge:
+      type: object
+      required:
+        - version
+        - message_id
+        - sender_chain_id
+        - recipient_chain_id
+        - sender_agent_id
+        - recipient_agent_id
+        - content_digest
+        - event_kind
+        - policy_epoch
+        - agreement_id
+        - contact_id
+        - contact_revision
+      description: >-
+        Payload-free immutable challenge returned only to the exact recipient
+        of a negotiated receipt-v2 import. Submit it unchanged to the matching
+        receipt/{kind} route so the exact recipient signs every binding.
+      properties:
+        version:
+          type: integer
+          const: 2
+        message_id:
+          type: string
+        sender_chain_id:
+          type: string
+        recipient_chain_id:
+          type: string
+        sender_agent_id:
+          type: string
+        recipient_agent_id:
+          type: string
+        content_digest:
+          type: string
+        event_kind:
+          type: string
+          enum: [claimed, read]
+        policy_epoch:
+          type: string
+        agreement_id:
+          type: string
+        contact_id:
+          type: string
+        contact_revision:
+          type: string
+        authorization_mode:
+          type: string
+        relation_digest:
+          type: string
+
+    FederatedPipeReceiptActionResponse:
+      type: object
+      required: [pipe_id, event_kind, receipt_status, idempotent_replay]
+      properties:
+        pipe_id:
+          type: string
+        event_kind:
+          type: string
+          enum: [claimed, read]
+        receipt_status:
+          type: string
+          const: queued
+        idempotent_replay:
+          type: boolean
+
+    FederatedPipeReceiptStatus:
+      type: object
+      required: [pipe_id, protocol, transport_status, claim_status, read_status]
+      description: >-
+        Payload-free exact-sender projection. Delivery, recipient claim/read,
+        and terminal outcome are independent monotonic dimensions; timestamps
+        are evidence metadata and never order authority.
+      properties:
+        pipe_id:
+          type: string
+        protocol:
+          type: string
+          enum: [unsupported, receipt-v2]
+        transport_status:
+          type: string
+          enum: [pending, delivered, failed]
+        delivery_evidence:
+          type: string
+          enum: [peer_operator_durable_admission]
+        delivered_at:
+          type: string
+          format: date-time
+        claim_status:
+          type: string
+          enum: [unconfirmed, confirmed]
+        claimed_at:
+          type: string
+          format: date-time
+        read_status:
+          type: string
+          enum: [unconfirmed, confirmed]
+        read_at:
+          type: string
+          format: date-time
+        terminal_kind:
+          type: string
+          enum: [failed, expired, revoked]
+        terminal_at:
+          type: string
+          format: date-time
 
     PipelineDeliveryUpdate:
       type: object
@@ -2226,6 +2378,12 @@ components:
             $ref: "#/components/schemas/ProblemDetails"
     ServiceUnavailable:
       description: Required node runtime capability or configuration is unavailable.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/ProblemDetails"
+    NotImplemented:
+      description: The active node runtime does not implement this optional capability.
       content:
         application/problem+json:
           schema:
@@ -3041,6 +3199,100 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
         "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/agents/directory:
+    get:
+      operationId: listAgentDirectory
+      summary: List minimal local recipient identities.
+      description: >-
+        Signed active-ordinary local directory used by sage_directory. Root,
+        historical Root, pending, inactive, removed, retired, and canonically
+        inconsistent identities are omitted. This endpoint provides no online,
+        reachability, delivery, or read evidence and never returns RBAC or
+        memory-count fields.
+      tags: [Agent]
+      responses:
+        "200":
+          description: Minimal active local recipient directory.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agents, total]
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentDirectoryEntry"
+                  total:
+                    type: integer
+                    minimum: 0
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/agents/lookup:
+    get:
+      operationId: lookupAgentsByName
+      summary: Resolve a bounded local recipient name.
+      description: >-
+        Signed literal substring lookup across active ordinary agents' display
+        name, immutable registered name, and provider. Exact field matches rank
+        before substring matches. It is recipient discovery, not presence.
+      tags: [Agent]
+      parameters:
+        - in: query
+          name: name
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 512
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 20
+      responses:
+        "200":
+          description: Ranked bounded local recipient matches.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agents, total]
+                properties:
+                  agents:
+                    type: array
+                    maxItems: 20
+                    items:
+                      $ref: "#/components/schemas/AgentLookupEntry"
+                  total:
+                    type: integer
+                    minimum: 0
+                    maximum: 20
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          $ref: "#/components/responses/InternalError"
+        "503":
           $ref: "#/components/responses/InternalError"
 
   /v1/agent/me:
@@ -4989,8 +5241,8 @@ paths:
       description: >-
         This is local queue/workflow state, not proof of remote delivery or
         reading. Canonical same-node sender/read evidence is available through
-        /v1/messages; federated read receipts remain capability-negotiated
-        future work.
+        /v1/messages. App-v26 peers may separately negotiate generation-bound
+        receipt v2; this workflow route never substitutes for that evidence.
       tags:
         - Pipeline
       parameters:
@@ -5012,6 +5264,117 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /v1/pipe/{pipe_id}/receipt/challenge/{kind}:
+    get:
+      operationId: pipeReceiptChallenge
+      summary: Fetch the exact immutable receipt-v2 body an imported-message recipient must sign.
+      description: >-
+        The challenge contains no message content. It is available only for a
+        negotiated v2 import, the exact addressed recipient, an allowed kind,
+        and a currently valid federation generation.
+      tags: [Pipeline]
+      parameters:
+        - name: pipe_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: kind
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [claimed, read]
+      responses:
+        "200":
+          description: Exact payload-free challenge.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pipe_id, event_kind, challenge]
+                properties:
+                  pipe_id: {type: string}
+                  event_kind: {type: string, enum: [claimed, read]}
+                  challenge:
+                    $ref: "#/components/schemas/FederatedPipeReceiptChallenge"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+
+  /v1/pipe/{pipe_id}/receipt/{kind}:
+    put:
+      operationId: pipeReceiptRecord
+      summary: Sign and queue exact-recipient claim/read evidence.
+      description: >-
+        Submit the challenge body unchanged with a fresh nonce-bound signature
+        from the exact recipient. Claim/read and receipt outbox insertion are
+        atomic. `queued` is local durable receipt transport state, not yet
+        sender-visible confirmation.
+      tags: [Pipeline]
+      parameters:
+        - name: pipe_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: kind
+          in: path
+          required: true
+          schema: {type: string, enum: [claimed, read]}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FederatedPipeReceiptChallenge"
+      responses:
+        "200":
+          description: Exact transition and receipt outbox entry persisted or replayed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederatedPipeReceiptActionResponse"
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "409": {$ref: "#/components/responses/Conflict"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+
+  /v1/pipe/{pipe_id}/receipt:
+    get:
+      operationId: pipeReceiptStatus
+      summary: Read payload-free federated receipt evidence as the exact sender.
+      description: >-
+        Unrelated callers, recipients, operators, Admin, Root, and absent IDs
+        share the same generic 404 behavior. Peer durable admission is distinct
+        from exact-recipient signed claim/read evidence. A v1 or historical
+        ungeneration-bound row is explicitly unsupported/unconfirmed.
+      tags: [Pipeline]
+      parameters:
+        - name: pipe_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Exact sender-only, payload-free independent receipt dimensions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FederatedPipeReceiptStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/pipe/{pipe_id}/claim:
     put:

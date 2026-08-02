@@ -425,11 +425,15 @@ func TestPurgePipelinesRetainsPendingAndUnreportedTransport(t *testing.T) {
 	require.NoError(t, err)
 
 	// Once the failure is reported and the pending result is delivered, normal
-	// retention can reclaim both rows and their transport metadata.
+	// retention can reclaim both rows and their transport metadata after their
+	// terminal transitions have aged past the retention cutoff.
 	updates, err := s.ListPipelineDeliveryUpdates(ctx, sendMsg.FromAgent, 10)
 	require.NoError(t, err)
 	require.Len(t, updates, 1)
 	require.NoError(t, s.MarkPipelineTransportDelivered(ctx, resultEvent.EventID))
+	_, err = s.writeExecContext(ctx, `UPDATE pipeline_messages SET terminal_at=? WHERE pipe_id IN (?,?)`,
+		formatTime(old), resultMsg.PipeID, sendMsg.PipeID)
+	require.NoError(t, err)
 	purged, err = s.PurgePipelines(ctx, now.Add(-24*time.Hour))
 	require.NoError(t, err)
 	require.Equal(t, 2, purged)

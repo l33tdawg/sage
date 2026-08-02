@@ -83,6 +83,7 @@ func (m *Manager) Router() http.Handler {
 		r.Post("/fed/v1/receipt", m.handleReceipt)
 		r.Post("/fed/v1/connection/revoke-notice", m.handleRevokeNotice)
 		r.Post("/fed/v1/pipe/event", m.handlePipeEvent)
+		r.Post("/fed/v2/pipe/receipt", m.handlePipeReceiptV2)
 		r.Post("/fed/v1/pipe/contacts/lookup", m.handlePipeContactLookup)
 		r.Post("/fed/v1/pipe/linked/resolve", m.handleLinkedMessageResolve)
 		r.Post("/fed/v1/pipe/linked/directory", m.handleLinkedMessageDirectory)
@@ -539,7 +540,12 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 			response.QueryAgreementBindingDigest = digest
 			response.Capabilities = append(response.Capabilities,
 				CapabilityFederationV23, CapabilityQueryAgentProofV2,
-				CapabilityFederatedGuestAgentEligibility)
+				CapabilityFederatedGuestAgentEligibility,
+				CapabilityLinkedMessageDirectoryEnumeration)
+			if m.postV26ForNextTx != nil && m.postV26ForNextTx() && ss != nil {
+				response.Capabilities = append(response.Capabilities,
+					CapabilityFederatedPipelineReceiptsV2)
+			}
 		}
 	} else {
 		m.logger.Debug().Err(readyErr).Str("peer", peer.ChainID).

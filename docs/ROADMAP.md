@@ -36,7 +36,7 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 - **Reading panel** collapses to the domain lobes by default (newest 30, most-recently-active first) with an expandable "how to read".
 - **Live task board** with agent-vs-human authorship and atomic claim/ownership; the agent message bus merged in as a Messages tab.
 - **Real search** (FTS with keyword fallback), bulk curation, status and tag filters, and corroboration counts on list + detail.
-- **Settings reorganized** into focused tabs (Overview, Connection, Recall, Security, Maintenance, Updates), with in-place updates and node restart.
+- **Settings reorganized** into focused tabs (Overview, Connection, Recall, Security, Maintenance, Updates), with verified update discovery and node restart. Linux supports in-place replacement; macOS downloads the signed DMG until a recovery helper can live safely outside the replaceable app bundle.
 
 ---
 
@@ -293,8 +293,8 @@ durable destination delivery plus an automatic exact-ID acknowledgement signed
 by the addressed recipient when canonical receive, `sage_inbox`, or
 `sage_turn.pipe_inbox` returns the item.
 Same-node read evidence and metadata-only HTTP MCP wake-up hints ship in
-v11.17. Federated receipt propagation remains deferred and must preserve both
-principals—the outer JOIN-frozen SAGE operator
+v11.17. Federated receipt propagation ships as a separately negotiated v2
+protocol that preserves both principals—the outer JOIN-frozen SAGE operator
 and inner recipient agent—and are negotiated as an additive capability with
 durable retry, replay/equivocation protection, and fail-closed
 pause/revoke/re-pair behavior. “Read” means the authenticated recipient client

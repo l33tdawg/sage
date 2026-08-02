@@ -239,6 +239,9 @@ type Config struct {
 	// federation must not advertise or accept v23 semantics before every
 	// validator evaluates the corresponding app version.
 	PostV23ForNextTx func() bool
+	// PostV26ForNextTx gates durable cross-node pipeline receipts. Receipt-v2
+	// persistence and wire capability must remain invisible before app-v26.
+	PostV26ForNextTx func() bool
 	// PostV8ForAccess reports whether the live chain uses the ancestor-aware
 	// access semantics. Federated inbox contacts must mirror the access check
 	// that governs a local agent's current domain read capability.
@@ -275,6 +278,7 @@ type Manager struct {
 	postV20ForNextTx    func() bool
 	postV22ForNextTx    func() bool
 	postV23ForNextTx    func() bool
+	postV26ForNextTx    func() bool
 	postV8ForAccess     func() bool
 	messageNotifier     func(string, AgentMessageNotification)
 	logger              zerolog.Logger
@@ -729,6 +733,7 @@ func NewManager(cfg Config) *Manager {
 		postV20ForNextTx:            cfg.PostV20ForNextTx,
 		postV22ForNextTx:            cfg.PostV22ForNextTx,
 		postV23ForNextTx:            cfg.PostV23ForNextTx,
+		postV26ForNextTx:            cfg.PostV26ForNextTx,
 		postV8ForAccess:             cfg.PostV8ForAccess,
 		messageNotifier:             cfg.MessageNotifier,
 		logger:                      cfg.Logger.With().Str("component", "federation").Logger(),

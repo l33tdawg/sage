@@ -140,6 +140,21 @@ func (f *linkedLookupFederation) FindRemoteLinkedMessageContacts(
 	return f.linked[chainID], nil
 }
 
+func (f *linkedLookupFederation) ListRemoteLinkedMessageContacts(
+	_ context.Context,
+	chainID, callerID string,
+) (*federation.LinkedMessageDirectoryResult, error) {
+	f.mu.Lock()
+	f.calls++
+	f.callerID = callerID
+	f.name = ""
+	f.mu.Unlock()
+	if err := f.linkedErrors[chainID]; err != nil {
+		return nil, err
+	}
+	return f.linked[chainID], nil
+}
+
 func (f *fakeFederation) LockAgreementMutation() func() {
 	f.agreementMu.Lock()
 	return f.agreementMu.Unlock
@@ -716,6 +731,83 @@ func TestFederationAvailableIncludesOnlyValidatedCallerScopedLinkedContacts(t *t
 		require.Empty(t, response.Connections)
 		require.Zero(t, response.Total)
 	})
+}
+
+func TestFederationAvailableEnumeratesOnlyCapabilityNegotiatedLinkedContacts(t *testing.T) {
+	newServer := func(t *testing.T, advertise bool) (*Server, *store.BadgerStore, *linkedLookupFederation) {
+		t.Helper()
+		srv, _, _ := newTestServer(t, "")
+		badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = badger.CloseBadger() })
+		srv.badgerStore = badger
+		require.NoError(t, badger.SetCrossFed(
+			"chain-linked", "https://redacted.invalid", []byte("peer-pin"),
+			2, 0, []string{"*"}, nil, "active",
+		))
+		capabilities := []string{}
+		if advertise {
+			capabilities = append(capabilities,
+				federation.CapabilityLinkedMessageDirectoryEnumeration)
+		}
+		remoteID := strings.Repeat("d", 64)
+		fed := &linkedLookupFederation{
+			parallelStatusFederation: &parallelStatusFederation{
+				fakeFederation: &fakeFederation{},
+				statuses: map[string]*federation.StatusResponse{
+					"chain-linked": {
+						ChainID: "chain-linked", NetworkName: "Linked SAGE",
+						Capabilities:  capabilities,
+						PeerRBACGrant: &federation.PeerRBACGrant{},
+					},
+				},
+			},
+			linked: map[string]*federation.LinkedMessageDirectoryResult{
+				"chain-linked": {Contacts: []federation.PipeContact{{
+					AgentID: remoteID, DisplayName: "Peer Guest",
+					RegisteredName: "mynah/peer-guest", Provider: "mynah",
+					Address:           remoteID + "@chain-linked",
+					AuthorizationMode: federation.LinkedMessageAuthorizationMode,
+				}}},
+			},
+			linkedErrors: map[string]error{},
+		}
+		srv.SetFederation(fed)
+		return srv, badger, fed
+	}
+
+	for _, tc := range []struct {
+		name         string
+		advertise    bool
+		wantContacts int
+		wantCalls    int
+	}{
+		{name: "new peer enumerates", advertise: true, wantContacts: 1, wantCalls: 1},
+		{name: "old peer omitted", advertise: false, wantContacts: 0, wantCalls: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, badger, fed := newServer(t, tc.advertise)
+			req, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available", nil)
+			require.NoError(t, badger.RegisterAgent(
+				callerID, "ordinary", "member", "", "test", "", 1,
+			))
+			rr := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rr, req)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			var response struct {
+				Connections []availableFederationConnection `json:"connections"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+			contacts := 0
+			for _, connection := range response.Connections {
+				contacts += len(connection.RemoteAgents)
+			}
+			require.Equal(t, tc.wantContacts, contacts)
+			fed.mu.Lock()
+			defer fed.mu.Unlock()
+			require.Equal(t, tc.wantCalls, fed.calls)
+		})
+	}
 }
 
 func TestFederationAvailableDiscoveryHonorsFederatedPipeDeny(t *testing.T) {

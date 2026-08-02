@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -100,6 +101,61 @@ func TestAppV23RESTPendingAndNoDomainRecallFailClosed(t *testing.T) {
 	require.Error(t, srv.checkDomainAccess(context.Background(), outsiderID, "outsider.home", "read"))
 	_, seeAll = srv.resolveVisibleAgents(outsiderID)
 	require.False(t, seeAll)
+}
+
+func TestAppV23FirstUseDomainReadDenialIsMachineTypedAcrossRecallRoutes(t *testing.T) {
+	srv, _, memberID, _, _ := setupAppV23RESTAccess(t)
+	const domain = "clean-first-use-probe"
+	require.Error(t, srv.checkDomainAccess(
+		context.Background(), memberID, domain, "read",
+	), "the domain must not become readable before its first committed write claims it")
+
+	for _, tc := range []struct {
+		name    string
+		path    string
+		body    string
+		handler http.HandlerFunc
+	}{
+		{
+			name: "semantic", path: "/v1/memory/query",
+			body:    `{"embedding":[0.1,0.2,0.3],"domain_tag":"clean-first-use-probe","top_k":5}`,
+			handler: srv.handleQueryMemory,
+		},
+		{
+			name: "text", path: "/v1/memory/search",
+			body:    `{"query":"first use","domain_tag":"clean-first-use-probe","top_k":5}`,
+			handler: srv.handleSearchMemory,
+		},
+		{
+			name: "hybrid", path: "/v1/memory/hybrid",
+			body:    `{"query":"first use","embedding":[0.1,0.2,0.3],"domain_tag":"clean-first-use-probe","top_k":5}`,
+			handler: srv.handleHybridSearchMemory,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewBufferString(tc.body))
+			req = req.WithContext(middleware.WithAgentID(req.Context(), memberID))
+			recorder := httptest.NewRecorder()
+			tc.handler.ServeHTTP(recorder, req)
+			require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+			require.Equal(t, "application/problem+json", recorder.Header().Get("Content-Type"))
+			var problem map[string]any
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &problem))
+			require.Equal(t, domainReadDeniedProblemType, problem["type"])
+			require.Equal(t, float64(http.StatusForbidden), problem["status"])
+		})
+	}
+
+	t.Run("policy backend failure stays retryable", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		writeDomainReadAccessError(recorder,
+			errors.New("app-v23 access-control state is unavailable"))
+		require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+		var problem map[string]any
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &problem))
+		require.NotEqual(t, domainReadDeniedProblemType, problem["type"],
+			"a policy backend outage must never be suppressed as harmless first use")
+	})
 }
 
 func TestAppV23RESTManagerCanLinkWithinGroupWithoutLegacyGrant(t *testing.T) {

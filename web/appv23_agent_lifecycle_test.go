@@ -28,6 +28,11 @@ func TestAppV23RemoveCommitsDeactivationAndGroupCleanupBeforeSQLProjection(t *te
 	require.NoError(t, fixture.badger.MutateAppV23AccessGroup(
 		fixture.rootID, "team", "Team", []string{fixture.agentID}, 0, false, 2,
 	))
+	require.NoError(t, fixture.badger.RegisterDomain("removal-shared", fixture.agentID, "", 2))
+	require.NoError(t, fixture.badger.SetSharedDomain("removal-shared"))
+	require.NoError(t, fixture.badger.SetAccessGrant(
+		"removal-shared", fixture.rootID, 2, 0, fixture.agentID,
+	))
 	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
@@ -52,6 +57,7 @@ func TestAppV23RemoveCommitsDeactivationAndGroupCleanupBeforeSQLProjection(t *te
 				RootGeneration: 1, Profile: approval.Profile, HomeDomain: approval.HomeDomain,
 				Clearance: approval.Clearance, Capabilities: store.AgentCapabilities(approval.Capabilities),
 				Active: approval.Active, UpdatedHeight: 3,
+				RetireOwnedDomainsToRoot: !approval.Active,
 			},
 			approval.Role, approval.ExpectedRevision, approval.ExpectedRoleRevision,
 		))
@@ -80,6 +86,20 @@ func TestAppV23RemoveCommitsDeactivationAndGroupCleanupBeforeSQLProjection(t *te
 	groups, err := fixture.badger.ListAppV23AgentGroups(fixture.agentID)
 	require.NoError(t, err)
 	assert.Empty(t, groups)
+	root, err := fixture.badger.GetAppV23Root()
+	require.NoError(t, err)
+	owner, err := fixture.badger.GetDomainOwner("removal-shared")
+	require.NoError(t, err)
+	assert.Equal(t, root.PrincipalID, owner)
+	level, _, granter, err := fixture.badger.GetAccessGrant("removal-shared", fixture.rootID)
+	require.NoError(t, err)
+	assert.Equal(t, uint8(2), level)
+	assert.Equal(t, fixture.agentID, granter, "agent removal must not rewrite unrelated grant history")
+	history, err := fixture.badger.ListAppV26DomainOwnershipHistory("removal-shared")
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	assert.Equal(t, fixture.agentID, history[0].PreviousOwner)
+	assert.Equal(t, root.PrincipalID, history[0].NewOwner)
 	projected, err := sqlStore.GetAgent(context.Background(), fixture.agentID)
 	require.NoError(t, err)
 	assert.Equal(t, "removed", projected.Status)
@@ -117,6 +137,51 @@ func TestAppV23RemoveDirectoryOnlyAgentSettlesAndIsIdempotent(t *testing.T) {
 	second := remove()
 	require.Equal(t, http.StatusOK, second.Code, second.Body.String())
 	assert.Contains(t, second.Body.String(), `"already_removed":true`)
+}
+
+func TestAppV26RemoveDoesNotTrustStaleRemovedProjectionOverActiveConsensus(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	require.NoError(t, sqlStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: fixture.agentID, Name: "Stale projection", Role: "member",
+		Status: "removed", Clearance: 1,
+	}))
+
+	var calls int
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		raw, decodeErr := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("tx"), "0x"))
+		require.NoError(t, decodeErr)
+		parsed, decodeErr := tx.DecodeTx(raw)
+		require.NoError(t, decodeErr)
+		require.NotNil(t, parsed.LocalAgentApprove)
+		approval := parsed.LocalAgentApprove
+		require.False(t, approval.Active)
+		require.NoError(t, fixture.badger.ApproveAppV23LocalAgent(
+			store.AppV23LocalEnrollment{
+				AgentID: approval.AgentID, ApprovedBy: fixture.rootID, RootGeneration: 1,
+				Profile: approval.Profile, HomeDomain: approval.HomeDomain,
+				Clearance: approval.Clearance, Capabilities: store.AgentCapabilities(approval.Capabilities),
+				Active: false, UpdatedHeight: 3, RetireOwnedDomainsToRoot: true,
+			}, approval.Role, approval.ExpectedRevision, approval.ExpectedRoleRevision,
+		))
+		_, _ = fmt.Fprint(w, `{"result":{"check_tx":{"code":0},"tx_result":{"code":0},"hash":"REMOVE","height":"3"}}`)
+	}))
+	defer rpc.Close()
+	h := appV23AccessTestHandler(fixture, rpc.URL, nil)
+	h.store = sqlStore
+	req := appV23AccessRequest(t, http.MethodDelete, "/agents/"+fixture.agentID+"?force=true", "id", fixture.agentID, nil)
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleRemoveAgent(sqlStore).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, calls, "active consensus authority must be deactivated despite a stale local removed row")
+	enrollment, err := fixture.badger.GetAppV23Enrollment(fixture.agentID)
+	require.NoError(t, err)
+	require.False(t, enrollment.Active)
 }
 
 func TestAppV23NonRootKeyRotationFailsClosedWithoutSQLMutation(t *testing.T) {
@@ -200,6 +265,49 @@ func TestAppV23LegacyAgentPolicyRouteIsGoneButDisplayMetadataStaysLocal(t *testi
 	assert.Equal(t, "Local Companion", updated.Name)
 	assert.Equal(t, "local label", updated.BootBio)
 	assert.Zero(t, rpcCalls, "post-v23 display metadata must not use a stale validator or Root key")
+}
+
+func TestAppV26LegacyAgentMetadataCannotBypassGovernedRename(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	require.NoError(t, sqlStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: fixture.agentID, Name: "Consensus Name", BootBio: "immutable purpose",
+		Role: "member", Status: "active", Clearance: 1,
+	}))
+
+	h := appV23AccessTestHandler(fixture, "http://unused.invalid", nil)
+	h.AppV26ActiveFn = func() bool { return true }
+	req := appV23AccessRequest(
+		t, http.MethodPatch, "/agents/"+fixture.agentID,
+		"id", fixture.agentID, map[string]any{
+			"name": "Local Impostor", "boot_bio": "rewritten purpose",
+		},
+	)
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleUpdateAgent(sqlStore).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusGone, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "governed_agent_metadata_required")
+	unchanged, err := sqlStore.GetAgent(context.Background(), fixture.agentID)
+	require.NoError(t, err)
+	assert.Equal(t, "Consensus Name", unchanged.Name)
+	assert.Equal(t, "immutable purpose", unchanged.BootBio)
+
+	// Non-identity presentation metadata remains a local dashboard concern.
+	avatarReq := appV23AccessRequest(
+		t, http.MethodPatch, "/agents/"+fixture.agentID,
+		"id", fixture.agentID, map[string]any{"avatar": "robot"},
+	)
+	avatarReq = appV23AccessAs(avatarReq, fixture.rootID)
+	avatarRec := httptest.NewRecorder()
+	h.handleUpdateAgent(sqlStore).ServeHTTP(avatarRec, avatarReq)
+	require.Equal(t, http.StatusOK, avatarRec.Code, avatarRec.Body.String())
+	updated, err := sqlStore.GetAgent(context.Background(), fixture.agentID)
+	require.NoError(t, err)
+	assert.Equal(t, "robot", updated.Avatar)
 }
 
 func TestAppV23MergeRejectsBeforeLocalMemoryMutation(t *testing.T) {
@@ -751,6 +859,105 @@ func TestAppV23RootCannotBeTargetedByTaskPipelineOrDomainReassignment(t *testing
 	h.handleReassignDomainOwnership(sqlStore).ServeHTTP(reassignRec, reassignReq)
 	require.Equal(t, http.StatusForbidden, reassignRec.Code, reassignRec.Body.String())
 	assert.Contains(t, reassignRec.Body.String(), "root_agent_surface_forbidden")
+}
+
+func TestAppV26RootCanTransferCurrentlyRootOwnedDomainToActiveLocalAgent(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	_, validatorKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	targetID := fixture.agentID
+	require.NoError(t, fixture.badger.RegisterDomain("root-recovery-domain", fixture.rootID, "", 2))
+
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	require.NoError(t, sqlStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: targetID, Name: "Recovery target", Role: "member", Status: "active",
+	}))
+
+	var captured []*tx.ParsedTx
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, decodeErr := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("tx"), "0x"))
+		require.NoError(t, decodeErr)
+		parsed, decodeErr := tx.DecodeTx(raw)
+		require.NoError(t, decodeErr)
+		captured = append(captured, parsed)
+		_, _ = fmt.Fprint(w, `{"result":{"check_tx":{"code":0},"tx_result":{"code":0,"log":"purged 0 grants"},"hash":"ROOTREASSIGN","height":"42"}}`)
+	}))
+	t.Cleanup(rpc.Close)
+
+	h := appV23AccessTestHandler(fixture, rpc.URL, nil)
+	// The target's private key is intentionally unavailable to CEREBRUM.
+	// app-v26 ownership itself must make the transfer immediately usable.
+	h.ResolveAgentKeyFn = func(id string) (ed25519.PrivateKey, bool) {
+		if id == fixture.rootID {
+			return fixture.rootKey, true
+		}
+		return nil, false
+	}
+	h.store = sqlStore
+	h.SigningKey = validatorKey
+	h.AppV20ActiveFn = func() bool { return true }
+	h.AppV26ActiveFn = func() bool { return true }
+	h.GovernanceDomainFn = func() string { return dashboardTestGovernanceDomain }
+	h.ValidatorCountFn = func() int { return 1 }
+	req := httptest.NewRequest(
+		http.MethodPost, "/v1/dashboard/network/reassign-domain-ownership",
+		strings.NewReader(fmt.Sprintf(
+			`{"source_agent_id":%q,"target_agent_id":%q,"domain":"root-recovery-domain"}`,
+			fixture.rootID, targetID,
+		)),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleReassignDomainOwnership(sqlStore).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.Equal(t, "ok", response["status"])
+	require.Equal(t, false, response["grant_deferred"])
+	require.Equal(t, "ownership", response["owner_access"])
+	require.Len(t, captured, 2, "app-v26 must not emit a redundant owner self-grant")
+	require.Equal(t, tx.TxTypeDomainReassign, captured[1].Type)
+	require.Equal(t, "root-recovery-domain", captured[1].DomainReassign.Domain)
+	require.Equal(t, targetID, captured[1].DomainReassign.NewOwnerID)
+	require.Equal(t, fixture.rootID, captured[1].DomainReassign.ExpectedOwnerID)
+	for _, parsed := range captured {
+		require.NotEqual(t, tx.TxTypeAccessGrant, parsed.Type)
+	}
+}
+
+func TestAppV26DomainTransferRejectsStaleOrGuessedSourceOwner(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	_, targetKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	targetID := agentIDForKey(targetKey)
+
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	require.NoError(t, sqlStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: targetID, Name: "Target", Role: "member", Status: "active",
+	}))
+
+	h := appV23AccessTestHandler(fixture, "http://unused.invalid", nil)
+	h.store = sqlStore
+	h.SigningKey = fixture.agentKey
+	h.ValidatorCountFn = func() int { return 1 }
+	req := httptest.NewRequest(
+		http.MethodPost, "/v1/dashboard/network/reassign-domain-ownership",
+		strings.NewReader(fmt.Sprintf(
+			`{"source_agent_id":%q,"target_agent_id":%q,"domain":"companion-home"}`,
+			strings.Repeat("ab", 32), targetID,
+		)),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleReassignDomainOwnership(sqlStore).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "owner_changed")
 }
 
 func TestAppV23DomainReassignmentUsesCurrentRotatedRootCredential(t *testing.T) {

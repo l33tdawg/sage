@@ -197,8 +197,18 @@ func TestPipelineStaleExpiry(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "pending", fresh.Status)
 
-	// The now-expired stale row is purgeable by the retention sweep.
+	// A freshly-expired row gets the full terminal retention window even though
+	// its original created_at is old.
 	purged, err := s.PurgePipelines(ctx, now.Add(-24*time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged)
+
+	// Once the terminal transition itself is older than the retention cutoff,
+	// the row is purgeable.
+	_, err = s.writeExecContext(ctx, `UPDATE pipeline_messages SET terminal_at=? WHERE pipe_id=?`,
+		formatTime(now.Add(-25*time.Hour)), "pipe-stale")
+	require.NoError(t, err)
+	purged, err = s.PurgePipelines(ctx, now.Add(-24*time.Hour))
 	require.NoError(t, err)
 	assert.Equal(t, 1, purged)
 }
@@ -475,8 +485,15 @@ func TestPipelineExpiry(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "expired", got.Status)
 
-	// Purge
+	// Expiry starts a fresh terminal retention window; the original send and
+	// expires_at timestamps must not make the row disappear immediately.
 	purged, err := s.PurgePipelines(ctx, now)
+	require.NoError(t, err)
+	assert.Equal(t, 0, purged)
+	_, err = s.writeExecContext(ctx, `UPDATE pipeline_messages SET terminal_at=? WHERE pipe_id=?`,
+		formatTime(now.Add(-time.Hour)), msg.PipeID)
+	require.NoError(t, err)
+	purged, err = s.PurgePipelines(ctx, now)
 	require.NoError(t, err)
 	assert.Equal(t, 1, purged)
 }

@@ -30,7 +30,7 @@ test('release-facing version metadata stays aligned', () => {
     ['desktop/sage-shell/tauri.conf.json', `"version": "${version}"`],
     ['web/static/js/app.js', `const SAGE_VERSION = 'v${version}';`],
     ['README.md', `## What's New in v${version}`],
-    ['README.md', 'App-v23 replaces capability-bit administration'],
+    ['README.md', 'App-v23 replaced capability-bit administration'],
     ['README.md', 'App-v24 closes the canonical terminal-hash lifecycle defect'],
     ['README.md', `SDK ${version}.`],
     ['README.md', `ghcr.io/l33tdawg/sage:${version}`],
@@ -70,7 +70,7 @@ test('v11.17 app-v23 through app-v26 public contract markers stay release-visibl
     'DomainWriteDeniedProblem:',
     'has_more:',
     'total_exact:',
-    'federated read receipts remain capability-negotiated',
+    'federated-pipeline-receipts-v2',
     '/v1/messages/{message_id}/status:',
     'MessageStatusResponse:',
   ]) {

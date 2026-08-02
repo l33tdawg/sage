@@ -24,10 +24,11 @@ var (
 )
 
 type remotePipeCandidate struct {
-	chainID     string
-	grant       *PipeContactGrant
-	contact     PipeContact
-	policyEpoch string
+	chainID                string
+	grant                  *PipeContactGrant
+	contact                PipeContact
+	policyEpoch            string
+	receiptProtocolVersion int
 }
 
 func pipeRoutingAgreementID(agreement *store.CrossFedRecord) string {
@@ -55,6 +56,10 @@ func hasFederatedPipelineCapability(status *StatusResponse) bool {
 
 func hasFederatedPipelineContactLookupCapability(status *StatusResponse) bool {
 	return status != nil && slices.Contains(status.Capabilities, CapabilityFederatedPipelineContactLookup)
+}
+
+func hasFederatedPipelineReceiptV2Capability(status *StatusResponse) bool {
+	return status != nil && slices.Contains(status.Capabilities, CapabilityFederatedPipelineReceiptsV2)
 }
 
 func validateRemotePipeContactGrant(remoteChainID string, grant *PipeContactGrant) error {
@@ -354,7 +359,7 @@ func (m *Manager) resolveRemotePipeTarget(ctx context.Context, target string, al
 					for _, contact := range cached.Contacts {
 						candidates = append(candidates, remotePipeCandidate{
 							chainID: agreement.RemoteChainID, grant: cached, contact: contact,
-							policyEpoch: control.PolicyEpoch,
+							policyEpoch: control.PolicyEpoch, receiptProtocolVersion: 0,
 						})
 					}
 				} else if cacheErr != nil {
@@ -392,9 +397,13 @@ func (m *Manager) resolveRemotePipeTarget(ctx context.Context, target string, al
 			continue
 		}
 		for _, contact := range grant.Contacts {
+			receiptProtocolVersion := 0
+			if hasFederatedPipelineReceiptV2Capability(status) {
+				receiptProtocolVersion = PipeReceiptVersion
+			}
 			candidates = append(candidates, remotePipeCandidate{
 				chainID: agreement.RemoteChainID, grant: grant, contact: contact,
-				policyEpoch: control.PolicyEpoch,
+				policyEpoch: control.PolicyEpoch, receiptProtocolVersion: receiptProtocolVersion,
 			})
 		}
 	}
@@ -443,7 +452,8 @@ func (m *Manager) resolveRemotePipeTarget(ctx context.Context, target string, al
 		ContactRevision: pipeContactAuthorizationRevision(match.grant, &match.contact), PolicyEpoch: match.policyEpoch,
 		AgreementID: match.grant.AgreementID, Address: match.contact.Address,
 		Handle: match.contact.Handle, DisplayName: match.contact.DisplayName,
-		Domains: append([]PipeContactDomain(nil), match.contact.Domains...),
+		ReceiptProtocolVersion: match.receiptProtocolVersion,
+		Domains:                append([]PipeContactDomain(nil), match.contact.Domains...),
 	}, nil
 }
 

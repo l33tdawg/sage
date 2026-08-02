@@ -744,9 +744,10 @@ func (app *SageApp) processLocalAgentApprove(parsedTx *tx.ParsedTx, height int64
 	enrollment := store.AppV23LocalEnrollment{
 		AgentID: approval.AgentID, ApprovedBy: actorID, RootGeneration: root.Generation,
 		Profile: approval.Profile, HomeDomain: approval.HomeDomain,
-		ExpectedHomeDomainOwner: approval.ExpectedHomeDomainOwner,
-		TransferHomeDomain:      approval.TransferHomeDomain,
-		Clearance:               approval.Clearance, Capabilities: capabilities,
+		ExpectedHomeDomainOwner:  approval.ExpectedHomeDomainOwner,
+		TransferHomeDomain:       approval.TransferHomeDomain,
+		RetireOwnedDomainsToRoot: !approval.Active && app.postAppV26Rules(height),
+		Clearance:                approval.Clearance, Capabilities: capabilities,
 		Active: approval.Active, UpdatedHeight: height,
 	}
 	elevation, err := app.appV23ElevationUse(

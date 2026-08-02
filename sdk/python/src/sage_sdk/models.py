@@ -345,6 +345,30 @@ class AgentInfo(BaseModel):
     memory_count: int | None = None
 
 
+class AgentDirectoryEntry(BaseModel):
+    """Minimal caller-visible recipient identity without presence evidence."""
+
+    agent_id: str
+    name: str
+    registered_name: str
+    provider: str | None = None
+    status: Literal["active"]
+
+
+class AgentDirectoryResponse(BaseModel):
+    agents: list[AgentDirectoryEntry]
+    total: int
+
+
+class AgentLookupEntry(AgentDirectoryEntry):
+    match_kind: Literal["exact", "substring"]
+
+
+class AgentLookupResponse(BaseModel):
+    agents: list[AgentLookupEntry]
+    total: int
+
+
 # --- Pipeline Models ---
 
 class PipeSendRequest(BaseModel):
@@ -398,6 +422,7 @@ class PipeMessage(BaseModel):
     federation_agreement_id: str | None = None
     federation_contact_id: str | None = None
     federation_contact_revision: str | None = None
+    receipt_protocol_version: int | None = None
     # Response-only trust metadata derived by SAGE. These fields are optional
     # so the SDK remains compatible with older nodes that predate the explicit
     # pipeline authority boundary.
@@ -817,6 +842,7 @@ class DomainReassignRequest(BaseModel):
     proposal_id: str
     parent_domain: str = ""
     open_to_shared: bool = False
+    expected_owner_id: str = ""
 
 
 class DomainReassignResponse(BaseModel):

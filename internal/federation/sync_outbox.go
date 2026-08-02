@@ -176,6 +176,7 @@ func (m *Manager) syncTick(ctx context.Context, ss *store.SQLiteStore) {
 	// contact authorization. It shares this worker lifecycle only so restart,
 	// shutdown and immediate nudges stay single-owner.
 	m.pipelineDrain(ctx, ss)
+	m.receiptDrain(ctx, ss)
 	if pending, err := ss.ListPendingSyncControls(ctx); err == nil {
 		for _, control := range pending {
 			if ctx.Err() != nil {

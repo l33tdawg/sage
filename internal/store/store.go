@@ -813,6 +813,13 @@ type PipelineMessage struct {
 	FederationContactRevision   string `json:"federation_contact_revision,omitempty"`
 	FederationAuthorizationMode string `json:"federation_authorization_mode,omitempty"`
 	FederationLinkedRelation    []byte `json:"-"`
+	// Receipt negotiation is transport metadata carried only while admitting a
+	// federated send. v2 is persisted atomically in the separate inbound receipt
+	// binding table; legacy rows remain zero and never acquire evidence by
+	// inference.
+	FederationReceiptProtocolVersion  int    `json:"-"`
+	FederationReceiptContentDigest    string `json:"-"`
+	FederationReceiptRecipientChainID string `json:"-"`
 }
 
 // PipelineStore defines the interface for agent-to-agent pipeline storage.
@@ -889,26 +896,27 @@ type PipelineAgentProof struct {
 // PipelineTransportOutbox is transport metadata attached to one authoritative
 // pipeline row. It is not a second inbox or public state machine.
 type PipelineTransportOutbox struct {
-	EventID           string
-	PipeID            string
-	RemoteChainID     string
-	EventKind         string
-	PolicyEpoch       string
-	AgreementID       string
-	ContactID         string
-	ContactRevision   string
-	AuthorizationMode string
-	LinkedRelation    []byte
-	SourceAgentID     string
-	TargetAgentID     string
-	Proof             PipelineAgentProof
-	State             string
-	Attempts          int
-	NextAttemptAt     time.Time
-	CreatedAt         time.Time
-	ExpiresAt         time.Time
-	DeliveredAt       *time.Time
-	LastError         string
+	EventID                string
+	PipeID                 string
+	RemoteChainID          string
+	EventKind              string
+	PolicyEpoch            string
+	AgreementID            string
+	ContactID              string
+	ContactRevision        string
+	AuthorizationMode      string
+	LinkedRelation         []byte
+	SourceAgentID          string
+	TargetAgentID          string
+	ReceiptProtocolVersion int
+	Proof                  PipelineAgentProof
+	State                  string
+	Attempts               int
+	NextAttemptAt          time.Time
+	CreatedAt              time.Time
+	ExpiresAt              time.Time
+	DeliveredAt            *time.Time
+	LastError              string
 }
 
 type PipelineTransportDedup struct {

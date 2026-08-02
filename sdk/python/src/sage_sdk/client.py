@@ -10,7 +10,9 @@ import httpx
 from sage_sdk.auth import AgentIdentity
 from sage_sdk.exceptions import SageAPIError, SageNotFoundError
 from sage_sdk.models import (
+    AgentDirectoryResponse,
     AgentInfo,
+    AgentLookupResponse,
     AgentProfile,
     AgentRegistration,
     ChallengeRequest,
@@ -579,6 +581,21 @@ class SageClient:
         resp = self._request("GET", "/v1/agents")
         return resp.json()
 
+    def agent_directory(self) -> AgentDirectoryResponse:
+        """List minimal active local recipients visible to this caller.
+
+        This is discovery metadata, not online, delivery, or read evidence.
+        """
+        resp = self._request("GET", "/v1/agents/directory")
+        return AgentDirectoryResponse.model_validate(resp.json())
+
+    def lookup_agents(self, name: str, limit: int = 20) -> AgentLookupResponse:
+        """Resolve a bounded local recipient name without loading the roster."""
+        resp = self._request(
+            "GET", "/v1/agents/lookup", params={"name": name, "limit": limit}
+        )
+        return AgentLookupResponse.model_validate(resp.json())
+
     # --- Validator -------------------------------------------------------------
 
     def get_pending(
@@ -826,6 +843,7 @@ class SageClient:
         proposal_id: str,
         parent_domain: str = "",
         open_to_shared: bool = False,
+        expected_owner_id: str = "",
     ) -> DomainReassignResponse:
         """Submit the on-chain TxTypeDomainReassign that consumes an accepted
         gov_propose of operation='domain_reassign' and atomically transfers
@@ -840,11 +858,15 @@ class SageClient:
             proposal_id=proposal_id,
             parent_domain=parent_domain,
             open_to_shared=open_to_shared,
+            expected_owner_id=expected_owner_id,
         )
+        body = req.model_dump()
+        if not expected_owner_id:
+            body.pop("expected_owner_id", None)
         resp = self._request(
             "POST",
             "/v1/domain/reassign",
-            json=req.model_dump(),
+            json=body,
         )
         return DomainReassignResponse.model_validate(resp.json())
 
@@ -855,6 +877,7 @@ class SageClient:
         reason: str,
         parent_domain: str = "",
         open_to_shared: bool = False,
+        expected_owner_id: str | None = None,
         poll_interval_s: float = 2.0,
         timeout_s: float = 120.0,
     ) -> DomainReassignResponse:
@@ -867,12 +890,48 @@ class SageClient:
         """
         import time
 
+        if expected_owner_id is None:
+            health_resp = self._client.get("/v1/dashboard/health")
+            self._handle_response(health_resp)
+            health_payload = health_resp.json()
+            chain = health_payload.get("chain") or {} if isinstance(health_payload, dict) else {}
+            raw_app_version = chain.get("app_version")
+            if not isinstance(raw_app_version, (str, int)) or isinstance(raw_app_version, bool):
+                raise SageAPIError(
+                    status_code=503,
+                    detail="could not determine the chain app version for safe domain reassignment",
+                )
+            try:
+                chain_app_version = int(raw_app_version)
+            except (TypeError, ValueError) as exc:
+                raise SageAPIError(
+                    status_code=503,
+                    detail="could not determine the chain app version for safe domain reassignment",
+                ) from exc
+            if chain_app_version <= 0:
+                raise SageAPIError(
+                    status_code=503,
+                    detail="could not determine the chain app version for safe domain reassignment",
+                )
+            if chain_app_version >= 26:
+                domain_info = self.get_domain(domain)
+                expected_owner_id = str(domain_info.get("owner_agent_id") or "")
+                if not expected_owner_id:
+                    raise SageAPIError(
+                        status_code=409,
+                        detail=f"domain {domain!r} has no chain-authoritative current owner",
+                    )
+            else:
+                expected_owner_id = ""
+
         payload = {
             "domain": domain,
             "new_owner_id": new_owner_id,
             "parent_domain": parent_domain,
             "open_to_shared": open_to_shared,
         }
+        if expected_owner_id:
+            payload["expected_owner_id"] = expected_owner_id
         propose_resp = self.governance_propose(
             operation="domain_reassign",
             target_id=domain,
@@ -909,6 +968,7 @@ class SageClient:
             proposal_id=proposal_id,
             parent_domain=parent_domain,
             open_to_shared=open_to_shared,
+            expected_owner_id=expected_owner_id,
         )
 
     # --- Department RBAC --------------------------------------------------------

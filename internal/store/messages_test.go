@@ -129,6 +129,41 @@ func TestMessageReceiveReplaySurvivesRestart(t *testing.T) {
 	require.Equal(t, "msg-restart", retry[0].PipeID)
 }
 
+func TestClaimedMessageHistoryAndReceiptSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "history-restart.db")
+	s, err := NewSQLiteStore(ctx, path)
+	require.NoError(t, err)
+	_, _, err = s.SendLocalMessage(ctx, "send-history", testLocalMessage(
+		"msg-history-restart", "alice", "bob", "durable work",
+	))
+	require.NoError(t, err)
+	items, _, err := s.ReceiveLocalMessages(ctx, "bob", "", "claim-history", 1)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.NoError(t, s.Close())
+
+	s, err = NewSQLiteStore(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	history, err := s.GetInboxHistory(ctx, "bob", "", 10)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, "msg-history-restart", history[0].PipeID)
+	require.Equal(t, "claimed", history[0].Status)
+	require.Equal(t, "durable work", history[0].Payload)
+
+	status, err := s.GetMessageStatusForSender(ctx, "alice", "msg-history-restart")
+	require.NoError(t, err)
+	require.Equal(t, "not_confirmed", status.ReadStatus)
+	_, err = s.AcknowledgeLocalMessageRead(ctx, "bob", "msg-history-restart")
+	require.NoError(t, err)
+	status, err = s.GetMessageStatusForSender(ctx, "alice", "msg-history-restart")
+	require.NoError(t, err)
+	require.Equal(t, "confirmed", status.ReadStatus)
+	require.Equal(t, "local_exact_ack", status.ReadEvidence)
+}
+
 func TestMessageReceiveConcurrentTokensNeverReturnSameMessage(t *testing.T) {
 	ctx := context.Background()
 	s := newMessageTestStore(t)
@@ -353,6 +388,51 @@ func TestMessageReplyIsExactRecipientLocalAndIdempotent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, outboxHistory, 1)
 	require.Equal(t, "msg", outboxHistory[0].PipeID)
+}
+
+func TestMessageTerminalAndReadTransitionsOwnTheirRetentionWindows(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	old := now.Add(-72 * time.Hour)
+	msg := testLocalMessage("msg-retention", "alice", "bob", "old work")
+	msg.CreatedAt = old
+	msg.ExpiresAt = now.Add(time.Hour)
+	_, _, err := s.SendLocalMessage(ctx, "send-retention", msg)
+	require.NoError(t, err)
+	_, _, err = s.ReceiveLocalMessages(ctx, "bob", "", "receive-retention", 1)
+	require.NoError(t, err)
+	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-retention", "done")
+	require.NoError(t, err)
+
+	status, err := s.GetMessageStatusForSender(ctx, "alice", "msg-retention")
+	require.NoError(t, err)
+	require.Equal(t, "completed", status.WorkflowStatus)
+	require.NotNil(t, status.TerminalAt)
+	require.WithinDuration(t, now, *status.TerminalAt, time.Minute)
+
+	cutoff := now.Add(-24 * time.Hour)
+	purged, err := s.PurgePipelines(ctx, cutoff)
+	require.NoError(t, err)
+	require.Zero(t, purged, "an old send completed now gets a fresh terminal retention window")
+
+	// A later exact read fact independently keeps sender status queryable even
+	// after the terminal transition itself has aged out.
+	_, err = s.writeExecContext(ctx, `UPDATE pipeline_messages SET terminal_at=? WHERE pipe_id=?`,
+		formatTime(old), "msg-retention")
+	require.NoError(t, err)
+	purged, err = s.PurgePipelines(ctx, cutoff)
+	require.NoError(t, err)
+	require.Zero(t, purged, "a fresh read receipt extends terminal metadata retention")
+
+	_, err = s.writeExecContext(ctx, `UPDATE message_read_receipts SET read_at=? WHERE message_id=?`,
+		formatTime(old), "msg-retention")
+	require.NoError(t, err)
+	purged, err = s.PurgePipelines(ctx, cutoff)
+	require.NoError(t, err)
+	require.Equal(t, 1, purged)
+	_, err = s.GetMessageStatusForSender(ctx, "alice", "msg-retention")
+	require.ErrorIs(t, err, ErrMessageNotFound)
 }
 
 func TestMessageReplyAndReadRaceConvergesOnOneReceipt(t *testing.T) {

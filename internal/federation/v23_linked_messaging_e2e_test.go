@@ -126,6 +126,12 @@ func TestLinkedMessageDirectoryBidirectionalDiscoveryAndExactSend(t *testing.T) 
 		"linked discovery must not claim online presence")
 	require.False(t, hosted.Contacts[0].Accepting,
 		"exact tuple consent must not be presented as live acceptance status")
+	hostedDirectory, err := pair.host.mgr.ListRemoteLinkedMessageContacts(
+		ctx, pair.peer.chainID, pair.memberID,
+	)
+	require.NoError(t, err)
+	require.Len(t, hostedDirectory.Contacts, 1)
+	require.Equal(t, hosted.Contacts[0], hostedDirectory.Contacts[0])
 
 	remoteHosted, err := pair.peer.mgr.FindRemoteLinkedMessageContacts(
 		ctx, pair.host.chainID, pair.guestID, "claude/host", 20,
@@ -137,6 +143,12 @@ func TestLinkedMessageDirectoryBidirectionalDiscoveryAndExactSend(t *testing.T) 
 	require.Equal(t, "claude/host-member", remoteHosted.Contacts[0].RegisteredName)
 	require.Equal(t, "claude-code", remoteHosted.Contacts[0].Provider)
 	require.Equal(t, pair.memberID+"@"+pair.host.chainID, remoteHosted.Contacts[0].Address)
+	remoteDirectory, err := pair.peer.mgr.ListRemoteLinkedMessageContacts(
+		ctx, pair.host.chainID, pair.guestID,
+	)
+	require.NoError(t, err)
+	require.Len(t, remoteDirectory.Contacts, 1)
+	require.Equal(t, remoteHosted.Contacts[0], remoteDirectory.Contacts[0])
 
 	target, err := pair.host.mgr.ResolveRemoteLinkedPipeTarget(
 		ctx, pair.memberID, hosted.Contacts[0].Address,
@@ -147,6 +159,40 @@ func TestLinkedMessageDirectoryBidirectionalDiscoveryAndExactSend(t *testing.T) 
 		target, "directory-exact-send",
 	)
 	deliverLinkedSend(t, pair.host, pair.peer, outbox)
+}
+
+func TestLinkedMessageDirectoryEnumerationNeverSilentlyTruncates(t *testing.T) {
+	for _, direction := range []string{
+		LinkedMessageGuestToMember,
+		LinkedMessageMemberToGuest,
+	} {
+		t.Run(direction, func(t *testing.T) {
+			req := LinkedMessageDirectoryRequest{
+				Direction: direction, Enumerate: true,
+				Limit: maxLinkedMessageDirectoryInventory,
+			}
+			entries := make([]LinkedMessageDirectoryEntry, 0, req.Limit)
+			for i := 0; i < req.Limit; i++ {
+				require.True(t, appendLinkedDirectoryEntry(
+					&entries, req, LinkedMessageDirectoryEntry{AgentID: strings.Repeat("a", 64)},
+				))
+			}
+			require.False(t, appendLinkedDirectoryEntry(
+				&entries, req, LinkedMessageDirectoryEntry{AgentID: strings.Repeat("b", 64)},
+			))
+			require.Len(t, entries, req.Limit)
+		})
+	}
+
+	contacts := make([]PipeContact, maxLinkedMessageDirectoryInventory+1)
+	_, err := boundLinkedDirectoryContacts(
+		contacts, maxLinkedMessageDirectoryInventory, true,
+	)
+	require.ErrorIs(t, err, ErrFederatedPipeInvalid,
+		"a two-direction union over the inventory limit must fail, not slice")
+	bounded, err := boundLinkedDirectoryContacts(contacts, 20, false)
+	require.NoError(t, err)
+	require.Len(t, bounded, 20, "bounded human-name lookup keeps top-N semantics")
 }
 
 func TestLinkedMessageDirectoryAmbiguityUnicodeAndUnrelatedHidden(t *testing.T) {

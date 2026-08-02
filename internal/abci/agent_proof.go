@@ -1166,11 +1166,12 @@ func (app *SageApp) verifySignedAgentAction(
 			return err
 		}
 		var body struct {
-			Domain       string `json:"domain"`
-			NewOwnerID   string `json:"new_owner_id"`
-			ParentDomain string `json:"parent_domain,omitempty"`
-			ProposalID   string `json:"proposal_id"`
-			OpenToShared bool   `json:"open_to_shared,omitempty"`
+			Domain          string `json:"domain"`
+			NewOwnerID      string `json:"new_owner_id"`
+			ParentDomain    string `json:"parent_domain,omitempty"`
+			ProposalID      string `json:"proposal_id"`
+			OpenToShared    bool   `json:"open_to_shared,omitempty"`
+			ExpectedOwnerID string `json:"expected_owner_id,omitempty"`
 		}
 		if err := decodeSignedJSON(req.body, &body, false); err != nil {
 			return err
@@ -1180,7 +1181,7 @@ func (app *SageApp) verifySignedAgentAction(
 		if body.Domain == "" || ownerErr != nil || len(newOwner) != ed25519.PublicKeySize || proposalErr != nil || len(proposalID) == 0 {
 			return fmt.Errorf("signed domain-reassign request fails the REST contract")
 		}
-		expected.DomainReassign = &tx.DomainReassign{Domain: body.Domain, NewOwnerID: body.NewOwnerID, ParentDomain: body.ParentDomain, ProposalID: body.ProposalID, OpenToShared: body.OpenToShared}
+		expected.DomainReassign = &tx.DomainReassign{Domain: body.Domain, NewOwnerID: body.NewOwnerID, ParentDomain: body.ParentDomain, ProposalID: body.ProposalID, OpenToShared: body.OpenToShared, ExpectedOwnerID: body.ExpectedOwnerID}
 
 	case tx.TxTypeCoCommitSubmit:
 		if _, err := requireAgentRoute(req, "POST", "v1", "cocommit", "submit"); err != nil {

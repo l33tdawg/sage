@@ -14,12 +14,14 @@ import (
 )
 
 const (
-	linkedMessageDirectoryVersion          = 1
-	maxLinkedMessageDirectoryRequestBytes  = 1 << 20
-	maxLinkedMessageDirectoryResponseBytes = 512 << 10
-	maxLinkedMessageDirectoryNameBytes     = 512
-	maxLinkedMessageDirectoryResults       = 20
-	minLinkedMessageDirectoryNameRunes     = 2
+	linkedMessageDirectoryVersion           = 1
+	maxLinkedMessageDirectoryRequestBytes   = 1 << 20
+	maxLinkedMessageDirectoryResponseBytes  = 512 << 10
+	maxLinkedMessageDirectoryNameBytes      = 512
+	maxLinkedMessageDirectoryResults        = 20
+	maxLinkedMessageDirectoryInventory      = store.MaxFederatedGuestIdentities
+	maxLinkedMessageDirectoryInventoryBytes = 2 << 20
+	minLinkedMessageDirectoryNameRunes      = 2
 )
 
 // linkedMessageGuestInventory is deliberately separate from
@@ -39,6 +41,7 @@ type LinkedMessageDirectoryRequest struct {
 	SourceAgentID string                   `json:"source_agent_id"`
 	Name          string                   `json:"name"`
 	Limit         int                      `json:"limit"`
+	Enumerate     bool                     `json:"enumerate,omitempty"`
 	Relations     []*LinkedMessageRelation `json:"relations,omitempty"`
 }
 
@@ -109,6 +112,22 @@ func linkedDirectoryEntryFromAgent(
 	}
 }
 
+// appendLinkedDirectoryEntry never truncates an inventory response. Named
+// lookup is intentionally bounded to the requested top-N; enumeration must be
+// all-or-unavailable so a caller cannot mistake a partial recipient set for a
+// complete authorization projection.
+func appendLinkedDirectoryEntry(
+	entries *[]LinkedMessageDirectoryEntry,
+	req LinkedMessageDirectoryRequest,
+	entry LinkedMessageDirectoryEntry,
+) bool {
+	if req.Enumerate && len(*entries) >= req.Limit {
+		return false
+	}
+	*entries = append(*entries, entry)
+	return true
+}
+
 func validateLinkedDirectoryEntryMetadata(
 	chainID string,
 	entry LinkedMessageDirectoryEntry,
@@ -140,7 +159,7 @@ func ValidateLinkedMessageDirectoryResult(
 	result *LinkedMessageDirectoryResult,
 ) error {
 	if result == nil || ValidateChainID(remoteChainID) != nil ||
-		len(result.Contacts) > maxLinkedMessageDirectoryResults {
+		len(result.Contacts) > maxLinkedMessageDirectoryInventory {
 		return ErrFederatedPipeInvalid
 	}
 	seen := make(map[string]struct{}, len(result.Contacts))
@@ -196,8 +215,11 @@ func decodeLinkedMessageDirectoryRequest(
 	if req.Version != linkedMessageDirectoryVersion ||
 		(req.Direction != LinkedMessageGuestToMember &&
 			req.Direction != LinkedMessageMemberToGuest) ||
-		!validLinkedMessageDirectoryName(req.Name) ||
-		req.Limit < 1 || req.Limit > maxLinkedMessageDirectoryResults ||
+		(!req.Enumerate && !validLinkedMessageDirectoryName(req.Name)) ||
+		(req.Enumerate && req.Name != "") ||
+		req.Limit < 1 ||
+		(!req.Enumerate && req.Limit > maxLinkedMessageDirectoryResults) ||
+		(req.Enumerate && req.Limit != maxLinkedMessageDirectoryInventory) ||
 		!isCanonicalAgentID(req.SourceAgentID) ||
 		req.SourceAgentID != strings.ToLower(req.SourceAgentID) ||
 		len(req.Relations) > store.MaxFederatedGuestIdentities {
@@ -258,12 +280,16 @@ func (m *Manager) handleLinkedMessageDirectory(
 		linkedDirectoryUnavailable(w)
 		return
 	}
-	lookupCtx, cancel := context.WithTimeout(
-		r.Context(), pipeContactLookupQueryTimeout,
-	)
-	candidates, err := ss.FindPipeContactLookupCandidates(
-		lookupCtx, req.Name, maxPipeContactLookupCandidates,
-	)
+	lookupCtx, cancel := context.WithTimeout(r.Context(), pipeContactLookupQueryTimeout)
+	var candidates []*store.AgentEntry
+	var err error
+	if req.Enumerate {
+		candidates, err = ss.ListAgentDirectory(lookupCtx)
+	} else {
+		candidates, err = ss.FindPipeContactLookupCandidates(
+			lookupCtx, req.Name, maxPipeContactLookupCandidates,
+		)
+	}
 	cancel()
 	if err != nil {
 		linkedDirectoryUnavailable(w)
@@ -289,12 +315,15 @@ func (m *Manager) handleLinkedMessageDirectory(
 		return
 	}
 
-	entries := make([]LinkedMessageDirectoryEntry, 0, req.Limit)
+	entries := make([]LinkedMessageDirectoryEntry, 0, min(req.Limit, len(candidates)))
 	switch req.Direction {
 	case LinkedMessageGuestToMember:
 		for _, candidate := range candidates {
-			if len(entries) >= req.Limit || candidate == nil {
+			if !req.Enumerate && len(entries) >= req.Limit {
 				break
+			}
+			if candidate == nil {
+				continue
 			}
 			relation, _, buildErr := m.buildHostedLinkedRelation(
 				r.Context(), peer, agreement, req.Direction,
@@ -304,14 +333,19 @@ func (m *Manager) handleLinkedMessageDirectory(
 				continue
 			}
 			contact := linkedDirectoryContactFromAgent(candidate, m.localChainID)
-			exact, partial := pipeContactMatchesName(req.Name, contact)
-			if !exact && !partial {
-				continue
+			if !req.Enumerate {
+				exact, partial := pipeContactMatchesName(req.Name, contact)
+				if !exact && !partial {
+					continue
+				}
 			}
-			entries = append(entries, linkedDirectoryEntryFromAgent(
+			if !appendLinkedDirectoryEntry(&entries, *req, linkedDirectoryEntryFromAgent(
 				candidate, m.localChainID, relation,
 				relation.ReceiverConsentRevision,
-			))
+			)) {
+				linkedDirectoryUnavailable(w)
+				return
+			}
 		}
 	case LinkedMessageMemberToGuest:
 		relations := make(map[string]*LinkedMessageRelation, len(req.Relations))
@@ -333,8 +367,11 @@ func (m *Manager) handleLinkedMessageDirectory(
 			relations[relation.TargetAgentID] = relation
 		}
 		for _, candidate := range candidates {
-			if len(entries) >= req.Limit || candidate == nil {
+			if !req.Enumerate && len(entries) >= req.Limit {
 				break
+			}
+			if candidate == nil {
+				continue
 			}
 			targetID := strings.ToLower(candidate.AgentID)
 			relation := relations[targetID]
@@ -348,22 +385,36 @@ func (m *Manager) handleLinkedMessageDirectory(
 				continue
 			}
 			contact := linkedDirectoryContactFromAgent(candidate, m.localChainID)
-			exact, partial := pipeContactMatchesName(req.Name, contact)
-			if !exact && !partial {
-				continue
+			if !req.Enumerate {
+				exact, partial := pipeContactMatchesName(req.Name, contact)
+				if !exact && !partial {
+					continue
+				}
 			}
-			entries = append(entries, linkedDirectoryEntryFromAgent(
+			if !appendLinkedDirectoryEntry(&entries, *req, linkedDirectoryEntryFromAgent(
 				candidate, m.localChainID, relation, consent.Revision,
-			))
+			)) {
+				linkedDirectoryUnavailable(w)
+				return
+			}
 		}
 	}
-	response, err := boundedLinkedMessageDirectoryResponse(
-		LinkedMessageDirectoryResponse{
-			Version: linkedMessageDirectoryVersion, ChainID: m.localChainID,
-			Direction: req.Direction, SourceAgentID: req.SourceAgentID,
-			Entries: entries,
-		},
-	)
+	responseValue := LinkedMessageDirectoryResponse{
+		Version: linkedMessageDirectoryVersion, ChainID: m.localChainID,
+		Direction: req.Direction, SourceAgentID: req.SourceAgentID,
+		Entries: entries,
+	}
+	var response *LinkedMessageDirectoryResponse
+	if req.Enumerate {
+		encoded, encodeErr := json.Marshal(&responseValue)
+		if encodeErr != nil || len(encoded) > maxLinkedMessageDirectoryInventoryBytes {
+			linkedDirectoryUnavailable(w)
+			return
+		}
+		response = &responseValue
+	} else {
+		response, err = boundedLinkedMessageDirectoryResponse(responseValue)
+	}
 	if err != nil {
 		linkedDirectoryUnavailable(w)
 		return
@@ -413,6 +464,20 @@ func sortLinkedDirectoryContacts(name string, contacts []PipeContact) {
 	})
 }
 
+func boundLinkedDirectoryContacts(
+	contacts []PipeContact,
+	limit int,
+	enumerate bool,
+) ([]PipeContact, error) {
+	if len(contacts) <= limit {
+		return contacts, nil
+	}
+	if enumerate {
+		return nil, ErrFederatedPipeInvalid
+	}
+	return contacts[:limit], nil
+}
+
 func (m *Manager) hostedDirectoryRelations(
 	ctx context.Context,
 	peer *peerIdentity,
@@ -455,14 +520,40 @@ func (m *Manager) FindRemoteLinkedMessageContacts(
 	remoteChainID, sourceAgentID, name string,
 	limit int,
 ) (*LinkedMessageDirectoryResult, error) {
+	return m.remoteLinkedMessageContacts(
+		ctx, remoteChainID, sourceAgentID, name, limit, false,
+	)
+}
+
+// ListRemoteLinkedMessageContacts returns the complete bounded set of exact
+// linked recipients currently authorized to sourceAgentID. Callers invoke it
+// only for peers advertising CapabilityLinkedMessageDirectoryEnumeration.
+func (m *Manager) ListRemoteLinkedMessageContacts(
+	ctx context.Context,
+	remoteChainID, sourceAgentID string,
+) (*LinkedMessageDirectoryResult, error) {
+	return m.remoteLinkedMessageContacts(
+		ctx, remoteChainID, sourceAgentID, "",
+		maxLinkedMessageDirectoryInventory, true,
+	)
+}
+
+func (m *Manager) remoteLinkedMessageContacts(
+	ctx context.Context,
+	remoteChainID, sourceAgentID, name string,
+	limit int,
+	enumerate bool,
+) (*LinkedMessageDirectoryResult, error) {
 	name = strings.TrimSpace(name)
-	if !validLinkedMessageDirectoryName(name) ||
+	if (!enumerate && !validLinkedMessageDirectoryName(name)) ||
 		!isCanonicalAgentID(sourceAgentID) ||
 		sourceAgentID != strings.ToLower(sourceAgentID) ||
 		!m.linkedMessageLocalAgentEligible(sourceAgentID) {
 		return &LinkedMessageDirectoryResult{Contacts: []PipeContact{}}, nil
 	}
-	if limit <= 0 || limit > maxLinkedMessageDirectoryResults {
+	if enumerate {
+		limit = maxLinkedMessageDirectoryInventory
+	} else if limit <= 0 || limit > maxLinkedMessageDirectoryResults {
 		limit = maxLinkedMessageDirectoryResults
 	}
 	agreement, err := m.ActiveAgreement(remoteChainID)
@@ -505,7 +596,7 @@ func (m *Manager) FindRemoteLinkedMessageContacts(
 				Version:       linkedMessageDirectoryVersion,
 				Direction:     LinkedMessageMemberToGuest,
 				SourceAgentID: sourceAgentID, Name: name, Limit: limit,
-				Relations: hosted,
+				Enumerate: enumerate, Relations: hosted,
 			},
 		)
 		if callErr == nil {
@@ -520,6 +611,7 @@ func (m *Manager) FindRemoteLinkedMessageContacts(
 			Version:       linkedMessageDirectoryVersion,
 			Direction:     LinkedMessageGuestToMember,
 			SourceAgentID: sourceAgentID, Name: name, Limit: limit,
+			Enumerate: enumerate,
 		},
 	)
 	if callErr == nil {
@@ -549,7 +641,8 @@ func (m *Manager) FindRemoteLinkedMessageContacts(
 			exact, partial := pipeContactMatchesName(name, contact)
 			if validateLinkedDirectoryEntryMetadata(remoteChainID, entry) != nil ||
 				entry.Relation.SourceAgentID != sourceAgentID ||
-				entry.Relation.TargetAgentID != entry.AgentID || (!exact && !partial) {
+				entry.Relation.TargetAgentID != entry.AgentID ||
+				(!enumerate && !exact && !partial) {
 				return nil, ErrFederatedPipeInvalid
 			}
 			switch result.direction {
@@ -612,8 +705,9 @@ func (m *Manager) FindRemoteLinkedMessageContacts(
 		return &LinkedMessageDirectoryResult{Contacts: []PipeContact{}}, nil
 	}
 	sortLinkedDirectoryContacts(name, contacts)
-	if len(contacts) > limit {
-		contacts = contacts[:limit]
+	contacts, err = boundLinkedDirectoryContacts(contacts, limit, enumerate)
+	if err != nil {
+		return nil, err
 	}
 	result := &LinkedMessageDirectoryResult{Contacts: contacts}
 	if ValidateLinkedMessageDirectoryResult(remoteChainID, result) != nil {

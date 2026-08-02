@@ -141,7 +141,8 @@ func runMCP() error {
 	// 1. SAGE_IDENTITY_PATH (matches SDK AgentIdentity.default())
 	// 2. SAGE_AGENT_KEY (kept for backward compatibility)
 	// 3. Per-project key (~/.sage/agents/<name>-<hash>/agent.key)
-	// 4. Default ~/.sage/agent.key
+	// Never fall back to the node operator/CEREBRUM Root key. An unpinned MCP
+	// session is always resolved to a project/workspace identity.
 	keyPath, _ := configuredMCPIdentityEnv()
 
 	projectName := strings.TrimSpace(os.Getenv("SAGE_PROJECT"))
@@ -284,10 +285,11 @@ func existingIdentityOrDefault(explicitPath, sageHome, projectDir, provider stri
 		}
 		return filepath.Join(providerProjectAgentDir(sageHome, projectDir, provider), "agent.key")
 	}
-	legacy := filepath.Join(sageHome, "agent.key")
-	if _, err := os.Stat(legacy); err == nil { //nolint:gosec // SageHome-derived legacy identity path
-		return legacy
-	}
+	// An app-scoped MCP registration has no trustworthy workspace boundary.
+	// Its implicit identity must still be an ordinary provider-specific agent,
+	// never the stable node transport/CEREBRUM Root key merely because
+	// ~/.sage/agent.key exists. Operators may deliberately pin a custom key via
+	// explicitPath, which returned above; absence is not consent to borrow Root.
 	return filepath.Join(sageHome, "agents", "global-"+sanitizeDirName(provider), "agent.key")
 }
 
@@ -841,7 +843,7 @@ func claimAgentIdentity(sageHome, token, keyPath string) error {
 	keyPath = filepath.Clean(keyPath)
 	baseURL := os.Getenv("SAGE_API_URL")
 	if baseURL == "" {
-		baseURL = "http://localhost:8080"
+		baseURL = mcp.DefaultBaseURL()
 	}
 
 	body, _ := json.Marshal(map[string]string{"token": token})

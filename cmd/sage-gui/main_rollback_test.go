@@ -76,6 +76,15 @@ func TestAutomaticRollbackIsSuppressedForLineageSafetyRefusal(t *testing.T) {
 	assert.False(t, shouldAttemptUpdateRollback(nil))
 }
 
+func TestPendingUpdateConfirmationRequiresExactRunningRelease(t *testing.T) {
+	assert.True(t, pendingUpdateMatchesRunningVersion("v11.17.0", "11.17.0"))
+	assert.True(t, pendingUpdateMatchesRunningVersion("11.17.0", "v11.17.0"))
+	assert.False(t, pendingUpdateMatchesRunningVersion("v11.17.1", "11.17.0"),
+		"a legacy marker left before rename must not make the intact old binary fail readiness")
+	assert.False(t, pendingUpdateMatchesRunningVersion("", "11.17.0"))
+	assert.False(t, pendingUpdateMatchesRunningVersion("11.17.0", "dev"))
+}
+
 func TestAutomaticBinaryRollbackInvalidatesConfiguredBadgerIndexProgress(t *testing.T) {
 	home := t.TempDir()
 	dataDir := filepath.Join(t.TempDir(), "custom data 状態")

@@ -2,6 +2,7 @@ package tx
 
 import (
 	"crypto/ed25519"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,11 +22,12 @@ func TestEncodeDecodeDomainReassign(t *testing.T) {
 		{
 			name: "full",
 			body: &DomainReassign{
-				Domain:       "protocol.lending_pool.usdc",
-				NewOwnerID:   "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-				ParentDomain: "protocol.lending_pool",
-				ProposalID:   "00112233445566778899aabbccddeeff",
-				OpenToShared: false,
+				Domain:          "protocol.lending_pool.usdc",
+				NewOwnerID:      "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+				ParentDomain:    "protocol.lending_pool",
+				ProposalID:      "00112233445566778899aabbccddeeff",
+				OpenToShared:    false,
+				ExpectedOwnerID: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 			},
 		},
 		{
@@ -76,8 +78,20 @@ func TestEncodeDecodeDomainReassign(t *testing.T) {
 			assert.Equal(t, tt.body.ParentDomain, decoded.DomainReassign.ParentDomain)
 			assert.Equal(t, tt.body.ProposalID, decoded.DomainReassign.ProposalID)
 			assert.Equal(t, tt.body.OpenToShared, decoded.DomainReassign.OpenToShared)
+			assert.Equal(t, tt.body.ExpectedOwnerID, decoded.DomainReassign.ExpectedOwnerID)
 		})
 	}
+}
+
+func TestDecodePreAppV26DomainReassignLeavesExpectedOwnerEmpty(t *testing.T) {
+	legacy := &DomainReassign{
+		Domain: "legacy-domain", NewOwnerID: strings.Repeat("ab", 32),
+		ParentDomain: "", ProposalID: "legacy-proposal", OpenToShared: false,
+	}
+	decoded, err := decodeDomainReassign(encodeDomainReassign(legacy))
+	require.NoError(t, err)
+	require.Empty(t, decoded.ExpectedOwnerID)
+	require.Equal(t, legacy, decoded)
 }
 
 // TestDomainReassignSignVerifyRoundtrip — end-to-end sign + verify.

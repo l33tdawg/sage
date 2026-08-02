@@ -31,7 +31,7 @@ type EffectiveWriteDenial struct {
 var definitions = map[Code]EffectiveWriteDenial{
 	CodeMissingWriteGrant: {
 		Code:      CodeMissingWriteGrant,
-		Remedy:    "Submit to a domain this agent owns. If shared management is intended, ask a local Root or Admin to approve this agent as a Manager and place it in an Access Group covering the target domain; v11.15.0 has no direct level-2 grant editor.",
+		Remedy:    "Submit to a domain this agent owns. If shared management is intended, ask a local Root or Admin to place the principals in an Access Group and explicitly select Read + write or Read + write + modify; CEREBRUM has no direct level-2 grant editor.",
 		Retryable: false,
 	},
 	CodeForeignWriteRestricted: {
@@ -61,7 +61,7 @@ var definitions = map[Code]EffectiveWriteDenial{
 	},
 	CodeManagerScopeDenied: {
 		Code:      CodeManagerScopeDenied,
-		Remedy:    "Use a local domain within this manager's authority scope, or ask a local admin to change the scope.",
+		Remedy:    "Submit to a domain this manager owns, or ask a local Root or Admin to place the manager and domain owner in the same Access Group and explicitly select Read + write or Read + write + modify; the Manager role alone does not widen group authority.",
 		Retryable: false,
 	},
 }

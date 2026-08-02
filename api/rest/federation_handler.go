@@ -551,6 +551,10 @@ type federationLinkedMessageContactFinder interface {
 	FindRemoteLinkedMessageContacts(ctx context.Context, remoteChainID, sourceAgentID, name string, limit int) (*federation.LinkedMessageDirectoryResult, error)
 }
 
+type federationLinkedMessageDirectoryLister interface {
+	ListRemoteLinkedMessageContacts(ctx context.Context, remoteChainID, sourceAgentID string) (*federation.LinkedMessageDirectoryResult, error)
+}
+
 const (
 	maxAgentFederationTargets    = 64
 	maxFederationAvailablePeers  = 64
@@ -731,6 +735,7 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 	statusContactFinder, hasStatusContactFinder := s.federation.(federationPipeContactStatusFinder)
 	lookupStatusFinder, hasLookupStatusFinder := s.federation.(federationPipeLookupStatusFinder)
 	linkedContactFinder, hasLinkedContactFinder := s.federation.(federationLinkedMessageContactFinder)
+	linkedDirectoryLister, hasLinkedDirectoryLister := s.federation.(federationLinkedMessageDirectoryLister)
 	type peerResult struct {
 		connection *availableFederationConnection
 	}
@@ -774,11 +779,16 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 							ctx, chain, callerID, agentName, agentLimit,
 						)
 					}
+				} else if callerMayPipe && hasLinkedDirectoryLister &&
+					slices.Contains(status.Capabilities, federation.CapabilityLinkedMessageDirectoryEnumeration) {
+					linked, linkedErr = linkedDirectoryLister.ListRemoteLinkedMessageContacts(
+						ctx, chain, callerID,
+					)
 				}
 				if connection, ok := s.availableFederationConnectionForCaller(
 					ctx, callerID, chain, status, agentName, lookup, lookupErr,
 					hasContactFinder || hasStatusContactFinder, linked, linkedErr,
-					hasLinkedContactFinder, callerMayPipe,
+					hasLinkedContactFinder || hasLinkedDirectoryLister, callerMayPipe,
 				); ok {
 					results[index].connection = connection
 				}
@@ -884,7 +894,7 @@ func (s *Server) availableFederationConnectionForCaller(
 		federation.ValidateRemotePipeContactGrant(remoteChainID, contacts) == nil {
 		connection.RemoteAgents = filterAvailablePipeContacts(contacts.Contacts, connection.SharedReadDomains)
 	}
-	if agentName != "" && includePipeContacts && hasLinkedLookup &&
+	if includePipeContacts && hasLinkedLookup &&
 		linkedErr == nil && linked != nil &&
 		federation.ValidateLinkedMessageDirectoryResult(remoteChainID, linked) == nil {
 		connection.RemoteAgents = mergeAvailablePipeContacts(

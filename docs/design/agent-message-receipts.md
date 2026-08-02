@@ -1,18 +1,18 @@
 # Agent Message Delivery and Read Receipts
 
 **Status:** v11.17 implements the canonical same-node Messages service and
-exact local recipient acknowledgements. Federated receipt capability
-negotiation/events remain planned and must not be advertised as shipped.
+exact local recipient acknowledgements. It also implements a distinct,
+capability-negotiated federated receipt-v2 protocol; legacy peers remain
+explicitly unsupported/unconfirmed.
 
 **Consensus:** off-consensus and off both chains. This feature requires no new
 application fork and does not change app-v23, AppHash, replay, or state-sync
 rules.
 
-**Release boundary:** v11.17 implements the same-node contract below without
-adding a new federation protocol. Federated delivery/read propagation remains
-deferred until capability negotiation and all federation gates in this document
-are implemented; product copy must not describe those remote receipts as
-available.
+**Release boundary:** v11.17 keeps same-node Messages and federated receipts as
+separate public surfaces. Federated evidence exists only when both peers
+negotiate `federated-pipeline-receipts-v2`; a locally queued legacy pipe must
+never be described as delivered or read.
 
 ## Product promise
 
@@ -23,8 +23,9 @@ An agent that sends one exact pipeline message can later ask SAGE whether:
 3. the authenticated recipient client fetched and acknowledged that exact
    message.
 
-The sender does not need a reply from the recipient. Local and federated
-messages use the same sender-facing query.
+The sender does not need a reply from the recipient. Local Messages use
+`GET /v1/messages/{message_id}/status`; federated pipes use the separate
+`GET /v1/pipe/{pipe_id}/receipt` projection.
 
 ## One public Messages model
 
@@ -222,7 +223,7 @@ A terminal workflow state never erases an earlier read fact. For example, a
 message may be `workflow_status:"expired"` and
 `read_status:"confirmed"` when the recipient read it but never replied.
 
-## Planned public surfaces
+## Public surfaces
 
 ### `GET /v1/messages/{message_id}/status`
 
@@ -233,10 +234,10 @@ Example response:
 ```json
 {
   "message_id": "pipe-…",
-  "scope": "federated",
+  "scope": "local",
   "transport_status": "delivered",
   "read_status": "confirmed",
-  "read_evidence": "exact_recipient_ack",
+  "read_evidence": "local_exact_ack",
   "workflow_status": "pending",
   "sent_at": "2026-07-29T08:00:00Z",
   "delivered_at": "2026-07-29T08:00:02Z",
@@ -267,8 +268,9 @@ therefore remains queryable while the content vault is locked; unreadable
 encrypted content cannot turn a metadata-only query into an error or plaintext
 fallback.
 
-The compatibility route `GET /v1/pipe/{pipe_id}/receipt` delegates to this
-handler and returns the same representation.
+`GET /v1/pipe/{pipe_id}/receipt` is not a compatibility alias for this local
+Messages handler. It is the exact-sender-only federated receipt-v2 projection,
+with independent transport, claim/read, and terminal dimensions.
 
 ### `sage_message_status`
 
@@ -286,9 +288,8 @@ recipient or changes `last_seen`, so asking for status is not itself a presence
 probe.
 
 There is no historical MCP `sage_pipe_status` tool to preserve. The
-`sage_message_status` name is new. A compatibility REST receipt route may
-delegate to the same exact-sender handler, but documentation must not invent a
-legacy MCP contract that never shipped.
+`sage_message_status` name is new for canonical local Messages;
+`sage_pipe_receipt_status` queries the separate federated projection.
 
 HTTP MCP bearer authentication must resolve to the exact sender Ed25519
 identity. A keyless bearer cannot fall back to Root or the node operator.
@@ -296,21 +297,20 @@ identity. A keyless bearer cannot fall back to Root or the node operator.
 ### `PUT /v1/messages/{receiver_local_message_id}/read`
 
 This is a signed recipient action over the receiver-local message ID returned
-by the canonical receive operation. A federated recipient never receives or
-uses the sender-local `message_id` in this path.
-`PUT /v1/pipe/{receiver_local_pipe_id}/read` is its compatibility route.
+by the canonical same-node receive operation. There is no pipe compatibility
+read route.
 
-For a local pipe, the exact path and recipient signature identify the message.
-For an imported federated pipe, the body additionally binds the stable original
-send event and the exact receipt-source chain, following the existing result
-return convention:
+For a negotiated imported federated pipe, the recipient instead fetches the
+exact immutable challenge for each action and submits it unchanged:
 
-```json
-{
-  "source_pipe_id": "pipe-event-…",
-  "source_chain_id": "receiving-chain-id"
-}
+```text
+GET /v1/pipe/{receiver_local_pipe_id}/receipt/challenge/{claimed|read}
+PUT /v1/pipe/{receiver_local_pipe_id}/receipt/{claimed|read}
 ```
+
+The challenge binds the stable original message/event, exact sender and
+recipient agents/chains, content digest, and current policy/agreement/contact
+generation. It contains no message content.
 
 The handler requires the exact addressed `to_agent`, or the exact provider
 agent that won a legacy provider-addressed claim. It has no operator/Admin/Root
@@ -325,14 +325,17 @@ It never changes payload, workflow ownership, result, or memory state.
 
 No recipient must explicitly send a reply or call a receipt tool.
 
-For each pipeline item returned by `sage_inbox` or the inbox phase of
-`sage_turn`, the MCP client performs:
+For each negotiated federated pipeline item returned by `sage_inbox` or the
+inbox phase of `sage_turn`, the MCP client performs:
 
 1. the existing signed inbox fetch and claim;
-2. one fresh signed exact-ID
-   `PUT /v1/messages/{receiver_local_message_id}/read` for that returned item;
-   and
-3. only then returns the formatted inbox item to the agent runtime.
+2. fetches and submits the exact `claimed` challenge;
+3. fetches and submits the exact `read` challenge; and
+4. returns the formatted inbox item even if receipt transport could not be
+   confirmed.
+
+Canonical same-node Messages continue to use
+`PUT /v1/messages/{receiver_local_message_id}/read`.
 
 One acknowledgement proof covers one message. A batch proof must not be split
 across multiple transport events because the existing proof replay boundary is
@@ -345,10 +348,10 @@ may retry an exact signed acknowledgement, but it may not let the node operator
 construct one without the recipient credential. Crash windows are therefore
 conservative false negatives, never forged positives.
 
-Direct REST/SDK consumers receive the same primitive and must call the signed
-read route after presenting an item. SDK convenience inbox methods should do
-this automatically by default and expose an explicit low-level/manual mode only
-for compatibility.
+Direct REST consumers receive the same primitive and must use the signed
+challenge/action routes after presenting a negotiated federated item. The
+Python SDK currently parses `receipt_protocol_version` but does not expose an
+automatic federated acknowledgement convenience method.
 
 ## Federated receipt protocol
 
@@ -357,7 +360,7 @@ for compatibility.
 A supporting SQLite-backed peer advertises:
 
 ```text
-federated-pipeline-receipts-v1
+federated-pipeline-receipts-v2
 ```
 
 The existing `federated-pipeline-v1` capability continues to mean send/result,
@@ -368,18 +371,18 @@ and return an explicit unsupported response; they never synthesize receipt
 state from an in-memory queue.
 
 An older peer keeps normal send/result behavior. The source reports
-`read_status:"unsupported"` rather than presenting absence as unread. A valid
-result from that exact recipient may still set
-`read_status:"confirmed"` with `read_evidence:"recipient_result"`.
+`protocol:"unsupported"` with `claim_status:"unconfirmed"` and
+`read_status:"unconfirmed"`; migration never invents evidence.
 Capability support is recorded from authenticated delivery preflight and local
-receipt state; the sender-only status query never probes the peer. A later
-upgrade may move an unexpired message from `unsupported` to `confirmed` only
-when a valid exact receipt actually arrives.
+receipt state; the sender-only status query never probes the peer. A historical
+or v1 row without the generation-bound v2 binding remains unsupported rather
+than being retrofitted after an upgrade.
 
 ### Receipt event
 
-The existing authenticated peer event envelope gains the previously reserved
-`claim` kind only under the new capability.
+Receipt v2 uses a distinct authenticated `POST /fed/v2/pipe/receipt` event and
+does not overload the legacy pipeline event or `/fed/v1/receipt` co-commit
+protocol.
 
 The outer federation proof still binds:
 

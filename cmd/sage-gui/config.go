@@ -329,6 +329,24 @@ func normalizeConfigPaths(cfg *Config, home string) {
 	}
 }
 
+// rawConfigRoundTripDefaults seeds fields that historically could be omitted
+// from config.yaml before a typed Config re-marshal.  Decoding YAML over a
+// zero Config and then marshaling it is not a lossless "one-field" update: it
+// materializes empty data_dir/agent_key_file values.  On the following boot an
+// empty relative path normalizes to SAGE_HOME itself, so the node attempts to
+// read the home directory as its stable federation key and refuses to start.
+//
+// Keep the path defaults relative here.  Explicit operator-authored paths
+// still overwrite them during yaml.Unmarshal and therefore round-trip exactly;
+// omitted historical paths become portable SAGE_HOME-relative defaults rather
+// than host-specific absolute paths.
+func rawConfigRoundTripDefaults() Config {
+	raw := *DefaultConfig(".")
+	raw.DataDir = "data"
+	raw.AgentKey = "agent.key"
+	return raw
+}
+
 // validate rejects contradictory configuration after the file + env merge.
 // Load-time, so a misconfigured node refuses to boot instead of guessing.
 func (cfg *Config) validate() error {
@@ -376,6 +394,14 @@ func (cfg *Config) validate() error {
 func applyEnvOverrides(cfg *Config) {
 	if envAddr := os.Getenv("REST_ADDR"); envAddr != "" {
 		cfg.RESTAddr = envAddr
+	}
+	// The HTTPS/MCP listener is independent from the plain dashboard REST
+	// listener.  Give secondary local nodes the same explicit override that
+	// Comet RPC/P2P and federation already have; otherwise every personal node
+	// silently competes for 127.0.0.1:8443 and the later process exits after it
+	// has already opened its other listeners.
+	if envAddr := os.Getenv("SAGE_TLS_ADDR"); envAddr != "" {
+		cfg.Quorum.TLSAddr = envAddr
 	}
 	if envProvider := os.Getenv("SAGE_EMBEDDING_PROVIDER"); envProvider != "" {
 		cfg.Embedding.Provider = envProvider
@@ -506,7 +532,7 @@ func persistChainID(chainID string) error {
 	// seed an omitted voter block would silently kill the auto-voter on the next
 	// boot), and the federation default is enabled=false (opt-in). (Keys present
 	// in the file still win — the seed only fills absent ones.)
-	raw := Config{Voter: defaultVoterConfig(), Federation: defaultFederationConfig()}
+	raw := rawConfigRoundTripDefaults()
 	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
 		return fmt.Errorf("parse config: %w", parseErr)
 	}
@@ -544,7 +570,7 @@ func persistFederationEnabled(enabled bool) error {
 		}
 		return fmt.Errorf("read config: %w", err)
 	}
-	raw := Config{Voter: defaultVoterConfig(), Federation: defaultFederationConfig()}
+	raw := rawConfigRoundTripDefaults()
 	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
 		return fmt.Errorf("parse config: %w", parseErr)
 	}
@@ -707,7 +733,7 @@ func persistNetworkName(name string) error {
 		}
 		return fmt.Errorf("read config: %w", err)
 	}
-	raw := Config{Voter: defaultVoterConfig(), Federation: defaultFederationConfig()}
+	raw := rawConfigRoundTripDefaults()
 	if parseErr := yaml.Unmarshal(data, &raw); parseErr != nil {
 		return fmt.Errorf("parse config: %w", parseErr)
 	}
@@ -761,7 +787,7 @@ func persistFederationRouteSnapshot(chainID string, snapshot federation.RouteSna
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read config: %w", err)
 	}
-	raw := Config{Voter: defaultVoterConfig(), Federation: defaultFederationConfig()}
+	raw := rawConfigRoundTripDefaults()
 	if len(data) > 0 {
 		if unmarshalErr := yaml.Unmarshal(data, &raw); unmarshalErr != nil {
 			return fmt.Errorf("parse config: %w", unmarshalErr)

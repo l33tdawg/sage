@@ -70,6 +70,20 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
+type readErrorBody struct {
+	read bool
+}
+
+func (b *readErrorBody) Read(p []byte) (int, error) {
+	if b.read {
+		return 0, io.ErrUnexpectedEOF
+	}
+	b.read = true
+	return copy(p, `{"items":[`), nil
+}
+
+func (*readErrorBody) Close() error { return nil }
+
 func TestIdempotentReadRetriesDuringNodeStartup(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
@@ -90,6 +104,57 @@ func TestIdempotentReadRetriesDuringNodeStartup(t *testing.T) {
 	require.Equal(t, int32(3), attempts.Load())
 }
 
+func TestReplaySafeCanonicalReceiveRetriesUnexpectedResponseEOFWithSameBody(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	server := NewServer("http://localhost:8080", priv)
+	requestBody := []byte(`{"receive_token":"stable-token","limit":5}`)
+	var attempts atomic.Int32
+	server.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		gotBody, readErr := io.ReadAll(req.Body)
+		require.NoError(t, readErr)
+		require.Equal(t, requestBody, gotBody, "a receive retry must preserve its exact idempotency token")
+		if attempts.Add(1) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       &readErrorBody{},
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"items":[],"count":0}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	var out map[string]any
+	require.NoError(t, server.doSignedJSON(
+		context.Background(), http.MethodPost, "/v1/messages/receive", requestBody, &out,
+	))
+	require.Equal(t, int32(2), attempts.Load())
+}
+
+func TestNonReplayableClaimGETDoesNotRetryUnexpectedResponseEOF(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	server := NewServer("http://localhost:8080", priv)
+	var attempts atomic.Int32
+	server.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       &readErrorBody{},
+			Header:     make(http.Header),
+		}, nil
+	})}
+	var out map[string]any
+	err = server.doSignedJSON(
+		context.Background(), http.MethodGet, "/v1/pipe/inbox?limit=5", nil, &out,
+	)
+	require.ErrorContains(t, err, "unexpected EOF")
+	require.Equal(t, int32(1), attempts.Load())
+}
+
 func TestSignedRequestReplayClassificationFailsClosed(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -108,6 +173,11 @@ func TestSignedRequestReplayClassificationFailsClosed(t *testing.T) {
 		{name: "idempotent message receive", method: http.MethodPost, path: "/v1/messages/receive", want: signedRequestReplaySafe},
 		{name: "idempotent message reply", method: http.MethodPost, path: "/v1/messages/msg-1/reply", want: signedRequestReplaySafe},
 		{name: "idempotent exact read ack", method: http.MethodPut, path: "/v1/messages/msg-1/read", want: signedRequestReplaySafe},
+		{name: "idempotent federated claimed receipt", method: http.MethodPut, path: "/v1/pipe/pipe-1/receipt/claimed", want: signedRequestReplaySafe},
+		{name: "idempotent federated read receipt", method: http.MethodPut, path: "/v1/pipe/pipe-1/receipt/read", want: signedRequestReplaySafe},
+		{name: "read-only federated claimed challenge", method: http.MethodGet, path: "/v1/pipe/pipe-1/receipt/challenge/claimed", want: signedRequestReplaySafe},
+		{name: "read-only federated read challenge", method: http.MethodGet, path: "/v1/pipe/pipe-1/receipt/challenge/read", want: signedRequestReplaySafe},
+		{name: "unknown federated receipt kind fails closed", method: http.MethodPut, path: "/v1/pipe/pipe-1/receipt/future", want: signedRequestSingleAttempt},
 		{name: "destructive pipe inbox", method: http.MethodGet, path: "/v1/pipe/inbox?limit=5", want: signedRequestSingleAttempt},
 		{name: "destructive pipe updates", method: http.MethodGet, path: "/v1/pipe/updates?limit=5", want: signedRequestSingleAttempt},
 		{name: "destructive task notifications", method: http.MethodGet, path: "/v1/dashboard/task-notifications?limit=5", want: signedRequestSingleAttempt},

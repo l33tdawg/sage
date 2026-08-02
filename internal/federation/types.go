@@ -319,6 +319,16 @@ type FederatedGuestAgentEligibilityResponse struct {
 // without transferring an unbounded roster in /fed/v1/status.
 const CapabilityFederatedPipelineContactLookup = "federated-pipeline-contact-lookup-v1"
 
+// CapabilityLinkedMessageDirectoryEnumeration advertises a caller-scoped
+// inventory of exact linked-message recipients. It never exposes a peer roster:
+// the serving peer returns only identities for which the authenticated source
+// agent currently has an exact, revalidated messaging relation.
+const CapabilityLinkedMessageDirectoryEnumeration = "linked-message-directory-enumeration-v1"
+
+// CapabilityFederatedPipelineReceiptsV2 advertises generation-bound,
+// participant-scoped claim/read evidence for federated pipeline messages.
+const CapabilityFederatedPipelineReceiptsV2 = "federated-pipeline-receipts-v2"
+
 // PipeContactGrant is the serving node's peer-scoped agent-address snapshot.
 // A routable contact is an active local agent that is either the effective
 // owner of a shared domain or currently holds normal local read access to it.
@@ -396,6 +406,10 @@ type RemotePipeTarget struct {
 	Address         string `json:"address"`
 	Handle          string `json:"handle,omitempty"`
 	DisplayName     string `json:"display_name,omitempty"`
+	// ReceiptProtocolVersion is authenticated peer capability state captured
+	// during exact route resolution. Zero is legacy/unconfirmed; 2 is the only
+	// currently defined durable receipt protocol.
+	ReceiptProtocolVersion int `json:"receipt_protocol_version,omitempty"`
 	// AuthorizationMode is empty for the original domain-contact route.
 	// "linked-v23" names the separate exact-agent messaging relation below;
 	// it never carries or implies domain authority.

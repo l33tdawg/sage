@@ -22,11 +22,12 @@ import (
 // on-chain decision record. ABCI verifies the body matches the proposal
 // payload byte-for-byte and re-checks the admin gate as defence-in-depth.
 type DomainReassignRequest struct {
-	Domain       string `json:"domain"`
-	NewOwnerID   string `json:"new_owner_id"`
-	ParentDomain string `json:"parent_domain,omitempty"`
-	ProposalID   string `json:"proposal_id"`
-	OpenToShared bool   `json:"open_to_shared,omitempty"`
+	Domain          string `json:"domain"`
+	NewOwnerID      string `json:"new_owner_id"`
+	ParentDomain    string `json:"parent_domain,omitempty"`
+	ProposalID      string `json:"proposal_id"`
+	OpenToShared    bool   `json:"open_to_shared,omitempty"`
+	ExpectedOwnerID string `json:"expected_owner_id,omitempty"`
 }
 
 // DomainReassignResponse is returned on HTTP 200. PurgedGrants comes from
@@ -73,6 +74,12 @@ func (s *Server) handleDomainReassign(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid new_owner_id", "new_owner_id must be hex(64) — 32-byte Ed25519 agent ID")
 		return
 	}
+	if req.ExpectedOwnerID != "" {
+		if decoded, hexErr := hex.DecodeString(req.ExpectedOwnerID); hexErr != nil || len(decoded) != 32 {
+			writeProblem(w, http.StatusBadRequest, "Invalid expected_owner_id", "expected_owner_id must be hex(64) — 32-byte Ed25519 agent ID")
+			return
+		}
+	}
 	if req.ProposalID == "" {
 		writeProblem(w, http.StatusBadRequest, "Missing proposal_id", "proposal_id is required")
 		return
@@ -92,11 +99,12 @@ func (s *Server) handleDomainReassign(w http.ResponseWriter, r *http.Request) {
 		Nonce:     tx.MonotonicNonce(s.signingKey),
 		Timestamp: time.Now(),
 		DomainReassign: &tx.DomainReassign{
-			Domain:       req.Domain,
-			NewOwnerID:   req.NewOwnerID,
-			ParentDomain: req.ParentDomain,
-			ProposalID:   req.ProposalID,
-			OpenToShared: req.OpenToShared,
+			Domain:          req.Domain,
+			NewOwnerID:      req.NewOwnerID,
+			ParentDomain:    req.ParentDomain,
+			ProposalID:      req.ProposalID,
+			OpenToShared:    req.OpenToShared,
+			ExpectedOwnerID: req.ExpectedOwnerID,
 		},
 	}
 

@@ -66,18 +66,22 @@ type AppV23RootState struct {
 }
 
 type AppV23LocalEnrollment struct {
-	AgentID                 string            `json:"agent_id"`
-	ApprovedBy              string            `json:"approved_by"`
-	RootGeneration          uint64            `json:"root_generation"`
-	Profile                 string            `json:"profile"`
-	HomeDomain              string            `json:"home_domain,omitempty"`
-	ExpectedHomeDomainOwner string            `json:"-"`
-	TransferHomeDomain      bool              `json:"-"`
-	Clearance               uint8             `json:"clearance"`
-	Capabilities            AgentCapabilities `json:"capabilities"`
-	Active                  bool              `json:"active"`
-	Revision                uint64            `json:"revision"`
-	UpdatedHeight           int64             `json:"updated_height"`
+	AgentID                 string `json:"agent_id"`
+	ApprovedBy              string `json:"approved_by"`
+	RootGeneration          uint64 `json:"root_generation"`
+	Profile                 string `json:"profile"`
+	HomeDomain              string `json:"home_domain,omitempty"`
+	ExpectedHomeDomainOwner string `json:"-"`
+	TransferHomeDomain      bool   `json:"-"`
+	// RetireOwnedDomainsToRoot is an app-v26 execution option, never persisted
+	// as enrollment policy. Deactivation moves current domain authority to the
+	// stable Root principal while retaining an explicit ownership-history row.
+	RetireOwnedDomainsToRoot bool              `json:"-"`
+	Clearance                uint8             `json:"clearance"`
+	Capabilities             AgentCapabilities `json:"capabilities"`
+	Active                   bool              `json:"active"`
+	Revision                 uint64            `json:"revision"`
+	UpdatedHeight            int64             `json:"updated_height"`
 }
 
 type AppV23RoleState struct {
@@ -3994,6 +3998,13 @@ func (s *BadgerStore) ApproveAppV23LocalAgent(
 				if err := s.removeAppV23MemberFromGroupTxn(txn, input.AgentID, input.ApprovedBy, input.UpdatedHeight); err != nil {
 					return err
 				}
+				if input.RetireOwnedDomainsToRoot {
+					if _, err := s.transferAppV26OwnedDomainsToRootTxn(
+						txn, input.AgentID, root.PrincipalID, input.UpdatedHeight,
+					); err != nil {
+						return err
+					}
+				}
 			}
 			agentData, agentMarshalErr := appV23Marshal(agent)
 			if agentMarshalErr != nil {
@@ -4392,47 +4403,60 @@ func (s *BadgerStore) mutateAppV23AccessGroup(actorID, groupID, name string, mem
 }
 
 // MigrateAppV26AccessGroupAuthorities deterministically upgrades every
-// historical local Access Group to the least-privileged app-v26 default. It
-// deliberately preserves the operator revision and audit fields: activation
-// is a fork migration, not a user-authored group edit.
-func (s *BadgerStore) MigrateAppV26AccessGroupAuthorities() error {
-	return s.update(func(txn *badger.Txn) error {
-		prefix := []byte("appv23:group:")
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = prefix
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		seen := 0
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			seen++
-			if seen > AppV23MaxGroups {
-				return errors.New("app-v23 group count exceeds deterministic bound")
-			}
-			var group AppV23AccessGroup
-			if err := it.Item().Value(func(value []byte) error {
-				return json.Unmarshal(value, &group)
-			}); err != nil {
-				return err
-			}
-			if group.GroupID != string(it.Item().Key()[len(prefix):]) {
-				return errors.New("app-v23 access group key/value invariant failed")
-			}
-			if group.MemberAuthority != "" {
-				if err := ValidateAppV26GroupAuthority(group.MemberAuthority); err != nil {
+// historical local Access Group to the least-privileged app-v26 default and
+// reconciles orphaned canonical domain owners to the stable Root principal.
+// It deliberately preserves operator revisions, memory authorship, grants,
+// and shared markers. Non-agent legacy owner labels are preserved exactly in
+// append-only ownership history while Root becomes the current authority:
+// activation is a fork migration, not a user-authored edit.
+func (s *BadgerStore) MigrateAppV26AccessGroupAuthorities(height int64) error {
+	if height <= 0 {
+		return errors.New("app-v26 migration height must be positive")
+	}
+	return s.withDomainOwnershipMutation(func() error {
+		return s.update(func(txn *badger.Txn) error {
+			prefix := []byte("appv23:group:")
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefix
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			seen := 0
+			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+				seen++
+				if seen > AppV23MaxGroups {
+					return errors.New("app-v23 group count exceeds deterministic bound")
+				}
+				var group AppV23AccessGroup
+				if err := it.Item().Value(func(value []byte) error {
+					return json.Unmarshal(value, &group)
+				}); err != nil {
 					return err
 				}
-				continue
+				if group.GroupID != string(it.Item().Key()[len(prefix):]) {
+					return errors.New("app-v23 access group key/value invariant failed")
+				}
+				if group.MemberAuthority != "" {
+					if err := ValidateAppV26GroupAuthority(group.MemberAuthority); err != nil {
+						return err
+					}
+					continue
+				}
+				group.MemberAuthority = AppV26GroupAuthorityRead
+				data, err := appV23Marshal(group)
+				if err != nil {
+					return err
+				}
+				if err := s.txnSet(txn, appV23GroupKey(group.GroupID), data); err != nil {
+					return err
+				}
 			}
-			group.MemberAuthority = AppV26GroupAuthorityRead
-			data, err := appV23Marshal(group)
-			if err != nil {
+			var root AppV23RootState
+			if err := appV23ReadJSON(txn, appV23RootKey(), &root); err != nil {
 				return err
 			}
-			if err := s.txnSet(txn, appV23GroupKey(group.GroupID), data); err != nil {
-				return err
-			}
-		}
-		return nil
+			_, err := s.reconcileAppV26InactiveDomainOwnersToRootTxn(txn, root, height)
+			return err
+		})
 	})
 }
 

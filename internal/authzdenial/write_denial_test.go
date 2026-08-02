@@ -81,14 +81,27 @@ func TestClassifyLegacyGrammarCannotBeForgedByDomain(t *testing.T) {
 	}
 }
 
-func TestMissingWriteGrantRemedyNamesOnlyShippedV1115Actions(t *testing.T) {
+func TestMissingWriteGrantRemedyNamesOnlyCurrentAppV26Actions(t *testing.T) {
 	denial, ok := Definition(CodeMissingWriteGrant)
 	require.True(t, ok)
 	assert.Contains(t, denial.Remedy, "domain this agent owns")
-	assert.Contains(t, denial.Remedy, "Manager")
 	assert.Contains(t, denial.Remedy, "Access Group")
+	assert.Contains(t, denial.Remedy, "Read + write")
+	assert.Contains(t, denial.Remedy, "Read + write + modify")
 	assert.Contains(t, denial.Remedy, "no direct level-2 grant editor")
+	assert.NotContains(t, denial.Remedy, "Manager")
 	assert.NotContains(t, denial.Remedy, "Grant this agent level 2")
+}
+
+func TestManagerScopeRemedyNamesOnlyCurrentAppV26Actions(t *testing.T) {
+	denial, ok := Definition(CodeManagerScopeDenied)
+	require.True(t, ok)
+	assert.Contains(t, denial.Remedy, "domain this manager owns")
+	assert.Contains(t, denial.Remedy, "Access Group")
+	assert.Contains(t, denial.Remedy, "Read + write")
+	assert.Contains(t, denial.Remedy, "Read + write + modify")
+	assert.Contains(t, denial.Remedy, "Manager role alone does not widen group authority")
+	assert.NotContains(t, denial.Remedy, "level 2")
 }
 
 func TestValidateProblemRequiresCompleteCanonicalContract(t *testing.T) {

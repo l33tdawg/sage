@@ -77,6 +77,17 @@ hard-denied principals may not.
 CEREBRUM Root is an immutable authority principal with a rotatable credential.
 It is not an ordinary agent role and cannot be removed or demoted.
 
+At app-v26 H+1, the current local Root or an active current-generation local
+Admin may change a governed non-Root agent's mutable display name from Access
+Controls. This is deliberately narrower than generic metadata editing:
+consensus requires the `AgentUpdate` boot bio to equal the target's current
+boot bio, and the browser never supplies it. The target's `agent_id`, immutable
+registered name, boot purpose, enrollment, role, profile, domains, and memory
+authorship remain unchanged. A no-op is reported as uncommitted; an uncertain
+broadcast is reconciled against canonical agent state before CEREBRUM reports
+success. Root handover remains a rare separate card below the everyday
+agent/group controls, not an agent rename or role action.
+
 Root never appears in the agent roster, role editor, Access Group picker, or
 agent-removal workflow. Generic agent lookup, search, messaging, pairing,
 claim-token, key-rotation, bundle-download, OAuth, and MCP-token paths must
@@ -162,17 +173,20 @@ from being reactivated after a subsequent generation.
 
 The only post-v23 agent roles are:
 
-- `member`: reads domains owned by other active local members of any shared
-  Access Group; writes only owned domains or compatible explicit grants.
-- `manager`: Member rights plus write and modify authority over domains owned
-  by active local members of a shared Access Group.
+- `member`: ordinary local principal. At app-v26, each Access Group's explicit
+  authority tier supplies the derived read/write/modify verbs for that group;
+  ownership and compatible direct grants remain independent sources.
+- `manager`: local management role. It does not silently widen a group's
+  explicit app-v26 authority tier.
 - `admin`: sudo-equivalent authority over normal local data, policy,
   governance, federation, and CEREBRUM operations. The root credential,
   root-recovery ceremony, and root identity remain non-delegable.
 
-Roles supply verbs. Access Groups supply scope. Clearance supplies the maximum
-classification. Capability restrictions are hard denies and override roles and
-grants. Local enrollment supplies the authority boundary.
+At app-v26, each Access Group supplies both its shared scope and its explicit
+member authority tier. Roles retain their non-group management meaning;
+clearance supplies the maximum classification. Capability restrictions are
+hard denies and override ownership, group authority, roles, and grants. Local
+enrollment supplies the authority boundary.
 
 An Admin or Manager transition must be atomic with a compatible security
 profile. The system must reject contradictory states such as Admin with the
@@ -302,6 +316,15 @@ Properties (app-v26 extension):
 - Removal or group deletion revokes only derived group access. Each agent keeps
   full authority over its own domain tree. Ownership transfer affects derived
   access immediately in consensus order.
+- App-v26 whole-domain reassignment binds the operator-approved proposal and
+  execution transaction to the exact canonical owner observed before the
+  proposal. If another committed transaction changes ownership first, the
+  stale transfer is rejected without mutation. The trailing wire binding is
+  admitted only at H+1; activation height H retains the app-v25 encoding.
+- App-v26 canonical ownership itself grants the active owner its policy-limited
+  read/write/modify authority. Reassignment therefore purges only unrelated
+  grants and does not emit a self-grant or require the target private key on
+  the CEREBRUM node.
 - Open challenge electorates remain frozen according to their existing
   consensus record; later membership churn does not rewrite history.
 
@@ -374,9 +397,10 @@ Permanent write denials include at least:
 - `no_owned_home_domain`; and
 - `manager_scope_denied`.
 
-Remedies are derived from the reason. For `missing_write_grant`, v11.16.0 names
-the owned home domain as the narrow action and, only when shared management is
-actually intended, the Root/Admin-approved Manager Access Group flow.
+Remedies are derived from the reason. For `missing_write_grant`, use the owned
+home domain as the narrow action or, only when shared management is actually
+intended, have Root/Admin place the principals in an Access Group and
+explicitly select Read + write or Read + write + modify.
 CEREBRUM does not claim to offer a direct level-2 grant editor in this release.
 Neither action is suggested when a capability restriction would override the
 resulting scope.

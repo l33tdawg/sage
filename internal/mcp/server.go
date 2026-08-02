@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -501,9 +502,12 @@ func (s *Server) autoRegister(ctx context.Context) {
 	_ = s.doSignedJSON(ctx, "POST", "/v1/agent/register", body, nil)
 }
 
-// signedRequest makes an authenticated HTTP request to the SAGE REST API.
-// Signs method + path + body + timestamp as per auth protocol v2.
-func (s *Server) signedRequest(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
+type preparedSignedRequest struct {
+	method, path, agentID, signature, timestamp, nonce string
+	body                                               []byte
+}
+
+func (s *Server) prepareSignedRequest(ctx context.Context, method, path string, body []byte) (*preparedSignedRequest, error) {
 	// A bearer-authed HTTP MCP request may carry a per-token signing identity
 	// (installed by MCPBearerAuthMiddleware). When present, sign AS that identity
 	// so on-chain RBAC/audit is honest instead of collapsing every token to the
@@ -544,17 +548,38 @@ func (s *Server) signedRequest(ctx context.Context, method, path string, body []
 	}
 	sig := auth.SignRequestWithNonce(signKey, method, path, body, timestamp, nonce)
 
-	req, err := http.NewRequestWithContext(ctx, method, s.baseURL+path, bytes.NewReader(body))
+	return &preparedSignedRequest{
+		method: method, path: path, agentID: signID, signature: hex.EncodeToString(sig),
+		timestamp: fmt.Sprintf("%d", timestamp), nonce: hex.EncodeToString(nonce),
+		body: append([]byte(nil), body...),
+	}, nil
+}
+
+func (s *Server) sendPreparedSignedRequest(ctx context.Context, prepared *preparedSignedRequest) (*http.Response, error) {
+	if prepared == nil {
+		return nil, fmt.Errorf("prepared signed request is nil")
+	}
+	req, err := http.NewRequestWithContext(ctx, prepared.method, s.baseURL+prepared.path, bytes.NewReader(prepared.body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Agent-ID", signID)
-	req.Header.Set("X-Signature", hex.EncodeToString(sig))
-	req.Header.Set("X-Timestamp", fmt.Sprintf("%d", timestamp))
-	req.Header.Set("X-Nonce", hex.EncodeToString(nonce))
+	req.Header.Set("X-Agent-ID", prepared.agentID)
+	req.Header.Set("X-Signature", prepared.signature)
+	req.Header.Set("X-Timestamp", prepared.timestamp)
+	req.Header.Set("X-Nonce", prepared.nonce)
 
 	return s.httpClient.Do(req)
+}
+
+// signedRequest makes an authenticated HTTP request to the SAGE REST API.
+// Signs method + path + body + timestamp as per auth protocol v2.
+func (s *Server) signedRequest(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
+	prepared, err := s.prepareSignedRequest(ctx, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+	return s.sendPreparedSignedRequest(ctx, prepared)
 }
 
 type signedRequestReplaySafety uint8
@@ -653,6 +678,13 @@ func classifySignedRequestReplay(method, path string) signedRequestReplaySafety 
 		if matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/status") {
 			return signedRequestReplaySafe
 		}
+		if matchesSinglePathSegmentWithSuffix(path, "/v1/pipe/", "/receipt") {
+			return signedRequestReplaySafe
+		}
+		if matchesSinglePathSegmentWithSuffix(path, "/v1/pipe/", "/receipt/challenge/claimed") ||
+			matchesSinglePathSegmentWithSuffix(path, "/v1/pipe/", "/receipt/challenge/read") {
+			return signedRequestReplaySafe
+		}
 	case http.MethodPost:
 		if retryableIdempotentPOSTPaths[path] {
 			return signedRequestReplaySafe
@@ -665,21 +697,39 @@ func classifySignedRequestReplay(method, path string) signedRequestReplaySafety 
 		if matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/read") {
 			return signedRequestReplaySafe
 		}
+		if matchesSinglePathSegmentWithSuffix(path, "/v1/pipe/", "/receipt/claimed") ||
+			matchesSinglePathSegmentWithSuffix(path, "/v1/pipe/", "/receipt/read") {
+			return signedRequestReplaySafe
+		}
 	}
 	return signedRequestSingleAttempt
 }
 
 // doSignedJSON makes a signed request and decodes the JSON response.
 func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []byte, out any) error {
+	replaySafety := classifySignedRequestReplay(method, path)
 	attempts := 1
-	if classifySignedRequestReplay(method, path) == signedRequestReplaySafe {
+	if replaySafety == signedRequestReplaySafe {
 		attempts = 4
 	}
 	var resp *http.Response
+	var respBody []byte
 	var err error
 	for attempt := 0; attempt < attempts; attempt++ {
 		resp, err = s.signedRequest(ctx, method, path, body)
-		retryStatus := err == nil && (resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable)
+		retryStatus := false
+		if err == nil {
+			respBody, err = io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10 MB max
+			_ = resp.Body.Close()
+			if err != nil {
+				err = fmt.Errorf("read response: %w", err)
+			} else {
+				retryStatus = resp.StatusCode == http.StatusBadGateway ||
+					resp.StatusCode == http.StatusServiceUnavailable
+			}
+		} else if resp != nil {
+			_ = resp.Body.Close()
+		}
 		if err == nil && !retryStatus {
 			break
 		}
@@ -688,9 +738,6 @@ func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []b
 				return err
 			}
 			break
-		}
-		if resp != nil {
-			_ = resp.Body.Close()
 		}
 		if err != nil && !isTransientMCPTransportErr(err) {
 			return err
@@ -706,11 +753,12 @@ func (s *Server) doSignedJSON(ctx context.Context, method, path string, body []b
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	return decodeSignedJSONResponse(resp, respBody, out)
+}
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20)) // 10 MB max
-	if err != nil {
-		return fmt.Errorf("read response: %w", err)
+func decodeSignedJSONResponse(resp *http.Response, respBody []byte, out any) error {
+	if resp == nil {
+		return fmt.Errorf("signed request returned no response")
 	}
 
 	if resp.StatusCode >= 400 {
@@ -934,6 +982,15 @@ func (s *Server) submitMemoryResilient(ctx context.Context, submitReq []byte, ou
 // Quorum mode (certs present) → https://localhost:8443
 // Personal mode (no certs) → http://localhost:8080
 func defaultBaseURL() string {
+	if tlsAddr := strings.TrimSpace(os.Getenv("SAGE_TLS_ADDR")); tlsAddr != "" {
+		if host, port, err := net.SplitHostPort(tlsAddr); err == nil && port != "" {
+			switch host {
+			case "", "0.0.0.0", "::":
+				host = "localhost"
+			}
+			return "https://" + net.JoinHostPort(host, port)
+		}
+	}
 	home := os.Getenv("SAGE_HOME")
 	if home == "" {
 		if userHome, err := os.UserHomeDir(); err == nil {

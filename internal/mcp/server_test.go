@@ -28,6 +28,22 @@ func TestEffectiveAgentIDUsesBearerPrincipal(t *testing.T) {
 	require.Equal(t, s.agentID, s.effectiveAgentID(context.Background()))
 }
 
+func TestDefaultBaseURLHonorsCustomTLSListener(t *testing.T) {
+	t.Setenv("SAGE_HOME", t.TempDir())
+
+	t.Setenv("SAGE_TLS_ADDR", "127.0.0.1:18443")
+	assert.Equal(t, "https://127.0.0.1:18443", DefaultBaseURL())
+
+	for bind, want := range map[string]string{
+		"0.0.0.0:19443": "https://localhost:19443",
+		":20443":        "https://localhost:20443",
+		"[::]:21443":    "https://localhost:21443",
+	} {
+		t.Setenv("SAGE_TLS_ADDR", bind)
+		assert.Equal(t, want, DefaultBaseURL())
+	}
+}
+
 func TestReadMCPFrameOversizeDoesNotPoisonFollowingRequest(t *testing.T) {
 	oversized := bytes.Repeat([]byte{'x'}, maxMCPFrameBytes+1)
 	input := append(append(oversized, '\n'), []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`+"\n")...)
@@ -105,7 +121,7 @@ func TestHandleToolsList(t *testing.T) {
 
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]map[string]any)
-	assert.Len(t, tools, 33)
+	assert.Len(t, tools, 34)
 
 	// Collect tool names
 	names := make(map[string]bool)

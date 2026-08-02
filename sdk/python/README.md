@@ -132,6 +132,11 @@ agent = client.get_agent("a1b2c3...")  # GET /v1/agent/{id}
 # List active ordinary agents visible to this signed caller
 agents = client.list_agents()        # GET /v1/agents → {"agents": [...], "total": N}
 
+# Lightweight local recipient directory and bounded human-name resolution.
+# Neither response is evidence that a recipient is online or has read a message.
+directory = client.agent_directory()
+matches = client.lookup_agents("mynah", limit=10)
+
 # From app-v23 onward (including app-v26 group authority),
 # role/profile/group changes happen through the local
 # CEREBRUM Root/Admin controls. Do not call the legacy set_agent_permission()
@@ -338,7 +343,7 @@ result = client.pipe_result(msg.pipe_id, result="Analysis complete: CVE is criti
 # Returns: PipeResultResponse(status, journal_id) — auto-journaled to memory
 
 # Inspect this node's local workflow row (not a delivery/read receipt;
-# sender-queryable successful delivery/read receipts are deferred beyond v11.16)
+# negotiated federated receipt-v2 evidence uses separate signed routes)
 status = client.pipe_status(msg.pipe_id)
 
 # List completed results
@@ -380,10 +385,11 @@ print(receipt.transport_status, receipt.read_status, receipt.workflow_status)
 bounded to 4096 tokens per agent; a purged/incomplete exact batch fails instead
 of claiming newer messages.
 
-The asynchronous client exposes the same five methods as coroutines. Canonical
-receipts are local-only in v11.17; federated sends continue to use the pipeline
-contact/revalidation path and must not be described as remotely read merely
-because they were queued.
+The asynchronous client exposes the same five methods as coroutines. Federated
+sends continue to use the pipeline contact/revalidation path. When both peers
+negotiate `federated-pipeline-receipts-v2`, the exact sender can query the
+separate payload-free receipt projection through the REST/MCP receipt-status
+surface; a locally queued pipe still must never be described as remotely read.
 
 ### Embeddings
 
@@ -575,8 +581,9 @@ def validate_submission(agent_name: str, domain_tag: str) -> bool:
 
 SAGE includes an access-control recovery primitive: a chain admin can take over
 a domain whose owner is unavailable or compromised. The flow is governance-gated:
-a `domain_reassign` proposal carries the new owner, optional parent, and an
-`open_to_shared` flag as its `payload`; validators vote; once accepted,
+a `domain_reassign` proposal carries the new owner, optional parent, an
+`open_to_shared` flag, and (on app-v26) the exact observed current owner as its
+compare-and-swap binding; validators vote; once accepted,
 `TxTypeDomainReassign` consumes the proposal, transfers ownership, **purges all
 existing grants on the domain**, and optionally promotes the domain to shared.
 
@@ -592,7 +599,9 @@ client = SageClient(base_url="http://localhost:8080", identity=admin)
 # operator. The node's live validator key remains the on-chain actor.
 
 # One-shot: propose -> poll -> submit. Raises SageAPIError on
-# reject/expire/cancel/timeout.
+# owner change/reject/expire/cancel/timeout. On app-v26 the helper reads and
+# binds the chain-authoritative current owner automatically; older chains keep
+# the historical payload.
 result = client.reassign_domain(
     domain="acme.engineering",
     new_owner_id="b" * 64,
@@ -630,6 +639,7 @@ propose = client.governance_propose(
         "new_owner_id": "b" * 64,
         "parent_domain": "",
         "open_to_shared": False,
+        "expected_owner_id": "a" * 64,
     },
 )
 # ... validators vote, proposal hits status="executed" ...
@@ -638,6 +648,7 @@ result = client.submit_domain_reassign(
     new_owner_id="b" * 64,
     proposal_id=propose.proposal_id,
     open_to_shared=False,
+    expected_owner_id="a" * 64,
 )
 ```
 
@@ -781,9 +792,9 @@ except SageAPIError as e:
 `remedy`, and `retryable`. For
 `https://sage.dev/errors/domain-write-denied`, branch on the structured
 `reason_code` and `retryable=False`, never by matching `detail`. In v11.15.0 a
-`missing_write_grant` remedy uses the owned-domain or Root/Admin-approved
-Manager Access Group flow; it does not imply that CEREBRUM ships a direct
-level-2 grant editor.
+`missing_write_grant` remedy uses the owned-domain or a Root/Admin-approved
+Access Group whose explicit tier is Read + write or Read + write + modify; it
+does not imply that CEREBRUM ships a direct level-2 grant editor.
 
 ## Configuration
 
@@ -911,6 +922,8 @@ def hash_embed(text: str, dim: int = 768) -> list[float]:
 | `GET` | `/v1/agent/{id}` | `get_agent()` |
 | `PUT` | `/v1/agent/{id}/permission` | `set_agent_permission()` — pre-app-v23 compatibility only; v11.16 returns HTTP 410 and directs policy changes to local CEREBRUM. |
 | `GET` | `/v1/agents` | `list_agents()` |
+| `GET` | `/v1/agents/directory` | `agent_directory()` |
+| `GET` | `/v1/agents/lookup` | `lookup_agents()` |
 
 ### Pipeline
 
@@ -924,6 +937,7 @@ def hash_embed(text: str, dim: int = 768) -> list[float]:
 | `PUT` | `/v1/pipe/{id}/result` | `pipe_result()` |
 | `GET` | `/v1/pipe/{id}` | `pipe_status()` |
 | `GET` | `/v1/pipe/results` | `pipe_results()` |
+| `GET` | `/v1/pipe/{id}/receipt` | MCP `sage_pipe_receipt_status` or signed REST |
 
 ### Canonical local Messages
 

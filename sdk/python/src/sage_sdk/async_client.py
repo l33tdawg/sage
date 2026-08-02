@@ -11,7 +11,9 @@ from sage_sdk.auth import AgentIdentity
 from sage_sdk.client import _encode_gov_payload, _looks_like_org_id
 from sage_sdk.exceptions import SageAPIError, SageNotFoundError
 from sage_sdk.models import (
+    AgentDirectoryResponse,
     AgentInfo,
+    AgentLookupResponse,
     AgentProfile,
     AgentRegistration,
     ChallengeRequest,
@@ -520,6 +522,21 @@ class AsyncSageClient:
         resp = await self._request("GET", "/v1/agents")
         return resp.json()
 
+    async def agent_directory(self) -> AgentDirectoryResponse:
+        """List minimal active local recipients visible to this caller.
+
+        This is discovery metadata, not online, delivery, or read evidence.
+        """
+        resp = await self._request("GET", "/v1/agents/directory")
+        return AgentDirectoryResponse.model_validate(resp.json())
+
+    async def lookup_agents(self, name: str, limit: int = 20) -> AgentLookupResponse:
+        """Resolve a bounded local recipient name without loading the roster."""
+        resp = await self._request(
+            "GET", "/v1/agents/lookup", params={"name": name, "limit": limit}
+        )
+        return AgentLookupResponse.model_validate(resp.json())
+
     # --- Validator -------------------------------------------------------------
 
     async def get_pending(
@@ -769,6 +786,7 @@ class AsyncSageClient:
         proposal_id: str,
         parent_domain: str = "",
         open_to_shared: bool = False,
+        expected_owner_id: str = "",
     ) -> DomainReassignResponse:
         """Submit the on-chain TxTypeDomainReassign that consumes an accepted
         gov_propose of operation='domain_reassign' and atomically transfers
@@ -783,13 +801,119 @@ class AsyncSageClient:
             proposal_id=proposal_id,
             parent_domain=parent_domain,
             open_to_shared=open_to_shared,
+            expected_owner_id=expected_owner_id,
         )
+        body = req.model_dump()
+        if not expected_owner_id:
+            body.pop("expected_owner_id", None)
         resp = await self._request(
             "POST",
             "/v1/domain/reassign",
-            json=req.model_dump(),
+            json=body,
         )
         return DomainReassignResponse.model_validate(resp.json())
+
+    async def reassign_domain(
+        self,
+        domain: str,
+        new_owner_id: str,
+        reason: str,
+        parent_domain: str = "",
+        open_to_shared: bool = False,
+        expected_owner_id: str | None = None,
+        poll_interval_s: float = 2.0,
+        timeout_s: float = 120.0,
+    ) -> DomainReassignResponse:
+        """Asynchronous end-to-end governed domain ownership transfer.
+
+        At app-v26 and later the client reads the current canonical owner and
+        binds it into both the proposal and execution transaction.  Earlier
+        chains retain the historical payload byte shape by omitting the CAS
+        extension entirely.
+        """
+        import asyncio
+        import time
+
+        if expected_owner_id is None:
+            health_resp = await self._client.get("/v1/dashboard/health")
+            self._handle_response(health_resp)
+            health_payload = health_resp.json()
+            chain = health_payload.get("chain") or {} if isinstance(health_payload, dict) else {}
+            raw_app_version = chain.get("app_version")
+            if not isinstance(raw_app_version, (str, int)) or isinstance(raw_app_version, bool):
+                raise SageAPIError(
+                    status_code=503,
+                    detail="could not determine the chain app version for safe domain reassignment",
+                )
+            try:
+                chain_app_version = int(raw_app_version)
+            except (TypeError, ValueError) as exc:
+                raise SageAPIError(
+                    status_code=503,
+                    detail="could not determine the chain app version for safe domain reassignment",
+                ) from exc
+            if chain_app_version <= 0:
+                raise SageAPIError(
+                    status_code=503,
+                    detail="could not determine the chain app version for safe domain reassignment",
+                )
+            if chain_app_version >= 26:
+                domain_info = await self.get_domain(domain)
+                expected_owner_id = str(domain_info.get("owner_agent_id") or "")
+                if not expected_owner_id:
+                    raise SageAPIError(
+                        status_code=409,
+                        detail=f"domain {domain!r} has no chain-authoritative current owner",
+                    )
+            else:
+                expected_owner_id = ""
+
+        payload = {
+            "domain": domain,
+            "new_owner_id": new_owner_id,
+            "parent_domain": parent_domain,
+            "open_to_shared": open_to_shared,
+        }
+        if expected_owner_id:
+            payload["expected_owner_id"] = expected_owner_id
+        propose_resp = await self.governance_propose(
+            operation="domain_reassign",
+            target_id=domain,
+            reason=reason,
+            payload=payload,
+        )
+        proposal_id = propose_resp.proposal_id
+
+        terminal_non_exec = {"rejected", "expired", "cancelled"}
+        deadline = time.monotonic() + timeout_s
+        while True:
+            detail = await self.governance_proposal_detail(proposal_id)
+            status = (detail.proposal.status or "").lower()
+            if status == "executed":
+                break
+            if status in terminal_non_exec:
+                raise SageAPIError(
+                    status_code=409,
+                    detail=f"domain reassign proposal {proposal_id} ended as {status}",
+                )
+            if time.monotonic() >= deadline:
+                raise SageAPIError(
+                    status_code=408,
+                    detail=(
+                        f"timed out after {timeout_s:.0f}s waiting for "
+                        f"domain reassign proposal {proposal_id} (last status={status})"
+                    ),
+                )
+            await asyncio.sleep(poll_interval_s)
+
+        return await self.submit_domain_reassign(
+            domain=domain,
+            new_owner_id=new_owner_id,
+            proposal_id=proposal_id,
+            parent_domain=parent_domain,
+            open_to_shared=open_to_shared,
+            expected_owner_id=expected_owner_id,
+        )
 
     # --- Department RBAC --------------------------------------------------------
 

@@ -2677,7 +2677,9 @@ func decodeUpgradeRevert(data []byte) (*UpgradeRevert, error) {
 // --- DomainReassign (v8.0) ---
 //
 // Wire format: Domain + NewOwnerID + ParentDomain + ProposalID + OpenToShared(1)
-// All strings are length-prefixed via appendBytes. The bool is a single 0/1 byte.
+// + optional ExpectedOwnerID. All strings are length-prefixed via appendBytes.
+// The bool is a single 0/1 byte. The trailing CAS binding is optional so every
+// pre-app-v26 transaction keeps decoding byte-for-byte.
 
 func encodeDomainReassign(d *DomainReassign) []byte {
 	var buf []byte
@@ -2686,6 +2688,9 @@ func encodeDomainReassign(d *DomainReassign) []byte {
 	buf = appendBytes(buf, []byte(d.ParentDomain))
 	buf = appendBytes(buf, []byte(d.ProposalID))
 	buf = append(buf, boolToByte(d.OpenToShared))
+	if d.ExpectedOwnerID != "" {
+		buf = appendBytes(buf, []byte(d.ExpectedOwnerID))
+	}
 	return buf
 }
 
@@ -2723,6 +2728,17 @@ func decodeDomainReassign(data []byte) (*DomainReassign, error) {
 		return nil, ErrInvalidTxData
 	}
 	d.OpenToShared = byteToBool(data[off])
+	off++
+	if off < len(data) {
+		b, off, err = readBytes(data, off)
+		if err != nil {
+			return nil, err
+		}
+		d.ExpectedOwnerID = string(b)
+		if off != len(data) {
+			return nil, ErrInvalidTxData
+		}
+	}
 
 	return d, nil
 }

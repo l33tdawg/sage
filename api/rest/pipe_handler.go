@@ -43,6 +43,20 @@ type federatedPipeAdmissionAuthorizer interface {
 	WithAuthorizedImportedPipe(context.Context, *store.PipelineMessage, func() error) error
 }
 
+type federatedPipeReceiptController interface {
+	ImportedPipeReceiptChallenge(context.Context, string, string, string) (json.RawMessage, error)
+	RecordImportedPipeReceipt(context.Context, string, string, string, store.PipelineAgentProof) (bool, error)
+}
+
+type federatedPipeReceiptStatusStore interface {
+	GetPipelineTransportForPipe(context.Context, string, string) (*store.PipelineTransportOutbox, error)
+	GetFederatedReceiptForSender(context.Context, string, string) (*store.FederatedReceiptProjection, error)
+}
+
+type federatedPipeReceiptInboundStore interface {
+	GetFederatedReceiptInbound(context.Context, string) (*store.FederatedReceiptBinding, error)
+}
+
 // callerCanReachFederatedPipeTarget reuses the caller/domain intersection that
 // backs ordinary federation discovery. The target resolver establishes a
 // peer-authenticated route, but must not turn that node-scoped fact into a
@@ -113,12 +127,13 @@ const (
 // persist or submit their own authority.
 type pipelineMessageRESTResponse struct {
 	*store.PipelineMessage
-	ReplySourceChainID string `json:"reply_source_chain_id,omitempty"`
-	Authority          string `json:"authority,omitempty"`
-	Trust              string `json:"trust"`
-	SecurityNotice     string `json:"security_notice"`
-	PayloadAuthority   string `json:"payload_authority,omitempty"`
-	ResultAuthority    string `json:"result_authority,omitempty"`
+	ReplySourceChainID     string `json:"reply_source_chain_id,omitempty"`
+	Authority              string `json:"authority,omitempty"`
+	Trust                  string `json:"trust"`
+	SecurityNotice         string `json:"security_notice"`
+	PayloadAuthority       string `json:"payload_authority,omitempty"`
+	ResultAuthority        string `json:"result_authority,omitempty"`
+	ReceiptProtocolVersion int    `json:"receipt_protocol_version,omitempty"`
 }
 
 func pipelineMessageREST(msg *store.PipelineMessage, surface string) pipelineMessageRESTResponse {
@@ -609,8 +624,9 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 			AuthorizationMode: msg.FederationAuthorizationMode,
 			LinkedRelation:    append([]byte(nil), msg.FederationLinkedRelation...),
 			SourceAgentID:     msg.FromAgent, TargetAgentID: msg.ToAgent,
-			Proof:     transportProof,
-			CreatedAt: msg.CreatedAt, ExpiresAt: msg.ExpiresAt,
+			ReceiptProtocolVersion: remoteTarget.ReceiptProtocolVersion,
+			Proof:                  transportProof,
+			CreatedAt:              msg.CreatedAt, ExpiresAt: msg.ExpiresAt,
 		}
 		insertErr = transportStore.InsertPipelineWithTransport(r.Context(), msg, event)
 	} else {
@@ -721,6 +737,15 @@ func (s *Server) handlePipeInbox(w http.ResponseWriter, r *http.Request) {
 	claimedItems := make([]*store.PipelineMessage, 0, len(items))
 	for _, item := range items {
 		if item.SourceChainID != "" {
+			// Negotiated v2 imports are returned pending so the exact signed
+			// /receipt/claimed transition can atomically claim+enqueue evidence.
+			// Legacy imports preserve claim-on-inbox compatibility.
+			if receiptStore, ok := s.store.(federatedPipeReceiptInboundStore); ok {
+				if _, receiptErr := receiptStore.GetFederatedReceiptInbound(r.Context(), item.PipeID); receiptErr == nil {
+					claimedItems = append(claimedItems, item)
+					continue
+				}
+			}
 			authorizer, ok := s.federation.(federatedPipeAdmissionAuthorizer)
 			if !ok || authorizer.WithAuthorizedImportedPipe(r.Context(), item, func() error {
 				return pipeStore.ClaimPipeline(r.Context(), item.PipeID, agentID)
@@ -737,7 +762,13 @@ func (s *Server) handlePipeInbox(w http.ResponseWriter, r *http.Request) {
 
 	responseItems := make([]pipelineMessageRESTResponse, 0, len(claimedItems))
 	for _, item := range claimedItems {
-		responseItems = append(responseItems, pipelineMessageREST(item, "inbox"))
+		response := pipelineMessageREST(item, "inbox")
+		if receiptStore, ok := s.store.(federatedPipeReceiptInboundStore); ok {
+			if _, err := receiptStore.GetFederatedReceiptInbound(r.Context(), item.PipeID); err == nil {
+				response.ReceiptProtocolVersion = federation.PipeReceiptVersion
+			}
+		}
+		responseItems = append(responseItems, response)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items": responseItems,
@@ -850,6 +881,113 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"pipe_id": pipeID,
 		"status":  "claimed",
+	})
+}
+
+func (s *Server) handlePipeReceiptChallenge(w http.ResponseWriter, r *http.Request) {
+	if !requireExactSignedMessageAction(w, r) {
+		return
+	}
+	pipeID, kind := chi.URLParam(r, "pipe_id"), chi.URLParam(r, "kind")
+	controller, ok := s.federation.(federatedPipeReceiptController)
+	if !ok {
+		writeProblem(w, http.StatusNotImplemented, "Federated receipts unavailable", "This node does not support negotiated federated receipts.")
+		return
+	}
+	challenge, err := controller.ImportedPipeReceiptChallenge(
+		r.Context(), pipeID, middleware.ContextAgentID(r.Context()), kind,
+	)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "Pipeline message not found", fmt.Sprintf("No pipeline message with id %s.", pipeID))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pipe_id": pipeID, "event_kind": kind, "challenge": challenge})
+}
+
+func (s *Server) handlePipeReceiptRecord(w http.ResponseWriter, r *http.Request) {
+	if !requireExactSignedMessageAction(w, r) {
+		return
+	}
+	pipeID, kind := chi.URLParam(r, "pipe_id"), chi.URLParam(r, "kind")
+	proof := middleware.ContextAgentAuth(r.Context())
+	if proof == nil || len(proof.Nonce) < 8 {
+		writeProblem(w, http.StatusUnauthorized, "Fresh signature required", "A nonce-bound exact recipient signature is required.")
+		return
+	}
+	controller, ok := s.federation.(federatedPipeReceiptController)
+	if !ok {
+		writeProblem(w, http.StatusNotImplemented, "Federated receipts unavailable", "This node does not support negotiated federated receipts.")
+		return
+	}
+	agentID := middleware.ContextAgentID(r.Context())
+	replayed, err := controller.RecordImportedPipeReceipt(r.Context(), pipeID, agentID, kind, store.PipelineAgentProof{
+		AgentID: agentID, Signature: append([]byte(nil), proof.Signature...), Timestamp: proof.Timestamp,
+		Nonce: append([]byte(nil), proof.Nonce...), CanonicalRequest: append([]byte(nil), proof.CanonicalRequest...),
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrFederatedReceiptNotFound) {
+			writeProblem(w, http.StatusNotFound, "Pipeline message not found", fmt.Sprintf("No pipeline message with id %s.", pipeID))
+		} else {
+			writeProblem(w, http.StatusConflict, "Federated receipt rejected", "The exact recipient or federated authorization binding changed.")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pipe_id": pipeID, "event_kind": kind, "receipt_status": "queued", "idempotent_replay": replayed})
+}
+
+func (s *Server) handlePipeReceiptStatus(w http.ResponseWriter, r *http.Request) {
+	if !requireExactSignedMessageAction(w, r) {
+		return
+	}
+	pipeID, senderID := chi.URLParam(r, "pipe_id"), middleware.ContextAgentID(r.Context())
+	pipeStore, ok := s.store.(store.PipelineStore)
+	statusStore, statusOK := s.store.(federatedPipeReceiptStatusStore)
+	if !ok || !statusOK {
+		writeProblem(w, http.StatusNotImplemented, "Federated receipts unavailable", "The active store does not support negotiated federated receipts.")
+		return
+	}
+	msg, err := pipeStore.GetPipeline(r.Context(), pipeID)
+	if err != nil || msg.FromAgent != senderID || msg.SourceChainID != "" || msg.DestinationChainID == "" {
+		writeProblem(w, http.StatusNotFound, "Pipeline message not found", fmt.Sprintf("No pipeline message with id %s.", pipeID))
+		return
+	}
+	transport, err := statusStore.GetPipelineTransportForPipe(r.Context(), pipeID, "send")
+	if err != nil || transport.SourceAgentID != senderID {
+		writeProblem(w, http.StatusNotFound, "Pipeline message not found", fmt.Sprintf("No pipeline message with id %s.", pipeID))
+		return
+	}
+	if transport.ReceiptProtocolVersion != federation.PipeReceiptVersion {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"pipe_id": pipeID, "protocol": "unsupported", "transport_status": transport.State,
+			"claim_status": "unconfirmed", "read_status": "unconfirmed",
+		})
+		return
+	}
+	projection, err := statusStore.GetFederatedReceiptForSender(r.Context(), senderID, pipeID)
+	if errors.Is(err, store.ErrFederatedReceiptNotFound) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"pipe_id": pipeID, "protocol": "receipt-v2", "transport_status": transport.State,
+			"claim_status": "unconfirmed", "read_status": "unconfirmed",
+		})
+		return
+	}
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Federated receipt status unavailable", "The durable receipt projection could not be read.")
+		return
+	}
+	claimStatus, readStatus := "unconfirmed", "unconfirmed"
+	if projection.ClaimedAt != nil {
+		claimStatus = "confirmed"
+	}
+	if projection.ReadAt != nil {
+		readStatus = "confirmed"
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pipe_id": pipeID, "protocol": "receipt-v2", "transport_status": transport.State,
+		"delivery_evidence": projection.DeliveryEvidence, "delivered_at": projection.DeliveredAt,
+		"claim_status": claimStatus, "claimed_at": projection.ClaimedAt,
+		"read_status": readStatus, "read_at": projection.ReadAt,
+		"terminal_kind": projection.TerminalKind, "terminal_at": projection.TerminalAt,
 	})
 }
 

@@ -23,6 +23,44 @@ ASSET_VERSION="${SAGE_VERSION:-dev}"
 VERSION="${ASSET_VERSION#v}"
 ARCH="${SAGE_ARCH:-$(uname -m)}"
 
+bundle_byte_manifest() {
+    local bundle_root=$1
+    (
+        cd "$bundle_root"
+        find . -type f -print | LC_ALL=C sort | while IFS= read -r rel; do
+            hash=$(shasum -a 256 "$rel" | awk '{print $1}')
+            mode=$(stat -f '%Lp' "$rel")
+            printf 'F %s %s %s\n' "$mode" "$hash" "$rel"
+        done
+        find . -type l -print | LC_ALL=C sort | while IFS= read -r rel; do
+            mode=$(stat -f '%Lp' "$rel")
+            printf 'L %s %s -> %s\n' "$mode" "$rel" "$(readlink "$rel")"
+        done
+    )
+}
+
+verify_app_release_metadata() {
+    local app_path=$1
+    local expected_version=$2
+    local version_output
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Contents/Info.plist")" = "com.sage.brain"
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Contents/Info.plist")" = "sage-tray"
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app_path/Contents/Info.plist")" = "$expected_version"
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_path/Contents/Info.plist")" = "$expected_version"
+    version_output=$("$app_path/Contents/MacOS/sage-gui" version)
+    test "$(printf '%s\n' "$version_output" | awk 'NR == 1 { print $1 }')" = "sage-gui"
+    test "$(printf '%s\n' "$version_output" | awk 'NR == 1 { print $2 }')" = "$expected_version"
+}
+
+require_writable_apfs_path() {
+    local path=$1
+    local device
+    test -d "$path" && test -w "$path"
+    device=$(df "$path" | awk 'END { print $1 }')
+    test -n "$device"
+    /usr/sbin/diskutil info "$device" | grep -Eq 'File System Personality:[[:space:]]+APFS'
+}
+
 # Release builds set NOTARIZE=1. Keep unsigned local developer builds possible,
 # but make the notarized path fail closed before compilation when any signing
 # input is absent.
@@ -147,6 +185,26 @@ if [ -n "${SIGN_IDENTITY:-}" ]; then
         "${APP_DIR}"
     echo "    Verifying signature..."
     codesign --verify --deep --strict --verbose=2 "${APP_DIR}"
+    app_identity=$(codesign -dv --verbose=4 "${APP_DIR}" 2>&1)
+    printf '%s\n' "$app_identity" | grep -Fx "Identifier=com.sage.brain"
+    if [ "${NOTARIZE:-0}" = "1" ]; then
+        printf '%s\n' "$app_identity" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+    fi
+    for leaf_spec in \
+        "${APP_DIR}/Contents/MacOS/sage-gui:sage-gui" \
+        "${APP_DIR}/Contents/MacOS/sage-tray:com.sage.brain"; do
+        leaf=${leaf_spec%:*}
+        expected_identifier=${leaf_spec##*:}
+        test -f "$leaf" && test ! -L "$leaf" && test -x "$leaf"
+        test "$(stat -f '%Lp' "$leaf")" = "755"
+        codesign --verify --strict --verbose=2 "$leaf"
+        leaf_identity=$(codesign -dv --verbose=4 "$leaf" 2>&1)
+        printf '%s\n' "$leaf_identity" | grep -Fx "Identifier=${expected_identifier}"
+        if [ "${NOTARIZE:-0}" = "1" ]; then
+            printf '%s\n' "$leaf_identity" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+        fi
+    done
+    verify_app_release_metadata "${APP_DIR}" "${VERSION}"
 else
     echo "    (Skipping code signing — set SIGN_IDENTITY to enable)"
 fi
@@ -174,7 +232,9 @@ personal memory node.
 After setup, SAGE starts automatically and opens the CEREBRUM
 Dashboard in your browser at http://localhost:8080.
 
-You can also update from the dashboard: Settings > Update tab.
+You can also check for updates from CEREBRUM: Settings > Update. On macOS,
+that screen downloads the signed DMG; fully quit SAGE, drag SAGE.app to
+Applications, then reopen it. CEREBRUM never replaces its own running app.
 
 For Claude Code / CLI usage:
   ~/.sage/bin/sage-gui serve
@@ -199,7 +259,12 @@ hdiutil create -size 1024m -volname "SAGE ${VERSION}" \
 # before notarization or publication.
 if [ -n "${SIGN_IDENTITY:-}" ]; then
     VERIFY_MOUNT="$(mktemp -d "${TMPDIR:-/tmp}/sage-dmg-verify.XXXXXX")"
+    COPY_VERIFY_ROOT=
     cleanup_verify_mount() {
+        if [ -n "${COPY_VERIFY_ROOT:-}" ]; then
+            rm -rf "$COPY_VERIFY_ROOT"
+            COPY_VERIFY_ROOT=
+        fi
         hdiutil detach "$VERIFY_MOUNT" >/dev/null 2>&1 || true
         rmdir "$VERIFY_MOUNT" >/dev/null 2>&1 || true
     }
@@ -207,6 +272,64 @@ if [ -n "${SIGN_IDENTITY:-}" ]; then
     hdiutil attach -readonly -nobrowse -mountpoint "$VERIFY_MOUNT" \
         "${BUILD_DIR}/${DMG_NAME}.dmg" >/dev/null
     codesign --verify --deep --strict --verbose=2 "$VERIFY_MOUNT/SAGE.app"
+    app_identity=$(codesign -dv --verbose=4 "$VERIFY_MOUNT/SAGE.app" 2>&1)
+    printf '%s\n' "$app_identity" | grep -Fx "Identifier=com.sage.brain"
+    if [ "${NOTARIZE:-0}" = "1" ]; then
+        printf '%s\n' "$app_identity" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+    fi
+    for leaf_spec in \
+        "$VERIFY_MOUNT/SAGE.app/Contents/MacOS/sage-gui:sage-gui" \
+        "$VERIFY_MOUNT/SAGE.app/Contents/MacOS/sage-tray:com.sage.brain"; do
+        leaf=${leaf_spec%:*}
+        expected_identifier=${leaf_spec##*:}
+        test -f "$leaf" && test ! -L "$leaf" && test -x "$leaf"
+        test "$(stat -f '%Lp' "$leaf")" = "755"
+        codesign --verify --strict --verbose=2 "$leaf"
+        leaf_identity=$(codesign -dv --verbose=4 "$leaf" 2>&1)
+        printf '%s\n' "$leaf_identity" | grep -Fx "Identifier=${expected_identifier}"
+        if [ "${NOTARIZE:-0}" = "1" ]; then
+            printf '%s\n' "$leaf_identity" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+        fi
+    done
+    verify_app_release_metadata "$VERIFY_MOUNT/SAGE.app" "${VERSION}"
+
+    # Prove that the signed DMG survives an ordinary writable-volume install
+    # copy on a fresh APFS inode. Read-only mount verification alone does not
+    # catch vnode/path cache failures that appear only after ditto and first
+    # execution.
+    COPY_VERIFY_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sage-dmg-copy-verify.XXXXXX")"
+    require_writable_apfs_path "$COPY_VERIFY_ROOT"
+    COPY_VERIFY_APP="${COPY_VERIFY_ROOT}/SAGE.app"
+    /usr/bin/ditto "$VERIFY_MOUNT/SAGE.app" "$COPY_VERIFY_APP"
+    bundle_byte_manifest "$VERIFY_MOUNT/SAGE.app" > "${COPY_VERIFY_ROOT}/mounted.manifest"
+    bundle_byte_manifest "$COPY_VERIFY_APP" > "${COPY_VERIFY_ROOT}/copied.manifest"
+    diff -u "${COPY_VERIFY_ROOT}/mounted.manifest" "${COPY_VERIFY_ROOT}/copied.manifest"
+    codesign --verify --deep --strict --verbose=2 "$COPY_VERIFY_APP"
+    app_identity=$(codesign -dv --verbose=4 "$COPY_VERIFY_APP" 2>&1)
+    printf '%s\n' "$app_identity" | grep -Fx "Identifier=com.sage.brain"
+    if [ "${NOTARIZE:-0}" = "1" ]; then
+        printf '%s\n' "$app_identity" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+    fi
+    for leaf_spec in \
+        "$COPY_VERIFY_APP/Contents/MacOS/sage-gui:sage-gui" \
+        "$COPY_VERIFY_APP/Contents/MacOS/sage-tray:com.sage.brain"; do
+        leaf=${leaf_spec%:*}
+        expected_identifier=${leaf_spec##*:}
+        test -f "$leaf" && test ! -L "$leaf" && test -x "$leaf"
+        test "$(stat -f '%Lp' "$leaf")" = "755"
+        codesign --verify --strict --verbose=2 "$leaf"
+        leaf_identity=$(codesign -dv --verbose=4 "$leaf" 2>&1)
+        printf '%s\n' "$leaf_identity" | grep -Fx "Identifier=${expected_identifier}"
+        if [ "${NOTARIZE:-0}" = "1" ]; then
+            printf '%s\n' "$leaf_identity" | grep -Fx "TeamIdentifier=${APPLE_TEAM_ID}"
+        fi
+    done
+    verify_app_release_metadata "$COPY_VERIFY_APP" "${VERSION}"
+    codesign --verify --deep --strict --verbose=2 "$COPY_VERIFY_APP"
+    codesign --verify --strict --verbose=2 "$COPY_VERIFY_APP/Contents/MacOS/sage-gui"
+    codesign --verify --strict --verbose=2 "$COPY_VERIFY_APP/Contents/MacOS/sage-tray"
+    rm -rf "$COPY_VERIFY_ROOT"
+    COPY_VERIFY_ROOT=
     hdiutil detach "$VERIFY_MOUNT" >/dev/null
     rmdir "$VERIFY_MOUNT"
     trap - EXIT

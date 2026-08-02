@@ -11,9 +11,16 @@ import (
 	"strings"
 
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 const MaxLegacyMemoryRecoverySelection = 256
+
+// Disposition IDs are intentionally wider than adoption wire IDs. A malformed
+// historical ID that cannot be represented in the consensus adoption payload
+// must still be explicitly deprecable instead of becoming a permanent queue
+// poison pill. The HTTP request cap remains the outer bound.
+const maxLegacyMemoryRecoveryDispositionIDBytes = 128 << 10
 
 // LegacyMemoryRecoveryAssignment is content-free operator intent. It is not
 // canonical memory state: the existing Root-bound legacy-adoption governance
@@ -150,7 +157,7 @@ func (s *SQLiteStore) ListLegacyMemoryRecoveryAssignments(
 	return result, nil
 }
 
-func canonicalRecoverySelection(ids []string) ([]string, error) {
+func canonicalRecoverySelection(ids []string, maxIDBytes int) ([]string, error) {
 	if len(ids) == 0 || len(ids) > MaxLegacyMemoryRecoverySelection {
 		return nil, fmt.Errorf("legacy recovery selection size %d is outside 1..%d",
 			len(ids), MaxLegacyMemoryRecoverySelection)
@@ -158,8 +165,14 @@ func canonicalRecoverySelection(ids []string) ([]string, error) {
 	result := append([]string(nil), ids...)
 	sort.Strings(result)
 	for i, id := range result {
-		if strings.TrimSpace(id) == "" || i > 0 && id == result[i-1] {
-			return nil, errors.New("legacy recovery selection contains an empty or duplicate memory id")
+		if strings.TrimSpace(id) == "" {
+			return nil, errors.New("legacy recovery selection contains an empty memory id")
+		}
+		if len(id) > maxIDBytes {
+			return nil, fmt.Errorf("legacy recovery memory id length %d exceeds %d bytes", len(id), maxIDBytes)
+		}
+		if i > 0 && id == result[i-1] {
+			return nil, errors.New("legacy recovery selection contains a duplicate memory id")
 		}
 	}
 	return result, nil
@@ -177,7 +190,7 @@ func (s *SQLiteStore) AssignLegacyMemoryRecoverySelection(
 	targetAgentID string,
 	authorizedBy string,
 ) (int, error) {
-	ids, err := canonicalRecoverySelection(memoryIDs)
+	ids, err := canonicalRecoverySelection(memoryIDs, tx.MaxMemoryLegacyAdoptionIDBytes)
 	if err != nil || expectedRevision == 0 || expectedCount <= 0 ||
 		strings.TrimSpace(targetAgentID) == "" || strings.TrimSpace(authorizedBy) == "" {
 		return 0, ErrLegacyMemoryRecoverySnapshotChanged
@@ -330,7 +343,7 @@ func (s *SQLiteStore) DeprecateLegacyMemoryRecoverySelection(
 	memoryIDs []string,
 	authorizedBy string,
 ) (int, error) {
-	ids, err := canonicalRecoverySelection(memoryIDs)
+	ids, err := canonicalRecoverySelection(memoryIDs, maxLegacyMemoryRecoveryDispositionIDBytes)
 	if err != nil || expectedRevision == 0 || expectedCount <= 0 || strings.TrimSpace(authorizedBy) == "" {
 		return 0, ErrLegacyMemoryRecoverySnapshotChanged
 	}

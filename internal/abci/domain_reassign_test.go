@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -200,6 +201,99 @@ func TestDomainReassign_HappyPath(t *testing.T) {
 	consumed, err := app.badgerStore.GetState("gov:proposal:" + proposalID + ":consumed")
 	require.NoError(t, err)
 	assert.NotEmpty(t, consumed)
+}
+
+func TestAppV26DomainReassignRequiresAndEnforcesExpectedOwnerCAS(t *testing.T) {
+	t.Run("exact current owner succeeds", func(t *testing.T) {
+		app, admin, capturedOwner, newOwner := setupReassignTestApp(t)
+		require.NoError(t, app.badgerStore.RegisterAgentWithCapabilities(
+			newOwner, "v26-domain-target", "member", "", "", "", 50, 0,
+		))
+		require.NoError(t, app.badgerStore.EnsureAppV23Root("v26-domain-cas-success", 51))
+		app.appV26AppliedHeight = 50
+		body := tx.DomainReassign{
+			Domain: "protocol.lending_pool", NewOwnerID: newOwner,
+			ExpectedOwnerID: capturedOwner,
+		}
+		body.ProposalID = seedExecutedReassignProposal(t, app, admin.id, body, 80)
+
+		res := app.processDomainReassign(
+			makeDomainReassignTx(t, admin, &body, 1), 100, time.Unix(1_700_000_000, 0),
+		)
+		require.Equal(t, uint32(0), res.Code, res.Log)
+		owner, err := app.badgerStore.GetDomainOwner(body.Domain)
+		require.NoError(t, err)
+		require.Equal(t, newOwner, owner)
+	})
+
+	t.Run("missing expected owner is rejected", func(t *testing.T) {
+		app, admin, capturedOwner, newOwner := setupReassignTestApp(t)
+		require.NoError(t, app.badgerStore.EnsureAppV23Root("v26-domain-cas-missing", 51))
+		app.appV26AppliedHeight = 50
+		body := tx.DomainReassign{Domain: "protocol.lending_pool", NewOwnerID: newOwner}
+		body.ProposalID = seedExecutedReassignProposal(t, app, admin.id, body, 80)
+
+		res := app.processDomainReassign(
+			makeDomainReassignTx(t, admin, &body, 1), 100, time.Unix(1_700_000_000, 0),
+		)
+		require.Equal(t, uint32(87), res.Code, res.Log)
+		require.Contains(t, res.Log, "expected owner is required")
+		owner, err := app.badgerStore.GetDomainOwner(body.Domain)
+		require.NoError(t, err)
+		require.Equal(t, capturedOwner, owner)
+	})
+
+	t.Run("raw transaction cannot assign authority to read-only target", func(t *testing.T) {
+		app, admin, capturedOwner, _ := setupReassignTestApp(t)
+		readOnly := newAgentKey(t)
+		require.NoError(t, app.badgerStore.RegisterAgentWithCapabilities(
+			readOnly.id, "v26-read-only-target", "observer", "", "", "", 50, 0,
+		))
+		require.NoError(t, app.badgerStore.EnsureAppV23Root("v26-domain-target-guard", 51))
+		app.appV26AppliedHeight = 50
+		body := tx.DomainReassign{
+			Domain: "protocol.lending_pool", NewOwnerID: readOnly.id,
+			ExpectedOwnerID: capturedOwner,
+		}
+		body.ProposalID = seedExecutedReassignProposal(t, app, admin.id, body, 80)
+
+		res := app.processDomainReassign(
+			makeDomainReassignTx(t, admin, &body, 1), 100, time.Unix(1_700_000_000, 0),
+		)
+		require.Equal(t, uint32(88), res.Code, res.Log)
+		require.Contains(t, res.Log, "not an active mutable local principal")
+		owner, err := app.badgerStore.GetDomainOwner(body.Domain)
+		require.NoError(t, err)
+		require.Equal(t, capturedOwner, owner)
+		history, err := app.badgerStore.ListAppV26DomainOwnershipHistory(body.Domain)
+		require.NoError(t, err)
+		require.Empty(t, history)
+		consumed, err := app.badgerStore.GetState("gov:proposal:" + body.ProposalID + ":consumed")
+		require.NoError(t, err)
+		require.Nil(t, consumed)
+	})
+
+	t.Run("concurrent transfer makes approved proposal stale", func(t *testing.T) {
+		app, admin, capturedOwner, newOwner := setupReassignTestApp(t)
+		require.NoError(t, app.badgerStore.EnsureAppV23Root("v26-domain-cas-stale", 51))
+		app.appV26AppliedHeight = 50
+		body := tx.DomainReassign{
+			Domain: "protocol.lending_pool", NewOwnerID: newOwner,
+			ExpectedOwnerID: capturedOwner,
+		}
+		body.ProposalID = seedExecutedReassignProposal(t, app, admin.id, body, 80)
+		concurrentOwner := strings.Repeat("cd", 32)
+		require.NoError(t, app.badgerStore.TransferDomain(body.Domain, concurrentOwner, "", 90))
+
+		res := app.processDomainReassign(
+			makeDomainReassignTx(t, admin, &body, 1), 100, time.Unix(1_700_000_000, 0),
+		)
+		require.Equal(t, uint32(87), res.Code, res.Log)
+		require.Contains(t, res.Log, "domain owner changed")
+		owner, err := app.badgerStore.GetDomainOwner(body.Domain)
+		require.NoError(t, err)
+		require.Equal(t, concurrentOwner, owner, "stale recovery must not overwrite newer authority")
+	})
 }
 
 func TestAppV20DomainReassignRejectsOversizedGrantInvalidationBeforeTransfer(t *testing.T) {

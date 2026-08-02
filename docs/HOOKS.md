@@ -24,7 +24,7 @@ The hooks under `.claude/` here are what the SAGE maintainers use day-to-day. Yo
 
 Both direct-write scripts shell out to the `sage-gui hook` subcommand. The script resolves the binary via `SAGE_GUI_BIN` (set to an absolute path at install time), and the subcommand:
 
-1. Reads the Ed25519 seed from `~/.sage/agent.key` (override with `SAGE_AGENT_KEY`).
+1. Resolves the same ordinary-agent Ed25519 key as the paired MCP process (`SAGE_IDENTITY_PATH`, `SAGE_AGENT_KEY`, or the per-workspace identity). A missing or malformed project key fails closed; hooks never fall back to the CEREBRUM Root/operator key.
 2. Builds the canonical signed-request headers SAGE's REST middleware expects (`X-Agent-ID`, `X-Signature`, `X-Timestamp`).
 3. POSTs / GETs against `http://localhost:8080` (override with `SAGE_URL`) with a tight timeout.
 4. Soft-fails silently if any of those steps fail — the agent never sees an error from a missing SAGE node.
@@ -39,13 +39,11 @@ Every script reads `~/.sage/memory_mode` and adapts:
 - **`bookend`** — SessionStart still prefetches, but the per-turn `sage_turn` nudges are suppressed; the agent only reflects at the end of significant tasks. SessionStart appends a `SAGE MODE: bookend` notice so the agent knows.
 - **`on-demand`** — automatic memory calls are skipped entirely; the agent drives `sage_recall` / `sage_reflect` explicitly.
 
-### Read scope on multi-agent nodes (v7.1)
+### Read scope on multi-agent nodes
 
-Direct-write hooks sign with the **node operator's** Ed25519 key — that's what lives in `~/.sage/agent.key`. The on-chain identity that key resolves to is the operator, not the LLM agent (e.g. `claude-code/sage`) running this session.
+Direct-write hooks sign as the exact ordinary agent used by that workspace's MCP process. SessionStart first resolves `/v1/agent/me`, then prefetches only that caller's approved home domain. It never uses the node operator/CEREBRUM Root identity as a visibility shortcut, and it never falls back to an unscoped memory list.
 
-As of v7.1 the SAGE REST layer recognises requests signed with the node operator's key and lets them bypass the cross-agent visibility filter on read paths. Concretely: `Server.SetNodeOperatorID` is wired at startup from `~/.sage/agent.key`, and `resolveVisibleAgents` short-circuits to `seeAll=true` when the caller matches. Per-domain access and per-record classification gates still apply, so the bypass doesn't lift hard access controls — it only lifts the agent-isolation filter that was making the SessionStart prefetch empty on multi-agent nodes.
-
-On a truly uninitialized node, `sage-gui serve` creates `~/.sage/agent.key` once. On an initialized node, a missing or unreadable key is a recovery error: startup refuses to mint a replacement because federation peers may have pinned that exact transport/operator identity. Restore the original key from backup. If it is unrecoverable, create a new node identity and explicitly re-pair every federation peer. A CEREBRUM Root handover does not rotate this transport key. The direct-write hook itself still soft-fails if the key or local REST service is unavailable.
+The stable `~/.sage/agent.key` remains the separate node transport/operator credential. Missing or unreadable transport state is a node recovery issue, not permission for a project hook to borrow Root. If the workspace key has not been created yet, the hook soft-fails and the shell wrapper emits its safe nudge; the next MCP launch creates/registers the ordinary identity.
 
 ## Installing in your own project
 
@@ -71,6 +69,6 @@ SAGE ships **two SessionStart/SessionEnd direct-write hooks** plus **nudge hooks
 
 ## Forward direction
 
-- **v7.1** — broader read scope for the node-operator hook key so the SessionStart prefetch returns useful context on multi-agent nodes (shipped).
+- **v7.1** — introduced direct signed hook prefetch (later replaced by exact workspace-agent scope).
 - **v8.0** — hook logic moved into the `sage-gui` binary (no Python dependency), `~/.sage/memory_mode` (`full` / `bookend` / `on-demand`), and Codex CLI hook parity via `sage-gui codex install` (shipped).
 - **Next** — optional batched `PostToolUse` direct-write so tool calls auto-observe; Cursor / Cline / Windsurf parity as those hosts expose lifecycle events.

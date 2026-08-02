@@ -181,8 +181,8 @@ func TestAppV26GroupMigrationIsDeterministicIdempotentAndRevisionPreserving(t *t
 		require.NoError(t, left.CloseBadger())
 		require.NoError(t, right.CloseBadger())
 	})
-	require.NoError(t, left.MigrateAppV26AccessGroupAuthorities())
-	require.NoError(t, right.MigrateAppV26AccessGroupAuthorities())
+	require.NoError(t, left.MigrateAppV26AccessGroupAuthorities(20))
+	require.NoError(t, right.MigrateAppV26AccessGroupAuthorities(20))
 	leftHash, err := left.ComputeAppHash()
 	require.NoError(t, err)
 	rightHash, err := right.ComputeAppHash()
@@ -193,7 +193,7 @@ func TestAppV26GroupMigrationIsDeterministicIdempotentAndRevisionPreserving(t *t
 	require.Equal(t, AppV26GroupAuthorityRead, group.MemberAuthority)
 	require.Equal(t, uint64(1), group.Revision)
 	require.Equal(t, int64(12), group.UpdatedHeight)
-	require.NoError(t, left.MigrateAppV26AccessGroupAuthorities())
+	require.NoError(t, left.MigrateAppV26AccessGroupAuthorities(20))
 	replayedHash, err := left.ComputeAppHash()
 	require.NoError(t, err)
 	require.Equal(t, leftHash, replayedHash)
@@ -214,7 +214,7 @@ func TestAppV26MigrationDefaultsLegacyManagerGroupToRead(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, legacyModify.Allowed, "pre-v26 replay keeps role-derived semantics")
 
-	require.NoError(t, s.MigrateAppV26AccessGroupAuthorities())
+	require.NoError(t, s.MigrateAppV26AccessGroupAuthorities(20))
 	read, err := s.AuthorizeAppV23LocalDomain(
 		manager, ownerEnrollment.HomeDomain, AppV23VerbRead, false,
 	)

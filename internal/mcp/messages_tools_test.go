@@ -129,6 +129,336 @@ func TestCanonicalReceiveReturnsClaimedWorkWhenExactAckFails(t *testing.T) {
 	require.Contains(t, items[0], "read_confirmation_error")
 }
 
+func TestUnifiedInboxKeepsFederatedWorkVisibleWhenCanonicalMessagesExist(t *testing.T) {
+	var mu sync.Mutex
+	var legacyLimits []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{
+				"message_id": "local-message", "from_agent": "local-sender", "payload": "local work",
+			}},
+			"count": 1,
+		})
+	})
+	mux.HandleFunc("/v1/messages/local-message/read", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"read_status": "confirmed"})
+	})
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		legacyLimits = append(legacyLimits, r.URL.Query().Get("limit"))
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{
+				"pipe_id": "foreign-message", "from_agent": strings.Repeat("ab", 32),
+				"source_chain_id": "remote-chain", "source_pipe_id": "remote-event",
+				"payload": "federated work",
+			}},
+			"count": 1,
+		})
+	})
+	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/results", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/updates", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, privateKey)
+
+	result, err := s.toolInbox(context.Background(), map[string]any{"limit": 3})
+	require.NoError(t, err)
+	items := result.(map[string]any)["items"].([]map[string]any)
+	require.Len(t, items, 2)
+	require.Equal(t, "local-message", items[0]["pipe_id"])
+	require.Equal(t, "confirmed", items[0]["read_status"])
+	require.Equal(t, "foreign-message", items[1]["pipe_id"])
+	require.Equal(t, true, items[1]["foreign"])
+
+	turn := s.checkPipelineInbox(context.Background())
+	turnItems := turn["pipe_inbox"].([]map[string]any)
+	require.Len(t, turnItems, 2)
+	require.Equal(t, "foreign-message", turnItems[1]["pipe_id"])
+	mu.Lock()
+	require.Equal(t, []string{"2", "4"}, legacyLimits,
+		"canonical-local work must consume capacity before legacy/federated claim")
+	mu.Unlock()
+}
+
+func TestUnifiedInboxAtomicallyClaimsAndReadsNegotiatedFederatedReceiptV2(t *testing.T) {
+	var mu sync.Mutex
+	called := make([]string, 0, 4)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{
+				"pipe_id": "foreign-v2", "from_agent": strings.Repeat("ab", 32),
+				"source_chain_id": "remote-chain", "source_pipe_id": "remote-event",
+				"payload": "durable federated work", "receipt_protocol_version": 2,
+			}},
+			"count": 1,
+		})
+	})
+	for _, kind := range []string{"claimed", "read"} {
+		kind := kind
+		mux.HandleFunc("/v1/pipe/foreign-v2/receipt/challenge/"+kind, func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, http.MethodGet, r.Method)
+			mu.Lock()
+			called = append(called, "challenge:"+kind)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"challenge": map[string]any{"version": 2, "message_id": "remote-event", "event_kind": kind},
+			})
+		})
+		mux.HandleFunc("/v1/pipe/foreign-v2/receipt/"+kind, func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, http.MethodPut, r.Method)
+			mu.Lock()
+			called = append(called, "record:"+kind)
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"receipt_status": "queued"})
+		})
+	}
+	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, privateKey)
+
+	result, err := s.toolInbox(context.Background(), map[string]any{"limit": 2})
+	require.NoError(t, err)
+	items := result.(map[string]any)["items"].([]map[string]any)
+	require.Len(t, items, 1)
+	require.Equal(t, "foreign-v2", items[0]["pipe_id"])
+	require.Equal(t, "queued", items[0]["claim_status"])
+	require.Equal(t, "queued", items[0]["read_status"])
+	mu.Lock()
+	require.Equal(t, []string{"challenge:claimed", "record:claimed", "challenge:read", "record:read"}, called)
+	mu.Unlock()
+}
+
+func TestUnifiedInboxNeverPresentsNegotiatedFederatedPayloadWhenClaimFails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
+			"pipe_id": "foreign-unclaimed", "payload": "must stay hidden", "receipt_protocol_version": 2,
+		}}, "count": 1})
+	})
+	mux.HandleFunc("/v1/pipe/foreign-unclaimed/receipt/challenge/claimed", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"challenge": map[string]any{"version": 2}})
+	})
+	mux.HandleFunc("/v1/pipe/foreign-unclaimed/receipt/claimed", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "claim conflict", http.StatusConflict)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, privateKey)
+
+	items, metadata, warning, receiveErr := s.receiveUnifiedPipelineInbox(context.Background(), "token", 2)
+	require.NoError(t, receiveErr)
+	require.Empty(t, items, "payload must not reach the tool result without a durable exact-recipient claim")
+	require.Error(t, warning)
+	require.Equal(t, "unconfirmed", metadata["foreign-unclaimed"]["claim_status"])
+}
+
+func TestUnifiedInboxKeepsClaimedNegotiatedFederatedPayloadWhenReadReceiptFails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
+			"pipe_id": "foreign-claimed", "payload": "durably owned", "receipt_protocol_version": 2,
+		}}, "count": 1})
+	})
+	for _, kind := range []string{"claimed", "read"} {
+		kind := kind
+		mux.HandleFunc("/v1/pipe/foreign-claimed/receipt/challenge/"+kind, func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"challenge": map[string]any{"version": 2, "kind": kind}})
+		})
+	}
+	mux.HandleFunc("/v1/pipe/foreign-claimed/receipt/claimed", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"receipt_status": "queued"})
+	})
+	mux.HandleFunc("/v1/pipe/foreign-claimed/receipt/read", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "read conflict", http.StatusConflict)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, privateKey)
+
+	items, metadata, warning, receiveErr := s.receiveUnifiedPipelineInbox(context.Background(), "token", 2)
+	require.NoError(t, receiveErr)
+	require.Len(t, items, 1, "a read-receipt failure must not hide already claimed work")
+	require.Equal(t, "durably owned", items[0].Payload)
+	require.Error(t, warning)
+	require.Equal(t, "queued", metadata["foreign-claimed"]["claim_status"])
+	require.Equal(t, "unconfirmed", metadata["foreign-claimed"]["read_status"])
+	require.NotEmpty(t, metadata["foreign-claimed"]["read_confirmation_error"])
+}
+
+func TestUnifiedInboxReturnsClaimedCanonicalWorkWhenLegacyClaimFailsThenRecoversLegacyWork(t *testing.T) {
+	var mu sync.Mutex
+	canonicalReceives := 0
+	legacyClaims := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		canonicalReceives++
+		call := canonicalReceives
+		mu.Unlock()
+		if call == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{
+					"message_id": "claimed-canonical", "from_agent": "local-sender", "payload": "do not lose me",
+				}},
+				"count": 1,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/messages/claimed-canonical/read", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"read_status": "confirmed"})
+	})
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		legacyClaims++
+		call := legacyClaims
+		mu.Unlock()
+		// Legacy inbox GET claims work and is therefore deliberately not
+		// retried after an ambiguous failure. Model that outage after canonical
+		// work was claimed, then recover on the next fresh tool call.
+		if call == 1 {
+			http.Error(w, "legacy transport unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{
+				"pipe_id": "recovered-legacy", "from_agent": strings.Repeat("ab", 32),
+				"source_chain_id": "remote-chain", "source_pipe_id": "remote-event",
+				"payload": "federated work survived",
+			}},
+			"count": 1,
+		})
+	})
+	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, privateKey)
+
+	first, err := s.toolInbox(context.Background(), map[string]any{"limit": 2})
+	require.NoError(t, err)
+	firstInbox := first.(map[string]any)
+	firstItems := firstInbox["items"].([]map[string]any)
+	require.Len(t, firstItems, 1)
+	require.Equal(t, "claimed-canonical", firstItems[0]["pipe_id"])
+	require.Equal(t, "do not lose me", firstItems[0]["payload"])
+	require.Equal(t, "confirmed", firstItems[0]["read_status"])
+	require.Contains(t, firstInbox["pipeline_inbox_warning"], "legacy transport unavailable")
+
+	second, err := s.toolInbox(context.Background(), map[string]any{"limit": 2})
+	require.NoError(t, err)
+	secondInbox := second.(map[string]any)
+	secondItems := secondInbox["items"].([]map[string]any)
+	require.Len(t, secondItems, 1)
+	require.Equal(t, "recovered-legacy", secondItems[0]["pipe_id"])
+	require.Equal(t, "federated work survived", secondItems[0]["payload"])
+	require.NotContains(t, secondInbox, "pipeline_inbox_warning")
+
+	mu.Lock()
+	require.Equal(t, 2, canonicalReceives, "claimed canonical work must not be delivered twice")
+	require.Equal(t, 2, legacyClaims, "the next fresh inbox call must recover legacy work after the ambiguous claim failure")
+	mu.Unlock()
+}
+
+func TestClaimedCanonicalWorkRemainsRecoverableFromPassiveInboxHistory(t *testing.T) {
+	var mu sync.Mutex
+	canonicalReceives := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		canonicalReceives++
+		call := canonicalReceives
+		mu.Unlock()
+		if call == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{{
+					"message_id": "history-recovery", "from_agent": "local-sender", "intent": "handoff",
+					"payload": "recover this claimed payload", "status": "claimed",
+				}},
+				"count": 1,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/messages/history-recovery/read", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"read_status": "confirmed"})
+	})
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/history/inbox", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{
+				"pipe_id": "history-recovery", "from_agent": "local-sender", "intent": "handoff",
+				"payload": "recover this claimed payload", "status": "claimed",
+				"claimed_by": "recipient", "created_at": "2026-08-02T00:00:00Z",
+			}},
+			"count": 1,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, privateKey)
+
+	// Model a client/network failure after SAGE returned the first tool result:
+	// the caller never observes this response even though the row was claimed.
+	_, err = s.toolInbox(context.Background(), map[string]any{"limit": 2})
+	require.NoError(t, err)
+
+	active, err := s.toolInbox(context.Background(), map[string]any{"limit": 2})
+	require.NoError(t, err)
+	require.Equal(t, 0, active.(map[string]any)["count"])
+
+	history, err := s.toolPipeHistory(context.Background(), map[string]any{"folder": "inbox", "limit": 20})
+	require.NoError(t, err)
+	historyItems := history.(map[string]any)["items"].([]map[string]any)
+	require.Len(t, historyItems, 1)
+	require.Equal(t, "history-recovery", historyItems[0]["pipe_id"])
+	require.Equal(t, "recover this claimed payload", historyItems[0]["payload"])
+	require.Equal(t, true, historyItems[0]["passive_history"])
+	require.Equal(t, "claimed", historyItems[0]["status"])
+}
+
 func TestCanonicalMessageToolsRejectOutOfContractBoundsBeforeHTTP(t *testing.T) {
 	_, privateKey, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)

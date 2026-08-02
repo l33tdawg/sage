@@ -152,13 +152,13 @@ new request valid.
 
 | `reason_code` | Effective cause | Exact `remedy` |
 |---|---|---|
-| `missing_write_grant` | No effective level-2 write grant | Submit to a domain this agent owns. If shared management is intended, a local Root/Admin can approve the agent as a Manager and place it in an Access Group covering the target domain. v11.16.0 has no direct level-2 grant editor. |
+| `missing_write_grant` | No effective level-2 write grant | Submit to a domain this agent owns. If shared management is intended, a local Root/Admin can place the principals in an Access Group and explicitly select Read + write or Read + write + modify. CEREBRUM has no direct level-2 grant editor. |
 | `foreign_write_restricted` | The effective named profile includes the deny-foreign-write restriction (app-v22 bit 8) | Assign a write-compatible named profile that permits foreign-domain writes, or submit to a domain this agent owns. |
 | `shared_write_restricted` | The effective named profile includes the deny-shared-write restriction (app-v22 bit 2) | Submit to the agent's owned non-shared home domain, or assign a named profile that permits shared-domain writes. |
 | `domain_claim_restricted` | The effective named profile includes the deny-domain-claim restriction (app-v22 bit 4) | Submit to a domain this agent already owns, or ask a local administrator to assign or reassign a non-shared domain; this profile cannot claim an unowned domain. |
 | `principal_pending_review` | Enrollment has not been approved | Approve the agent's enrollment and assign its role and named profile before submitting. |
 | `no_owned_home_domain` | Enrollment has no owned non-shared home domain | Complete enrollment by assigning an owned non-shared home domain, then submit there. |
-| `manager_scope_denied` | A manager write is outside its local authority scope | Use a local domain within this manager's authority scope, or ask a local admin to change the scope. |
+| `manager_scope_denied` | A manager write is outside its local authority scope | Use an owned domain, or ask a local Root/Admin to add the exact local relationship to an Access Group with an explicit write-capable authority tier. |
 
 The classifier is intentionally narrow. A non-zero capability mask does not by
 itself invalidate a grant: only the matching effective restriction produces its
@@ -715,6 +715,10 @@ recipient picker would immediately discard.
 
 **Response** (HTTP 200): `{"agents": [...identity metadata...], "total": N}`
 
+This REST route remains deliberately local. MCP `sage_directory(scope="all")`
+combines it with the separately signed, caller-filtered federation availability
+projection; remote peers never receive a request for an unscoped roster.
+
 ---
 
 ### `GET /v1/agents/lookup`
@@ -949,6 +953,7 @@ Pre-app-v23 nodes retain their legacy projection behavior.
 |---|---|
 | `GET /v1/dashboard/network/access` | Read Root/broker readiness plus non-Root agents, enrollment/role revisions, named profiles, Access Groups, linked-reader readiness, and separate linked-message consent readiness. |
 | `PUT /v1/dashboard/network/access/agents/{id}/policy` | Atomically approve or change a non-Root local agent's role, named profile, clearance, and compatible owned home domain. |
+| `PUT /v1/dashboard/network/access/agents/{id}/name` | App-v26 H+1: current local Root/Admin changes only a governed non-Root agent's mutable display name. The handler copies the current boot bio into `AgentUpdate`; consensus rejects any operator attempt to alter that bio. `agent_id` and immutable `registered_name` never change. A no-op returns `status:"unchanged", committed:false`; a real change is reported only after commit or canonical reconciliation. |
 | `PUT /v1/dashboard/network/access/groups/{groupID}` | Create or replace a consensus local Access Group using an expected-revision binding. |
 | `DELETE /v1/dashboard/network/access/groups/{groupID}` | Delete an Access Group using its expected revision. |
 | `GET /v1/dashboard/network/access/linked-readers` | List exact node-local federated linked-reader relations. |
@@ -961,6 +966,14 @@ Pre-app-v23 nodes retain their legacy projection behavior.
 | `GET /v1/dashboard/memory/adoption-progress` | Root/operator aggregate App-v25 historical-recovery progress. It returns counts and state only—never the hidden records' content, domains, authors, or reasons. |
 | `POST /v1/dashboard/memory/adoption-retry` | Current-Root-only request for a fresh scan of the exact unresolved App-v25 snapshot. Requires its `projection_revision` and `expected_count`; it never deletes rows or clears earlier dispositions. |
 | `POST /v1/dashboard/memory/adoption-deprecate` | Current-Root-only retirement of the exact unresolved snapshot. Requires `projection_revision`, `expected_count`, and typed `DEPRECATE <count>` confirmation. Records remain preserved for audit and are skipped by future automatic repair. |
+
+Once app-v26 is active, the legacy
+`PATCH /v1/dashboard/network/agents/{id}` metadata route rejects `name` and
+`boot_bio` with `governed_agent_metadata_required`. Display-label changes use
+the governed Access Controls endpoint above; boot purpose, registered name,
+and agent ID remain immutable. Local presentation-only fields such as avatar
+and P2P address continue to use the legacy route. Pre-app-v26 metadata behavior
+is unchanged.
 
 The roles are `member`, `manager`, and `admin`. Roles define verbs; consensus
 Access Groups define local scope; clearance caps readable classification; and
@@ -1121,7 +1134,8 @@ live Access Controls page in v11.15+, so documentation and typed denials must
 not direct an operator to a nonexistent level-2 editor. The low-level consensus
 grant/revoke routes remain documented here for compatible clients; the shipped
 v11.16 CEREBRUM actions are owned-home-domain policy and, where shared
-management is intended, Root/Admin-approved Manager Access Groups.
+management is intended, Root/Admin-approved Access Groups with an explicit
+Read + write or Read + write + modify tier.
 
 ---
 
@@ -1190,6 +1204,7 @@ Execute a domain ownership transfer that was authorized by an accepted governanc
 | `parent_domain` | string | no | Must match existing parent if supplied |
 | `proposal_id` | string | yes | Hex of accepted gov_propose |
 | `open_to_shared` | bool | no | If true, also writes `shared_domain:<name>` on-chain |
+| `expected_owner_id` | string | app-v26: yes; earlier: omit | Hex(64) owner observed before proposing. The proposal and execution tx both bind it; consensus rejects if current ownership changed before execution. |
 
 **Response** (HTTP 200):
 
@@ -1197,11 +1212,11 @@ Execute a domain ownership transfer that was authorized by an accepted governanc
 {"tx_hash": "<hex>", "purged_grants": 5}
 ```
 
-`purged_grants` is parsed from the FinalizeBlock log. Previous owner's full grant chain-of-trust is wiped on transfer.
+`purged_grants` is parsed from the FinalizeBlock log. Previous owner's full grant chain-of-trust is wiped on transfer. The canonical new owner immediately receives owner-derived access; app-v26 does not require or emit a redundant self-grant, so a transfer does not depend on CEREBRUM holding the new owner's private key.
 
 **Error behavior:** Unlike other endpoints, FinalizeBlock rejection messages are surfaced verbatim (not sanitized) so operators can diagnose `proposal not found`, `body mismatch`, `already consumed`, etc. (`domain_reassign_handler.go:162-195`)
 
-**CEREBRUM orchestration (v11.3):** The dashboard drives this whole agent-to-agent transfer from the Search page via `POST /v1/dashboard/network/reassign-domain-ownership`, commit-confirmed in strict order: `gov_propose(domain_reassign)` -> the sole validator's accept vote drives the proposal to `Executed` in-band -> this `DomainReassign` flips the owner and purges the domain's grants -> an `AccessGrant` gives the new owner level 3 (deferred to the owner's own node if their key is not local). It requires a single-validator node; a multi-validator chain returns HTTP 409 because the other validators must vote on the proposal. This is off-consensus orchestration only - each underlying step is the same on-chain tx documented here, and memory authorship (`submitting_agent`) is never rewritten (`web/reassign_handler.go:285-318`).
+**CEREBRUM orchestration (v11.3; app-v26 CAS):** The dashboard drives this whole agent-to-agent transfer from the Search page via `POST /v1/dashboard/network/reassign-domain-ownership`, commit-confirmed in strict order: `gov_propose(domain_reassign)` -> the sole validator's accept vote drives the proposal to `Executed` in-band -> this `DomainReassign` atomically flips the owner, records ownership history, purges unrelated grants, applies any shared marker, and consumes the proposal. The new owner's access follows directly from canonical ownership, so no target-key lookup or self-grant is required. At app-v26 the dashboard reads the canonical current owner, includes it as `expected_owner_id` in both the approved proposal payload and execution transaction, and consensus compares it immediately before transfer. A concurrent handover therefore fails instead of applying a stale operator confirmation. The optional trailing wire field is admitted only from H+1; activation height H retains the historical encoding. It requires a single-validator node; a multi-validator chain returns HTTP 409 because the other validators must vote on the proposal. This is off-consensus orchestration only - each underlying step is the same on-chain tx documented here, and memory authorship (`submitting_agent`) is never rewritten (`web/reassign_handler.go`; `internal/abci/app.go`).
 
 ---
 
@@ -2010,8 +2025,37 @@ only `message_id`, `from_agent`, and `sent_at`. A missing/full stream never
 fails the send, does not alter any message state, and is not evidence that a
 recipient is online. Stdio and Streamable HTTP have no server-push contract.
 
-Compatibility routes `PUT /v1/pipe/{pipe_id}/read` and
-`GET /v1/pipe/{pipe_id}/receipt` delegate to exact read/status semantics.
+The canonical same-node Messages routes remain separate from the
+capability-gated federated receipt-v2 surface. A negotiated imported pipe adds
+these payload-free routes:
+
+| Route | Caller and meaning |
+|---|---|
+| `GET /v1/pipe/{pipe_id}/receipt/challenge/{kind}` | Exact imported-message recipient fetches the immutable body for `kind=claimed|read`. |
+| `PUT /v1/pipe/{pipe_id}/receipt/{kind}` | That exact recipient submits the challenge unchanged under a fresh nonce-bound signature; returns local `receipt_status:queued`. |
+| `GET /v1/pipe/{pipe_id}/receipt` | Exact original sender reads the payload-free independent evidence projection. |
+
+An imported inbox row advertises `receipt_protocol_version:2` only when both
+peers negotiated `federated-pipeline-receipts-v2`; absent/zero means the legacy
+path. Federation keeps three independent facts:
+
+- `transport_status:delivered` is the remote SAGE operator's authenticated
+  acknowledgement that it durably admitted the message. It is not evidence
+  that the recipient was online or saw it.
+- `claim_status:confirmed` and `read_status:confirmed` require a fresh
+  nonce-bound signature by the exact addressed recipient over that recipient's
+  exact retained message action. Read means fetched and acknowledged, never
+  comprehension, agreement, execution, or completion.
+- terminal failure/expiry/revocation is an independent monotonic dimension. A
+  message can terminate without being read; peer timestamps are evidence
+  metadata and never order authority.
+
+Only the exact original sender may query the payload-free federated projection.
+Recipient, unrelated agent, Manager, Admin, Root, operator, and nonexistent IDs
+share generic non-enumerating behavior. Peers negotiate
+`federated-pipeline-receipts-v2`; v1 peers and historical rows without the
+generation-bound v2 binding remain explicitly `unsupported`/`unconfirmed`.
+Upgrade migration never invents delivery, claim, or read evidence.
 Legacy `sage_pipe`, `sage_inbox`, and `sage_pipe_result` use the canonical local
 service when available and fall back only on a definitive route-not-found from
 an older node. Passive pipe history remains unchanged.
@@ -2325,10 +2369,10 @@ authorization to take a recovery action.
 `sage_turn` polls this route and returns actionable `pipe_delivery_updates`.
 
 v11.17 exposes exact sender-queryable read state for same-node canonical
-messages only. Federated exact-recipient receipt negotiation/events remain
-unimplemented; neither a federated delivery update, the local
-`/v1/pipe/{pipe_id}` workflow row, nor a clean inbox may be presented as
-evidence that a remote recipient read a message.
+messages and, only after both peers negotiate receipt v2, for federated pipes
+through `GET /v1/pipe/{pipe_id}/receipt`. Neither a legacy federated delivery
+update, the local `/v1/pipe/{pipe_id}` workflow row, nor a clean inbox may be
+presented as evidence that a remote recipient read a message.
 
 ---
 

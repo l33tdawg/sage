@@ -13,6 +13,7 @@ import json
 
 import httpx
 import pytest
+import pytest_asyncio
 import respx
 
 from sage_sdk.exceptions import SageAPIError
@@ -23,6 +24,7 @@ BASE_URL = "http://localhost:8080"
 
 DOMAIN = "acme.engineering"
 NEW_OWNER = "b" * 64
+CURRENT_OWNER = "a" * 64
 PROPOSAL_ID = "c" * 64
 TX_HASH_HEX = "deadbeef" * 8
 
@@ -66,6 +68,7 @@ def test_submit_domain_reassign_posts_expected_body(client, mock_api):
         proposal_id=PROPOSAL_ID,
         parent_domain="acme",
         open_to_shared=True,
+        expected_owner_id=CURRENT_OWNER,
     )
 
     assert isinstance(resp, DomainReassignResponse)
@@ -81,6 +84,7 @@ def test_submit_domain_reassign_posts_expected_body(client, mock_api):
         "proposal_id": PROPOSAL_ID,
         "parent_domain": "acme",
         "open_to_shared": True,
+        "expected_owner_id": CURRENT_OWNER,
     }
 
 
@@ -96,6 +100,7 @@ def test_submit_domain_reassign_defaults_parent_and_shared(client, mock_api):
     sent = json.loads(route.calls.last.request.content.decode("utf-8"))
     assert sent["parent_domain"] == ""
     assert sent["open_to_shared"] is False
+    assert "expected_owner_id" not in sent
 
 
 def test_submit_domain_reassign_propagates_errors(client, mock_api):
@@ -221,6 +226,16 @@ def test_reassign_domain_happy_path(client, mock_api, monkeypatch):
     # No real sleeping in tests.
     monkeypatch.setattr("time.sleep", lambda _s: None)
 
+    health_route = mock_api.get("/v1/dashboard/health").mock(
+        return_value=httpx.Response(200, json={"chain": {"app_version": "26"}})
+    )
+    domain_route = mock_api.get(f"/v1/domain/{DOMAIN}").mock(
+        return_value=httpx.Response(
+            200,
+            json={"domain_name": DOMAIN, "owner_agent_id": CURRENT_OWNER},
+        )
+    )
+
     propose_route = mock_api.post("/v1/governance/propose").mock(
         return_value=_gov_propose_response()
     )
@@ -262,13 +277,70 @@ def test_reassign_domain_happy_path(client, mock_api, monkeypatch):
         "new_owner_id": NEW_OWNER,
         "parent_domain": "",
         "open_to_shared": True,
+        "expected_owner_id": CURRENT_OWNER,
     }
 
     # Verify we polled until executed (2 calls), then submitted with the proposal_id.
     assert detail_route.call_count == 2
+    assert health_route.call_count == 1
+    assert domain_route.call_count == 1
     submit_body = json.loads(reassign_route.calls.last.request.content.decode("utf-8"))
     assert submit_body["proposal_id"] == PROPOSAL_ID
     assert submit_body["open_to_shared"] is True
+    assert submit_body["expected_owner_id"] == CURRENT_OWNER
+
+
+def test_reassign_domain_pre_v26_omits_owner_extension(client, mock_api, monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+    mock_api.get("/v1/dashboard/health").mock(
+        return_value=httpx.Response(200, json={"chain": {"app_version": "25"}})
+    )
+    propose_route = mock_api.post("/v1/governance/propose").mock(
+        return_value=_gov_propose_response()
+    )
+    mock_api.get(
+        f"/v1/dashboard/governance/proposals/{PROPOSAL_ID}"
+    ).mock(return_value=httpx.Response(200, json=_proposal_detail("executed")))
+    reassign_route = mock_api.post("/v1/domain/reassign").mock(
+        return_value=httpx.Response(
+            200, json={"tx_hash": TX_HASH_HEX, "purged_grants": 0}
+        )
+    )
+
+    client.reassign_domain(
+        domain=DOMAIN,
+        new_owner_id=NEW_OWNER,
+        reason="pre-v26 recovery",
+        poll_interval_s=0.01,
+        timeout_s=5.0,
+    )
+
+    submit_body = json.loads(reassign_route.calls.last.request.content.decode("utf-8"))
+    assert "expected_owner_id" not in submit_body
+    propose_body = json.loads(propose_route.calls.last.request.content.decode("utf-8"))
+    propose_payload = json.loads(
+        base64.b64decode(propose_body["payload"]).decode("utf-8")
+    )
+    assert "expected_owner_id" not in propose_payload
+
+
+def test_reassign_domain_refuses_unknown_chain_version(client, mock_api):
+    mock_api.get("/v1/dashboard/health").mock(
+        return_value=httpx.Response(200, json={"chain": {}})
+    )
+    propose_route = mock_api.post("/v1/governance/propose").mock(
+        return_value=_gov_propose_response()
+    )
+
+    with pytest.raises(SageAPIError) as exc:
+        client.reassign_domain(
+            domain=DOMAIN,
+            new_owner_id=NEW_OWNER,
+            reason="unsafe without a version",
+        )
+
+    assert exc.value.status_code == 503
+    assert not propose_route.called
 
 
 @pytest.mark.parametrize("terminal_status", ["rejected", "expired", "cancelled"])
@@ -293,6 +365,7 @@ def test_reassign_domain_non_executed_terminal_raises(
             domain=DOMAIN,
             new_owner_id=NEW_OWNER,
             reason="recovery",
+            expected_owner_id=CURRENT_OWNER,
             poll_interval_s=0.01,
             timeout_s=5.0,
         )
@@ -327,6 +400,7 @@ def test_reassign_domain_timeout_raises(client, mock_api, monkeypatch):
             domain=DOMAIN,
             new_owner_id=NEW_OWNER,
             reason="recovery",
+            expected_owner_id=CURRENT_OWNER,
             poll_interval_s=0.01,
             timeout_s=10.0,
         )
@@ -338,9 +412,6 @@ def test_reassign_domain_timeout_raises(client, mock_api, monkeypatch):
 
 
 # --- Async parity --------------------------------------------------------------
-
-
-import pytest_asyncio
 
 
 @pytest_asyncio.fixture
@@ -364,12 +435,14 @@ async def test_async_submit_domain_reassign(async_client, mock_api):
         new_owner_id=NEW_OWNER,
         proposal_id=PROPOSAL_ID,
         open_to_shared=False,
+        expected_owner_id=CURRENT_OWNER,
     )
     assert resp.tx_hash == TX_HASH_HEX
     assert resp.purged_grants == 2
     sent = json.loads(route.calls.last.request.content.decode("utf-8"))
     assert sent["domain"] == DOMAIN
     assert sent["proposal_id"] == PROPOSAL_ID
+    assert sent["expected_owner_id"] == CURRENT_OWNER
 
 
 @pytest.mark.asyncio
@@ -398,3 +471,86 @@ async def test_async_governance_propose_payload_none_omits(async_client, mock_ap
     )
     sent = json.loads(route.calls.last.request.content.decode("utf-8"))
     assert "payload" not in sent
+
+
+@pytest.mark.asyncio
+async def test_async_reassign_domain_app_v26_binds_owner(
+    async_client, mock_api, monkeypatch
+):
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", no_sleep)
+    mock_api.get("/v1/dashboard/health").mock(
+        return_value=httpx.Response(200, json={"chain": {"app_version": 26}})
+    )
+    mock_api.get(f"/v1/domain/{DOMAIN}").mock(
+        return_value=httpx.Response(200, json={"owner_agent_id": CURRENT_OWNER})
+    )
+    propose_route = mock_api.post("/v1/governance/propose").mock(
+        return_value=_gov_propose_response()
+    )
+    mock_api.get(f"/v1/dashboard/governance/proposals/{PROPOSAL_ID}").mock(
+        return_value=httpx.Response(200, json=_proposal_detail("executed"))
+    )
+    execute_route = mock_api.post("/v1/domain/reassign").mock(
+        return_value=httpx.Response(
+            200, json={"tx_hash": TX_HASH_HEX, "purged_grants": 1}
+        )
+    )
+
+    await async_client.reassign_domain(DOMAIN, NEW_OWNER, "handover")
+
+    proposal = json.loads(propose_route.calls.last.request.content)
+    proposal_payload = json.loads(base64.b64decode(proposal["payload"]))
+    assert proposal_payload["expected_owner_id"] == CURRENT_OWNER
+    execution = json.loads(execute_route.calls.last.request.content)
+    assert execution["expected_owner_id"] == CURRENT_OWNER
+
+
+@pytest.mark.asyncio
+async def test_async_reassign_domain_pre_v26_omits_extension(
+    async_client, mock_api, monkeypatch
+):
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr("asyncio.sleep", no_sleep)
+    mock_api.get("/v1/dashboard/health").mock(
+        return_value=httpx.Response(200, json={"chain": {"app_version": 25}})
+    )
+    propose_route = mock_api.post("/v1/governance/propose").mock(
+        return_value=_gov_propose_response()
+    )
+    mock_api.get(f"/v1/dashboard/governance/proposals/{PROPOSAL_ID}").mock(
+        return_value=httpx.Response(200, json=_proposal_detail("executed"))
+    )
+    execute_route = mock_api.post("/v1/domain/reassign").mock(
+        return_value=httpx.Response(
+            200, json={"tx_hash": TX_HASH_HEX, "purged_grants": 0}
+        )
+    )
+
+    await async_client.reassign_domain(DOMAIN, NEW_OWNER, "legacy handover")
+
+    proposal = json.loads(propose_route.calls.last.request.content)
+    assert "expected_owner_id" not in json.loads(base64.b64decode(proposal["payload"]))
+    assert "expected_owner_id" not in json.loads(execute_route.calls.last.request.content)
+
+
+@pytest.mark.asyncio
+async def test_async_reassign_domain_refuses_unknown_chain_version(
+    async_client, mock_api
+):
+    mock_api.get("/v1/dashboard/health").mock(
+        return_value=httpx.Response(200, json={"chain": {}})
+    )
+    propose_route = mock_api.post("/v1/governance/propose").mock(
+        return_value=_gov_propose_response()
+    )
+
+    with pytest.raises(SageAPIError) as exc:
+        await async_client.reassign_domain(DOMAIN, NEW_OWNER, "unsafe")
+
+    assert exc.value.status_code == 503
+    assert not propose_route.called

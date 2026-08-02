@@ -358,6 +358,19 @@ async function appV23AccessRequest(path, options = {}) {
             error.status = 0;
             throw error;
         }
+        if (method !== 'GET') {
+            // A transport failure after the request left the browser does not
+            // prove that consensus rejected it. Classify mutation-side
+            // network failures as indeterminate so CEREBRUM refreshes and
+            // blocks duplicate authority changes until state is verified.
+            const error = new Error(
+                'The connection ended before consensus confirmation. The change may already be committed; reload and verify before trying it again.',
+                { cause },
+            );
+            error.code = 'access_control_transport_uncertain';
+            error.status = 0;
+            throw error;
+        }
         throw cause;
     } finally {
         clearTimeout(timeout);
@@ -382,6 +395,14 @@ export async function updateAppV23AgentPolicy(id, policy) {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(policy),
+    });
+}
+
+export async function updateAppV26AgentDisplayName(id, name) {
+    return appV23AccessRequest(`/v1/dashboard/network/access/agents/${encodeURIComponent(id)}/name`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
     });
 }
 
@@ -722,7 +743,9 @@ export async function updateTaskStatus(id, taskStatus) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task_status: taskStatus }),
     });
-    return res.json();
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || res.statusText || 'task status update failed');
+    return payload;
 }
 
 export async function reorderTasks(taskStatus, taskIds) {

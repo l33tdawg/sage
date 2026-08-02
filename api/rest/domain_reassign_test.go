@@ -64,11 +64,12 @@ func TestDomainReassign_HappyPath(t *testing.T) {
 	srv, _, _ := newTestServer(t, cometMock.URL)
 
 	body, _ := json.Marshal(DomainReassignRequest{
-		Domain:       "pipeline.failures.boot2root",
-		NewOwnerID:   testNewOwnerID,
-		ParentDomain: "pipeline.failures",
-		ProposalID:   testProposalID,
-		OpenToShared: false,
+		Domain:          "pipeline.failures.boot2root",
+		NewOwnerID:      testNewOwnerID,
+		ParentDomain:    "pipeline.failures",
+		ProposalID:      testProposalID,
+		OpenToShared:    false,
+		ExpectedOwnerID: strings.Repeat("bb", 32),
 	})
 	req, _ := signedRequest(t, http.MethodPost, "/v1/domain/reassign", body)
 
@@ -118,6 +119,19 @@ func TestDomainReassign_BadRequest_MalformedHexOwner(t *testing.T) {
 
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "new_owner_id")
+}
+
+func TestDomainReassign_BadRequest_MalformedExpectedOwner(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	body, _ := json.Marshal(DomainReassignRequest{
+		Domain: "security", NewOwnerID: testNewOwnerID,
+		ProposalID: testProposalID, ExpectedOwnerID: "not-an-agent-id",
+	})
+	req, _ := signedRequest(t, http.MethodPost, "/v1/domain/reassign", body)
+	rr := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rr, req)
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "expected_owner_id")
 }
 
 func TestDomainReassign_BadRequest_WrongLengthOwner(t *testing.T) {

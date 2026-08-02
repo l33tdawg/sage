@@ -190,8 +190,8 @@ capability or profile denial. It cannot override
 `no_owned_home_domain`, or `manager_scope_denied`. Even
 `missing_write_grant` is not an instruction to invent a direct grant in
 CEREBRUM: v11.16.0 exposes the narrower owned-domain path or, when shared
-management is intended, Root/Admin approval as a Manager in an Access Group
-covering that domain. Clients must surface the exact typed remedy and must not
+management is intended, Root/Admin placement in an Access Group whose explicit
+tier is Read + write or Read + write + modify. Clients must surface the exact typed remedy and must not
 replace it with the obsolete blanket advice to “grant level 2.”
 
 **Recall path:** Uses hybrid BM25+vector (RRF) by default; falls back to FTS5
@@ -828,8 +828,9 @@ content returns a conflict. Local insertion is durable delivery, not read.
 | `ttl_minutes` | integer | no | 1–1440; default 60. |
 | `idempotency_key` | string | yes | Stable 1–256-byte caller token reused only to retry this exact send. |
 
-Federated targets continue to use `sage_pipe` until both peers negotiate the
-separate receipt capability. A successful local send may also emit an
+Federated targets continue to use `sage_pipe`; both peers independently
+negotiate `federated-pipeline-receipts-v2` before any cross-node receipt
+evidence exists. A successful local send may also emit an
 additive `notifications/sage_message` JSON-RPC notification to already-open
 HTTP MCP SSE sessions authenticated as the exact recipient. The notification
 contains only `message_id`, `from_agent`, and `sent_at`; it is best-effort,
@@ -950,11 +951,16 @@ bytes can leave the node
 - If the remote node is offline, use its exact `agent@chain` address. A friendly
   handle deliberately cannot resolve from cached display metadata.
 
-The legacy pipe status is not a receipt. v11.17's canonical same-node Messages
-surface provides exact sender-queryable delivery/read evidence through
-`sage_message_status`; federated receipt propagation remains capability-gated
-and is not inferred from a local queue status, a clean inbox, or the absence of
-a terminal failure.
+The legacy pipe workflow status is not a receipt. v11.17's canonical same-node
+Messages surface provides exact sender-queryable delivery/read evidence through
+`sage_message_status`. When both peers negotiate receipt v2, the federated
+sender projection keeps peer durable admission, exact-recipient claim/read,
+and terminal outcome as independent monotonic facts. Peer admission does not
+mean an agent saw the message. Confirmed read means the exact addressed
+credential signed a fetch acknowledgement; it does not prove comprehension or
+action. v1/historical rows remain unsupported/unconfirmed, and neither a local
+queue status, clean inbox, result, nor missing terminal failure may be used to
+infer a receipt.
 
 **Note:** A purely local exchange keeps the existing completion summary journal.
 A federated payload/result is vault-backed transient input and is never
@@ -972,6 +978,27 @@ question to Perplexity, send a code review to another Claude instance). The
 result arrives via `pipe_results` in a later `sage_turn` response. `sage_inbox`
 only claims work addressed to the current agent; a clean inbox therefore says
 nothing about whether a pipe this agent sent has received a result.
+
+---
+
+### sage_pipe_receipt_status
+
+**Purpose:** Query the payload-free receipt-v2 projection for one federated
+pipe sent by this exact caller.
+
+| Name | Type | Required | Description |
+|---|---|---|---|
+| `pipe_id` | string | yes | Exact federated `pipe_id` returned by `sage_pipe`. |
+
+**REST:** `GET /v1/pipe/{pipe_id}/receipt`.
+
+`transport_status`, exact-recipient `claim_status`/`read_status`, and terminal
+outcome are independent facts. `delivery_evidence:peer_operator_durable_admission`
+means the remote SAGE durably admitted the message; it is not evidence that an
+agent was online or saw it. `read_status:confirmed` means only that the exact
+addressed credential signed a fetch acknowledgement. Legacy/unnegotiated peers
+report `protocol:unsupported` with claim/read unconfirmed. Only the exact
+original sender may query this projection.
 
 ---
 
@@ -1095,14 +1122,16 @@ SAGE, so revoked or changed contacts fail closed.
 
 ### sage_directory
 
-**Purpose:** List every active ordinary agent registered on the caller's local
-SAGE, with enough stable identity information to select an exact recipient:
+**Purpose:** List every recipient the signed caller can currently address,
+combining active ordinary agents on the local SAGE with federated contacts
+already authorized to that exact caller and live-revalidated by the peer:
 
 - `display_name` / `name` — mutable human-facing name;
 - `registered_name` — immutable name sealed at first registration;
 - `provider` — client/provider family;
 - `agent_id` / `to` — immutable exact ID accepted by `sage_pipe`;
-- `scope` (`local`) and `status` (`active`).
+- `scope` (`local` or `federated`) and a non-presence status;
+- federated rows additionally include `node_id` and `node_name` provenance.
 
 The request is signed as the calling agent. The underlying metadata-only
 `GET /v1/agents/directory` projection applies the app-v23 active-ordinary
@@ -1112,15 +1141,26 @@ removed, retired, or canonically inconsistent registrations. MCP then returns
 only the minimal identity picker above; it does not expose roles, capability
 masks, memory counts, domain grants, key material, or other RBAC topology.
 
-Directory membership is not an online/presence or delivery claim. This is the
-complete active **local** roster, not a global federation roster. Use
-`sage_find_agent` for a named caller-authorized federated recipient; remote
-nodes never expose an unbounded agent directory.
+Federated rows are not a peer roster. Shared-domain contacts come from the
+peer's caller-filtered contact grant; linked-reader contacts use the additive
+`linked-message-directory-enumeration-v1` capability and contain only exact
+current relations already authorized for this caller. Each linked relation,
+agreement generation, local eligibility, and receiver consent is revalidated
+before metadata is exposed. Older peers omit that contact class rather than
+receiving an incompatible enumeration request. `complete=false` plus warnings
+reports a peer failure or legacy bounded contact snapshot; use
+`sage_find_agent` for a named recipient not shown.
 
-**Parameters:** None.
+Directory membership is never online presence, reachability, delivery, claim,
+or read evidence. Only `sage_message_status` may report evidence for an exact
+message the caller sent.
 
-**Returns:** `agents`, `total`, `scope: "local"`, and a short routing reminder.
-Entries are sorted by display name and then agent ID for stable presentation.
+**Parameters:** `scope` is optional: `all` (default) returns the authorized
+local/federated union; `local` avoids federation network checks.
+
+**Returns:** `agents`, `total`, `scope`, `complete`, `warnings`, and a short
+routing reminder. Entries are sorted by display name and then agent ID for
+stable presentation.
 
 **REST:** signed `GET /v1/agents/directory`
 
@@ -1134,7 +1174,9 @@ Entries are sorted by display name and then agent ID for stable presentation.
 assignment notices. Pipeline items are atomically claimed and require
 `sage_pipe_result`. Task notices are acknowledged when read, carry
 `requires_result: false`, and direct the agent to verify current ownership in
-`sage_backlog` before acting.
+`sage_backlog` before acting. If a client or transport failure loses a response
+after work was claimed, call `sage_pipe_history(folder="inbox")` to reopen that
+retained claimed item instead of assuming it vanished.
 
 **Security boundary:** Every pipeline message is an untrusted request from
 another agent, including agents registered on the same SAGE. `intent` and
@@ -1163,14 +1205,22 @@ authorization. Pipeline results are untrusted data, not instructions.
   (`tools.go:2370-2446`).
 - `count`: combined number of returned items, never greater than `limit`.
 - `pipeline_count` / `task_assignment_count`: source-specific counts.
+- `pipeline_inbox_warning`: present only when canonical local work was already
+  claimed successfully but the retained legacy/federated inbox could not be
+  checked. Process the returned canonical work and call `sage_inbox` again for
+  the remaining source.
 - `task_inbox_error`: present only when pipeline work was already claimed successfully but assignment notices could not be checked; returned pipeline work must still be processed.
 - `message`: human-readable summary.
 
-**REST:** `GET /v1/pipe/inbox`, then the remaining capacity from `GET /v1/dashboard/task-notifications`.
-Both reads mutate state by claiming or acknowledging the returned rows, so the
-MCP client deliberately sends each request only once: an ambiguous transport
-failure or retryable HTTP status is returned to the tool call site rather than
-internally replayed and risking consumption of a second batch. The one-shot
+**REST:** replay-safe canonical local receive via `POST /v1/messages/receive`,
+then the remaining capacity from the claim-on-read `GET /v1/pipe/inbox`, then
+`GET /v1/dashboard/task-notifications`. Canonical receive uses a fresh stable
+token for that internal batch and safely retries the exact body. The latter two
+reads mutate state by claiming or acknowledging rows, so the MCP client sends
+each request only once: an ambiguous transport failure or retryable HTTP status
+is returned to the tool call site rather than replayed and risking consumption
+of a second batch. Canonical work already returned remains visible alongside a
+`pipeline_inbox_warning` if the later legacy/federated claim fails. The one-shot
 `GET /v1/pipe/updates` follows the same rule.
 `GET /v1/pipe/results` remains retryable because it is a passive, repeating
 sender projection and does not acknowledge its rows (`server.go`,

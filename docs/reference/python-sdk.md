@@ -607,6 +607,21 @@ The SDK signs this request. Since v11.16/app-v23, the server returns only the
 active ordinary local roster visible through the pipeline identity boundary;
 the endpoint is no longer an unsigned full-directory read.
 
+#### `agent_directory()` / `lookup_agents()`
+
+```python
+agent_directory() -> AgentDirectoryResponse
+lookup_agents(name: str, limit: int = 20) -> AgentLookupResponse
+```
+
+Signed `GET /v1/agents/directory` returns the minimal active local recipient
+projection without RBAC or memory totals. Signed `GET /v1/agents/lookup`
+performs a bounded literal name search and adds server-owned `match_kind`
+(`exact` or `substring`). These rows are recipient-discovery metadata, never
+online, reachability, delivery, or read evidence. Federation-wide directory
+composition remains an MCP broker operation because it requires live
+peer-authenticated, caller-specific relation checks.
+
 ---
 
 #### `set_agent_permission()`
@@ -760,13 +775,14 @@ pipe_status(pipe_id: str) -> PipeMessage
 `GET /v1/pipe/{pipe_id}`
 
 This inspects the current node's local pipeline workflow row. It is not proof
-that a remote recipient received or read the message. Sender-queryable
-successful-delivery and claim/read receipts are explicitly deferred beyond
-v11.16.
+that a remote recipient received or read the message. Negotiated federated
+receipt-v2 evidence lives on the separate signed REST challenge/action/status
+routes and is not inferred from this legacy row.
 
 `PipeMessage` includes additive `source_chain_id`, `source_pipe_id`,
 `destination_chain_id`, `reply_source_chain_id`, policy/agreement/contact
-bindings, claim/journal fields when applicable, and optional response-only
+bindings, `receipt_protocol_version` when a federated import negotiated v2,
+claim/journal fields when applicable, and optional response-only
 `authority`, `trust`, `security_notice`, `payload_authority`, and
 `result_authority`. Status labels payload and result independently and omits a
 single object-wide authority when both are present. These fields are optional
@@ -810,8 +826,9 @@ remain optional so the client can parse responses from older nodes.
 
 These methods share the existing local pipeline inbox but add durable
 idempotency, exact receive-batch replay, exact-recipient read evidence, and a
-payload-free sender status projection. They are same-node only; federated
-delivery/read receipts remain capability-negotiated future work.
+payload-free sender status projection. They are same-node only. Federated
+delivery/read evidence is a separate capability-negotiated receipt-v2 REST
+protocol; it must never be inferred from these methods or from `pipe_status()`.
 
 #### `message_send()`
 
@@ -963,12 +980,13 @@ submit_domain_reassign(
     proposal_id: str,
     parent_domain: str = "",
     open_to_shared: bool = False,
+    expected_owner_id: str = "",
 ) -> DomainReassignResponse
 ```
 
 `POST /v1/domain/reassign`
 
-Low-level primitive. Submits the `TxTypeDomainReassign` that **consumes** an already-accepted `domain_reassign` governance proposal. Atomically transfers domain ownership, **purges all existing grants on the domain**, and optionally promotes the domain to shared status. Requires chain admin role.
+Low-level primitive. Submits the `TxTypeDomainReassign` that **consumes** an already-accepted `domain_reassign` governance proposal. Atomically transfers domain ownership, **purges all existing grants on the domain**, and optionally promotes the domain to shared status. Requires chain admin role. On app-v26, `expected_owner_id` is required and must exactly match the value bound into the accepted proposal.
 
 Returns `DomainReassignResponse(tx_hash: str, purged_grants: int)`.
 
@@ -976,7 +994,7 @@ Gotcha: if the domain was previously marked shared (`open_to_shared=True`), atte
 
 ---
 
-#### `reassign_domain()`  *(v8.0, SageClient only)*
+#### `reassign_domain()`  *(v8.0)*
 
 ```python
 reassign_domain(
@@ -985,14 +1003,25 @@ reassign_domain(
     reason: str,
     parent_domain: str = "",
     open_to_shared: bool = False,
+    expected_owner_id: str | None = None,
     poll_interval_s: float = 2.0,
     timeout_s: float = 120.0,
 ) -> DomainReassignResponse
 ```
 
-No equivalent on `AsyncSageClient`.
+`AsyncSageClient.reassign_domain()` has the identical signature and behavior;
+await it rather than blocking the event loop while governance progresses.
 
-End-to-end helper: calls `governance_propose(operation="domain_reassign", ...)`, polls `governance_proposal_detail` every `poll_interval_s` seconds until status is `"executed"`, then calls `submit_domain_reassign`. Raises `SageAPIError(409)` if the proposal ends as `rejected`/`expired`/`cancelled`; raises `SageAPIError(408)` on timeout.
+End-to-end helper: reads the public CEREBRUM health surface to determine the
+active chain version. On app-v26, when `expected_owner_id` is omitted, it then
+reads the chain-authoritative current owner and binds that value into
+`governance_propose(operation="domain_reassign", ...)`; pre-app-v26 requests
+retain the historical body. It polls `governance_proposal_detail` every
+`poll_interval_s` seconds until status is `"executed"`, then submits the same
+binding to `submit_domain_reassign`. A concurrent owner change is rejected
+rather than overwritten. Raises `SageAPIError(409)` if the app-v26 owner is
+absent or the proposal ends as `rejected`/`expired`/`cancelled`; raises
+`SageAPIError(408)` on timeout.
 
 ---
 
@@ -1249,7 +1278,8 @@ Known `operation` values include `"add_validator"`, `"remove_validator"`,
 - `bytes` → base64-encoded directly.
 - `None` → field omitted entirely.
 
-`domain_reassign` expects a payload dict with keys `domain`, `new_owner_id`, `parent_domain`, `open_to_shared`.
+`domain_reassign` expects a payload dict with keys `domain`, `new_owner_id`,
+`parent_domain`, `open_to_shared`, and app-v26 `expected_owner_id`.
 `scope_action` should use `scope`; the server canonicalizes the guided template
 and owns the zero proposal heights. `scope` and `payload` are mutually
 exclusive. Legacy callers may still supply pre-encoded canonical bytes.
@@ -1545,6 +1575,7 @@ compatibility and populated automatically after activation.
 | `proposal_id` | `str` | required |
 | `parent_domain` | `str` | `""` |
 | `open_to_shared` | `bool` | `False` |
+| `expected_owner_id` | `str` | `""` (required by app-v26) |
 
 ---
 
@@ -1592,9 +1623,10 @@ Canonical app-v23 memory-write denials have
 `error_type="https://sage.dev/errors/domain-write-denied"`, one of the seven
 stable `reason_code` values, an exact `remedy`, and `retryable=False`. Branch on
 those fields, never on human-readable `detail`. For `missing_write_grant`,
-v11.16.0 directs the agent to its owned domain or, when broader shared
-management is intended, to a Root/Admin-approved Manager Access Group; it does
-not claim that CEREBRUM has a direct level-2 grant editor.
+the agent should use its owned domain or, when broader shared management is
+intended, a Root/Admin-approved Access Group whose explicit tier is Read +
+write or Read + write + modify; it does not claim that CEREBRUM has a direct
+level-2 grant editor.
 
 ```python
 from sage_sdk.exceptions import SageError, SageAPIError, SageAuthError, SageNotFoundError, SageValidationError
@@ -1613,11 +1645,10 @@ except SageAPIError as e:
 
 ## Method Count Summary
 
-**`SageClient`**: 75 public methods
-**`AsyncSageClient`**: 75 public methods (`reassign_domain` is sync-only; `close` is async-only)
+**`SageClient`**: 77 public methods
+**`AsyncSageClient`**: 78 public methods (`close` is async-only)
 
 Groups: Health (2), Memory (8), Embeddings (1), Tasks (2), Voting/Validation
-(5), Agents (6), Validator (2), Pipeline (10), canonical Messages (5), Access Control (4), Domains (3
-shared + sync-only `reassign_domain`), Organizations (7), Departments (6),
+(5), Agents (8), Validator (2), Pipeline (10), canonical Messages (5), Access Control (4), Domains (4), Organizations (7), Departments (6),
 Federation (5), Governance and scope visibility (8), and async lifecycle (1) =
-76 distinct methods across both clients (counting the 74 shared methods once).
+78 distinct methods across both clients (counting the 77 shared methods once).

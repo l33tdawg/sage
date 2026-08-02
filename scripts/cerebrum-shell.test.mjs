@@ -59,6 +59,16 @@ test('CEREBRUM has a dependency-free bootstrap shell and sanitized failure state
     assert.doesNotMatch(appSource, /if auth check fails, assume no auth/);
 });
 
+test('task status mutations reject HTTP failures before optimistic board state can settle', () => {
+    const updateTaskStatusSource = apiSource.slice(
+        apiSource.indexOf('export async function updateTaskStatus('),
+        apiSource.indexOf('export async function reorderTasks('),
+    );
+    assert.match(updateTaskStatusSource, /const payload = await res\.json\(\)\.catch\(\(\) => \(\{\}\)\)/);
+    assert.match(updateTaskStatusSource, /if \(!res\.ok\) throw new Error\(payload\.error/,
+        'bulk clear uses Promise.all, so the API helper must reject instead of fulfilling with an error body');
+});
+
 test('static JavaScript gate rejects the v11.15 nested-template failure under module grammar', () => {
     const checker = fileURLToPath(new URL('./check-static-js.mjs', import.meta.url));
     const fixture = fileURLToPath(
@@ -233,6 +243,14 @@ test('CEREBRUM Root is separate from agents and uses a two-stage one-time handov
     assert.match(apiSource, /expected_generation: Number\(expectedGeneration\)/);
     assert.match(apiSource, /\/v1\/dashboard\/network\/access\/root\/handover/);
     assert.doesNotMatch(apiSource, /access\/root\/bundle/);
+    assert.ok(
+        access.indexOf('class="v23-root-card"') > access.indexOf('class="v23-groups-section"'),
+        'rare Root handover must render below everyday agent and group controls',
+    );
+    assert.ok(
+        access.indexOf('class="v23-root-card"') < access.indexOf('class="v23-linked-readers"'),
+        'Root handover should remain discoverable before the separate federation compartment',
+    );
 });
 
 test('app-v23 access UI uses named policy choices and visibly separates local groups from federated readers', () => {
@@ -249,6 +267,10 @@ test('app-v23 access UI uses named policy choices and visibly separates local gr
         'group membership must expose the role while the explicit tier determines group data authority');
     assert.match(access, /Consensus confirmation still pending/);
     assert.match(access, /blocked duplicate authority changes in this view/);
+    assert.match(apiSource, /error\.code = 'access_control_transport_uncertain'/,
+        'a mutation transport failure must be treated as possibly committed, never as permission to submit a duplicate');
+    assert.match(access, /error\?\.code === 'access_control_transport_uncertain'/,
+        'the Access Controls UI must enter confirmation-pending state after an uncertain mutation transport');
     assert.match(access, /group\.group_id\}:\$\{group\.revision/,
         'a committed revision must remount uncontrolled group-name inputs');
     assert.match(access, /Every agent keeps full control of its own domain tree/);
@@ -270,20 +292,52 @@ test('app-v23 access UI uses named policy choices and visibly separates local gr
         'drag and drop must keep an accessible non-pointer alternative');
     assert.match(access, /appV23DirectLocalGroupPlan\(state\?\.groups \|\| \[\], source, target\)/,
         'dropping one approved local agent onto another must create a real narrow Access Group');
-    assert.match(access, /Drop here to remove this agent from its current Access Group/,
+    assert.match(access, /Drop here to remove this agent from this Access Group/,
         'dragging a member back out must revoke that group relationship');
+    assert.match(access, /if \(!mutationReady \|\| groupBusy \|\| mutationLockRef\.current\)/,
+        'drag/drop must not bypass broker readiness, pending confirmation, or the synchronous mutation lock');
+    assert.match(access, /v23-agent-pill local" draggable=\$\{mutationReady && !groupBusy\}/,
+        'the local drag tray must visibly disable while authority mutation is unsafe');
+    assert.match(access, /v23-agent-pill federated" draggable=\$\{mutationReady && !linkedBusy\}/,
+        'the federated drag tray must obey the same mutation-readiness gate as its explicit Attach control');
+    assert.match(access, /linked:\$\{operation\}:\$\{remote\?\.remote_chain_id/,
+        'linked-reader drag and explicit controls must share the synchronous mutation lock');
     assert.match(access, /created on-chain at Read\. Each owner keeps full control/,
         'new direct groups must communicate the app-v26 read baseline without implying role-based widening');
     assert.match(appSource, /Memory ownership & recovery/,
         'the agent review card must expose the affected memory inventory where the operator is making the decision');
     assert.match(appSource, /fetchMemories\(\{[\s\S]*agent: agent\.agent_id/,
         'agent recovery must load only the selected agent’s records');
-    assert.match(appSource, /reassignDomainOwnership\(\{[\s\S]*source_agent_id: agent\.agent_id/,
-        'the recovery transfer must reuse the real on-chain domain ownership flow');
+    assert.match(appSource, /reassignDomainOwnership\(\{[\s\S]*source_agent_id: ''/,
+        'the recovery transfer must reuse the real on-chain flow and resolve current ownership server-side instead of guessing from authorship');
     assert.match(appSource, /deleteMemory\(item\.memory_id\)/,
         'the recovery card must permit an operator to deprecate an exact checked subset');
     assert.match(appSource, /Every memory in each listed domain moves under the new owner’s current control, including records not selected here/,
         'the selected-record entry point must disclose that RBAC transfer is whole-domain, not a false per-record ownership rewrite');
+    assert.match(appSource, /transferred before the next governance operation failed/,
+        'multi-domain recovery must report partial success instead of implying rollback');
+    assert.match(appSource, /deprecated before the next operation failed/,
+        'multi-record deprecation must report partial success instead of implying rollback');
+    assert.match(appSource, /Grant access again or point ownership/,
+        'historical recovery must make both authority choices discoverable without conflating them with principal repair');
+    assert.match(appSource, /Transfer whole domain ownership/,
+        'Root recovery must expose a real governed transfer action, not only descriptive copy');
+    assert.match(appSource, /source_agent_id: reviewed\.authority_owner_id/,
+        'the recovery transfer must bind the exact owner the operator reviewed so stale authority fails closed');
+    assert.match(appSource, /const ownedDomain = reviewed\?\.authority_owned_domain \|\| authorityDomain/,
+        'whole-domain recovery must transfer the actual owning ancestor rather than a non-owning descendant label');
+    assert.match(appSource, /#\/network\?agent=\$\{encodeURIComponent\(authorityTargetAgentID\)\}&domain=\$\{encodeURIComponent\(authorityDomain\)\}&recovery=1/,
+        'the exact recovery choice must deep-link to the existing governed domain matrix');
+    assert.match(appSource, /setExpandedTab\('recovery-domain-access'\)/,
+        'the recovery deep-link must open a reachable exact-domain authority surface');
+    assert.match(appSource, /initialFilter=\$\{recoveryDomain\}/,
+        'the recovered domain must be the only initially visible matrix row');
+    assert.match(appSource, /principal repair did not grant authority/i,
+        'the matrix must not imply that an operational-principal association granted access');
+    assert.match(appSource, /Ownership handover at block \$\{handover\.transferred_at\}/,
+        'Root recovery must expose the append-only owner handover chain');
+    assert.match(appSource, /domain created at block \$\{handover\.domain_created_at\}/,
+        'owner handovers must not relabel the domain creation height');
     assert.match(access, /v23-access-legend/);
     assert.match(access, /v23-agent-choice local/);
     assert.match(access, /v23-agent-pill federated/);
@@ -298,6 +352,14 @@ test('app-v23 access UI uses named policy choices and visibly separates local gr
     assert.match(access, /Admin suspended/);
     assert.match(access, /suspended after Root handover/);
     assert.match(access, /Reauthorize Admin/);
+    assert.match(access, /class="v23-agent-name-editor"/);
+    assert.match(access, /updateAppV26AgentDisplayName\(selected\.agent_id, nextName\)/);
+    assert.match(access, /Registered as \$\{selected\.registered_name/);
+    assert.match(access, /registered identity, agent ID, and boot purpose stay immutable/);
+    assert.match(access, /result\.status === 'unchanged'/,
+        'a no-op rename must not be presented as a committed transaction');
+    assert.match(apiSource, /\/v1\/dashboard\/network\/access\/agents\/\$\{encodeURIComponent\(id\)\}\/name/);
+    assert.match(cssSource, /\.v23-agent-name-editor \{/);
 });
 
 test('Agents page cannot expose browser-only drag grouping as access policy', () => {
@@ -346,6 +408,19 @@ test('Access Controls exposes the exact signer identity behind every grant', () 
     assert.match(networkPage, /client must report this same Agent ID/);
     assert.match(networkPage, /sage_status/);
     assert.match(networkPage, /sage_inception/);
+});
+
+test('app-v26 domain transfer UI never invents a deferred owner self-grant', () => {
+    assert.match(
+        appSource,
+        /res\.owner_access === 'legacy_self_grant' && !!res\.grant_deferred/,
+        'only the dormant legacy transfer path may surface the historical self-grant warning',
+    );
+    assert.doesNotMatch(
+        appSource,
+        /if \(res\.grant_deferred\) \{/,
+        'app-v26 owner-derived authority must not be treated as a deferred target-key grant',
+    );
 });
 
 test('first-run onboarding offers a real create-or-join decision', () => {
@@ -1024,7 +1099,7 @@ test('access-control bulk actions stay scoped and saves expose consensus progres
     assert.match(network, /Applying access on-chain…/);
     assert.match(network, /disabled=\$\{!accessDirty \|\| accessSaving\}/);
     assert.match(network, /\$\{accessSaving \? 'Saving…' : 'Save'\}/);
-    assert.match(matrix, /function DomainAccessMatrix\(\{ domains, domainAccess, onChange, disabled, busy = false, allowModify = true, denySharedWrite = false \}\)/);
+    assert.match(matrix, /function DomainAccessMatrix\(\{ domains, domainAccess, onChange, disabled, busy = false, allowModify = true, denySharedWrite = false, initialFilter = '' \}\)/);
     assert.doesNotMatch(matrix, /Add new domain tag|handleAddDomain|setNewDomain|onAddDomain/,
         'operators attribute access to agent-created domains instead of creating domain tags');
     assert.match(matrix, /No domains yet\. Domains appear here as agents submit memories\./,

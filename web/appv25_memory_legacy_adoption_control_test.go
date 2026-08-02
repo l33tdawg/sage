@@ -6,9 +6,11 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -334,9 +336,35 @@ func appV26RecoverySelectionRequest(
 	return req
 }
 
+func TestAppV26LegacyRecoveryDecoderAcceptsMaximumBoundedSelection(t *testing.T) {
+	ids := make([]string, store.MaxLegacyMemoryRecoverySelection)
+	for i := range ids {
+		// Keep every ID distinct while exercising the 512-byte adoption wire
+		// bound. The old 4 KiB HTTP cap rejected this valid store-level shape.
+		prefix := fmt.Sprintf("%03d-", i)
+		ids[i] = prefix + strings.Repeat("x", 512-len(prefix))
+	}
+	body, err := json.Marshal(appV25LegacyRecoveryControlRequest{
+		ProjectionRevision: 1, ExpectedCount: len(ids), MemoryIDs: ids,
+		TargetAgentID: strings.Repeat("a", 64),
+	})
+	require.NoError(t, err)
+	require.Greater(t, len(body), 4096)
+	require.Less(t, len(body), appV26LegacyRecoveryRequestMaxBytes)
+
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	decoded, ok := decodeAppV25LegacyRecoveryControlRequest(recorder, request)
+	require.True(t, ok, recorder.Body.String())
+	require.Len(t, decoded.MemoryIDs, store.MaxLegacyMemoryRecoverySelection)
+}
+
 func TestAppV26LegacyRecoveryInventoryAndCompanionAssignment(t *testing.T) {
 	handler, sqlite, fixture, _, _ := appV25RecoveryControlFixture(t)
 	handler.AppV26ActiveFn = func() bool { return true }
+	require.NoError(t, fixture.badger.RegisterDomain(
+		"historical/verified", fixture.agentID, "", 7,
+	))
 	content := "A verified historical memory whose old application label has no current key."
 	digest := sha256.Sum256([]byte(content))
 	require.NoError(t, sqlite.InsertMemory(context.Background(), &memory.MemoryRecord{
@@ -377,6 +405,9 @@ func TestAppV26LegacyRecoveryInventoryAndCompanionAssignment(t *testing.T) {
 	require.Len(t, inventory.Items, 1)
 	require.True(t, inventory.Items[0].Assignable)
 	require.Contains(t, inventory.Items[0].ContentPreview, "verified historical memory")
+	require.Equal(t, "available", inventory.Items[0].AuthorityStatus)
+	require.Equal(t, fixture.agentID, inventory.Items[0].AuthorityOwnerID)
+	require.Equal(t, "historical/verified", inventory.Items[0].AuthorityOwnedDomain)
 	require.Contains(t, inventory.Agents, struct {
 		AgentID string `json:"agent_id"`
 	}{AgentID: fixture.agentID},
@@ -446,4 +477,37 @@ func TestAppV26LegacyRecoveryAssignmentRejectsReadOnlyAgent(t *testing.T) {
 	assignments, err := sqlite.ListLegacyMemoryRecoveryAssignments(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, assignments)
+}
+
+func TestAppV26LegacyRecoveryTargetEligibilityRejectsAbsentInactiveAndRoot(t *testing.T) {
+	handler, _, fixture, _, _ := appV25RecoveryControlFixture(t)
+	handler.AppV26ActiveFn = func() bool { return true }
+
+	eligible, err := handler.appV26LegacyRecoveryTargetEligible(fixture.agentID)
+	require.NoError(t, err)
+	require.True(t, eligible)
+
+	eligible, err = handler.appV26LegacyRecoveryTargetEligible(strings.Repeat("f", 64))
+	require.NoError(t, err)
+	require.False(t, eligible)
+	eligible, err = handler.appV26LegacyRecoveryTargetEligible(fixture.rootID)
+	require.NoError(t, err)
+	require.False(t, eligible)
+
+	root, err := fixture.badger.GetAppV23Root()
+	require.NoError(t, err)
+	enrollment, err := fixture.badger.GetAppV23Enrollment(fixture.agentID)
+	require.NoError(t, err)
+	role, err := fixture.badger.GetAppV23Role(fixture.agentID)
+	require.NoError(t, err)
+	require.NoError(t, fixture.badger.ApproveAppV23LocalAgent(store.AppV23LocalEnrollment{
+		AgentID: fixture.agentID, ApprovedBy: root.CredentialID,
+		RootGeneration: root.Generation, Profile: enrollment.Profile,
+		HomeDomain: enrollment.HomeDomain, Clearance: enrollment.Clearance,
+		Capabilities: enrollment.Capabilities, Active: false, UpdatedHeight: 3,
+		RetireOwnedDomainsToRoot: true,
+	}, role.Role, enrollment.Revision, role.Revision))
+	eligible, err = handler.appV26LegacyRecoveryTargetEligible(fixture.agentID)
+	require.NoError(t, err)
+	require.False(t, eligible)
 }

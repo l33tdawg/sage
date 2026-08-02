@@ -1,6 +1,6 @@
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
-import { fetchStats, fetchMemoryAdoptionProgress, fetchMemoryAdoptionInventory, retryMemoryAdoption, assignMemoryAdoption, deprecateMemoryAdoption, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchScopes, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAppV23Access, updateAppV23AgentPolicy, putAppV23AccessGroup, deleteAppV23AccessGroup, fetchAppV23LinkedReaders, fetchAppV23LinkedReaderIdentities, checkAppV23LinkedReaderEligibility, mutateAppV23LinkedReader, fetchAppV23LinkedMessageConsent, fetchAppV23RemoteHostedMessageCandidates, putAppV23LinkedMessageConsent, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, handoverRootCredential, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
+import { fetchStats, fetchMemoryAdoptionProgress, fetchMemoryAdoptionInventory, retryMemoryAdoption, assignMemoryAdoption, deprecateMemoryAdoption, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchScopes, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAppV23Access, updateAppV23AgentPolicy, updateAppV26AgentDisplayName, putAppV23AccessGroup, deleteAppV23AccessGroup, fetchAppV23LinkedReaders, fetchAppV23LinkedReaderIdentities, checkAppV23LinkedReaderEligibility, mutateAppV23LinkedReader, fetchAppV23LinkedMessageConsent, fetchAppV23RemoteHostedMessageCandidates, putAppV23LinkedMessageConsent, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, handoverRootCredential, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
 rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, reorderTasks, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, fetchMemoryReanchorPlan, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
 deprecateUnreadable, getRecoveryKey, confirmRecoveryKeyBackup, recoverOrphansPreview, recoverOrphans,
@@ -288,16 +288,23 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
     const [inventoryLoading, setInventoryLoading] = useState(true);
     const [selectedIDs, setSelectedIDs] = useState([]);
     const [targetAgentID, setTargetAgentID] = useState('');
+    const [authorityDomain, setAuthorityDomain] = useState('');
+    const [authorityTargetAgentID, setAuthorityTargetAgentID] = useState('');
     const recoveryCount = Number(progress?.recovery || 0);
     const projectionRevision = progress?.projection_revision;
     const deprecationCount = selectedIDs.length || recoveryCount;
     const requiredConfirmation = `DEPRECATE ${deprecationCount}`;
+    const authorityDomains = Array.from(new Map((inventory.items || [])
+        .filter(item => item.authority_status === 'available' && item.domain)
+        .map(item => [item.domain, item])).values());
     const requestClose = () => { if (!submitting) onClose(); };
     const dialogRef = useModalDialog(requestClose);
 
     useEffect(() => {
         setConfirmation('');
         setError('');
+        setAuthorityDomain('');
+        setAuthorityTargetAgentID('');
     }, [recoveryCount, projectionRevision]);
 
     async function loadInventory(after = '', append = false) {
@@ -352,6 +359,50 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
             } else {
                 setError(err?.message || 'The selected records could not be assigned.');
             }
+        } finally {
+            setSubmitting('');
+        }
+    }
+
+    function openGovernedDomainAuthority() {
+        if (!authorityDomain || !authorityTargetAgentID || submitting) return;
+        const reviewed = authorityDomains.find(item => item.domain === authorityDomain);
+        if (!reviewed) return;
+        onClose();
+        window.location.hash = `#/network?agent=${encodeURIComponent(authorityTargetAgentID)}&domain=${encodeURIComponent(authorityDomain)}&recovery=1`;
+    }
+
+    function openGroupWideAuthority() {
+        if (!authorityTargetAgentID || submitting) return;
+        onClose();
+        window.location.hash = `#/access?agent=${encodeURIComponent(authorityTargetAgentID)}&recovery=1`;
+    }
+
+    async function transferGovernedDomainOwnership() {
+        if (!authorityDomain || !authorityTargetAgentID || submitting) return;
+        const reviewed = authorityDomains.find(item => item.domain === authorityDomain);
+        const target = (inventory.agents || []).find(agent => agent.agent_id === authorityTargetAgentID);
+        const ownedDomain = reviewed?.authority_owned_domain || authorityDomain;
+        if (!reviewed || !reviewed.authority_owner_id || !ownedDomain || !target) return;
+        const confirmed = await showConfirmation(
+            `Transfer current ownership of the whole domain “${ownedDomain}” to ${target.name || target.agent_id.slice(0, 12)}?${ownedDomain !== authorityDomain ? `\n\nThe reviewed record is in descendant “${authorityDomain}”; authority comes from owning ancestor “${ownedDomain}”, so the whole owned subtree is transferred.` : ''}\n\nThis changes control for every memory in that owned domain tree, including records not visible or selected here. Existing grants on the owned domain are purged and must be reviewed again. Historical authorship, content, blocks, and the recorded prior owner do not change.`,
+            { title: 'Transfer whole domain ownership?', confirmLabel: 'Transfer whole domain', tone: 'danger' },
+        );
+        if (!confirmed) return;
+        setSubmitting('authority-transfer');
+        setError('');
+        setSuccess('');
+        try {
+            const result = await reassignDomainOwnership({
+                source_agent_id: reviewed.authority_owner_id,
+                target_agent_id: target.agent_id,
+                domain: ownedDomain,
+            });
+            setSuccess(result.message || `Domain “${ownedDomain}” ownership transferred. Historical authorship and chain history remain unchanged.`);
+            setAuthorityDomain('');
+            await loadInventory();
+        } catch (err) {
+            setError(err?.message || 'The governed whole-domain transfer could not be completed.');
         } finally {
             setSubmitting('');
         }
@@ -476,6 +527,11 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
                                                 <strong>${item.domain || 'Unknown domain'}</strong>
                                                 <span>${item.content_preview || 'Content cannot be safely previewed.'}</span>
                                                 <small>${item.reason.replaceAll('_', ' ')} · ${item.assignable ? 'assignable' : 'deprecate only'}${item.assigned_target ? ' · assignment pending' : ''}</small>
+                                                ${(item.authority_history || []).map(handover => html`
+                                                    <small class="cerebrum-recovery-authority-history">
+                                                        Ownership handover at block ${handover.transferred_at}: ${handover.previous_owner} → ${handover.new_owner} · domain created at block ${handover.domain_created_at} · ${String(handover.reason || '').replaceAll('_', ' ')}
+                                                    </small>
+                                                `)}
                                             </span>
                                         </label>
                                     `)}
@@ -501,6 +557,50 @@ function MemoryAdoptionResolutionModal({ progress, onProgress, onClose }) {
                                 onClick=${assignSelected}>
                                 ${submitting === 'assign' ? 'Associating…' : 'Associate selected'}
                             </button>
+                        </div>
+                        <div class="cerebrum-recovery-assignment">
+                            <div>
+                                <strong>Grant access again or point ownership</strong>
+                                <p class="cerebrum-recovery-note">This is separate from principal repair. Choose one exact domain and target, then use the existing governed per-domain matrix to grant Read, Read + write, or Read + write + modify without changing ownership. Access Groups are a separate group-wide option: their chosen authority applies across members’ owned domains, not just this one. Whole-domain ownership transfer has its own explicit all-record confirmation. Historical authorship does not change.</p>
+                            </div>
+                            <label>
+                                <span>Exact domain</span>
+                                <select value=${authorityDomain} disabled=${!!submitting || !inventory.assignment_active}
+                                    onChange=${event => setAuthorityDomain(event.currentTarget.value)}>
+                                    <option value="">Choose a reviewed domain…</option>
+                                    ${authorityDomains.map(item => html`
+                                        <option value=${item.domain}>${item.domain}</option>
+                                    `)}
+                                </select>
+                            </label>
+                            <label>
+                                <span>Agent that needs authority</span>
+                                <select value=${authorityTargetAgentID} disabled=${!!submitting || !inventory.assignment_active}
+                                    onChange=${event => setAuthorityTargetAgentID(event.currentTarget.value)}>
+                                    <option value="">Choose an active local agent…</option>
+                                    ${(inventory.agents || []).map(agent => html`
+                                        <option value=${agent.agent_id}>${agent.name || agent.agent_id.slice(0, 12)}</option>
+                                    `)}
+                                </select>
+                            </label>
+                            <button type="button" class="btn"
+                                disabled=${!!submitting || !inventory.assignment_active || !authorityDomain || !authorityTargetAgentID}
+                                onClick=${openGovernedDomainAuthority}>
+                                Open exact-domain grant matrix
+                            </button>
+                            <button type="button" class="btn"
+                                disabled=${!!submitting || !inventory.assignment_active || !authorityTargetAgentID}
+                                onClick=${openGroupWideAuthority}>
+                                Open group-wide Access Controls
+                            </button>
+                            <button type="button" class="btn btn-danger"
+                                disabled=${!!submitting || !inventory.assignment_active || !authorityDomain || !authorityTargetAgentID}
+                                onClick=${transferGovernedDomainOwnership}>
+                                ${submitting === 'authority-transfer' ? 'Transferring whole domain…' : 'Transfer whole domain ownership'}
+                            </button>
+                            ${inventory.items.some(item => item.authority_status === 'unowned') && html`
+                                <p class="cerebrum-recovery-note">Some preserved records name an ownerless domain. CEREBRUM will not silently claim it from this screen; establish ownership explicitly before granting access.</p>
+                            `}
                         </div>
                         ${!inventory.assignment_active && html`<p class="cerebrum-recovery-note">Assignment becomes available when governed app-v26 is active. Retry and deprecation remain available.</p>`}
                     </section>
@@ -3907,17 +4007,15 @@ function SearchPage() {
     // WHOLE domain, so we derive the distinct domains the selected memories live
     // in and transfer each in full - the modal copy makes clear that unselected
     // memories in those domains move too. No source agent needs picking: the
-    // per-domain author (best-effort mirror source) is read off the memories and
-    // the real owner flip happens on-chain regardless.
+    // server resolves current ownership from canonical chain state. Historical
+    // authorship is never treated as present authority.
     function startSelectionTransfer() {
         const selMems = results.filter(m => selected.has(m.memory_id));
         if (selMems.length === 0) return;
-        const authorByDomain = {};
         const domains = [];
         for (const m of selMems) {
             const d = m.domain_tag;
-            if (!d || authorByDomain[d] !== undefined) continue;
-            authorByDomain[d] = m.submitting_agent || '';
+            if (!d || domains.some(entry => entry.domain === d)) continue;
             domains.push({ domain: d });
         }
         if (domains.length === 0) { showToast('Selected memories have no domain to transfer.', 'warning'); return; }
@@ -3925,7 +4023,6 @@ function SearchPage() {
             fromSelection: true,
             sourceAgentId: '',
             sourceName: `${selected.size} selected ${selected.size === 1 ? 'memory' : 'memories'}`,
-            authorByDomain,
             domains,
             step: domains.length === 1 ? 'target' : 'domains',
             selectedDomain: domains.length === 1 ? domains[0] : null,
@@ -3933,30 +4030,34 @@ function SearchPage() {
     }
 
     // Transfer the whole selected domain's RBAC ownership to the target agent.
-    // Surfaces the server's honest status/grant_deferred/message rather than
-    // pretending success. Handles both entry points: the filter-row flow (source
+    // Surfaces the server's honest status/message rather than pretending
+    // success. A dormant pre-app-v26 chain may still report the historical
+    // legacy_self_grant path; app-v26 owner access is immediate and must never
+    // be described as deferred or dependent on the target private key. Handles
+    // both entry points: the filter-row flow (source
     // is the picked agent) and the selection flow (source is the domain's author,
     // used only for the off-chain mirror; on multi-domain selections it loops
     // back to the remaining domains after each transfer).
     async function handleDomainOwnershipTransfer(targetId) {
         if (!domXfer?.selectedDomain) return;
         const dom = domXfer.selectedDomain.domain;
-        const sourceId = domXfer.sourceAgentId
-            || (domXfer.authorByDomain ? (domXfer.authorByDomain[dom] || '') : '');
         setXferring(true);
         try {
             const res = await reassignDomainOwnership({
-                source_agent_id: sourceId,
+                // The server resolves the current chain owner. Memory authorship
+                // is immutable history and must never be guessed as live authority.
+                source_agent_id: '',
                 target_agent_id: targetId,
                 domain: dom,
             });
             await loadMemories(query, agentFilter, domainFilter, tagFilter);
             const status = res.status || 'ok';
             let msg = res.message || `Domain "${dom}" ownership transferred.`;
-            if (res.grant_deferred) {
+            const legacyGrantDeferred = res.owner_access === 'legacy_self_grant' && !!res.grant_deferred;
+            if (legacyGrantDeferred) {
                 msg += ' The read/write grant to the new owner was deferred (their signing key is not held on this node) - issue it from the Agents access matrix once that agent is available.';
             }
-            const level = status === 'error' ? 'error' : ((status === 'partial' || res.grant_deferred) ? 'warning' : 'success');
+            const level = status === 'error' ? 'error' : ((status === 'partial' || legacyGrantDeferred) ? 'warning' : 'success');
             showToast(msg, level, 9000);
             if (domXfer.fromSelection) {
                 const remaining = (domXfer.domains || []).filter(d => d.domain !== dom);
@@ -4173,8 +4274,7 @@ function SearchPage() {
                                     </p>
                                 </div>
                                 ${(() => {
-                                    const excludeId = domXfer.sourceAgentId
-                                        || (domXfer.authorByDomain && domXfer.selectedDomain ? (domXfer.authorByDomain[domXfer.selectedDomain.domain] || '') : '');
+                                    const excludeId = domXfer.sourceAgentId || '';
                                     const targets = agents.filter(a => a.status !== 'removed' && a.agent_id !== excludeId);
                                     return targets.length === 0 ? html`
                                         <p style="color:var(--text-muted);font-size:13px;font-style:italic;">No other agents are available to receive this domain. Register another agent first.</p>
@@ -4881,9 +4981,9 @@ function SoftwareUpdate() {
                     </button>
                 `}
 
-				${updateInfo?.in_app_update_supported === false && updateInfo?.release_url && updateInfo?.update_available && !updateInfo?.restart_required && html`
-					<a class="btn btn-primary" href="${updateInfo.release_url}" target="_blank" rel="noopener">
-						Download Signed Release
+				${updateInfo?.in_app_update_supported === false && (updateInfo?.download_url || updateInfo?.release_url) && updateInfo?.update_available && !updateInfo?.restart_required && html`
+					<a class="btn btn-primary" href="${updateInfo.download_url || updateInfo.release_url}" target="_blank" rel="noopener">
+						${updateInfo?.platform?.startsWith('darwin/') ? 'Download Signed DMG' : 'Download Signed Release'}
 					</a>
 				`}
 
@@ -8244,8 +8344,8 @@ const isReservedSharedDomain = domain => {
         || value.startsWith('sage-');
 };
 
-function DomainAccessMatrix({ domains, domainAccess, onChange, disabled, busy = false, allowModify = true, denySharedWrite = false }) {
-    const [filter, setFilter] = useState('');
+function DomainAccessMatrix({ domains, domainAccess, onChange, disabled, busy = false, allowModify = true, denySharedWrite = false, initialFilter = '' }) {
+    const [filter, setFilter] = useState(initialFilter);
     // Preserve assigned grants that are not present in the current domain inventory.
     const allDomains = [...new Set([...domains, ...Object.keys(domainAccess)])].sort();
     const filtered = allDomains.filter(d => !filter || d.toLowerCase().includes(filter.toLowerCase()));
@@ -8576,7 +8676,8 @@ function AgentMemoryRecoveryPanel({ agent, agents, canControl }) {
         .filter(Boolean))];
     const activeTargets = agents.filter(candidate =>
         candidate.agent_id !== agent?.agent_id && candidate.enrollment_active &&
-        !candidate.needs_reauthorization);
+        !candidate.needs_reauthorization && !candidate.needs_approval &&
+        (candidate.profile === 'standard' || candidate.profile === 'companion'));
 
     const toggle = (memoryID) => setSelected(previous => {
         const next = new Set(previous);
@@ -8598,13 +8699,20 @@ function AgentMemoryRecoveryPanel({ agent, agents, canControl }) {
             { title: 'Deprecate selected memories?', confirmLabel: 'Deprecate selected', tone: 'danger' },
         )) return;
         setBusy('deprecate');
+        let completed = 0;
         try {
-            for (const item of selectedMemories) await deleteMemory(item.memory_id);
+            for (const item of selectedMemories) {
+                await deleteMemory(item.memory_id);
+                completed++;
+            }
             showToast(`${selectedMemories.length} ${selectedMemories.length === 1 ? 'memory was' : 'memories were'} deprecated.`, 'success');
             setSelected(new Set());
             await loadMemories(query);
         } catch (e) {
-            showToast(e.message || 'Could not deprecate the selected memories.', 'error', 9000);
+            showToast(completed
+                ? `${completed} ${completed === 1 ? 'memory was' : 'memories were'} deprecated before the next operation failed. The remaining selections were not reported as completed. ${e.message || ''}`
+                : (e.message || 'Could not deprecate the selected memories.'), 'error', 9000);
+            await loadMemories(query);
         } finally {
             setBusy('');
         }
@@ -8620,19 +8728,26 @@ function AgentMemoryRecoveryPanel({ agent, agents, canControl }) {
             { title: 'Transfer domain control?', confirmLabel: 'Transfer domains', tone: 'danger' },
         )) return;
         setBusy('transfer');
+        let completed = 0;
         try {
             for (const domain of selectedDomains) {
                 await reassignDomainOwnership({
-                    source_agent_id: agent.agent_id,
+                    // Associated-memory authorship is not proof of current
+                    // domain ownership; let the server bind canonical state.
+                    source_agent_id: '',
                     target_agent_id: targetID,
                     domain,
                 });
+                completed++;
             }
             showToast(`${selectedDomains.length} ${selectedDomains.length === 1 ? 'domain was' : 'domains were'} transferred on-chain.`, 'success', 8000);
             setSelected(new Set());
             await loadMemories(query);
         } catch (e) {
-            showToast(e.message || 'Could not transfer the selected domains.', 'error', 9000);
+            showToast(completed
+                ? `${completed} ${completed === 1 ? 'domain was' : 'domains were'} transferred before the next governance operation failed. Remaining domains were not reported as transferred. ${e.message || ''}`
+                : (e.message || 'Could not transfer the selected domains.'), 'error', 9000);
+            await loadMemories(query);
         } finally {
             setBusy('');
         }
@@ -8650,7 +8765,7 @@ function AgentMemoryRecoveryPanel({ agent, agents, canControl }) {
                 }}>Open full Search</button>
             </div>
             <p class="v23-agent-memory-explainer">
-                Review this agent’s active records here. You can deprecate selected records one by one or transfer the selected records’ <strong>whole domains</strong> to another active local agent. Historical authorship never changes.
+                Review this agent’s active records here. An Access Group below grants its chosen authority group-wide across members’ owned domains; it is not an exact-domain grant. Here you can deprecate selected records or transfer the selected records’ <strong>whole domains</strong> to another active local agent. Historical authorship never changes.
             </p>
             ${agent.needs_approval && agent.local_key_available && html`
                 <div class="v23-inline-note warning">
@@ -8724,11 +8839,15 @@ function AgentMemoryRecoveryPanel({ agent, agents, canControl }) {
 }
 
 function AppV23AccessControl() {
+    const routeQuery = new URLSearchParams((window.location.hash.split('?')[1] || ''));
+    const recoveryAgentID = routeQuery.get('recovery') === '1' ? (routeQuery.get('agent') || '') : '';
     const [state, setState] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
-    const [selectedID, setSelectedID] = useState('');
+    const [selectedID, setSelectedID] = useState(recoveryAgentID);
     const [draft, setDraft] = useState(null);
+    const [displayNameDraft, setDisplayNameDraft] = useState('');
+    const [renameBusy, setRenameBusy] = useState(false);
     const [saving, setSaving] = useState(false);
     const [groupBusy, setGroupBusy] = useState('');
     const [pendingConfirmation, setPendingConfirmation] = useState('');
@@ -8771,6 +8890,10 @@ function AppV23AccessControl() {
         try { return localStorage.getItem(APPV23_LEGACY_DECISION_KEY) || ''; } catch (_) { return ''; }
     });
     const legacyModel = loadAgentGroups();
+
+    useEffect(() => {
+        if (recoveryAgentID) setSelectedID(recoveryAgentID);
+    }, [recoveryAgentID]);
 
     const load = useCallback(async () => {
         try {
@@ -9023,6 +9146,9 @@ function AppV23AccessControl() {
         selected?.enrollment_revision,
         selected?.role_revision,
     ]);
+    useEffect(() => {
+        setDisplayNameDraft(selected?.name || '');
+    }, [selected?.agent_id, selected?.name]);
 
     const mutateDraft = (patch) => setDraft(current => ({ ...(current || {}), ...patch }));
     const beginMutation = (key) => {
@@ -9039,7 +9165,9 @@ function AppV23AccessControl() {
         showToast(detail, 'info', 10000);
         await load();
     };
-    const mutationMayHaveCommitted = error => error?.code === 'access_control_timeout';
+    const mutationMayHaveCommitted = error =>
+        error?.code === 'access_control_timeout' ||
+        error?.code === 'access_control_transport_uncertain';
     const chooseRole = (role) => {
         if (!draft) return;
         mutateDraft(appV23RoleDefaults(role, draft.capabilities));
@@ -9081,6 +9209,40 @@ function AppV23AccessControl() {
             showToast(e.message || 'The policy was not committed.', 'error', 9000);
         } finally {
             setSaving(false);
+            endMutation(mutationKey);
+        }
+    };
+
+    const saveDisplayName = async () => {
+        const nextName = displayNameDraft.trim();
+        const mutationKey = `rename:${selected?.agent_id || ''}`;
+        if (!selected || renameBusy || !nextName || nextName === selected.name ||
+            !beginMutation(mutationKey)) return;
+        setRenameBusy(true);
+        try {
+            const result = await updateAppV26AgentDisplayName(selected.agent_id, nextName);
+            if (result.status === 'confirmation_pending') {
+                await holdPendingConfirmation(result.error);
+                return;
+            }
+            showToast(
+                result.status === 'unchanged'
+                    ? 'Display name was already current; no transaction was committed.'
+                    : 'Display name committed. Registered identity and agent ID are unchanged.',
+                result.status === 'unchanged' ? 'info' : 'success',
+            );
+            if (result.projection_ready === false && result.projection_warning) {
+                showToast(result.projection_warning, 'info', 10000);
+            }
+            await load();
+        } catch (e) {
+            if (mutationMayHaveCommitted(e)) {
+                await holdPendingConfirmation(e.message);
+                return;
+            }
+            showToast(e.message || 'The display-name change was not committed.', 'error', 9000);
+        } finally {
+            setRenameBusy(false);
             endMutation(mutationKey);
         }
     };
@@ -9263,6 +9425,15 @@ function AppV23AccessControl() {
 
     const dropIntoGroup = (group, event) => {
         const dropKind = appV23GroupDropKind(dragAgentID, dragRemoteKey);
+        // Drag/drop is only an input affordance; it must obey the same
+        // consensus/broker/single-flight gate as the explicit controls.  In
+        // particular, an indeterminate commit sets pendingConfirmation and
+        // must not be bypassable by a still-dragging tray item.
+        if (!mutationReady || groupBusy || mutationLockRef.current) {
+            clearLocalDrag();
+            setDragRemoteKey('');
+            return;
+        }
         if (dropKind === 'linked_reader') {
             const remote = remoteCandidates.find(item => item.key === dragRemoteKey);
             setDragRemoteKey('');
@@ -9417,7 +9588,8 @@ function AppV23AccessControl() {
         maxClassification = linkedClearance,
         remote = selectedRemote,
     ) => {
-        if (!remote || linkedBusy || !groupID) return;
+        const mutationKey = `linked:${operation}:${remote?.remote_chain_id || ''}:${remote?.remote_agent_id || ''}:${groupID}`;
+        if (!remote || linkedBusy || !groupID || !beginMutation(mutationKey)) return;
         setLinkedBusy(`${operation}:${groupID}`);
         try {
             await mutateAppV23LinkedReader({
@@ -9444,6 +9616,7 @@ function AppV23AccessControl() {
             showToast(e.message || 'The Linked reader change was rejected.', 'error', 9000);
         } finally {
             setLinkedBusy('');
+            endMutation(mutationKey);
         }
     };
 
@@ -9554,7 +9727,7 @@ function AppV23AccessControl() {
     if (error) return html`<div class="v23-access-banner danger"><strong>Access policy unavailable</strong><span>${error}</span><button class="btn" onClick=${load}>Retry</button></div>`;
 
     const brokerReady = state?.broker?.available === true;
-    const mutationReady = state?.active === true && brokerReady && !saving && !groupBusy && !pendingConfirmation;
+    const mutationReady = state?.active === true && brokerReady && !saving && !renameBusy && !groupBusy && !pendingConfirmation;
     const legacyProfileNeedsReview = appV23ProfileNeedsReview(selected);
     const draftProfileSelectable = appV23ProfileIsSelectable(draft?.profile);
     const homeReapproval = appV23NeedsHomeReapproval(selected, draft);
@@ -9568,7 +9741,7 @@ function AppV23AccessControl() {
         !adminLocalReady || !draft || !draftProfileSelectable || !policyCommitNeeded;
     const capabilityIndicators = appV23CapabilityIndicators(draft || {});
     const selectLocalAgent = async agentID => {
-        if (saving || agentID === selectedID) return;
+        if (saving || renameBusy || agentID === selectedID) return;
         if (policyDirty && !await showConfirmation(
             'Discard the unsaved policy changes for this agent?',
             { title: 'Discard policy changes?', confirmLabel: 'Discard changes', tone: 'danger' },
@@ -9598,27 +9771,6 @@ function AppV23AccessControl() {
                     <button class="btn" onClick=${() => window.location.reload()}>Reload and verify</button>
                 </div>
             `}
-
-            <div class="v23-root-card">
-                <div class="v23-root-mark" aria-hidden="true">R</div>
-                <div>
-                    <div class="v23-eyebrow">Sovereign authority · this machine only</div>
-                    <h3>CEREBRUM Root</h3>
-                    <p>Root is this node’s owner, not an agent or an agent role. It stays out of agent lists and groups. A handover changes the key that controls the same Root-owned domains; existing memories, authors, and ownership history remain readable and unchanged.</p>
-                    <details class="v23-root-diagnostics">
-                        <summary>Authority record</summary>
-                        <div class="v23-mono">Principal ${state.root?.principal_id || 'not established'}</div>
-                        <div class="v23-mono">Current credential ${state.root?.credential_id || 'not established'} · generation ${state.root?.generation ?? '—'}</div>
-                    </details>
-                </div>
-                <div class="v23-root-actions">
-                    <span class="v23-root-badge">ROOT</span>
-                    <button class="btn btn-danger" disabled=${!mutationReady || rootHandoverBusy}
-                        onClick=${() => { setRootHandoverTyped(''); setRootHandoverStage(1); }}>
-                        Begin Root handover
-                    </button>
-                </div>
-            </div>
 
             ${rootHandoverStage > 0 && html`
                 <div class="cerebrum-confirm-overlay">
@@ -9693,7 +9845,7 @@ function AppV23AccessControl() {
                     </div>
                     ${dragSourceGroupID && html`
                         <div class="v23-rail-drop-hint" role="status">
-                            Drop here to remove this agent from its current Access Group. Its own domains stay private and fully usable.
+                            Drop here to remove this agent from this Access Group. Its own domains and access from any other groups remain unchanged.
                         </div>
                     `}
                     ${localAgents.map(agent => html`
@@ -9748,6 +9900,25 @@ function AppV23AccessControl() {
                                 : selected.needs_approval && !legacyProfileNeedsReview &&
                                     html`<span class="v23-review-badge">Pending review</span>`}
                         </div>
+
+                        <form class="v23-agent-name-editor" onSubmit=${event => { event.preventDefault(); saveDisplayName(); }}>
+                            <label class="v23-field">
+                                <span>Display name</span>
+                                <input value=${displayNameDraft} maxlength="128"
+                                    disabled=${renameBusy || !state?.group_authority_active}
+                                    onInput=${event => setDisplayNameDraft(event.currentTarget.value)}
+                                    aria-describedby="v23-agent-name-identity" />
+                            </label>
+                            <button type="submit" class="btn"
+                                disabled=${renameBusy || !mutationReady || !state?.group_authority_active ||
+                                    !displayNameDraft.trim() || displayNameDraft.trim() === selected.name}>
+                                ${renameBusy ? 'Committing…' : 'Rename agent'}
+                            </button>
+                            <small id="v23-agent-name-identity">
+                                Registered as ${selected.registered_name || selected.name || 'unnamed'} · ${selected.agent_id}.
+                                Rename changes only this display label after consensus commit; registered identity, agent ID, and boot purpose stay immutable.
+                            </small>
+                        </form>
 
                         ${legacyProfileNeedsReview && html`
                             <div class="v23-legacy-profile-review" role="status">
@@ -9922,7 +10093,8 @@ function AppV23AccessControl() {
                 <div class="v23-agent-tray" aria-label="Approved local agents available for groups">
                     <span>Drag an agent into a group to add it, or onto another agent above to make a new two-agent group. Use its Add local agent menu instead if you prefer.</span>
                     ${localAgents.filter(a => a.enrollment_active).map(agent => html`
-                        <div class="v23-agent-pill local" draggable="true"
+                        <div class="v23-agent-pill local" draggable=${mutationReady && !groupBusy}
+                            aria-disabled=${!mutationReady || !!groupBusy}
                             title=${`${agent.role || 'member'} · drag into a local group`}
                             onDragStart=${event => startLocalDrag(event, agent.agent_id)}
                             onDragEnd=${clearLocalDrag}>
@@ -10035,6 +10207,27 @@ function AppV23AccessControl() {
                 </div>
             </div>
 
+            <div class="v23-root-card">
+                <div class="v23-root-mark" aria-hidden="true">R</div>
+                <div>
+                    <div class="v23-eyebrow">Sovereign authority · rare recovery action</div>
+                    <h3>CEREBRUM Root</h3>
+                    <p>Root is this node’s owner, not an agent or an agent role. It stays out of agent lists and groups. A handover changes the key that controls the same Root-owned domains; existing memories, authors, and ownership history remain readable and unchanged.</p>
+                    <details class="v23-root-diagnostics">
+                        <summary>Authority record</summary>
+                        <div class="v23-mono">Principal ${state.root?.principal_id || 'not established'}</div>
+                        <div class="v23-mono">Current credential ${state.root?.credential_id || 'not established'} · generation ${state.root?.generation ?? '—'}</div>
+                    </details>
+                </div>
+                <div class="v23-root-actions">
+                    <span class="v23-root-badge">ROOT</span>
+                    <button class="btn btn-danger" disabled=${!mutationReady || rootHandoverBusy}
+                        onClick=${() => { setRootHandoverTyped(''); setRootHandoverStage(1); }}>
+                        Begin Root handover
+                    </button>
+                </div>
+            </div>
+
             ${legacyModel.groups.length > 0 && !legacyDecision && html`
                 <div class="v23-legacy-review">
                     <div>
@@ -10077,7 +10270,8 @@ function AppV23AccessControl() {
                         <div class="v23-agent-tray">
                             <span>Federated agents · drop onto a group to create a separate read-only link</span>
                             ${remoteCandidates.map(remote => html`
-                                <div class="v23-agent-pill federated" draggable="true"
+                                <div class="v23-agent-pill federated" draggable=${mutationReady && !linkedBusy}
+                                    aria-disabled=${!mutationReady || !!linkedBusy}
                                     role="button" tabIndex="0"
                                     aria-label=${`Federated agent ${remote.label}; maximum clearance ${remote.max_clearance}`}
                                     onClick=${() => setSelectedRemoteKey(remote.key)}
@@ -10346,6 +10540,9 @@ function AppV23AccessControl() {
 
 // --- Network Page (Accordion) ---
 function NetworkPage({ sse, accessMode = false }) {
+    const routeQuery = new URLSearchParams((window.location.hash.split('?')[1] || ''));
+    const recoveryAgentID = routeQuery.get('recovery') === '1' ? (routeQuery.get('agent') || '') : '';
+    const recoveryDomain = routeQuery.get('recovery') === '1' ? (routeQuery.get('domain') || '') : '';
     const [agents, setAgents] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showWizard, setShowWizard] = useState(false);
@@ -10385,6 +10582,7 @@ function NetworkPage({ sse, accessMode = false }) {
     const [showRemoveConfirm, setShowRemoveConfirm] = useState(null);
     const [redeployStatus, setRedeployStatus] = useState(null);
     const [allDomains, setAllDomains] = useState([]);
+    const recoveryAccessInitializedRef = useRef('');
     const redeployPollRef = useRef(null);
 
     // Access control state
@@ -10642,6 +10840,39 @@ function NetworkPage({ sse, accessMode = false }) {
         }
     }, [expandedId, accessMode]);
 
+    // Recovery deep-links reopen the already-governed exact-domain matrix. The
+    // query only selects UI context; Save still uses the existing owner/admin
+    // signed grant reconciliation and therefore cannot bypass authority.
+    useEffect(() => {
+        if (!recoveryAgentID || !recoveryDomain) return;
+        const recoveryContextKey = `${recoveryAgentID}\u0000${recoveryDomain}`;
+        if (recoveryAccessInitializedRef.current === recoveryContextKey) return;
+        const agent = agents.find(candidate => candidate.agent_id === recoveryAgentID);
+        if (!agent) return;
+        recoveryAccessInitializedRef.current = recoveryContextKey;
+        setExpandedId(agent.agent_id);
+        setExpandedTab('recovery-domain-access');
+        setEditing(false);
+        setEditRole(agent.role);
+        setEditClearance(agent.clearance);
+        setAccessDirty(false);
+        setAccessSaved(false);
+        setAccessFailures([]);
+        setEditVisibleAgents(agent.visible_agents || '');
+        setEditCapabilities(Number(agent.capabilities || 0));
+        const parsed = {};
+        try {
+            JSON.parse(agent.domain_access || '[]').forEach(entry => {
+                parsed[entry.domain] = {
+                    read: !!entry.read,
+                    write: !!entry.write,
+                    modify: !!entry.modify,
+                };
+            });
+        } catch (_) {}
+        setEditDomainAccess(parsed);
+    }, [agents, recoveryAgentID, recoveryDomain]);
+
     const handleAccessSave = useCallback(async (agentId, adminOverride = false) => {
         if (accessSavingRef.current) return;
         const arr = Object.entries(editDomainAccess)
@@ -10756,6 +10987,12 @@ function NetworkPage({ sse, accessMode = false }) {
     const handleOverviewSave = useCallback(async (agentId) => {
         try {
             const res = await updateAgent(agentId, { name: editName, boot_bio: editBio });
+            if (res.code === 'governed_agent_metadata_required') {
+                showToast('Display names are governed in Access Controls. Registered identity and boot purpose cannot be changed.', 'warning', 8000);
+                setEditing(false);
+                window.location.hash = '/access?agent=' + encodeURIComponent(agentId);
+                return;
+            }
             if (res.error) { showToast(res.error, 'error'); return; }
             if (res.on_chain_warning) {
                 showToast('Saved locally but on-chain sync failed - will auto-heal on next agent boot. (' + res.on_chain_warning + ')', 'warning', 8000);
@@ -11364,6 +11601,13 @@ function NetworkPage({ sse, accessMode = false }) {
                                             e.stopPropagation();
                                             window.location.hash = '/access';
                                         }}>Open Access Controls</button>
+                                        ${recoveryAgentID === agent.agent_id && recoveryDomain && html`
+                                            <button class="agent-tab ${expandedTab === 'recovery-domain-access' ? 'active' : ''}"
+                                                disabled=${accessSaving}
+                                                onClick=${e => { e.stopPropagation(); setExpandedTab('recovery-domain-access'); setEditing(false); }}>
+                                                Exact domain authority
+                                            </button>
+                                        `}
                                         <button class="agent-tab ${expandedTab === 'activity' ? 'active' : ''}" disabled=${accessSaving} onClick=${e => { e.stopPropagation(); setExpandedTab('activity'); setEditing(false); }}>Activity</button>
                                     </div>
 
@@ -11424,11 +11668,10 @@ function NetworkPage({ sse, accessMode = false }) {
                                         </div>
                                     `}
 
-                                    ${expandedTab === 'legacy-access-disabled' && html`
+                                    ${expandedTab === 'recovery-domain-access' && recoveryAgentID === agent.agent_id && recoveryDomain && html`
                                         <div>
                                             <div class="access-identity-note">
-                                                These permissions apply only to signer <span class="mono">${agent.agent_id}</span>.
-                                                The client must report this same Agent ID in <span class="mono">sage_status</span> or <span class="mono">sage_inception</span>; names are labels, not identity.
+                                                Historical principal repair did not grant authority. These permissions apply only to signer <span class="mono">${agent.agent_id}</span>. The client must report this same Agent ID in <span class="mono">sage_status</span> or <span class="mono">sage_inception</span>; names are labels, not identity. The reviewed domain is <strong>${recoveryDomain}</strong>; changing a row affects access to every record in that domain, but never changes ownership or historical memory authorship.
                                             </div>
                                             <div class="access-section-title">Role <${HelpTip} text="Admins have full access to all domains and can manage the network. Members read and write only in the domains they hold an on-chain access grant for. Observers are read-only. Role is fixed when the agent is registered on-chain and cannot be changed here." /></div>
                                             <div class="role-selector" onClick=${e => e.stopPropagation()}>
@@ -11483,11 +11726,13 @@ function NetworkPage({ sse, accessMode = false }) {
 
                                             <div class="access-section-title">Domain Access <${HelpTip} text="Control which knowledge domains this agent can read, write, or modify. Modify is level 3 and includes permission to challenge/deprecate or reinstate memories. The domain owner normally authorizes the change. For an agent installed on this computer, the genesis admin can explicitly override access without changing the original owner or memory authorship." /></div>
                                             <${DomainAccessMatrix}
-                                                domains=${allDomains}
+                                                key=${recoveryDomain}
+                                                domains=${[...new Set([...allDomains, recoveryDomain])]}
                                                 domainAccess=${editDomainAccess}
                                                 onChange=${(v) => { setEditDomainAccess(v); setAccessDirty(true); }}
                                                 busy=${accessSaving}
                                                 denySharedWrite=${(editCapabilities & 2) !== 0}
+                                                initialFilter=${recoveryDomain}
                                             />
                                             ${accessFailures.length > 0 && html`
                                                 <div style="margin-top:12px;padding:12px 14px;border:1px solid rgba(245,158,11,.35);border-radius:10px;background:rgba(245,158,11,.08);" onClick=${e => e.stopPropagation()}>

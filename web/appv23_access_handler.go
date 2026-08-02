@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -31,6 +32,7 @@ const (
 type appV23AgentAccessView struct {
 	AgentID              string `json:"agent_id"`
 	Name                 string `json:"name,omitempty"`
+	RegisteredName       string `json:"registered_name,omitempty"`
 	Avatar               string `json:"avatar,omitempty"`
 	Status               string `json:"status,omitempty"`
 	Provider             string `json:"provider,omitempty"`
@@ -163,6 +165,10 @@ type appV23PolicyRequest struct {
 	Capabilities uint32 `json:"capabilities"`
 }
 
+type appV26AgentDisplayNameRequest struct {
+	Name string `json:"name"`
+}
+
 func appV23PolicyNeedsHomeReapproval(
 	enrollment *store.AppV23LocalEnrollment,
 	nextProfile string,
@@ -172,6 +178,112 @@ func appV23PolicyNeedsHomeReapproval(
 			enrollment.Profile == store.AppV23ProfileLegacyRestricted) &&
 		enrollment.HomeDomain == "" &&
 		nextProfile != store.AppV23ProfileReadOnly
+}
+
+// handleAppV26AgentDisplayName gives the local human operator a governed way
+// to change only an agent's mutable display label. The registered name,
+// agent_id, and boot bio are copied from current consensus state and cannot be
+// supplied by the browser. Consensus enforces the same invariant at H+1, so a
+// forged AgentUpdate cannot use this route's authority to rewrite identity or
+// purpose metadata.
+func (h *DashboardHandler) handleAppV26AgentDisplayName() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		actor, ok := h.requireAppV23ControlActor(w, r, true)
+		if !ok {
+			return
+		}
+		if !h.appV26IsActive() {
+			writeAppV23AccessError(w, http.StatusConflict, "app_v26_inactive",
+				"Operator display-name changes require governed app-v26 activation.")
+			return
+		}
+		agentID := strings.TrimSpace(chi.URLParam(r, "id"))
+		if _, err := auth.AgentIDToPublicKey(agentID); err != nil {
+			writeAppV23AccessError(w, http.StatusBadRequest, "invalid_agent_id",
+				"Agent ID must be canonical lowercase Ed25519 hex.")
+			return
+		}
+		if h.appV23IsRootIdentity(agentID) {
+			writeAppV23AccessError(w, http.StatusForbidden, "root_identity_immutable",
+				"CEREBRUM Root is sovereign authority and cannot be renamed as an agent.")
+			return
+		}
+		var req appV26AgentDisplayNameRequest
+		if err := decodeAppV23AccessJSON(w, r, &req); err != nil {
+			writeAppV23AccessError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		req.Name = strings.TrimSpace(req.Name)
+		if !utf8.ValidString(req.Name) || req.Name == "" || len(req.Name) > 128 {
+			writeAppV23AccessError(w, http.StatusBadRequest, "invalid_display_name",
+				"Display name must be 1–128 UTF-8 bytes after trimming.")
+			return
+		}
+		current, err := h.BadgerStore.GetRegisteredAgent(agentID)
+		if err != nil || current == nil {
+			writeAppV23AccessError(w, http.StatusNotFound, "agent_not_registered",
+				"The selected local agent is not registered in consensus state.")
+			return
+		}
+		if req.Name == current.Name {
+			writeJSONResp(w, http.StatusOK, map[string]any{
+				"ok": true, "status": "unchanged", "committed": false,
+				"agent_id": agentID, "name": current.Name,
+				"registered_name": current.RegisteredName,
+			})
+			return
+		}
+		ptx := &tx.ParsedTx{
+			Type: tx.TxTypeAgentUpdate,
+			AgentUpdateTx: &tx.AgentUpdate{
+				AgentID: agentID,
+				Name:    req.Name,
+				BootBio: current.BootBio,
+			},
+		}
+		hash, height, _, broadcastErr := h.signAndBroadcastAppV23ControlContext(r.Context(), ptx, actor)
+		reconciled := false
+		if broadcastErr != nil {
+			if isIndeterminateCommitError(broadcastErr) {
+				reconciled = waitForAppV23CommittedState(func() bool {
+					updated, lookupErr := h.BadgerStore.GetRegisteredAgent(agentID)
+					return lookupErr == nil && updated != nil && updated.Name == req.Name &&
+						updated.BootBio == current.BootBio &&
+						updated.RegisteredName == current.RegisteredName
+				})
+				if !reconciled {
+					writeAppV23CommitUnconfirmed(w, "agent display-name change")
+					return
+				}
+			} else {
+				writeAppV23AccessError(w, http.StatusConflict, "consensus_rejected",
+					"The display-name change was not committed.")
+				return
+			}
+		}
+		projectionReady := false
+		projectionWarning := "The display name committed, but the local Agents view is still catching up. Do not submit the rename again."
+		if agentStore, storeOK := h.store.(store.AgentStore); storeOK {
+			local, localErr := agentStore.GetAgent(r.Context(), agentID)
+			if localErr == nil && local != nil {
+				projected := *local
+				projected.Name = req.Name
+				projected.RegisteredName = current.RegisteredName
+				projected.BootBio = current.BootBio
+				if updateErr := agentStore.UpdateAgent(r.Context(), &projected); updateErr == nil {
+					projectionReady = true
+					projectionWarning = ""
+				}
+			}
+		}
+		writeJSONResp(w, http.StatusOK, map[string]any{
+			"ok": true, "status": "committed", "committed": true,
+			"agent_id": agentID, "name": req.Name,
+			"registered_name": current.RegisteredName,
+			"tx_hash":         hash, "height": height, "reconciled": reconciled,
+			"projection_ready": projectionReady, "projection_warning": projectionWarning,
+		})
+	}
 }
 
 type appV23GroupRequest struct {
@@ -688,13 +800,26 @@ func (h *DashboardHandler) handleAppV23AccessState(agentStore store.AgentStore) 
 				continue
 			}
 			view := appV23AgentAccessView{
-				AgentID:      agent.AgentID,
-				Role:         agent.Role,
-				Clearance:    agent.Clearance,
-				Capabilities: uint32(agent.Capabilities),
+				AgentID:        agent.AgentID,
+				Name:           agent.Name,
+				RegisteredName: agent.RegisteredName,
+				Role:           agent.Role,
+				Clearance:      agent.Clearance,
+				Capabilities:   uint32(agent.Capabilities),
 			}
 			if local := metadata[agent.AgentID]; local != nil {
-				view.Name = local.Name
+				// Consensus is authoritative for a governed display-name once it
+				// exists.  The SQLite row is only a compatibility fallback for
+				// older registrations whose on-chain name is empty.  Letting a
+				// stale local projection override a committed rename makes the
+				// operator think the transaction was lost and invites a duplicate
+				// submission after a projection write/restart failure.
+				if view.Name == "" && local.Name != "" {
+					view.Name = local.Name
+				}
+				if view.RegisteredName == "" {
+					view.RegisteredName = local.RegisteredName
+				}
 				view.Avatar = local.Avatar
 				view.Status = local.Status
 				view.Provider = local.Provider

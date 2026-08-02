@@ -759,6 +759,11 @@ func TestSageDirectoryReturnsMinimalExactLocalRecipientRoster(t *testing.T) {
 			"total": 2,
 		})
 	})
+	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connections": []map[string]any{}, "total": 0,
+		})
+	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
 
@@ -769,7 +774,9 @@ func TestSageDirectoryReturnsMinimalExactLocalRecipientRoster(t *testing.T) {
 	require.True(t, signed, "the local roster must use the signed caller identity")
 
 	out := result.(map[string]any)
-	require.Equal(t, "local", out["scope"])
+	require.Equal(t, "all", out["scope"])
+	require.Equal(t, false, out["complete"])
+	require.NotEmpty(t, out["warnings"])
 	require.Equal(t, 2, out["total"])
 	agents := out["agents"].([]map[string]any)
 	require.Len(t, agents, 2)
@@ -782,6 +789,54 @@ func TestSageDirectoryReturnsMinimalExactLocalRecipientRoster(t *testing.T) {
 	require.Equal(t, "agent/sage-voice-bridge", agents[1]["registered_name"])
 	require.NotContains(t, agents[1], "role")
 	require.NotContains(t, agents[1], "memory_count")
+}
+
+func TestSageDirectoryReturnsCallerAuthorizedFederatedUnionWithoutPresence(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agents/directory", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agents": []map[string]any{{
+				"agent_id": "local-a", "name": "Local A",
+				"registered_name": "codex/local-a", "provider": "codex",
+			}},
+		})
+	})
+	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, r *http.Request) {
+		require.NotEmpty(t, r.Header.Get("X-Agent-ID"))
+		remoteID := strings.Repeat("a", 64)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"connections": []map[string]any{{
+				"remote_chain_id": "chain-peer", "network_name": "Peer SAGE",
+				"reachable": true,
+				"remote_agents": []map[string]any{{
+					"agent_id": remoteID, "display_name": "Remote A",
+					"registered_name": "mynah/remote-a", "provider": "mynah",
+					"address":            remoteID + "@chain-peer",
+					"authorization_mode": "linked-v23",
+					"available":          false, "accepting": false,
+				}},
+			}},
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	result, err := s.toolDirectory(context.Background(), nil)
+	require.NoError(t, err)
+	out := result.(map[string]any)
+	require.Equal(t, false, out["complete"])
+	agents := out["agents"].([]map[string]any)
+	require.Len(t, agents, 2)
+	remote := agents[1]
+	require.Equal(t, "federated", remote["scope"])
+	require.Equal(t, "authorized", remote["status"])
+	require.Equal(t, "chain-peer", remote["node_id"])
+	require.Equal(t, strings.Repeat("a", 64)+"@chain-peer", remote["to"])
+	require.NotContains(t, remote, "reachable")
+	require.NotContains(t, remote, "available")
+	require.NotContains(t, remote, "accepting")
 }
 
 func TestSageFindAgentUsesSignedLookupMatchWithoutStatusRefilter(t *testing.T) {

@@ -294,6 +294,92 @@ func TestAppV23PolicyApprovalUsesCommittedRootAndTargetConsent(t *testing.T) {
 	))
 }
 
+func TestAppV26RootDisplayRenameBroadcastsOnlyMutableLabel(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	require.NoError(t, fixture.badger.UpdateAgentMeta(
+		fixture.agentID, "Mynah", "voice bridge purpose remains immutable",
+	))
+	before, err := fixture.badger.GetRegisteredAgent(fixture.agentID)
+	require.NoError(t, err)
+
+	var captured *tx.ParsedTx
+	var calls atomic.Int32
+	rpc := newGrantRPC(t, &captured, &calls)
+	defer rpc.Close()
+	h := appV23AccessTestHandler(fixture, rpc.URL, nil)
+	h.AppV26ActiveFn = func() bool { return true }
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	require.NoError(t, sqlStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: fixture.agentID, Name: "Mynah", RegisteredName: before.RegisteredName,
+		BootBio: before.BootBio, Role: store.AppV23RoleMember, Status: "active",
+	}))
+	h.store = sqlStore
+	req := appV23AccessRequest(
+		t, http.MethodPut,
+		"/v1/dashboard/network/access/agents/"+fixture.agentID+"/name",
+		"id", fixture.agentID, map[string]any{"name": "  Sage Voice Bridge  "},
+	)
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleAppV26AgentDisplayName().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, int32(1), calls.Load())
+	require.NotNil(t, captured)
+	require.Equal(t, tx.TxTypeAgentUpdate, captured.Type)
+	require.NotNil(t, captured.AgentUpdateTx)
+	require.Equal(t, fixture.agentID, captured.AgentUpdateTx.AgentID)
+	require.Equal(t, "Sage Voice Bridge", captured.AgentUpdateTx.Name)
+	require.Equal(t, before.BootBio, captured.AgentUpdateTx.BootBio)
+	require.Equal(t, fixture.rootID, agentIDForKey(fixture.rootKey))
+	require.Equal(t, []byte(fixture.rootKey.Public().(ed25519.PublicKey)), []byte(captured.PublicKey))
+
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.Equal(t, true, response["committed"])
+	require.Equal(t, "committed", response["status"])
+	require.Equal(t, before.RegisteredName, response["registered_name"])
+	require.Equal(t, true, response["projection_ready"])
+	projected, err := sqlStore.GetAgent(context.Background(), fixture.agentID)
+	require.NoError(t, err)
+	require.Equal(t, "Sage Voice Bridge", projected.Name)
+	require.Equal(t, before.RegisteredName, projected.RegisteredName)
+	require.Equal(t, before.BootBio, projected.BootBio)
+}
+
+func TestAppV26DisplayRenameRequiresActivationAndCurrentControlActor(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	var captured *tx.ParsedTx
+	var calls atomic.Int32
+	rpc := newGrantRPC(t, &captured, &calls)
+	defer rpc.Close()
+	h := appV23AccessTestHandler(fixture, rpc.URL, nil)
+
+	inactiveReq := appV23AccessRequest(
+		t, http.MethodPut, "/v1/dashboard/network/access/agents/"+fixture.agentID+"/name",
+		"id", fixture.agentID, map[string]any{"name": "new label"},
+	)
+	inactiveReq = appV23AccessAs(inactiveReq, fixture.rootID)
+	inactiveRec := httptest.NewRecorder()
+	h.handleAppV26AgentDisplayName().ServeHTTP(inactiveRec, inactiveReq)
+	require.Equal(t, http.StatusConflict, inactiveRec.Code, inactiveRec.Body.String())
+	require.Contains(t, inactiveRec.Body.String(), "app_v26_inactive")
+
+	h.AppV26ActiveFn = func() bool { return true }
+	memberReq := appV23AccessRequest(
+		t, http.MethodPut, "/v1/dashboard/network/access/agents/"+fixture.agentID+"/name",
+		"id", fixture.agentID, map[string]any{"name": "member label"},
+	)
+	memberReq = appV23AccessAs(memberReq, fixture.agentID)
+	memberRec := httptest.NewRecorder()
+	h.handleAppV26AgentDisplayName().ServeHTTP(memberRec, memberReq)
+	require.Equal(t, http.StatusForbidden, memberRec.Code, memberRec.Body.String())
+	require.Contains(t, memberRec.Body.String(), "current_local_admin_required")
+	require.Equal(t, int32(0), calls.Load())
+}
+
 func TestAppV23PolicyApprovalImmediatelyRepairsAgentsProjection(t *testing.T) {
 	_, rootKey, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
@@ -716,6 +802,43 @@ func TestAppV23GroupMutationReconcilesCommittedStateAfterMalformedRPCResponse(t 
 	assert.Equal(t, uint64(1), group.Revision)
 }
 
+func TestAppV26GroupMutationReconcilesAuthorityAfterMalformedRPCResponse(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, err := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("tx"), "0x"))
+		require.NoError(t, err)
+		parsed, err := tx.DecodeTx(raw)
+		require.NoError(t, err)
+		require.NotNil(t, parsed.AccessGroupMutate)
+		mutation := parsed.AccessGroupMutate
+		require.NoError(t, fixture.badger.MutateAppV26AccessGroup(
+			fixture.rootID, mutation.GroupID, mutation.Name, mutation.Members,
+			mutation.MemberAuthority, mutation.ExpectedRevision,
+			mutation.Delete, 2,
+		))
+		_, _ = fmt.Fprint(w, `{`)
+	}))
+	defer rpc.Close()
+	h := appV23AccessTestHandler(fixture, rpc.URL, nil)
+	h.AppV26ActiveFn = func() bool { return true }
+	req := appV23AccessRequest(t, http.MethodPut, "/groups/research", "groupID", "research", map[string]any{
+		"name": "Research", "members": []string{fixture.agentID},
+		"member_authority":  store.AppV26GroupAuthorityReadWriteModify,
+		"expected_revision": 0,
+	})
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleAppV23AccessGroupPut().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"reconciled":true`)
+	group, err := fixture.badger.GetAppV23AccessGroup("research")
+	require.NoError(t, err)
+	require.NotNil(t, group)
+	assert.Equal(t, store.AppV26GroupAuthorityReadWriteModify, group.MemberAuthority)
+	assert.Equal(t, uint64(1), group.Revision)
+}
+
 func TestAppV23GroupMutationDoesNotResubmitWhenCommitResponseIsUncertain(t *testing.T) {
 	fixture := newAppV23AccessFixture(t)
 	var calls atomic.Int32
@@ -1057,6 +1180,10 @@ func TestAppV23AccessStateSeparatesRootAndLinkedReaders(t *testing.T) {
 	assert.Equal(t, fixture.rootID, response.Root.PrincipalID)
 	require.Len(t, response.Agents, 1)
 	assert.Equal(t, fixture.agentID, response.Agents[0].AgentID)
+	assert.Equal(t, "Mynah", response.Agents[0].Name,
+		"existing local display metadata remains visible until a governed rename commits")
+	assert.Equal(t, "Mynah", response.Agents[0].RegisteredName,
+		"legacy empty registered names use the projection's immutable registration fallback")
 	require.Len(t, response.Groups, 1)
 	assert.Equal(t, "local-team", response.Groups[0].GroupID)
 	assert.Equal(t, []string{
@@ -1066,6 +1193,34 @@ func TestAppV23AccessStateSeparatesRootAndLinkedReaders(t *testing.T) {
 	}, response.Profiles, "migration-only legacy restrictions must never be advertised as selectable")
 	assert.Equal(t, "unavailable", response.LinkedReaders.Status)
 	assert.Equal(t, "linked_readers_api_unavailable", response.LinkedReaders.ReasonCode)
+}
+
+func TestAppV26AccessStatePrefersGovernedNameOverStaleLocalProjection(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	require.NoError(t, fixture.badger.UpdateAgentMeta(
+		fixture.agentID, "Consensus label", "immutable purpose",
+	))
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	require.NoError(t, sqlStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: fixture.agentID, Name: "Stale local label", Role: "member",
+		Status: "active", Clearance: 1,
+	}))
+	h := appV23AccessTestHandler(fixture, "", nil)
+	h.AppV26ActiveFn = func() bool { return true }
+	req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/network/access", nil)
+	rec := httptest.NewRecorder()
+	h.handleAppV23AccessState(sqlStore).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var response struct {
+		Agents []appV23AgentAccessView `json:"agents"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.Len(t, response.Agents, 1)
+	require.Equal(t, "Consensus label", response.Agents[0].Name,
+		"a stale dashboard row must not hide a committed governed rename")
 }
 
 func TestCanonicalAppV23GroupMembersRejectsAdminSuspendedByRootHandover(t *testing.T) {

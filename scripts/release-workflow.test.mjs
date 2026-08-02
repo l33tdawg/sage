@@ -585,6 +585,7 @@ test('Dependabot ignores only incompatible post-v0 go-libp2p versions', () => {
 
 test('macOS release artifacts must be signed, notarized, stapled, and assessed', () => {
   const body = job('macos-dmg');
+  const stagedBody = job('verify-staged-macos-release');
   assert.match(body, /APPLE_CERTIFICATE_BASE64/);
   assert.match(body, /APPLE_CERTIFICATE_PASSWORD/);
   assert.match(body, /NOTARIZE: '1'/);
@@ -615,8 +616,55 @@ test('macOS release artifacts must be signed, notarized, stapled, and assessed',
   );
   assert.match(macosBuild, /hdiutil attach -readonly -nobrowse -mountpoint/);
   assert.match(macosBuild, /codesign --verify --deep --strict --verbose=2 "\$VERIFY_MOUNT\/SAGE\.app"/);
+  assert.match(macosBuild, /Contents\/MacOS\/sage-gui:sage-gui/);
+  assert.match(macosBuild, /Contents\/MacOS\/sage-tray:com\.sage\.brain/);
+  assert.match(macosBuild, /codesign --verify --strict --verbose=2 "\$leaf"/);
+  assert.match(macosBuild, /grep -Fx "TeamIdentifier=\$\{APPLE_TEAM_ID\}"/);
+  assert.match(macosBuild, /bundle_byte_manifest/);
+  assert.match(macosBuild, /\/usr\/bin\/ditto "\$VERIFY_MOUNT\/SAGE\.app" "\$COPY_VERIFY_APP"/);
+  assert.match(macosBuild, /diff -u "\$\{COPY_VERIFY_ROOT\}\/mounted\.manifest" "\$\{COPY_VERIFY_ROOT\}\/copied\.manifest"/);
+  assert.match(macosBuild, /verify_app_release_metadata "\$COPY_VERIFY_APP" "\$\{VERSION\}"/);
+  assert.match(macosBuild, /stat -f '%Lp' "\$leaf"/);
+  assert.match(macosBuild, /require_writable_apfs_path "\$COPY_VERIFY_ROOT"/);
+  assert.match(macosBuild, /Print :CFBundleShortVersionString/);
+  assert.match(body, /\/usr\/bin\/ditto "\$\{MOUNT_POINT\}\/SAGE\.app" "\$\{COPY_VERIFY_APP\}"/);
+  assert.match(stagedBody, /\/usr\/bin\/ditto "\$\{mount_point\}\/SAGE\.app" "\$\{copy_verify_app\}"/);
+  assert.match(body, /bundle_byte_manifest/);
+  assert.match(body, /diff -u "\$\{COPY_VERIFY_ROOT\}\/mounted\.manifest" "\$\{COPY_VERIFY_ROOT\}\/copied\.manifest"/);
+  assert.match(body, /version_output=\$\("\$\{COPY_VERIFY_APP\}\/Contents\/MacOS\/sage-gui" version\)/);
+  assert.match(body, /awk 'NR == 1 \{ print \$2 \}'\)" = "\$\{SAGE_VERSION#v\}"/);
+  assert.match(stagedBody, /version_output=\$\("\$\{copy_verify_app\}\/Contents\/MacOS\/sage-gui" version\)/);
+  assert.match(stagedBody, /awk 'NR == 1 \{ print \$2 \}'\)" = "\$\{RELEASE_TAG#v\}"/);
+  assert.match(body, /Contents\/MacOS\/sage-gui:sage-gui/);
+  assert.match(body, /Contents\/MacOS\/sage-tray:com\.sage\.brain/);
+  assert.match(body, /test -f "\$\{leaf\}" && test ! -L "\$\{leaf\}" && test -x "\$\{leaf\}"/);
+  assert.match(body, /stat -f '%Lp' "\$\{leaf\}"/);
+  assert.match(body, /codesign --verify --strict --verbose=2 "\$\{leaf\}"/);
+  assert.match(body, /grep -Fx "TeamIdentifier=\$\{APPLE_TEAM_ID\}"/);
+  assert.match(body, /grep -Fx "Identifier=com\.sage\.brain"/);
+  assert.match(stagedBody, /grep -Fx "TeamIdentifier=2N7GKZ8D8Z"/);
+  assert.match(stagedBody, /"SAGE-macOS-\$\{arch\}\.dmg"/);
+  assert.match(stagedBody, /test "\$\{published_name\}" = "\$\(basename "\$\{dmg\}"\)"/);
+  assert.match(stagedBody, /File System Personality:\[\[:space:\]\]\+APFS/);
+  assert.match(stagedBody, /spctl --assess --type execute --verbose=4 "\$\{copy_verify_app\}"/);
+  assert.match(stagedBody, /Print :CFBundleShortVersionString/);
   assert.match(body, /stapler validate/);
   assert.match(body, /spctl --assess --type execute/);
+});
+
+test('the exact GoReleaser Linux archive crosses extraction and atomic updater swap', () => {
+  const body = job('goreleaser-prepare');
+  assert.match(body, /SAGE_PACKAGED_UPDATE_ARCHIVE:/);
+  assert.match(body, /sage-gui_\$\{\{ needs\.release-metadata\.outputs\.version \}\}_linux_amd64\.tar\.gz/);
+  assert.match(body, /go test \.\/web -run '\^TestLinuxPackagedBinarySwapEndToEnd\$' -count=1/);
+});
+
+test('public package publication waits for the exact staged macOS assets', () => {
+  const body = job('publish-docker-version');
+  assert.match(
+    body,
+    /needs:\s*\[stage-github-release, verify-staged-macos-release, release-metadata\]/,
+  );
 });
 
 test('desktop release metadata strips the tag prefix without renaming versioned assets', () => {

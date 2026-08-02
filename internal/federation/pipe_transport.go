@@ -35,27 +35,29 @@ var (
 // OriginEventID links a result to the original send proof without exposing or
 // trusting either node's private local pipe id.
 type PipeEvent struct {
-	Version            int                      `json:"version"`
-	EventID            string                   `json:"event_id"`
-	Kind               string                   `json:"kind"`
-	OriginEventID      string                   `json:"origin_event_id,omitempty"`
-	SourcePipeID       string                   `json:"source_pipe_id,omitempty"`
-	SourceChainID      string                   `json:"source_chain_id"`
-	DestinationChainID string                   `json:"destination_chain_id"`
-	SourceAgentID      string                   `json:"source_agent_id"`
-	TargetAgentID      string                   `json:"target_agent_id"`
-	Intent             string                   `json:"intent,omitempty"`
-	Payload            string                   `json:"payload,omitempty"`
-	Result             string                   `json:"result,omitempty"`
-	CreatedAt          time.Time                `json:"created_at"`
-	ExpiresAt          time.Time                `json:"expires_at"`
-	PolicyEpoch        string                   `json:"policy_epoch"`
-	AgreementID        string                   `json:"agreement_id"`
-	ContactID          string                   `json:"contact_id"`
-	ContactRevision    string                   `json:"contact_revision"`
-	AuthorizationMode  string                   `json:"authorization_mode,omitempty"`
-	LinkedRelation     *LinkedMessageRelation   `json:"linked_relation,omitempty"`
-	Proof              store.PipelineAgentProof `json:"proof"`
+	Version                int                      `json:"version"`
+	EventID                string                   `json:"event_id"`
+	Kind                   string                   `json:"kind"`
+	OriginEventID          string                   `json:"origin_event_id,omitempty"`
+	SourcePipeID           string                   `json:"source_pipe_id,omitempty"`
+	SourceChainID          string                   `json:"source_chain_id"`
+	DestinationChainID     string                   `json:"destination_chain_id"`
+	SourceAgentID          string                   `json:"source_agent_id"`
+	TargetAgentID          string                   `json:"target_agent_id"`
+	Intent                 string                   `json:"intent,omitempty"`
+	Payload                string                   `json:"payload,omitempty"`
+	Result                 string                   `json:"result,omitempty"`
+	CreatedAt              time.Time                `json:"created_at"`
+	ExpiresAt              time.Time                `json:"expires_at"`
+	PolicyEpoch            string                   `json:"policy_epoch"`
+	AgreementID            string                   `json:"agreement_id"`
+	ContactID              string                   `json:"contact_id"`
+	ContactRevision        string                   `json:"contact_revision"`
+	AuthorizationMode      string                   `json:"authorization_mode,omitempty"`
+	LinkedRelation         *LinkedMessageRelation   `json:"linked_relation,omitempty"`
+	ReceiptProtocolVersion int                      `json:"receipt_protocol_version,omitempty"`
+	ReceiptContentDigest   string                   `json:"receipt_content_digest,omitempty"`
+	Proof                  store.PipelineAgentProof `json:"proof"`
 }
 
 type PipeEventResponse struct {
@@ -622,13 +624,31 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 		SourceChainID: event.SourceChainID, SourcePipeID: event.EventID,
 		FederationPolicyEpoch: event.PolicyEpoch, FederationAgreementID: event.AgreementID,
 		FederationContactID: event.ContactID, FederationContactRevision: event.ContactRevision,
-		FederationAuthorizationMode: event.AuthorizationMode,
+		FederationAuthorizationMode:       event.AuthorizationMode,
+		FederationReceiptProtocolVersion:  event.ReceiptProtocolVersion,
+		FederationReceiptContentDigest:    event.ReceiptContentDigest,
+		FederationReceiptRecipientChainID: event.DestinationChainID,
 	}
 	if event.LinkedRelation != nil {
 		msg.FederationLinkedRelation, err = json.Marshal(event.LinkedRelation)
 		if err != nil {
 			return "", false, ErrFederatedPipeInvalid
 		}
+	}
+	switch event.ReceiptProtocolVersion {
+	case 0:
+		if event.ReceiptContentDigest != "" {
+			return "", false, fmt.Errorf("legacy send cannot carry receipt-v2 evidence")
+		}
+	case PipeReceiptVersion:
+		if m.postV26ForNextTx == nil || !m.postV26ForNextTx() ||
+			event.ReceiptContentDigest != pipeReceiptContentDigest(
+				event.EventID, event.SourceChainID, event.DestinationChainID, msg,
+			) {
+			return "", false, fmt.Errorf("receipt-v2 negotiation or content binding is invalid")
+		}
+	default:
+		return "", false, fmt.Errorf("unsupported receipt protocol version")
 	}
 	proofHash := PipelineProofHash(event.SourceChainID, event.Kind, event.Proof)
 	contentHash := pipeEventContentHash(event)

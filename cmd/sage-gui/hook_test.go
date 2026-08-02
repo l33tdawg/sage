@@ -42,6 +42,13 @@ func withTestSageEnv(t *testing.T, apiURL string) string {
 	return keyPath
 }
 
+func TestHookBaseURLHonorsCustomTLSListener(t *testing.T) {
+	t.Setenv("SAGE_API_URL", "")
+	t.Setenv("SAGE_HOME", t.TempDir())
+	t.Setenv("SAGE_TLS_ADDR", "127.0.0.1:18443")
+	assert.Equal(t, "https://127.0.0.1:18443", hookBaseURL())
+}
+
 func TestHookSessionStart_PrintsMemoriesContextBlock(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/agent/me" {
@@ -142,6 +149,80 @@ func TestHookSessionStart_MissingKeyReturnsError(t *testing.T) {
 
 	err := runHookSessionStart()
 	require.Error(t, err, "no key file → soft-fail back to nudge")
+}
+
+func writeHookTestSeed(t *testing.T, path string) []byte {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0700))
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	seed := priv.Seed()
+	require.NoError(t, os.WriteFile(path, seed, 0600))
+	return seed
+}
+
+func withHookWorkingDirectory(t *testing.T, path string) {
+	t.Helper()
+	original, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(path))
+	t.Cleanup(func() { require.NoError(t, os.Chdir(original)) })
+}
+
+func TestLoadHookSeedNeverFallsBackToOperatorForMissingPinnedIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SAGE_HOME", home)
+	t.Setenv("SAGE_IDENTITY_MODE", "pinned")
+	t.Setenv("SAGE_IDENTITY_PATH", filepath.Join(home, "agents", "missing", "agent.key"))
+	t.Setenv("SAGE_AGENT_KEY", "")
+	writeHookTestSeed(t, filepath.Join(home, "agent.key"))
+
+	_, err := loadHookSeed()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "missing")
+}
+
+func TestLoadHookSeedNeverFallsBackToOperatorForMalformedPinnedIdentity(t *testing.T) {
+	home := t.TempDir()
+	pinned := filepath.Join(home, "agents", "malformed", "agent.key")
+	require.NoError(t, os.MkdirAll(filepath.Dir(pinned), 0700))
+	require.NoError(t, os.WriteFile(pinned, []byte("not-an-ed25519-key"), 0600))
+	writeHookTestSeed(t, filepath.Join(home, "agent.key"))
+	t.Setenv("HOME", home)
+	t.Setenv("SAGE_HOME", home)
+	t.Setenv("SAGE_IDENTITY_MODE", "pinned")
+	t.Setenv("SAGE_IDENTITY_PATH", pinned)
+	t.Setenv("SAGE_AGENT_KEY", "")
+
+	_, err := loadHookSeed()
+	require.ErrorContains(t, err, "invalid Ed25519 key length")
+}
+
+func TestLoadHookSeedWorkspaceModeMatchesMCPAndNeverBorrowsOperator(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	withHookWorkingDirectory(t, project)
+	project, err := os.Getwd()
+	require.NoError(t, err)
+	t.Setenv("HOME", home)
+	t.Setenv("SAGE_HOME", home)
+	t.Setenv("SAGE_PROVIDER", "codex")
+	t.Setenv("SAGE_PROJECT", "")
+	t.Setenv("SAGE_IDENTITY_MODE", "workspace")
+	t.Setenv("SAGE_IDENTITY_PATH", filepath.Join(home, "foreign.key"))
+	t.Setenv("SAGE_AGENT_KEY", filepath.Join(home, "agent.key"))
+	writeHookTestSeed(t, filepath.Join(home, "agent.key"))
+
+	expectedPath := implicitMCPIdentityPath(home, project, "codex", "")
+	expectedSeed := writeHookTestSeed(t, expectedPath)
+	seed, err := loadHookSeed()
+	require.NoError(t, err)
+	require.Equal(t, expectedSeed, seed)
+
+	require.NoError(t, os.Remove(expectedPath))
+	_, err = loadHookSeed()
+	require.Error(t, err, "missing workspace key must soft-fail instead of borrowing Root")
 }
 
 func TestHookSessionEnd_PostsLifecycleObservation(t *testing.T) {

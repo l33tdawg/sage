@@ -62,6 +62,9 @@ func TestPersistFederationRouteSnapshotRoundTripsVersionAndGeneration(t *testing
 	assert.Equal(t, int64(100), got.IssuedAt)
 	assert.Equal(t, int64(200), got.ExpiresAt)
 	assert.Equal(t, "generation-hash", got.Generation)
+	assert.Equal(t, filepath.Join(tmp, "data"), loaded.DataDir)
+	assert.Equal(t, filepath.Join(tmp, "agent.key"), loaded.AgentKey,
+		"route persistence must not turn an omitted key path into SAGE_HOME itself")
 }
 
 func TestSelectFederationRouteAddressesKeepsMultipleRelayCandidates(t *testing.T) {
@@ -249,6 +252,16 @@ func TestLoadConfig_VoterEnvOverrides(t *testing.T) {
 	assert.False(t, cfg.Voter.Required)
 }
 
+func TestLoadConfig_TLSAddrEnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("SAGE_HOME", tmp)
+	t.Setenv("SAGE_TLS_ADDR", "127.0.0.1:18443")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:18443", cfg.Quorum.TLSAddr)
+}
+
 func TestLoadConfig_VoterRequiredEnv(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("SAGE_HOME", tmp)
@@ -318,6 +331,39 @@ func TestPersistChainID_KeepsVoterDefault(t *testing.T) {
 	assert.Equal(t, "sage-test-chain", cfg.ChainID)
 	assert.Equal(t, ":9090", cfg.RESTAddr)
 	assert.True(t, cfg.Voter.Enabled, "chain_id rewrite must not flip the voter default off")
+	assert.Equal(t, filepath.Join(tmp, "data"), cfg.DataDir,
+		"chain_id rewrite must not turn an omitted data path into SAGE_HOME itself")
+	assert.Equal(t, filepath.Join(tmp, "agent.key"), cfg.AgentKey,
+		"chain_id rewrite must not turn an omitted key path into SAGE_HOME itself")
+
+	written, err := os.ReadFile(filepath.Join(tmp, "config.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(written), "data_dir: data")
+	assert.Contains(t, string(written), "agent_key_file: agent.key")
+}
+
+func TestRawConfigRoundTripsKeepOmittedStableIdentityDefaults(t *testing.T) {
+	mutations := []struct {
+		name string
+		run  func() error
+	}{
+		{"federation toggle", func() error { return persistFederationEnabled(true) }},
+		{"network rename", func() error { return persistNetworkName("Test node") }},
+	}
+	for _, mutation := range mutations {
+		t.Run(mutation.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("SAGE_HOME", home)
+			require.NoError(t, os.WriteFile(filepath.Join(home, "config.yaml"), []byte("rest_addr: :9090\n"), 0o600))
+
+			require.NoError(t, mutation.run())
+			loaded, err := LoadConfig()
+			require.NoError(t, err)
+			assert.Equal(t, filepath.Join(home, "data"), loaded.DataDir)
+			assert.Equal(t, filepath.Join(home, "agent.key"), loaded.AgentKey)
+			assert.NotEqual(t, home, loaded.AgentKey)
+		})
+	}
 }
 
 func TestSageHome_EnvVar(t *testing.T) {

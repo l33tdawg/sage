@@ -395,11 +395,12 @@ type GovPropose struct {
 // ProposalID links the tx to the on-chain decision record. Optionally
 // promotes the domain to shared via the on-chain shared_domain:<name> key.
 type DomainReassign struct {
-	Domain       string // target of TransferDomain.name
-	NewOwnerID   string // TransferDomain.newOwnerID (hex agent ID)
-	ParentDomain string // TransferDomain.parentDomain; must match existing parent or be empty
-	ProposalID   string // hex(32), links to the accepted gov_propose
-	OpenToShared bool   // also write shared_domain:<name>
+	Domain          string // target of TransferDomain.name
+	NewOwnerID      string // TransferDomain.newOwnerID (hex agent ID)
+	ParentDomain    string // TransferDomain.parentDomain; must match existing parent or be empty
+	ProposalID      string // hex(32), links to the accepted gov_propose
+	OpenToShared    bool   // also write shared_domain:<name>
+	ExpectedOwnerID string `json:"ExpectedOwnerID,omitempty"` // app-v26 ownership CAS binding
 }
 
 // MemoryDomainRepairEntry is one {memory_id → domain} backfill in an

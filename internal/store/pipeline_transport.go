@@ -168,6 +168,9 @@ func validatePipelineTransportOutbox(event *PipelineTransportOutbox) error {
 	if event.CreatedAt.IsZero() || event.ExpiresAt.IsZero() || !event.ExpiresAt.After(event.CreatedAt) {
 		return fmt.Errorf("federated pipeline transport lifetime is invalid")
 	}
+	if event.ReceiptProtocolVersion != 0 && event.ReceiptProtocolVersion != FederatedPipelineReceiptVersion {
+		return fmt.Errorf("unsupported federated pipeline receipt protocol version")
+	}
 	switch event.AuthorizationMode {
 	case "":
 		if len(event.LinkedRelation) != 0 {
@@ -210,14 +213,14 @@ func (s *SQLiteStore) insertPipelineTransport(ctx context.Context, event *Pipeli
 	_, err = s.writeExecContext(ctx, `INSERT INTO pipeline_transport_outbox
 		(event_id, pipe_id, remote_chain_id, event_kind, policy_epoch, agreement_id,
 		 contact_id, contact_revision, authorization_mode, linked_relation,
-		 source_agent_id, target_agent_id,
+		 source_agent_id, target_agent_id, receipt_protocol_version,
 		 proof_signature, proof_timestamp, proof_nonce, proof_canonical,
 		 state, attempts, next_attempt_at, created_at, expires_at, last_error)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		event.EventID, event.PipeID, event.RemoteChainID, event.EventKind, event.PolicyEpoch,
 		event.AgreementID, event.ContactID, event.ContactRevision,
 		event.AuthorizationMode, linkedRelation, event.SourceAgentID,
-		event.TargetAgentID, []byte{}, int64(0), []byte{},
+		event.TargetAgentID, event.ReceiptProtocolVersion, []byte{}, int64(0), []byte{},
 		encryptedProof, state, event.Attempts, formatTime(nextAttempt), formatTime(event.CreatedAt),
 		formatTime(event.ExpiresAt), event.LastError)
 	return err
@@ -285,6 +288,32 @@ func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineM
 		dedup.LinkedRelationDigest != pipelineLinkedRelationDigest(msg.FederationLinkedRelation) {
 		return "", false, fmt.Errorf("imported pipeline row and dedup binding mismatch")
 	}
+	if msg.FederationReceiptProtocolVersion != 0 && msg.FederationReceiptProtocolVersion != FederatedPipelineReceiptVersion {
+		return "", false, fmt.Errorf("unsupported imported receipt protocol version")
+	}
+	if msg.FederationReceiptProtocolVersion == 0 && msg.FederationReceiptContentDigest != "" {
+		return "", false, fmt.Errorf("legacy imported pipeline cannot carry a receipt digest")
+	}
+	var inboundReceipt *FederatedReceiptBinding
+	if msg.FederationReceiptProtocolVersion == FederatedPipelineReceiptVersion {
+		inboundReceipt = &FederatedReceiptBinding{
+			MessageID: msg.SourcePipeID, LocalPipeID: msg.PipeID,
+			SenderChainID: msg.SourceChainID, RecipientChainID: dedup.RemoteChainID,
+			SenderAgentID: msg.FromAgent, RecipientAgentID: msg.ToAgent,
+			ContentDigest: msg.FederationReceiptContentDigest,
+			PolicyEpoch:   msg.FederationPolicyEpoch, AgreementID: msg.FederationAgreementID,
+			ContactID: msg.FederationContactID, ContactRevision: msg.FederationContactRevision,
+			AuthorizationMode: msg.FederationAuthorizationMode,
+			RelationDigest:    pipelineLinkedRelationDigest(msg.FederationLinkedRelation),
+		}
+		// The recipient chain is local and therefore not present in the imported
+		// message provenance. It is bound by the event and filled by the caller
+		// before admission; reject an absent/aliased value rather than guess.
+		inboundReceipt.RecipientChainID = msg.FederationReceiptRecipientChainID
+		if err := validateFederatedReceiptBinding(*inboundReceipt); err != nil {
+			return "", false, err
+		}
+	}
 	err = s.runPipelineTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)
 		var existingHash []byte
@@ -316,6 +345,20 @@ func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineM
 		}
 		if insertErr := tx.InsertPipeline(ctx, msg); insertErr != nil {
 			return insertErr
+		}
+		if inboundReceipt != nil {
+			if _, insertErr := tx.writeExecContext(ctx, `INSERT INTO pipeline_receipt_v2_inbound
+				(message_id,local_pipe_id,sender_chain_id,recipient_chain_id,sender_agent_id,
+				 recipient_agent_id,content_digest,policy_epoch,agreement_id,contact_id,
+				 contact_revision,authorization_mode,relation_digest,protocol_version)
+				VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, inboundReceipt.MessageID,
+				inboundReceipt.LocalPipeID, inboundReceipt.SenderChainID, inboundReceipt.RecipientChainID,
+				inboundReceipt.SenderAgentID, inboundReceipt.RecipientAgentID, inboundReceipt.ContentDigest,
+				inboundReceipt.PolicyEpoch, inboundReceipt.AgreementID, inboundReceipt.ContactID,
+				inboundReceipt.ContactRevision, inboundReceipt.AuthorizationMode,
+				inboundReceipt.RelationDigest, FederatedPipelineReceiptVersion); insertErr != nil {
+				return fmt.Errorf("insert federated receipt v2 inbound binding: %w", insertErr)
+			}
 		}
 		if _, execErr := tx.writeExecContext(ctx, `INSERT INTO pipeline_transport_dedup
 			(remote_chain_id, policy_epoch, agreement_id, contact_id, contact_revision,
@@ -458,7 +501,7 @@ func (s *SQLiteStore) ListPendingPipelineTransport(ctx context.Context, now time
 	rows, err := s.conn.QueryContext(ctx, `SELECT event_id, pipe_id, remote_chain_id,
 		event_kind, policy_epoch, agreement_id, contact_id, contact_revision,
 		authorization_mode, linked_relation,
-		source_agent_id, target_agent_id, proof_signature, proof_timestamp,
+		source_agent_id, target_agent_id, receipt_protocol_version, proof_signature, proof_timestamp,
 		COALESCE(proof_nonce, x''), proof_canonical, state, attempts,
 		next_attempt_at, created_at, expires_at, delivered_at, last_error
 		FROM pipeline_transport_outbox WHERE state='pending'
@@ -492,7 +535,7 @@ func (s *SQLiteStore) scanPipelineTransport(scanner pipelineTransportScanner) (*
 	if err := scanner.Scan(&event.EventID, &event.PipeID, &event.RemoteChainID,
 		&event.EventKind, &event.PolicyEpoch, &event.AgreementID, &event.ContactID,
 		&event.ContactRevision, &event.AuthorizationMode, &event.LinkedRelation,
-		&event.SourceAgentID, &event.TargetAgentID,
+		&event.SourceAgentID, &event.TargetAgentID, &event.ReceiptProtocolVersion,
 		&legacySignature, &legacyTimestamp, &legacyNonce,
 		&canonical, &event.State, &event.Attempts, &next, &created, &expires,
 		&delivered, &event.LastError); err != nil {
@@ -530,13 +573,28 @@ func (s *SQLiteStore) GetPipelineTransport(ctx context.Context, eventID string) 
 	row := s.conn.QueryRowContext(ctx, `SELECT event_id, pipe_id, remote_chain_id,
 		event_kind, policy_epoch, agreement_id, contact_id, contact_revision,
 		authorization_mode, linked_relation,
-		source_agent_id, target_agent_id, proof_signature, proof_timestamp,
+		source_agent_id, target_agent_id, receipt_protocol_version, proof_signature, proof_timestamp,
 		COALESCE(proof_nonce, x''), proof_canonical, state, attempts,
 		next_attempt_at, created_at, expires_at, delivered_at, last_error
 		FROM pipeline_transport_outbox WHERE event_id=?`, eventID)
 	event, err := s.scanPipelineTransport(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("pipeline transport event %s not found", eventID)
+	}
+	return event, err
+}
+
+func (s *SQLiteStore) GetPipelineTransportForPipe(ctx context.Context, pipeID, eventKind string) (*PipelineTransportOutbox, error) {
+	row := s.conn.QueryRowContext(ctx, `SELECT event_id, pipe_id, remote_chain_id,
+		event_kind, policy_epoch, agreement_id, contact_id, contact_revision,
+		authorization_mode, linked_relation,
+		source_agent_id, target_agent_id, receipt_protocol_version, proof_signature, proof_timestamp,
+		COALESCE(proof_nonce, x''), proof_canonical, state, attempts,
+		next_attempt_at, created_at, expires_at, delivered_at, last_error
+		FROM pipeline_transport_outbox WHERE pipe_id=? AND event_kind=?`, pipeID, eventKind)
+	event, err := s.scanPipelineTransport(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("pipeline transport for pipe %s not found", pipeID)
 	}
 	return event, err
 }

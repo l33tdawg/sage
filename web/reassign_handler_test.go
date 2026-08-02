@@ -440,6 +440,8 @@ func TestReassignDomainOwnershipPostAppV20UsesChainBoundOperatorProof(t *testing
 	reassign := captured[1]
 	require.Equal(t, tx.TxTypeDomainReassign, reassign.Type)
 	assert.Equal(t, []byte(adminKey.Public().(ed25519.PublicKey)), []byte(reassign.PublicKey))
+	assert.Empty(t, reassign.DomainReassign.ExpectedOwnerID,
+		"a dormant app-v26 chain must receive the historical wire form")
 	assert.Equal(
 		t,
 		governance.ComputeProposalID(validatorID, 42, governance.OpDomainReassign, "quiettype-pages"),

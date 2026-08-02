@@ -498,14 +498,14 @@ func (s *SQLiteStore) ReplyLocalMessage(ctx context.Context, receiverID, message
 func (s *SQLiteStore) GetMessageStatusForSender(ctx context.Context, senderID, messageID string) (*MessageStatus, error) {
 	var status MessageStatus
 	var workflow, sentAt, expiresAt string
-	var completedAt, readAt *string
+	var completedAt, terminalAt, readAt *string
 	err := s.conn.QueryRowContext(ctx,
-		`SELECT p.pipe_id,p.status,p.created_at,p.completed_at,p.expires_at,r.read_at
+		`SELECT p.pipe_id,p.status,p.created_at,p.completed_at,p.terminal_at,p.expires_at,r.read_at
 		 FROM pipeline_messages p
 		 LEFT JOIN message_read_receipts r ON r.message_id=p.pipe_id
 		 WHERE p.pipe_id=? AND p.from_agent=? AND p.source_chain_id='' AND p.destination_chain_id=''
 		   AND p.to_agent!='' AND p.to_provider=''`,
-		messageID, senderID).Scan(&status.MessageID, &workflow, &sentAt, &completedAt, &expiresAt, &readAt)
+		messageID, senderID).Scan(&status.MessageID, &workflow, &sentAt, &completedAt, &terminalAt, &expiresAt, &readAt)
 	if err != nil {
 		return nil, ErrMessageNotFound
 	}
@@ -516,6 +516,7 @@ func (s *SQLiteStore) GetMessageStatusForSender(ctx context.Context, senderID, m
 	status.ExpiresAt = parseTime(expiresAt)
 	status.DeliveredAt = &status.SentAt
 	status.CompletedAt = parseTimePtr(completedAt)
+	status.TerminalAt = parseTimePtr(terminalAt)
 	status.ReadAt = parseTimePtr(readAt)
 	status.ReadStatus = "not_confirmed"
 	if status.ReadAt != nil {
@@ -524,10 +525,14 @@ func (s *SQLiteStore) GetMessageStatusForSender(ctx context.Context, senderID, m
 	}
 	switch workflow {
 	case "completed":
-		status.TerminalAt = status.CompletedAt
+		if status.TerminalAt == nil {
+			status.TerminalAt = status.CompletedAt
+		}
 		status.TerminalReason = "completed"
 	case "expired", "failed":
-		status.TerminalAt = &status.ExpiresAt
+		if status.TerminalAt == nil {
+			status.TerminalAt = &status.ExpiresAt
+		}
 		status.TerminalReason = workflow
 	}
 	return &status, nil

@@ -15,6 +15,7 @@ import (
 )
 
 const appV25LegacyDeprecationConfirmation = "DEPRECATE %d"
+const appV26LegacyRecoveryRequestMaxBytes = 160 << 10
 
 type appV25LegacyRecoveryController interface {
 	GetLegacyMemoryAdoptionProgress(context.Context) (*store.LegacyMemoryAdoptionProgress, error)
@@ -34,13 +35,17 @@ type appV25LegacyRecoveryControlRequest struct {
 }
 
 type appV26LegacyRecoveryInventoryView struct {
-	MemoryID       string `json:"memory_id"`
-	Reason         string `json:"reason"`
-	Domain         string `json:"domain"`
-	Author         string `json:"historical_author,omitempty"`
-	ContentPreview string `json:"content_preview"`
-	Assignable     bool   `json:"assignable"`
-	AssignedTarget string `json:"assigned_target,omitempty"`
+	MemoryID             string                               `json:"memory_id"`
+	Reason               string                               `json:"reason"`
+	Domain               string                               `json:"domain"`
+	Author               string                               `json:"historical_author,omitempty"`
+	ContentPreview       string                               `json:"content_preview"`
+	Assignable           bool                                 `json:"assignable"`
+	AssignedTarget       string                               `json:"assigned_target,omitempty"`
+	AuthorityOwnerID     string                               `json:"authority_owner_id,omitempty"`
+	AuthorityOwnedDomain string                               `json:"authority_owned_domain,omitempty"`
+	AuthorityStatus      string                               `json:"authority_status"`
+	AuthorityHistory     []store.AppV26DomainOwnershipHistory `json:"authority_history,omitempty"`
 }
 
 func appV26LegacyContentPreview(content string) string {
@@ -85,13 +90,34 @@ func (h *DashboardHandler) handleAppV26LegacyRecoveryInventory(w http.ResponseWr
 	}
 	views := make([]appV26LegacyRecoveryInventoryView, 0, len(items))
 	for _, item := range items {
-		views = append(views, appV26LegacyRecoveryInventoryView{
+		view := appV26LegacyRecoveryInventoryView{
 			MemoryID: item.MemoryID, Reason: item.Reason, Domain: item.Domain,
-			Author:         item.SubmittingAgent,
-			ContentPreview: appV26LegacyContentPreview(item.Content),
-			Assignable:     appV26LegacyRecoveryAssignable(item),
-			AssignedTarget: item.AssignedTarget,
-		})
+			Author:          item.SubmittingAgent,
+			ContentPreview:  appV26LegacyContentPreview(item.Content),
+			Assignable:      appV26LegacyRecoveryAssignable(item),
+			AssignedTarget:  item.AssignedTarget,
+			AuthorityStatus: "unavailable",
+		}
+		if h.BadgerStore != nil && strings.TrimSpace(item.Domain) != "" {
+			owner, ownedDomain, ownerErr := h.BadgerStore.ResolveAppV23OwningAncestor(item.Domain)
+			switch {
+			case ownerErr != nil:
+				view.AuthorityStatus = "lookup_failed"
+			case owner == "" || ownedDomain == "":
+				// A grant must never auto-claim an unresolved historical domain.
+				// Ownership requires its own explicit recovery/governance decision.
+				view.AuthorityStatus = "unowned"
+			default:
+				view.AuthorityStatus = "available"
+				view.AuthorityOwnerID = owner
+				view.AuthorityOwnedDomain = ownedDomain
+				history, historyErr := h.BadgerStore.ListAppV26DomainOwnershipHistory(ownedDomain)
+				if historyErr == nil {
+					view.AuthorityHistory = history
+				}
+			}
+		}
+		views = append(views, view)
 	}
 	type agentView struct {
 		AgentID string `json:"agent_id"`
@@ -151,22 +177,12 @@ func (h *DashboardHandler) handleAppV26LegacyAdoptionAssign(w http.ResponseWrite
 		writeError(w, http.StatusBadRequest, "memory_ids and target_agent_id are required")
 		return
 	}
-	enrollment, err := h.BadgerStore.GetAppV23Enrollment(request.TargetAgentID)
+	eligible, err := h.appV26LegacyRecoveryTargetEligible(request.TargetAgentID)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "target agent state is unavailable")
 		return
 	}
-	role, err := h.BadgerStore.GetAppV23Role(request.TargetAgentID)
-	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, "target agent state is unavailable")
-		return
-	}
-	if enrollment == nil || role == nil || !enrollment.Active ||
-		(enrollment.Profile != store.AppV23ProfileStandard &&
-			enrollment.Profile != store.AppV23ProfileCompanion) ||
-		!store.ValidAppV23Role(role.Role) ||
-		!store.AppV23ProfileAllowsRole(enrollment.Profile, role.Role) ||
-		h.appV23IsRootIdentity(request.TargetAgentID) {
+	if !eligible {
 		writeError(w, http.StatusConflict, "target must be an active ordinary local agent")
 		return
 	}
@@ -185,6 +201,27 @@ func (h *DashboardHandler) handleAppV26LegacyAdoptionAssign(w http.ResponseWrite
 		"access_scope": "operational_principal_only",
 		"message":      "The Root-governed principal repair is queued for canonical adoption; historical authorship, content, and domain permissions remain unchanged.",
 	})
+}
+
+func (h *DashboardHandler) appV26LegacyRecoveryTargetEligible(targetAgentID string) (bool, error) {
+	targetAgentID = strings.TrimSpace(targetAgentID)
+	if h.BadgerStore == nil || targetAgentID == "" || h.appV23IsRootIdentity(targetAgentID) ||
+		!h.BadgerStore.IsAgentRegistered(targetAgentID) {
+		return false, nil
+	}
+	enrollment, err := h.BadgerStore.GetAppV23Enrollment(targetAgentID)
+	if err != nil {
+		return false, err
+	}
+	role, err := h.BadgerStore.GetAppV23Role(targetAgentID)
+	if err != nil {
+		return false, err
+	}
+	return enrollment != nil && role != nil && enrollment.Active &&
+		(enrollment.Profile == store.AppV23ProfileStandard ||
+			enrollment.Profile == store.AppV23ProfileCompanion) &&
+		store.ValidAppV23Role(role.Role) &&
+		store.AppV23ProfileAllowsRole(enrollment.Profile, role.Role), nil
 }
 
 func (h *DashboardHandler) appV25LegacyAdoptionWakeChannel() <-chan struct{} {
@@ -211,7 +248,9 @@ func decodeAppV25LegacyRecoveryControlRequest(
 	r *http.Request,
 ) (appV25LegacyRecoveryControlRequest, bool) {
 	var request appV25LegacyRecoveryControlRequest
-	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	// A selected recovery mutation accepts up to 256 bounded historical IDs.
+	// Four KiB admitted only a fraction of that documented/store-level bound.
+	r.Body = http.MaxBytesReader(w, r.Body, appV26LegacyRecoveryRequestMaxBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {

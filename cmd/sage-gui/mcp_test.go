@@ -235,6 +235,27 @@ func TestProjectMCPConfigMigratesLegacySharedNodeIdentity(t *testing.T) {
 	assert.NotContains(t, string(data), sharedNodeKey)
 }
 
+func TestAppScopedMCPConfigNeverFallsBackToNodeRootIdentity(t *testing.T) {
+	sageHome := t.TempDir()
+	rootPath := filepath.Join(sageHome, "agent.key")
+	require.NoError(t, os.WriteFile(rootPath, make([]byte, 32), 0600))
+
+	for _, provider := range []string{"claude-desktop", "windsurf", "cursor"} {
+		t.Run(provider, func(t *testing.T) {
+			got := existingIdentityOrDefault("", sageHome, "", provider)
+			require.Equal(t,
+				filepath.Join(sageHome, "agents", "global-"+sanitizeDirName(provider), "agent.key"),
+				got,
+			)
+			require.NotEqual(t, rootPath, got)
+		})
+	}
+
+	custom := filepath.Join(sageHome, "agents", "reviewed", "agent.key")
+	require.Equal(t, custom, existingIdentityOrDefault(custom, sageHome, "", "claude-desktop"),
+		"an operator-pinned ordinary identity remains authoritative")
+}
+
 func TestSelfHeal_RewritesStaleBinaryPath(t *testing.T) {
 	projectDir := t.TempDir()
 	sageHome := t.TempDir()

@@ -241,6 +241,21 @@ for ordinary registration or later reuse as Root
 (`internal/store/appv23_local_rbac.go`; `internal/abci/app.go`;
 [`app-v23-access-control-design.md`](../app-v23-access-control-design.md)).
 
+App-v26 also closes orphaned current-domain authority during activation and
+local-agent retirement. An inactive or missing directory principal, a retired
+Root credential, or a noncanonical legacy owner label cannot remain the
+effective current owner, so the stable CEREBRUM Root principal assumes current
+control. The exact previous owner label is retained in the append-only
+`appv26:domain-owner-history:` transition record; memory authors, existing
+grant/granter evidence, shared-domain state, and earlier blocks are not
+rewritten. Each transition records `domain_created_at` separately from
+`transferred_at`, and the current `domain:` row retains its original registered
+height. Root's historical-recovery inventory exposes these handovers to the
+operator. A later ownership change remains a separate governed whole-domain
+reassignment with an all-record blast radius
+(`internal/store/appv26_domain_owner_retirement.go`;
+`web/appv25_memory_legacy_adoption_control.go`).
+
 An Access Group's local-member compartment is disjoint from its federated
 linked-reader compartment. Local rights are derived dynamically from current
 ownership rather than expanded into pairwise grants. Group authority is
@@ -324,7 +339,7 @@ Two dashboard surfaces now write to the on-chain RBAC state above instead of mer
 
 - **app-v18 explicit genesis-admin override (v11.7 candidate).** CEREBRUM may offer **Admin override & assign** only when the target agent's private key is held on this node (local, not merely visible through federation). The confirmation identifies the effective original owner and desired read/write level. The transaction carries that expected owner and owning ancestor as a consensus-checked binding, so a concurrent ownership change rejects rather than applying a stale confirmation. Once app-v18 is activated, a registered global admin may sign `AccessGrant` / `AccessRevoke` even when it is not the domain owner; the grant remains an ordinary auditable `grant:<domain>:<agentID>` record and does **not** change domain ownership or memory authorship. Ordinary agents remain owner/ancestor-owner gated. Level 1 is read-only; memory submit and co-commit require the effective owner or an explicit level-2 direct/ancestor grant—org membership and federation clearance do not imply write authority. Pre-app-v18 blocks and the activation block retain the old rule byte-for-byte (`internal/abci/app.go`, `web/reassign_handler.go`).
 
-- **Domain ownership transfers agent-to-agent via governance.** `POST /v1/dashboard/network/reassign-domain-ownership` orchestrates, commit-confirmed: `gov_propose(domain_reassign)` -> the sole validator's accept vote drives it to `Executed` -> `TxTypeDomainReassign` flips the owner and purges the domain's grants -> `TxTypeAccessGrant` gives the new owner level 3 (deferred to the owner's own node if their key is not local). Post-app-v22, the approved new owner must also be a canonical, registered on-chain agent before any ownership mutation; malformed or unknown target IDs fail closed. This transfers OWNERSHIP and read/write ACCESS only; it does NOT rewrite memory authorship - every memory stays authored by its original `submitting_agent`. Single-validator node only; a multi-validator chain is rejected because the other validators must vote on the proposal (`internal/abci/app.go`; `web/reassign_handler.go:285-318`).
+- **Domain ownership transfers agent-to-agent via governance.** `POST /v1/dashboard/network/reassign-domain-ownership` orchestrates, commit-confirmed: `gov_propose(domain_reassign)` -> the sole validator's accept vote drives it to `Executed` -> `TxTypeDomainReassign` atomically flips the owner, records chain-of-custody history, purges unrelated grants, and consumes the proposal. The canonical owner immediately receives owner-derived access, so app-v26 emits no redundant self-grant and never needs the target's private key on the CEREBRUM node. Post-app-v22, the approved new owner must also be a canonical, registered on-chain agent before any ownership mutation; malformed or unknown target IDs fail closed. This transfers current AUTHORITY only; it does NOT rewrite memory authorship - every memory stays authored by its original `submitting_agent`. Single-validator node only; a multi-validator chain is rejected because the other validators must vote on the proposal (`internal/abci/app.go`; `web/reassign_handler.go`).
 
 ---
 
@@ -921,6 +936,25 @@ federation access, or administrator authority.
 ---
 
 ## REST Endpoints Reference
+
+### Federated pipeline receipt evidence (app-v26)
+
+Receipt v2 is a distinct, capability-negotiated protocol; it does not overload
+the v1 pipeline event or `/fed/v1/receipt` co-commit protocol. Every accepted
+event binds the immutable origin message, content digest, exact sender and
+recipient agents/chains, and the active agreement/policy/contact/linked-relation
+generation. A new claim/read transition is admitted only after live relation
+revalidation. Accepted historical evidence remains queryable by the original
+sender after a later pause or revocation, but an event from the retired
+generation cannot advance it.
+
+Evidence dimensions are deliberately not one ordered status enum. Remote-node
+durable admission, recipient claim, recipient read, and terminal outcome are
+independent write-once facts. Network timestamps never decide which fact wins.
+Only the exact original sender can query the payload-free projection; sovereign
+Root and administrative roles do not become message participants. Legacy v1
+and pre-v2 rows remain unsupported/unconfirmed, and migration creates no
+evidence.
 
 | Method | Path | Tx Type | Description |
 |--------|------|---------|-------------|

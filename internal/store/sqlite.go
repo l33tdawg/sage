@@ -839,12 +839,18 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 
 	// Migration: add pipeline_messages table.
 	s.migratePipeline(ctx)
+	if err := s.migratePipelineTerminalRetention(ctx); err != nil {
+		return fmt.Errorf("migrate pipeline terminal retention: %w", err)
+	}
 	if err := s.migrateMessages(ctx); err != nil {
 		return fmt.Errorf("migrate canonical messages: %w", err)
 	}
 	s.migratePipelineTransport(ctx)
 	if err := s.migratePipelineV23SecurityColumns(ctx); err != nil {
 		return fmt.Errorf("migrate pipeline v23 authorization columns: %w", err)
+	}
+	if err := s.migrateFederatedPipelineReceiptsV2(ctx); err != nil {
+		return fmt.Errorf("migrate federated pipeline receipts v2: %w", err)
 	}
 
 	// Migration: add mcp_tokens table for HTTP MCP transport bearer auth.
@@ -6079,6 +6085,7 @@ func (s *SQLiteStore) migratePipeline(ctx context.Context) {
 		claimed_by    TEXT NOT NULL DEFAULT '',
 		claimed_at    TEXT,
 		completed_at  TEXT,
+		terminal_at   TEXT,
 		expires_at    TEXT NOT NULL,
 		journal_id    TEXT,
 		source_chain_id         TEXT NOT NULL DEFAULT '',
@@ -6115,6 +6122,51 @@ func (s *SQLiteStore) migratePipeline(ctx context.Context) {
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_destination ON pipeline_messages(destination_chain_id, status)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_source ON pipeline_messages(source_chain_id, source_pipe_id)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_source_status ON pipeline_messages(source_chain_id, status)`)
+}
+
+// migratePipelineTerminalRetention makes the terminal-state transition, rather
+// than the original send time, authoritative for bounded message retention.
+// The triggers keep every status transition on the same invariant, including
+// federation failure/revocation paths that do not flow through CompletePipeline.
+func (s *SQLiteStore) migratePipelineTerminalRetention(ctx context.Context) error {
+	if err := s.addSQLiteColumnIfMissing(ctx, "pipeline_messages", "terminal_at",
+		`ALTER TABLE pipeline_messages ADD COLUMN terminal_at TEXT`); err != nil {
+		return err
+	}
+	if _, err := s.writeExecContext(ctx, `UPDATE pipeline_messages
+		SET terminal_at=CASE
+			WHEN status='completed' AND completed_at IS NOT NULL THEN completed_at
+			WHEN status='expired' AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ','now') THEN expires_at
+			ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		END
+		WHERE status IN ('completed','expired','failed') AND terminal_at IS NULL`); err != nil {
+		return fmt.Errorf("backfill pipeline terminal timestamps: %w", err)
+	}
+	for _, statement := range []string{
+		`CREATE TRIGGER IF NOT EXISTS stamp_pipeline_terminal_after_update
+		AFTER UPDATE OF status ON pipeline_messages
+		WHEN NEW.status IN ('completed','expired','failed')
+		 AND OLD.status NOT IN ('completed','expired','failed')
+		 AND NEW.terminal_at IS NULL
+		BEGIN
+			UPDATE pipeline_messages SET terminal_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+			WHERE pipe_id=NEW.pipe_id;
+		END`,
+		`CREATE TRIGGER IF NOT EXISTS stamp_pipeline_terminal_after_insert
+		AFTER INSERT ON pipeline_messages
+		WHEN NEW.status IN ('completed','expired','failed') AND NEW.terminal_at IS NULL
+		BEGIN
+			UPDATE pipeline_messages SET terminal_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+			WHERE pipe_id=NEW.pipe_id;
+		END`,
+		`CREATE INDEX IF NOT EXISTS idx_pipe_terminal_retention
+			ON pipeline_messages(status, terminal_at)`,
+	} {
+		if _, err := s.writeExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("install pipeline terminal retention invariant: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *SQLiteStore) decryptPipelineFields(m *PipelineMessage) error {
@@ -6552,17 +6604,31 @@ func (s *SQLiteStore) PurgePipelines(ctx context.Context, olderThan time.Time) (
 		tx := txStore.(*SQLiteStore)
 		if _, err := tx.writeExecContext(ctx, `DELETE FROM pipeline_transport_outbox
 			WHERE pipe_id IN (SELECT p.pipe_id FROM pipeline_messages p
-				WHERE p.status IN ('completed','expired','failed') AND p.created_at < ?
+				WHERE p.status IN ('completed','expired','failed')
+				AND COALESCE(p.terminal_at,p.completed_at,p.created_at) < ?
+				AND NOT EXISTS (SELECT 1 FROM message_read_receipts receipt
+					WHERE receipt.message_id=p.pipe_id AND receipt.read_at >= ?)
 				AND NOT EXISTS (SELECT 1 FROM pipeline_transport_outbox keep
 					WHERE keep.pipe_id=p.pipe_id AND (keep.state='pending'
-						OR (keep.state='failed' AND keep.reported_at IS NULL))))`, formatTime(olderThan)); err != nil {
+						OR (keep.state='failed' AND keep.reported_at IS NULL)))
+				AND NOT EXISTS (SELECT 1 FROM pipeline_receipt_v2_outbox receipt_v2
+					WHERE receipt_v2.local_pipe_id=p.pipe_id AND receipt_v2.state='pending'
+					AND julianday(receipt_v2.expires_at)>julianday('now')))`,
+			formatTime(olderThan), formatTime(olderThan)); err != nil {
 			return err
 		}
 		res, err := tx.writeExecContext(ctx, `DELETE FROM pipeline_messages
-			WHERE status IN ('completed', 'expired', 'failed') AND created_at < ?
+			WHERE status IN ('completed', 'expired', 'failed')
+			AND COALESCE(terminal_at,completed_at,created_at) < ?
+			AND NOT EXISTS (SELECT 1 FROM message_read_receipts receipt
+				WHERE receipt.message_id=pipeline_messages.pipe_id AND receipt.read_at >= ?)
 			AND NOT EXISTS (SELECT 1 FROM pipeline_transport_outbox keep
 				WHERE keep.pipe_id=pipeline_messages.pipe_id AND (keep.state='pending'
-					OR (keep.state='failed' AND keep.reported_at IS NULL)))`, formatTime(olderThan))
+					OR (keep.state='failed' AND keep.reported_at IS NULL)))
+			AND NOT EXISTS (SELECT 1 FROM pipeline_receipt_v2_outbox receipt_v2
+				WHERE receipt_v2.local_pipe_id=pipeline_messages.pipe_id AND receipt_v2.state='pending'
+				AND julianday(receipt_v2.expires_at)>julianday('now'))`,
+			formatTime(olderThan), formatTime(olderThan))
 		if err != nil {
 			return err
 		}
