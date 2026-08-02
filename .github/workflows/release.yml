@@ -1240,7 +1240,6 @@ jobs:
               "repos/${GH_REPO}/releases/assets/${asset_id}" \
               > "staged-macos/${name}"
           }
-
           for arch in arm64 x86_64; do
             for dmg_name in \
               "SAGE-${RELEASE_TAG}-macOS-${arch}.dmg" \
