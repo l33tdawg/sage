@@ -23,7 +23,8 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`environment-variables.md`](environment-variables.md) | Every env var SAGE reads (`SAGE_HOME`, embeddings, hybrid recall, TLS, snapshots, …), with defaults and the `file:line` that consumes each. |
 | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) | submit → proposed → committed/deprecated; node-local vs on-chain data; confidence decay; corroboration. |
 | [`concepts/clearance-classification.md`](concepts/clearance-classification.md) | Per-record classification (0–4), the REST-vs-wire default gotcha, and the per-record query gate. |
-| [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, cross-chain peer Read/Copy RBAC, why peer Write is reserved but unavailable in v11.9, the five-gate query pipeline, and the app-v20 one-chain quorum-scope boundary. |
+| [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, current fail-closed cross-chain Read/Copy policy, the five-gate query pipeline, and the app-v20 one-chain quorum-scope boundary. |
+| [`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md) | The current local Access Group contract: explicit Read / Read+Write / Read+Write+Modify member authority, ownership-preserving join/leave semantics, CAS revisions, hard-deny intersections, and the app-v25 → app-v26 migration boundary. |
 | [`app-v23-access-control-design.md`](app-v23-access-control-design.md) | The v11.16.0 contract for Root, Member/Manager/Admin roles, named security profiles, Access Groups, atomic enrollment, linked federated readers, app-v24 readiness and memory integrity, migration, replay, and state sync. |
 | [`app-v25-upgrade-recovery.md`](app-v25-upgrade-recovery.md) | The v11.16.2 strict App-v25 upgrade: immutable new-memory envelopes, automatic historical repair, local writer continuity, record-local quarantine, Root retry/deprecation controls, and readiness semantics. |
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
@@ -51,7 +52,8 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | Send agent work to a visible shared-domain recipient on another federated SAGE | [`mcp-tools.md`](mcp-tools.md) — `sage_find_agent`, then `sage_pipe`; [`federation-and-brain-api.md`](federation-and-brain-api.md) — `POST /fed/v1/pipe/event` |
 | Discover connected SAGEs and live-read a domain they share | [`mcp-tools.md`](mcp-tools.md) — `sage_federation`, then `sage_recall` with `federated=true` |
 | Distinguish internet federation, app-v20 quorum replication, and local-vs-network snapshot recovery | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) — “v11.9 quorum scopes are not cross-chain federation” |
-| Understand Root handover, local Access Groups, or why a federated agent is read-only | [`app-v23-access-control-design.md`](app-v23-access-control-design.md) + [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) |
+| Understand Root handover or why a federated agent is read-only | [`app-v23-access-control-design.md`](app-v23-access-control-design.md) + [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) |
+| Create a local Access Group, choose its authority, or understand join/leave behavior | [`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md) |
 | Understand why an upgrade is repairing, partially displaying, or preserving historical memories | [`app-v25-upgrade-recovery.md`](app-v25-upgrade-recovery.md) |
 | Configure SAGE via environment variables | [`environment-variables.md`](environment-variables.md) |
 

@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.16.2: internal/abci/app.go (app-v25 gate and immutable envelope), web/appv25_memory_legacy_adoption_worker.go, web/appv25_domain_continuity_worker.go, web/appv25_memory_legacy_adoption_control.go, and internal/store/appv25_domain_continuity.go. -->
+<!-- Reconciled through SAGE v11.17.0: internal/abci/app.go (app-v25 gate and immutable envelope), web/appv25_memory_legacy_adoption_worker.go, web/appv25_domain_continuity_worker.go, web/appv25_memory_legacy_adoption_control.go, and internal/store/appv25_domain_continuity.go. -->
 
 # App-v25 Upgrade, Historical Recovery, and Domain Continuity
 
@@ -65,6 +65,9 @@ domains that predate the app-v23 enrollment model.
   exact recovered domain.
 - The recovered writer set is frozen at the upgrade cutoff. New app-v25
   submissions cannot enlarge it.
+- Memories already in the terminal `deprecated` state are preserved for audit
+  but excluded from continuity evidence. Deprecated-only history can never
+  recreate live ownership, a writer grant, or an Access Group.
 - If the earliest writer is missing, retired, or cannot safely be activated as
   a local principal, CEREBRUM Root owns the recovered domain. A later writer is
   never silently promoted in its place.
@@ -74,6 +77,14 @@ domains that predate the app-v23 enrollment model.
 
 This restores operational access only. It never changes the immutable author
 record on a historical memory.
+
+Governance `executed` status is not treated as the success receipt by itself.
+The worker verifies the exact canonical continuity record and every recovered
+writer grant after execution. If an older app-v25 batch left that result
+missing or revision-stale, it releases the stale proposal pointer and retries
+the same frozen evidence through governance; it neither drops the domain nor
+expands the writer set. Explicit policy changes remain conflicts and fail
+closed instead of being overwritten by recovery.
 
 ## When a historical row cannot be repaired
 

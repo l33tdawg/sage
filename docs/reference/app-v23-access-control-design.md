@@ -287,6 +287,10 @@ possible database copy; migration revokes their tokens and erases the rows.
 
 ## Access Groups
 
+For the current app-v26 member-authority and mutation contract, see
+[`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md). This
+section retains the wider app-v23 design context.
+
 Access Groups are new app-v23 consensus objects. They are not the existing
 browser `localStorage` groups and not federation `sync_group_*` replication
 groups.

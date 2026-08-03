@@ -267,3 +267,110 @@ func TestAppV25DomainContinuityV2ValidatesAndAppliesWholeBatch(t *testing.T) {
 		require.True(t, allowed.Allowed)
 	}
 }
+
+func TestAppV25DomainContinuityGovernedReplayRepairsStaleGrantAfterCommit(t *testing.T) {
+	fixture := setupAppV24ReanchorGovernanceFixture(t, 1)
+	fixture.app.appV25AppliedHeight = 1
+
+	const (
+		staleDomain   = "continuity-governed-replay-a"
+		laterDomain   = "continuity-governed-replay-b"
+		missingDomain = "continuity-governed-replay-c"
+	)
+	for height, domain := range []string{staleDomain, laterDomain, missingDomain} {
+		require.NoError(t, fixture.app.badgerStore.RegisterDomain(
+			domain, fixture.root.id, "", int64(height+2),
+		))
+	}
+
+	// The old singleton continuity path bound each grant to the enrollment
+	// revision current at that call.  Allocating the writer's later home domain
+	// incremented the enrollment revision and made the first grant ineffective.
+	firstPlan := sha256.Sum256([]byte("governed-replay-legacy-a"))
+	require.NoError(t, fixture.app.badgerStore.ApplyAppV25DomainContinuity(
+		staleDomain, []string{fixture.validator.id}, firstPlan[:], 1, 120,
+	))
+	secondPlan := sha256.Sum256([]byte("governed-replay-legacy-b"))
+	require.NoError(t, fixture.app.badgerStore.ApplyAppV25DomainContinuity(
+		laterDomain, []string{fixture.validator.id}, secondPlan[:], 1, 121,
+	))
+	allowed, err := fixture.app.badgerStore.AppV25AllowsHistoricalDomainWrite(
+		fixture.validator.id, staleDomain,
+	)
+	require.NoError(t, err)
+	require.False(t, allowed, "fixture must reproduce the revision-stale grant")
+	missingRecord, err := fixture.app.badgerStore.GetAppV25DomainContinuity(missingDomain)
+	require.NoError(t, err)
+	require.Nil(t, missingRecord, "fixture must also exercise the missing-record recovery variant")
+
+	root, err := fixture.app.badgerStore.GetAppV23Root()
+	require.NoError(t, err)
+	require.NotNil(t, root)
+	entries := []tx.DomainContinuityEntry{
+		{Domain: staleDomain, Owner: fixture.validator.id, Writers: []string{fixture.validator.id}},
+		{Domain: laterDomain, Owner: fixture.validator.id, Writers: []string{fixture.validator.id}},
+		{Domain: missingDomain, Owner: fixture.validator.id, Writers: []string{fixture.validator.id}},
+	}
+	plan := sha256.Sum256([]byte("governed-replay-exact-evidence"))
+	payload, err := tx.EncodeDomainContinuityPayload(tx.DomainContinuityPayload{
+		Version:          tx.DomainContinuityPayloadVersion,
+		RootCredentialID: root.CredentialID,
+		RootGeneration:   root.Generation,
+		PlanDigest:       plan[:],
+		Entries:          entries,
+	})
+	require.NoError(t, err)
+	targetID, err := tx.DomainContinuityTargetID(payload)
+	require.NoError(t, err)
+	proposalID, err := fixture.app.govEngine.ProposeDomainContinuityAdoption(
+		fixture.validator.id,
+		targetID,
+		nil,
+		0,
+		governance.DefaultExpiryBlocks,
+		"replay exact historical continuity evidence",
+		130,
+		payload,
+	)
+	require.NoError(t, err)
+
+	voteTime := time.Unix(25_900, 0).UTC()
+	vote := &tx.ParsedTx{
+		Type: tx.TxTypeGovVote, Nonce: 1, Timestamp: voteTime,
+		GovVote: &tx.GovVote{
+			ProposalID: proposalID,
+			Decision:   tx.VoteDecisionAccept,
+		},
+	}
+	require.NoError(t, tx.SignTx(vote, fixture.validator.priv))
+	rawVote, err := tx.EncodeTx(vote)
+	require.NoError(t, err)
+	response, err := fixture.app.FinalizeBlock(
+		context.Background(),
+		&abcitypes.RequestFinalizeBlock{
+			Height: 131,
+			Time:   voteTime,
+			Txs:    [][]byte{rawVote},
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, response.TxResults, 1)
+	require.Zero(t, response.TxResults[0].Code, response.TxResults[0].Log)
+	commitGovernanceReplayBlock(t, fixture.app)
+
+	proposal, err := fixture.app.govEngine.LoadProposal(proposalID)
+	require.NoError(t, err)
+	require.Equal(t, governance.StatusExecuted, proposal.Status)
+	for _, domain := range []string{staleDomain, laterDomain, missingDomain} {
+		allowed, allowErr := fixture.app.badgerStore.AppV25AllowsHistoricalDomainWrite(
+			fixture.validator.id, domain,
+		)
+		require.NoError(t, allowErr)
+		require.True(t, allowed, "governed replay must publish the final grant revision for %s", domain)
+		decision, authErr := fixture.app.badgerStore.AuthorizeAppV23PolicyPrincipalDomain(
+			fixture.validator.id, domain, store.AppV23VerbWrite, false,
+		)
+		require.NoError(t, authErr)
+		require.True(t, decision.Allowed, "ordinary policy authorization must converge for %s", domain)
+	}
+}

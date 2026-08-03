@@ -101,6 +101,23 @@ func TestAppV25DomainContinuityPlanDerivesOnlyCanonicalPreUpgradeLocalWriters(t 
 	require.NoError(t, badgerStore.SetMemoryAuthorPrincipal("mismatch", writerA))
 	require.NoError(t, badgerStore.SetMemoryClassification("mismatch", 1))
 
+	// A fully canonical deprecated row is preserved in storage but must not
+	// recreate live ownership or writer authority during continuity recovery.
+	deprecatedHash := sha256.Sum256([]byte("retired history"))
+	require.NoError(t, sqlite.InsertMemory(ctx, &memory.MemoryRecord{
+		MemoryID: "deprecated-canonical", SubmittingAgent: writerA,
+		Content: "retired history", ContentHash: deprecatedHash[:],
+		MemoryType: memory.TypeFact, DomainTag: "retired-domain",
+		Status: memory.StatusDeprecated,
+	}))
+	require.NoError(t, badgerStore.SetMemoryHash(
+		"deprecated-canonical", deprecatedHash[:], "deprecated",
+	))
+	require.NoError(t, badgerStore.SetMemoryDomain("deprecated-canonical", "retired-domain"))
+	require.NoError(t, badgerStore.SetMemoryAuthor("deprecated-canonical", writerA))
+	require.NoError(t, badgerStore.SetMemoryAuthorPrincipal("deprecated-canonical", writerA))
+	require.NoError(t, badgerStore.SetMemoryClassification("deprecated-canonical", 1))
+
 	handler := NewDashboardHandler(sqlite, "test")
 	handler.BadgerStore = badgerStore
 	handler.ResolveAgentKeyFn = func(agentID string) (ed25519.PrivateKey, bool) {
@@ -115,7 +132,8 @@ func TestAppV25DomainContinuityPlanDerivesOnlyCanonicalPreUpgradeLocalWriters(t 
 	}
 	plan, err := handler.buildAppV25DomainContinuityPlan(ctx, sqlite)
 	require.NoError(t, err)
-	require.Equal(t, 1, plan.SkippedRecords)
+	require.Zero(t, plan.SkippedRecords,
+		"deprecated rows are intentionally excluded, not unresolved continuity evidence")
 	require.Len(t, plan.Entries, 2)
 	require.Equal(t, "joint-history", plan.Entries[0].Domain)
 	require.Equal(t, writerA, plan.Entries[0].Owner,
@@ -131,6 +149,8 @@ func TestAppV25DomainContinuityPlanDerivesOnlyCanonicalPreUpgradeLocalWriters(t 
 	for _, entry := range plan.Entries {
 		require.NotEqual(t, "writer-owned", entry.Domain,
 			"ordinary current ownership must not create a redundant maintenance proposal")
+		require.NotEqual(t, "retired-domain", entry.Domain,
+			"deprecated-only history must not recreate live domain authority")
 	}
 }
 
@@ -305,11 +325,10 @@ func TestAppV25DomainContinuityPendingProposalTerminalOutcomes(t *testing.T) {
 			wantPending:   true,
 		},
 		{
-			name:          "executed without canonical receipt fails loudly",
+			name:          "executed without canonical receipt replays exact evidence",
 			status:        governance.StatusExecuted,
-			wantErr:       "executed domain continuity proposal has no canonical result",
+			wantErr:       "current Root signing path is unavailable",
 			wantRemaining: 1,
-			wantPending:   true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -383,7 +402,7 @@ func TestAppV25DomainContinuityPendingProposalTerminalOutcomes(t *testing.T) {
 	}
 }
 
-func TestAppV25RejectedRepairWithPreexistingStaleRecordsIsNotTreatedAsApplied(t *testing.T) {
+func TestAppV25ExecutedRepairWithPreexistingStaleGrantsIsReplayed(t *testing.T) {
 	ctx := context.Background()
 	badgerStore, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
 	require.NoError(t, err)
@@ -426,10 +445,10 @@ func TestAppV25RejectedRepairWithPreexistingStaleRecordsIsNotTreatedAsApplied(t 
 
 	progress := store.LegacyMemoryAdoptionProgress{State: "complete"}
 	require.NoError(t, sqlite.PublishLegacyMemoryAdoptionProgress(ctx, progress))
-	const proposalID = "rejected-stale-repair-batch"
+	const proposalID = "executed-stale-repair-batch"
 	proposalBytes, err := json.Marshal(governance.ProposalState{
 		ProposalID: proposalID, Operation: governance.OpDomainContinuityAdopt,
-		Status: governance.StatusRejected,
+		Status: governance.StatusExecuted,
 	})
 	require.NoError(t, err)
 	require.NoError(t, badgerStore.SetGovProposal(proposalID, proposalBytes))
@@ -454,9 +473,11 @@ func TestAppV25RejectedRepairWithPreexistingStaleRecordsIsNotTreatedAsApplied(t 
 	require.ErrorContains(t, err, "current Root signing path is unavailable")
 	require.False(t, more)
 	require.Equal(t, entries, run.plan.Entries,
-		"record existence cannot masquerade as a successful grant repair")
+		"executed status and record existence cannot masquerade as a successful grant repair")
 	require.Empty(t, run.pendingDomains,
-		"the next pass must use the durable rejection receipt to bisect")
+		"the next pass must replay the retained exact evidence under a fresh proposal")
+	require.Empty(t, run.pendingProposalID,
+		"the stale executed proposal must not pin every later worker pass")
 
 	batchPlan := sha256.Sum256([]byte("successful-stale-repair"))
 	require.NoError(t, badgerStore.ApplyAppV25DomainContinuityBatch(

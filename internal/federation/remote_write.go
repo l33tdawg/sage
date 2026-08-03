@@ -7,8 +7,8 @@ import (
 )
 
 const (
-	// CapabilityWrite reserves the mixed-version wire label, but v11.9 never
-	// advertises it. A reusable ordinary AccessGrant is agent-wide and therefore
+	// CapabilityWrite reserves the mixed-version wire label, but current SAGE
+	// does not advertise it. A reusable ordinary AccessGrant is agent-wide and therefore
 	// cannot honestly implement a permission scoped to one trusted peer link.
 	CapabilityWrite = "write-v1"
 )
@@ -16,10 +16,10 @@ const (
 // ErrRemoteWriteCapabilityUnavailable keeps preview callers fail-closed and
 // explicit until consensus has a one-shot ingress capability bound to the
 // active ceremony generation, frozen peer, domain, and exact submission.
-var ErrRemoteWriteCapabilityUnavailable = errors.New("federation write requires a consensus-bound ingress capability and is unavailable in v11.9")
+var ErrRemoteWriteCapabilityUnavailable = errors.New("federation write requires a consensus-bound ingress capability and is unavailable in the current protocol")
 
 // RemoteWriteHeaders preserves the reserved write-v1 envelope for
-// mixed-version compatibility. v11.9 never dispatches these credentials to
+// mixed-version compatibility. Current SAGE never dispatches these credentials to
 // /v1/memory/submit.
 type RemoteWriteHeaders struct {
 	AgentID   string `json:"x_agent_id"`

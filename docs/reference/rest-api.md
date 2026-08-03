@@ -983,8 +983,8 @@ Pre-app-v23 nodes retain their legacy projection behavior.
 | `GET /v1/dashboard/network/access` | Read Root/broker readiness plus non-Root agents, enrollment/role revisions, named profiles, Access Groups, linked-reader readiness, and separate linked-message consent readiness. |
 | `PUT /v1/dashboard/network/access/agents/{id}/policy` | Atomically approve or change a non-Root local agent's role, named profile, clearance, and compatible owned home domain. |
 | `PUT /v1/dashboard/network/access/agents/{id}/name` | App-v26 H+1: current local Root/Admin changes only a governed non-Root agent's mutable display name. The handler copies the current boot bio into `AgentUpdate`; consensus rejects any operator attempt to alter that bio. `agent_id` and immutable `registered_name` never change. A no-op returns `status:"unchanged", committed:false`; a real change is reported only after commit or canonical reconciliation. |
-| `PUT /v1/dashboard/network/access/groups/{groupID}` | Create or replace a consensus local Access Group using an expected-revision binding. |
-| `DELETE /v1/dashboard/network/access/groups/{groupID}` | Delete an Access Group using its expected revision. |
+| `PUT /v1/dashboard/network/access/groups/{groupID}` | Create or replace a consensus local Access Group using `name`, local `members` (canonicalized and sorted by the handler), app-v26 `member_authority` (`read`, `read_write`, or `read_write_modify`), and an `expected_revision` binding. See [`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md). |
+| `DELETE /v1/dashboard/network/access/groups/{groupID}` | Delete an Access Group using `{"expected_revision": <current revision>}`. See [`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md). |
 | `GET /v1/dashboard/network/access/linked-readers` | List exact node-local federated linked-reader relations. |
 | `POST /v1/dashboard/network/access/linked-readers/eligibility` | Live-check one exact `remote_agent_id` on one active `remote_chain_id` before offering the manual-ID fallback; it is not a directory or presence query. |
 | `POST /v1/dashboard/network/access/linked-readers` | Attach, remove, or rebind an exact remote agent as a read-only relation; never creates local membership. |
@@ -1452,7 +1452,7 @@ advertises reserved `write-v1` (`internal/federation/remote_write.go:48-52`;
 
 An ordinary level-2 `AccessGrant` is agent/domain authorization usable through
 the normal submit API outside a particular federation link. It is therefore not
-a trust-bound A↔B Write permission. v11.9 keeps Write fail-closed until consensus
+a trust-bound A↔B Write permission. The current protocol keeps Write fail-closed until consensus
 provides an ingress capability bound to the active ceremony generation, frozen
 peer, domain, and exact submission. Tracked preview-era grants are revoked and
 verified synchronously before `sage-gui` binds application listeners; an

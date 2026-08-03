@@ -1,12 +1,36 @@
 package store
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestAppV26AccessGroupReferenceTracksAuthorityContract(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	repoRoot := filepath.Join(filepath.Dir(source), "..", "..")
+	docPath := filepath.Join(repoRoot, "docs", "reference", "concepts", "app-v26-access-groups.md")
+	doc, err := os.ReadFile(docPath)
+	require.NoError(t, err)
+	for _, authority := range []string{
+		AppV26GroupAuthorityRead,
+		AppV26GroupAuthorityReadWrite,
+		AppV26GroupAuthorityReadWriteModify,
+	} {
+		require.Contains(t, string(doc), "`"+authority+"`")
+	}
+	require.Contains(t, string(doc), "not ordinary agent SDK or MCP")
+
+	index, err := os.ReadFile(filepath.Join(repoRoot, "docs", "reference", "INDEX.md"))
+	require.NoError(t, err)
+	require.Contains(t, string(index), "concepts/app-v26-access-groups.md")
+}
 
 func appV26GroupFixture(t *testing.T) (*BadgerStore, string, string, string, string) {
 	t.Helper()

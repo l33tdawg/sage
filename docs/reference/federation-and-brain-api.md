@@ -4,12 +4,12 @@
 
 v11 adds two independent HTTP surfaces. v11.6 can carry the same mTLS HTTP protocol over direct HTTPS or libp2p, including NAT traversal and Circuit Relay v2 fallback. The dashboard JOIN wizard now exposes one topology-free flow: it prepares every usable Direct and Secure relay candidate and sends `transport:"auto"`. Preparation is not a reachability claim; the selected route is reported only after an authenticated exchange actually uses it. A valid Direct route no longer waits for a relay reservation: it is usable immediately, while the secure relay remains the automatic roaming/NAT fallback. Current peers exchange and persist roaming routes over their authenticated agreement after signing, while older peers remain compatible through Direct. The relay is outside the trust boundary and sees only encrypted traffic.
 
-1. **Cross-network federation** - a directional read/copy exchange between two independent SAGE chains, plus a guided TOTP JOIN ceremony that establishes node trust. Mutable per-domain peer RBAC is separate from that ceremony. Write is reserved in the versioned wire shape but unavailable in v11.9/v11.10. The existing agent pipeline can also carry explicitly accepted agent-to-agent work over that trust edge; it remains off-consensus and is not remote memory Write. This spans three listeners: a dedicated peer-facing mTLS listener (`/fed/v1/*`), the signed local-control REST surface (`/v1/federation/*`), and a cookie-authed dashboard proxy (`/v1/dashboard/federation/*`).
+1. **Cross-network federation** - a directional read/copy exchange between two independent SAGE chains, plus a guided TOTP JOIN ceremony that establishes node trust. Mutable per-domain peer RBAC is separate from that ceremony. Write is reserved in the versioned wire shape but unavailable in the current protocol. The existing agent pipeline can also carry explicitly accepted agent-to-agent work over that trust edge; it remains off-consensus and is not remote memory Write. This spans three listeners: a dedicated peer-facing mTLS listener (`/fed/v1/*`), the signed local-control REST surface (`/v1/federation/*`), and a cookie-authed dashboard proxy (`/v1/dashboard/federation/*`).
 2. **The brain as a tool** - the memory "train of thought" endpoint (`GET /v1/dashboard/memory/{id}/related`) that powers the MRI click-to-explore board.
 
 ### The trust / consensus boundary (read this first)
 
-Federation transport, routing, policy, and foreign recall results are **OFF-consensus**. Borrowed query results are merged into REST responses only and never persisted. Treaty lifecycle reaches chain state through each node's own `TxTypeCrossFedSet` (tx-33) and `TxTypeCrossFedRevoke` (tx-34) broadcasts. Before app-v23 those Manager-originated transactions retain the historical operator signer; after app-v23 they resolve and sign with the exact currently committed CEREBRUM Root credential. A peer receipt (Mode-2) reaches chain state as signed bytes inside `TxTypeCoCommitAttest` and remains bound to the peer-pinned transport/coauthor identity. Domain-sync copies enter independently as ordinary locally authorized `TxTypeMemorySubmit` (tx-1) transactions and pass the receiver's consensus/RBAC gates; after app-v23 this new local write is likewise signed by current Root while its remote origin remains immutable SyncItem provenance. Remote Write does **not** enter this path in v11.9: the reserved route returns an authenticated `501` and never dispatches a body to `/v1/memory/submit` (`internal/federation/remote_write.go:41-52`). Trust and authorization checks fail **closed** on an unreachable peer, revoked/expired/unknown agreement, missing current Root key, missing remote CA, SPKI pin mismatch, peer-operator mismatch, or absent domain permission; Write remains unavailable regardless of credentials.
+Federation transport, routing, policy, and foreign recall results are **OFF-consensus**. Borrowed query results are merged into REST responses only and never persisted. Treaty lifecycle reaches chain state through each node's own `TxTypeCrossFedSet` (tx-33) and `TxTypeCrossFedRevoke` (tx-34) broadcasts. Before app-v23 those Manager-originated transactions retain the historical operator signer; after app-v23 they resolve and sign with the exact currently committed CEREBRUM Root credential. A peer receipt (Mode-2) reaches chain state as signed bytes inside `TxTypeCoCommitAttest` and remains bound to the peer-pinned transport/coauthor identity. Domain-sync copies enter independently as ordinary locally authorized `TxTypeMemorySubmit` (tx-1) transactions and pass the receiver's consensus/RBAC gates; after app-v23 this new local write is likewise signed by current Root while its remote origin remains immutable SyncItem provenance. Remote Write does **not** enter this path in the current protocol: the reserved route returns an authenticated `501` and never dispatches a body to `/v1/memory/submit` (`internal/federation/remote_write.go:41-52`). Trust and authorization checks fail **closed** on an unreachable peer, revoked/expired/unknown agreement, missing current Root key, missing remote CA, SPKI pin mismatch, peer-operator mismatch, or absent domain permission; Write remains unavailable regardless of credentials.
 
 **The JOIN ceremony's peer-auth anchor is HUMAN** - an in-person / on-camera QR scan (or a spoken-code fallback). The TOTP factor proves co-possession of a shared seed and bilateral consent; it does **not** prove the secret reached the right peer. Do not read the ceremony as machine-authenticated key exchange. CEREBRUM opens the common guest path directly on the reciprocal scan and progressively discloses remote/address fallbacks. It presents the remaining six-digit value as one short fingerprint check against a swapped or relayed QR, not as another login factor or protocol counter (`web/static/js/app.js`, `GuestJoinWizard`, `FedCodeCompare`).
 
@@ -140,7 +140,7 @@ other node's frozen operator:
 |---|---|
 | **Read** | Live remote lookup in the selected existing-domain subtree. Results are borrowed, not retained. |
 | **Copy** | Permission for the peer to retain synchronized local copies. The peer must separately opt in with its own subscription. |
-| **Write (reserved)** | Nothing in v11.9. The field remains for mixed-version compatibility, but persisted and advertised peer policy keeps it false and permission updates reject it. |
+| **Write (reserved)** | No authority in the current protocol. The field remains for mixed-version compatibility, but persisted and advertised peer policy keeps it false and permission updates reject it. |
 
 For A → B, A edits “what A shares with B”; B can only observe that snapshot.
 B edits its own independent “what B shares with A” snapshot for the reverse
@@ -248,7 +248,7 @@ Authenticated reachability / identity and permission preflight (`handleStatus`,
 | `chain_id` | string | the serving node's own chain id |
 | `time` | int64 | serving node's unix time |
 | `capabilities` | []string | optional features. A SQLite-backed v11.13.5 node advertises `sync`, `federated-pipeline-v1`, and `federated-pipeline-contact-lookup-v1`; it never advertises reserved `write-v1`. |
-| `peer_rbac_grant` | object, optional | the serving node's current `{policy_version, paused, domains:[{domain,read,write,copy}]}` snapshot, disclosed only to the exact bound peer; present with zero rows means deny-all. While paused, current peers see `paused:true` and an empty domain list; the empty list also keeps older peers fail-closed. The versioned `write` member is always false in v11.9 (`internal/federation/peer_rbac.go:313-330`). |
+| `peer_rbac_grant` | object, optional | the serving node's current `{policy_version, paused, domains:[{domain,read,write,copy}]}` snapshot, disclosed only to the exact bound peer; present with zero rows means deny-all. While paused, current peers see `paused:true` and an empty domain list; the empty list also keeps older peers fail-closed. The versioned `write` member is always false in the current protocol (`internal/federation/peer_rbac.go:313-330`). |
 | `pipe_contacts` | object, optional | Compatible v1 peer-scoped projection of domain owners and **active local agents with current level-1 Read access** for shared Read/Copy domains. App-v23 named profiles retain the app-v22 `ReadAllDomains` / `DenyFederatedPipe` bits as derived compatibility restrictions: ReadAll qualifies an active reviewed target, while the deny excludes a target even when it owns the domain. Without the advisory `X-Sage-Capabilities: federated-pipeline-contact-lookup-v1` request header it is a deterministic valid subset: eligible effective owners plus a stable first 128 active-agent candidates, bounded again to 1,024 contacts and 1 MiB. This keeps old consumers safe without a roster-wide RBAC scan. A lookup-capable requester receives the policy/capability preflight without this roster (and locally caps that compact response at 1 MiB), then uses the bounded live lookup route below. A v11.13.0 peer ignores that advisory header; if its historic full status exceeds the compact cap, the requester retries its normal legacy status once through a single-worker compatibility lane and filters it immediately. |
 | `sharing_grant` | object, optional | legacy compatibility envelope (`allowed_domains`, `max_clearance`) |
 
@@ -388,7 +388,7 @@ hash or another model/dimension space (`server.go`, `types.go`).
 
 ### `POST /fed/v1/write`
 
-This is a **reserved, fail-closed endpoint** in v11.9. It remains mounted behind
+This is a **reserved, fail-closed endpoint** in the current protocol. It remains mounted behind
 `peerAuth`, so an unauthenticated request is rejected before the handler. After
 successful peer authentication, the handler returns `501 Not Implemented` with
 `ErrRemoteWriteCapabilityUnavailable`; it deliberately does not parse the body
@@ -397,7 +397,7 @@ or dispatch credentials to `/v1/memory/submit`
 `48-52`).
 
 The `write-v1` constant and `RemoteWriteRequest` envelope remain reserved for
-mixed-version compatibility, but v11.9 never advertises the capability. The
+mixed-version compatibility, but current SAGE never advertises the capability. The
 outbound `WritePeer` method returns the typed unavailable error before agreement
 lookup or dialing (`internal/federation/remote_write.go:9-45`), and status adds
 only capabilities actually supported by the running node
@@ -639,7 +639,7 @@ remote node to mutate its chain (`api/rest/federation_handler.go:252-279`;
 
 `POST …/write` reserves the path and `RemoteWriteRequest` wire type for
 compatibility. Its local controller is the exact configured node operator
-before app-v23 and current local Root/Admin after app-v23. In v11.9 the control
+before app-v23 and current local Root/Admin after app-v23. In the current protocol the control
 handler returns `501` before parsing any inner credential or calling a
 transport implementation (`api/rest/federation_write_handler.go`). The
 Manager's separately reserved `WritePeer` method likewise returns the typed

@@ -146,9 +146,9 @@ matches = client.lookup_agents("mynah", limit=10)
 owned = client.owned_domains(limit=50)
 sample = client.domain_access_sample()
 
-# Agent roles, operating modes, groups, and grants are governed in the local
-# CEREBRUM Access Controls screen; the SDK deliberately exposes no legacy
-# per-agent permission mutation shortcut.
+# Agent roles, operating modes, app-v26 Access Group membership/authority, and
+# grants are governed in the local CEREBRUM Access Controls screen; the SDK
+# deliberately exposes no legacy per-agent permission mutation shortcut.
 ```
 
 ### Memory Operations

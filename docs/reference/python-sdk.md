@@ -644,7 +644,10 @@ are intentionally bounded policy samples, not this complete ownership set.
 Current local policy is an atomic role/profile/clearance/home-domain operation
 performed by Root/Admin through loopback CEREBRUM. The SDK deliberately has no
 per-agent permission mutation shortcut because an ordinary agent cannot
-self-promote or bypass that governed workflow.
+self-promote or bypass that governed workflow. App-v26 Access Group membership
+and `member_authority` are governed by the same loopback-only boundary and are
+not SDK methods; see
+[`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md).
 
 #### `domain_access_sample()`
 

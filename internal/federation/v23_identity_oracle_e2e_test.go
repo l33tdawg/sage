@@ -291,7 +291,7 @@ func TestV23FederatedGuestIdentityOracleOverTwoSAGEMTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const exactWriteDenial = `{"error":"federation write requires a consensus-bound ingress capability and is unavailable in v11.9"}`
+	const exactWriteDenial = `{"error":"federation write requires a consensus-bound ingress capability and is unavailable in the current protocol"}`
 	if writeStatus != http.StatusNotImplemented ||
 		strings.TrimSpace(string(writeBody)) != exactWriteDenial {
 		t.Fatalf("authenticated remote write = status %d body %q",

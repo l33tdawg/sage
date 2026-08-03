@@ -285,9 +285,21 @@ func (h *DashboardHandler) runAppV25DomainContinuityPassWithRun(
 				return true, nil
 			case governance.StatusExecuted:
 				if !allApplied {
-					return false, errors.New(
-						"executed domain continuity proposal has no canonical result",
-					)
+					// An app-v25 batch could commit its governance terminal
+					// status while leaving either no continuity record or a
+					// revision-stale grant.  StatusExecuted is therefore not a
+					// durable success receipt by itself.  Release the stale
+					// proposal pointer but retain the frozen plan entries so the
+					// exact evidence is proposed again.  The store's continuity
+					// apply path is idempotent and repairs only continuity-owned
+					// state; explicit later policy mutations still fail closed.
+					logger.Warn().
+						Str("proposal_id", run.pendingProposalID).
+						Int("domains", len(run.pendingDomains)).
+						Msg("executed domain continuity proposal missing canonical result; replaying exact evidence")
+					removeBatch = false
+					run.pendingProposalID = ""
+					break
 				}
 				removeBatch = true
 			default:
@@ -596,8 +608,11 @@ func (h *DashboardHandler) buildAppV25DomainContinuityPlan(
 					continue
 				}
 				if record.Status != memory.StatusProposed &&
-					record.Status != memory.StatusCommitted &&
-					record.Status != memory.StatusDeprecated {
+					record.Status != memory.StatusCommitted {
+					// A terminal deprecation is an explicit decision that this
+					// record must no longer participate in live memory policy.
+					// Preserve it for audit, but never let deprecated-only
+					// history recreate ownership, a writer grant, or a group.
 					continue
 				}
 				inspection := inspections[i]

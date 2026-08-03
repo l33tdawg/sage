@@ -513,7 +513,7 @@ existing domains with live Read/Copy capabilities and one reserved field:
 |---|---|
 | **Read** | The peer may run live remote recall in the selected domain subtree. Results are borrowed for that response and are not retained merely because Read is enabled. |
 | **Copy** | The source permits replication, but no copy moves unless the receiving node independently subscribes to save that domain locally. |
-| **Write (reserved)** | Unavailable in v11.9. The versioned field remains for compatibility but must be false; neither pairing nor an ordinary `AccessGrant` enables connection-scoped remote submission. |
+| **Write (reserved)** | Unavailable in the current protocol. The versioned field remains for compatibility but must be false; neither pairing nor an ordinary `AccessGrant` enables connection-scoped remote submission. |
 
 `Copy` implies `Read`; the stored policy canonicalizes that invariant and rejects
 `Write` (`internal/store/peer_rbac_policy.go:26-41`, `113-142`). The dashboard lists the
