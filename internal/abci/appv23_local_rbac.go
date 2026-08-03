@@ -266,13 +266,14 @@ func (app *SageApp) enforceAppV23ControlElevation(parsedTx *tx.ParsedTx, height 
 		if parsedTx.LocalElevation != nil {
 			return errors.New("unapproved principal supplied local elevation")
 		}
-		// The only unaffiliated credential allowed through this central gate is
-		// a brand-new key performing its first self-registration. Every
-		// credential already known to the chain has an app-v23 policy
-		// disposition after migration. Failing open here would let a rotated
-		// Root credential, a stale-generation delegated Admin, or a pending
-		// principal fall through to legacy role checks that still project
-		// Role=="admin".
+		// Registration is the one control-plane operation a pending ordinary
+		// principal may repeat. The transaction is self-signed and the
+		// consensus handler is idempotent: it preserves the immutable canonical
+		// identity and cannot grant a role, enrollment, domain, or capability.
+		// This is what lets an operator reject a review request locally while
+		// allowing the same key to request review again later. Root and legacy
+		// Admin identities remain excluded so they cannot fall through legacy
+		// role checks that still project Role=="admin".
 		if errors.Is(actorErr, store.ErrAppV23NeedsApproval) &&
 			parsedTx.Type == tx.TxTypeAgentRegister {
 			registered, registrationErr := app.badgerStore.GetRegisteredAgent(actorID)
@@ -282,7 +283,7 @@ func (app *SageApp) enforceAppV23ControlElevation(parsedTx *tx.ParsedTx, height 
 			if registrationErr != nil {
 				return fmt.Errorf("read app-v23 registration state: %w", registrationErr)
 			}
-			if registered == nil {
+			if registered == nil || registered.Role != store.AppV23RoleAdmin {
 				return nil
 			}
 		}

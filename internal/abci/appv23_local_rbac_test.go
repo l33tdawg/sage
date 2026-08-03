@@ -1346,8 +1346,8 @@ func TestAppV23AgentRegisterAlwaysCreatesRestrictedPendingMember(t *testing.T) {
 				"only a previously unknown key may reach first self-registration")
 			result := app.processAgentRegister(parsed, 11, appV23BlockTime())
 			require.Zero(t, result.Code, result.Log)
-			require.Error(t, app.enforceAppV23ControlElevation(parsed, 12),
-				"a now-known pending principal must not self-register through legacy paths")
+			require.NoError(t, app.enforceAppV23ControlElevation(parsed, 12),
+				"a pending ordinary principal may repeat only its idempotent self-registration")
 			record, err := app.badgerStore.GetRegisteredAgent(agent.id)
 			require.NoError(t, err)
 			require.Equal(t, store.AppV23RoleMember, record.Role)
@@ -1372,6 +1372,78 @@ func TestAppV23AgentRegisterAlwaysCreatesRestrictedPendingMember(t *testing.T) {
 			require.Equal(t, appV23Denial(authzdenial.CodePrincipalPendingReview), denied)
 		})
 	}
+}
+
+func TestAppV23PendingAgentReregisterPassesConsensusTransactionGate(t *testing.T) {
+	app := setupTestApp(t)
+	root := newAgentKey(t)
+	pending := newAgentKey(t)
+	registerAppV23Agent(t, app, root, store.AppV23RoleAdmin, 1, 0)
+	require.NoError(t, app.badgerStore.EnsureAppV23Root("pending-reregister-scope", 10))
+	app.appV23AppliedHeight = 10
+	app.state.Height = 10
+
+	first := makeAgentRegisterTx(t, pending, "pending", store.AppV23RoleMember, "", "", "")
+	signAppV23Outer(t, first, pending, 1)
+	firstRaw, err := tx.EncodeTx(first)
+	require.NoError(t, err)
+	firstBlock, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Height: 11, Time: appV23BlockTime(), Txs: [][]byte{firstRaw},
+	})
+	require.NoError(t, err)
+	require.Len(t, firstBlock.TxResults, 1)
+	require.Zero(t, firstBlock.TxResults[0].Code, firstBlock.TxResults[0].Log)
+	_, err = app.Commit(context.Background(), &abcitypes.RequestCommit{})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	registeredProjection, err := app.offchainStore.GetAgent(ctx, pending.id)
+	require.NoError(t, err)
+	require.Equal(t, "active", registeredProjection.Status)
+	require.NoError(t, app.offchainStore.RemoveAgent(ctx, pending.id),
+		"operator rejection removes only the local pending projection")
+
+	// Exercise FinalizeBlock again, not just processAgentRegister. The latter
+	// misses enforceAppV23ControlElevation and allowed the live reject/re-request
+	// regression to escape the earlier unit test.
+	retry := makeAgentRegisterTx(t, pending, "ignored replacement", store.AppV23RoleAdmin, "", "", "")
+	signAppV23Outer(t, retry, pending, 2)
+	retryRaw, err := tx.EncodeTx(retry)
+	require.NoError(t, err)
+	retryBlock, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Height: 12, Time: appV23BlockTime().Add(time.Second), Txs: [][]byte{retryRaw},
+	})
+	require.NoError(t, err)
+	require.Len(t, retryBlock.TxResults, 1)
+	require.Zero(t, retryBlock.TxResults[0].Code, retryBlock.TxResults[0].Log)
+	_, err = app.Commit(context.Background(), &abcitypes.RequestCommit{})
+	require.NoError(t, err)
+
+	record, err := app.badgerStore.GetRegisteredAgent(pending.id)
+	require.NoError(t, err)
+	require.Equal(t, store.AppV23RoleMember, record.Role)
+	require.Equal(t, store.DefaultSelfRegisteredAgentCapabilities, record.Capabilities)
+	require.Equal(t, int64(11), record.RegisteredAt, "idempotent retry must preserve canonical registration history")
+	enrollment, err := app.badgerStore.GetAppV23Enrollment(pending.id)
+	require.NoError(t, err)
+	require.Nil(t, enrollment, "re-request must not approve or activate the pending identity")
+	restoredProjection, err := app.offchainStore.GetAgent(ctx, pending.id)
+	require.NoError(t, err)
+	require.Equal(t, "active", restoredProjection.Status)
+	require.Nil(t, restoredProjection.RemovedAt)
+
+	// The exception is registration-only. A pending principal remains unable to
+	// mutate even its own canonical metadata through the control plane.
+	update := makeAgentUpdateTx(t, pending, pending.id, "not allowed", "")
+	signAppV23Outer(t, update, pending, 3)
+	updateRaw, err := tx.EncodeTx(update)
+	require.NoError(t, err)
+	deniedBlock, err := app.FinalizeBlock(context.Background(), &abcitypes.RequestFinalizeBlock{
+		Height: 13, Time: appV23BlockTime().Add(2 * time.Second), Txs: [][]byte{updateRaw},
+	})
+	require.NoError(t, err)
+	require.Len(t, deniedBlock.TxResults, 1)
+	require.Equal(t, uint32(110), deniedBlock.TxResults[0].Code)
 }
 
 func TestAppV23ReadOnlyWriteDenialNeverPrescribesGrant(t *testing.T) {
