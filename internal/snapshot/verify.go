@@ -33,7 +33,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	dbm "github.com/cometbft/cometbft-db"
@@ -282,13 +281,13 @@ func VerifyWithOptions(dir string, opts VerifyOptions) error {
 }
 
 func verifyRecoveryConfig(archivePath string, requireVault bool, vaultPassphrase string) error {
-	root, err := os.MkdirTemp("", "sage-verify-config-*")
-	if err != nil {
-		return err
+	root, mkdirErr := os.MkdirTemp("", "sage-verify-config-*")
+	if mkdirErr != nil {
+		return mkdirErr
 	}
 	defer func() { _ = os.RemoveAll(root) }()
-	if err := untarZstd(archivePath, root); err != nil {
-		return fmt.Errorf("extract: %w", err)
+	if extractErr := untarZstd(archivePath, root); extractErr != nil {
+		return fmt.Errorf("extract: %w", extractErr)
 	}
 	configDir := filepath.Join(root, "cometbft", "config")
 	genesisRaw, err := os.ReadFile(filepath.Join(configDir, "genesis.json"))
@@ -429,44 +428,6 @@ func verifyCometState(archivePath, backend string, expectedHeight int64, expecte
 		return fmt.Errorf("blockstore tip seen commit is invalid: %w", err)
 	}
 	return nil
-}
-
-func walkTarNames(path string, visit func(string)) error {
-	return walkTar(path, func(hdr *tar.Header, tr io.Reader) error {
-		name := filepath.ToSlash(filepath.Clean(hdr.Name))
-		if strings.HasPrefix(name, "../") || name == ".." || filepath.IsAbs(name) {
-			return fmt.Errorf("tar entry escapes root: %q", hdr.Name)
-		}
-		visit(name)
-		_, err := io.Copy(io.Discard, tr)
-		return err
-	})
-}
-
-func walkTar(path string, visit func(*tar.Header, io.Reader) error) error {
-	in, err := os.Open(path) //nolint:gosec // verified snapshot-owned path
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-	zr, err := zstd.NewReader(in)
-	if err != nil {
-		return err
-	}
-	defer zr.Close()
-	tr := tar.NewReader(zr)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if err := visit(hdr, tr); err != nil {
-			return err
-		}
-	}
 }
 
 // materialize returns a filesystem path containing the plaintext bytes

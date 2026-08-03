@@ -120,8 +120,8 @@ func seedVerifiedCometState(t *testing.T, dataDir string, height int64, appHash 
 		Round: 0, Type: cmtproto.PrecommitType, BlockID: blockID, Timestamp: time.Unix(2, 0).UTC(),
 	}
 	protoVote := vote.ToProto()
-	if err := cmttypes.NewMockPVWithParams(priv, false, false).SignVote(state.ChainID, protoVote); err != nil {
-		t.Fatal(err)
+	if signErr := cmttypes.NewMockPVWithParams(priv, false, false).SignVote(state.ChainID, protoVote); signErr != nil {
+		t.Fatal(signErr)
 	}
 	seenCommit := &cmttypes.Commit{
 		Height: height, Round: 0, BlockID: blockID,
@@ -130,8 +130,8 @@ func seedVerifiedCometState(t *testing.T, dataDir string, height int64, appHash 
 			Timestamp: vote.Timestamp, Signature: append([]byte(nil), protoVote.Signature...),
 		}},
 	}
-	if err := seenCommit.ValidateBasic(); err != nil {
-		t.Fatal(err)
+	if validateErr := seenCommit.ValidateBasic(); validateErr != nil {
+		t.Fatal(validateErr)
 	}
 	cometDataDir := filepath.Join(dataDir, "cometbft", "data")
 	blockDB, err := dbm.NewDB("blockstore", dbm.GoLevelDBBackend, cometDataDir)
@@ -140,8 +140,8 @@ func seedVerifiedCometState(t *testing.T, dataDir string, height int64, appHash 
 	}
 	blockStore := cmtstore.NewBlockStore(blockDB)
 	blockStore.SaveBlock(block, parts, seenCommit)
-	if err := blockStore.Close(); err != nil {
-		t.Fatal(err)
+	if closeErr := blockStore.Close(); closeErr != nil {
+		t.Fatal(closeErr)
 	}
 
 	state.LastBlockHeight = height
@@ -813,11 +813,11 @@ func TestSnapshotSchedulerPrepareQuiesceAbortRetryAndCommit(t *testing.T) {
 	}
 	sched.endFlight()
 
-	commit, abort, err := sched.PrepareQuiesce(context.Background())
+	_, abort, err := sched.PrepareQuiesce(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := sched.PrepareQuiesce(context.Background()); err == nil {
+	if _, _, prepareErr := sched.PrepareQuiesce(context.Background()); prepareErr == nil {
 		t.Fatal("concurrent restart preparation acquired the active drain token")
 	}
 	abort()
@@ -826,7 +826,7 @@ func TestSnapshotSchedulerPrepareQuiesceAbortRetryAndCommit(t *testing.T) {
 	}
 	sched.endFlight()
 
-	commit, abort, err = sched.PrepareQuiesce(context.Background())
+	commit, abort, err := sched.PrepareQuiesce(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1025,14 +1025,14 @@ func TestTakeVerifiedPreservesPriorVersionAtSameIdleHeight(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = pinned.Close() }()
-	if _, err := snapshot.Take(context.Background(), dataDir, 77, appHash[:], "old-version", snapshot.Options{
+	if _, takeErr := snapshot.Take(context.Background(), dataDir, 77, appHash[:], "old-version", snapshot.Options{
 		BinaryVersion: "v11.16.4-test", LiveBadger: db, IncludeBinary: true, BinarySource: pinned,
-	}); err != nil {
-		t.Fatal(err)
+	}); takeErr != nil {
+		t.Fatal(takeErr)
 	}
 	sched := newVerifiedSnapshotScheduler(t, dataDir, db)
-	if _, err := sched.TakeVerified(context.Background(), 77, appHash[:], "new-version", nil); err != nil {
-		t.Fatal(err)
+	if _, takeErr := sched.TakeVerified(context.Background(), 77, appHash[:], "new-version", nil); takeErr != nil {
+		t.Fatal(takeErr)
 	}
 	entries, err := os.ReadDir(filepath.Join(dataDir, "snapshots"))
 	if err != nil {

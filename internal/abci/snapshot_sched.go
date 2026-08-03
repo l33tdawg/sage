@@ -454,20 +454,20 @@ func (s *SnapshotScheduler) PreserveRunningBinary() (string, error) {
 		}
 		return nil
 	}
-	if info, err := os.Lstat(destination); err == nil {
+	if info, lstatErr := os.Lstat(destination); lstatErr == nil {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return "", errors.New("recovery executable is not a real regular file")
 		}
-		if err := verify(destination); err != nil {
-			return "", err
+		if verifyErr := verify(destination); verifyErr != nil {
+			return "", verifyErr
 		}
 		return destination, nil
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("inspect recovery executable: %w", err)
+	} else if !os.IsNotExist(lstatErr) {
+		return "", fmt.Errorf("inspect recovery executable: %w", lstatErr)
 	}
-	temp, err := os.CreateTemp(recoveryDir, ".sage-gui-recovery-*")
-	if err != nil {
-		return "", fmt.Errorf("create recovery executable: %w", err)
+	temp, createErr := os.CreateTemp(recoveryDir, ".sage-gui-recovery-*")
+	if createErr != nil {
+		return "", fmt.Errorf("create recovery executable: %w", createErr)
 	}
 	tempPath := temp.Name()
 	keep := false
@@ -477,18 +477,18 @@ func (s *SnapshotScheduler) PreserveRunningBinary() (string, error) {
 			_ = os.Remove(tempPath)
 		}
 	}()
-	info, err := s.binarySource.Stat()
-	if err != nil {
-		return "", fmt.Errorf("stat pinned executable: %w", err)
+	info, statErr := s.binarySource.Stat()
+	if statErr != nil {
+		return "", fmt.Errorf("stat pinned executable: %w", statErr)
 	}
-	if _, err := io.Copy(temp, io.NewSectionReader(s.binarySource, 0, info.Size())); err != nil {
-		return "", fmt.Errorf("copy pinned executable: %w", err)
+	if _, copyErr := io.Copy(temp, io.NewSectionReader(s.binarySource, 0, info.Size())); copyErr != nil {
+		return "", fmt.Errorf("copy pinned executable: %w", copyErr)
 	}
-	if err := temp.Chmod(0o700); err != nil {
-		return "", fmt.Errorf("make recovery executable launchable: %w", err)
+	if chmodErr := temp.Chmod(0o700); chmodErr != nil {
+		return "", fmt.Errorf("make recovery executable launchable: %w", chmodErr)
 	}
-	if err := temp.Sync(); err != nil {
-		return "", fmt.Errorf("sync recovery executable: %w", err)
+	if syncErr := temp.Sync(); syncErr != nil {
+		return "", fmt.Errorf("sync recovery executable: %w", syncErr)
 	}
 	if err := temp.Close(); err != nil {
 		return "", fmt.Errorf("close recovery executable: %w", err)

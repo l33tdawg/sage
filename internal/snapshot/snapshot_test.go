@@ -321,8 +321,8 @@ func TestVerifyRejectsUnbootableRecoveryIdentity(t *testing.T) {
 					t.Fatal(err)
 				}
 				var document map[string]any
-				if err := json.Unmarshal(raw, &document); err != nil {
-					t.Fatal(err)
+				if unmarshalErr := json.Unmarshal(raw, &document); unmarshalErr != nil {
+					t.Fatal(unmarshalErr)
 				}
 				document["address"] = "00"
 				raw, err = json.Marshal(document)

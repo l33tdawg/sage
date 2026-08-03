@@ -84,17 +84,17 @@ func (s *BadgerStore) repairAppV26EnrollmentHomesTxn(txn *badger.Txn, height int
 		return err
 	}
 	for _, enrollment := range enrollments {
-		reason, defective, err := s.appV23RecoverableHomeDefectTxn(txn, enrollment)
-		if err != nil {
-			return fmt.Errorf("inspect app-v26 home repair for %s: %w", enrollment.AgentID, err)
+		reason, defective, defectErr := s.appV23RecoverableHomeDefectTxn(txn, enrollment)
+		if defectErr != nil {
+			return fmt.Errorf("inspect app-v26 home repair for %s: %w", enrollment.AgentID, defectErr)
 		}
 		if !defective {
 			continue
 		}
-		if _, err := txn.Get(appV26HomeRepairKey(enrollment.AgentID)); err == nil {
+		if _, getErr := txn.Get(appV26HomeRepairKey(enrollment.AgentID)); getErr == nil {
 			return fmt.Errorf("app-v26 home repair already exists for %s", enrollment.AgentID)
-		} else if !errors.Is(err, badger.ErrKeyNotFound) {
-			return err
+		} else if !errors.Is(getErr, badger.ErrKeyNotFound) {
+			return getErr
 		}
 		previousHome := enrollment.HomeDomain
 		previousRevision := enrollment.Revision
@@ -111,8 +111,8 @@ func (s *BadgerStore) repairAppV26EnrollmentHomesTxn(txn *badger.Txn, height int
 		if err != nil {
 			return err
 		}
-		if err := s.txnSet(txn, appV23EnrollmentKey(enrollment.AgentID), data); err != nil {
-			return err
+		if setErr := s.txnSet(txn, appV23EnrollmentKey(enrollment.AgentID), data); setErr != nil {
+			return setErr
 		}
 		audit, err := appV23Marshal(AppV26HomeRepair{
 			AgentID: enrollment.AgentID, PreviousHome: previousHome,
