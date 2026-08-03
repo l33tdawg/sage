@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.17.0/app-v26 code (2026-08-03). Cite file:line when behavior is non-obvious. -->
+<!-- Verified against SAGE v11.17.1/app-v26 code (2026-08-03). Cite file:line when behavior is non-obvious. -->
 
 # App-v26 Access Groups and member authority
 

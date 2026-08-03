@@ -146,6 +146,9 @@ test('metadata, source, race, frontend, and fault checks converge before packagi
   assert.match(job('release-metadata'), /NEWEST_STABLE_TAG/);
   assert.match(job('release-metadata'), /server\.json/);
   assert.match(job('release-metadata'), /DASHBOARD_VERSION/);
+  assert.match(job('release-metadata'), /Verify module metadata is already tidy/);
+  assert.match(job('release-metadata'), /go mod tidy/);
+  assert.match(job('release-metadata'), /git diff --exit-code -- go\.mod go\.sum/);
   assert.match(job('v119-fault-gates'), /require_scoped_reconfiguration: true/);
   assert.match(job('v119-fault-gates'), /require_authorized_state_sync: true/);
   assertNeeds('quality-gate', [

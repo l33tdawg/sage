@@ -51,7 +51,7 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.17.0
+## What's New in v11.17.1
 
 **App-v26 makes Access Group authority explicit and reviewable.** Every local
 group now stores one deterministic member authority: `read`, `read_write`, or
@@ -100,7 +100,7 @@ This is a governed consensus upgrade from app-v25 to app-v26. Existing chains
 advance in place; memories, historical authors, domains, and prior blocks are
 not rewritten.
 
-Container: `ghcr.io/l33tdawg/sage:11.17.0`. SDK 11.17.0.
+Container: `ghcr.io/l33tdawg/sage:11.17.1`. SDK 11.17.1.
 
 ## What's New in v11.16.4
 
@@ -1125,7 +1125,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.1`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:

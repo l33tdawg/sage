@@ -1162,7 +1162,7 @@ func runServe(startupProof string) (rerr error) {
 		// v10.5.1 auto-advance: personal nodes walk the fork ladder to the
 		// binary ceiling automatically (issue #40 follow-up — updating the
 		// binary now brings the chain up to date too). Quorum clusters keep
-		// governed multi-validator activation. v11.17.0 requires app-v26 and
+		// governed multi-validator activation. v11.17.1 requires app-v26 and
 		// never lets disable_auto_upgrade suppress personal-node consensus
 		// migrations: binary/chain-rule divergence is not a supported state.
 		PersonalMode:       !cfg.Quorum.Enabled,
