@@ -69,6 +69,21 @@ test('task status mutations reject HTTP failures before optimistic board state c
         'bulk clear uses Promise.all, so the API helper must reject instead of fulfilling with an error body');
 });
 
+test('task board always leaves its loading state after success or failure', () => {
+    const tasksPage = appSource.slice(
+        appSource.indexOf('function TasksPage('),
+        appSource.indexOf('function Combobox('),
+    );
+    const loadTasks = tasksPage.slice(
+        tasksPage.indexOf('async function loadTasks()'),
+        tasksPage.indexOf('const pause ='),
+    );
+    assert.match(loadTasks, /finally\s*\{\s*setLoading\(false\);\s*\}/,
+        'a successful return must not strand the task board in its loading state');
+    assert.ok(loadTasks.indexOf('finally') > loadTasks.indexOf('catch'),
+        'the same cleanup must cover both fulfilled and rejected task requests');
+});
+
 test('static JavaScript gate rejects the v11.15 nested-template failure under module grammar', () => {
     const checker = fileURLToPath(new URL('./check-static-js.mjs', import.meta.url));
     const fixture = fileURLToPath(

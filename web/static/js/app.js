@@ -3251,8 +3251,9 @@ function TasksPage({ sse }) {
         } catch (e) {
 			console.error('Task board load failed:', e);
 			setError('SAGE could not load your task list. Your tasks are still safe; try again.');
+		} finally {
+			setLoading(false);
 		}
-		setLoading(false);
     }
 
     const pause = ms => new Promise(resolve => window.setTimeout(resolve, ms));
