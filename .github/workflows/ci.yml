@@ -45,8 +45,24 @@ jobs:
         with:
           go-version: '1.25'
           cache: true
-      - name: Run tests
-        run: go test ./... -v -count=1 -race -timeout 30m
+      - name: Run complete test suite
+        run: go test ./... -v -count=1 -timeout 20m
+      - name: Race-check shared-state boundaries
+        run: >-
+          go test -race -count=1 -timeout 25m
+          ./api/rest
+          ./internal/store
+          ./internal/federation
+          ./internal/mcp
+          ./internal/p2p
+          ./internal/snapshot
+          ./internal/statesync
+          ./internal/tx
+      - name: Race-check app and UI concurrency regressions
+        run: >-
+          go test -race -count=1 -timeout 5m
+          -run 'Race|Concurrent|TOCTOU|Linear'
+          ./internal/abci ./web
       - name: Run natter tests
         run: |
           cd natter

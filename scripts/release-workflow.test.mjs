@@ -357,8 +357,25 @@ test('wheel smoke installs declared runtime dependencies before importing the SD
 test('PR and main CI require the same v11.9 composite proofs as release', () => {
   assert.match(ciJob('v119-fault-gates'), /require_scoped_reconfiguration: true/);
   assert.match(ciJob('v119-fault-gates'), /require_authorized_state_sync: true/);
-  assert.match(ciJob('test'), /go test \.\/\.\.\. -v -count=1 -race -timeout 30m/);
-  assert.match(job('test'), /go test \.\/\.\.\. -count=1 -race -timeout 30m/);
+  for (const testJob of [ciJob('test'), job('test')]) {
+    assert.match(testJob, /go test \.\/\.\.\.(?: -v)? -count=1 -timeout 20m/);
+    assert.match(testJob, /go test -race -count=1 -timeout 25m/);
+    for (const sharedStatePackage of [
+      './api/rest',
+      './internal/store',
+      './internal/federation',
+      './internal/mcp',
+      './internal/p2p',
+      './internal/snapshot',
+      './internal/statesync',
+      './internal/tx',
+    ]) {
+      assert.match(testJob, new RegExp(sharedStatePackage.replaceAll('/', '\\/')));
+    }
+    assert.match(testJob, /go test -race -count=1 -timeout 5m/);
+    assert.match(testJob, /-run 'Race\|Concurrent\|TOCTOU\|Linear'/);
+    assert.match(testJob, /\.\/internal\/abci \.\/web/);
+  }
 });
 
 test('the composite fault gate rechecks frozen source after every companion', () => {
