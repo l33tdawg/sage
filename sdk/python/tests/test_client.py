@@ -93,6 +93,15 @@ def test_obsolete_post_appv23_permission_method_is_not_exposed(client):
     assert not hasattr(client, "set_agent_permission")
 
 
+def test_update_agent_name_only_omits_boot_bio(client, mock_api):
+    route = mock_api.put("/v1/agent/update").mock(
+        return_value=httpx.Response(200, json={"status": "updated"})
+    )
+
+    assert client.update_agent(name="renamed") == {"status": "updated"}
+    assert json.loads(route.calls.last.request.content) == {"name": "renamed"}
+
+
 def test_propose_memory(client, mock_api, sample_submit_response):
     mock_api.post("/v1/memory/submit").mock(
         return_value=httpx.Response(201, json=sample_submit_response)

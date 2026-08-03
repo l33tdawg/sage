@@ -387,7 +387,7 @@ async function appV23AccessRequest(path, options = {}) {
 }
 
 export async function fetchAppV23Access() {
-    return appV23AccessRequest('/v1/dashboard/network/access');
+    return appV23AccessRequest('/v1/dashboard/network/access', { cache: 'no-store' });
 }
 
 export async function updateAppV23AgentPolicy(id, policy) {

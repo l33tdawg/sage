@@ -263,6 +263,12 @@ test('app-v23 access UI uses named policy choices and visibly separates local gr
     assert.match(access, /role="group" aria-labelledby="v23-role-label"/);
     assert.match(access, /role="group" aria-labelledby="v23-profile-label"/);
     assert.match(access, /class="btn btn-primary" disabled=\$\{saveDisabled\}/);
+    assert.match(access, /selected\.needs_approval && !selected\.enrollment_active/,
+        'Reject registration must be rendered only for a pending review, never an active agent');
+    assert.match(access, /removeAgent\(selected\.agent_id, false\)/,
+        'pending rejection must not bypass the server memory-resolution guard with force');
+    assert.match(access, /If the same key registers again, it will return as a fresh review request/,
+        'the operator must be told that rejection preserves immutable registration history');
     assert.match(access, /<em>\$\{member\?\.role \|\| 'member'\}\$\{member\?\.needs_reauthorization/,
         'group membership must expose the role while the explicit tier determines group data authority');
     assert.match(access, /Consensus confirmation still pending/);

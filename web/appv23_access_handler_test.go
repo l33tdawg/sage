@@ -1164,6 +1164,7 @@ func TestAppV23AccessStateSeparatesRootAndLinkedReaders(t *testing.T) {
 	h.handleAppV23AccessState(sqlStore).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 	var response struct {
 		Active        bool                      `json:"active"`
 		Root          *store.AppV23RootState    `json:"root"`

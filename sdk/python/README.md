@@ -100,6 +100,10 @@ Request signing is handled automatically by the client. Each request includes fo
 
 ## Complete API Reference
 
+`SageClient` exposes 84 public operations. `AsyncSageClient` exposes those
+same 84 operations as coroutines plus the async-only `close()` lifecycle
+method, for 85 public methods total.
+
 ### Health & Status
 
 ```python

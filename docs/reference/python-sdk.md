@@ -89,7 +89,11 @@ governance actions require nonce-bound proof and reject legacy signing.
 
 ## Clients
 
-Both clients share an identical public surface. `SageClient` is synchronous (backed by `httpx.Client`); `AsyncSageClient` is async (backed by `httpx.AsyncClient`). All async method signatures are identical to their sync counterparts — just `await` them.
+`SageClient` exposes 84 public operations and is synchronous (backed by
+`httpx.Client`). `AsyncSageClient` exposes the same 84 operations as
+coroutines, plus its async-only `close()` method, for 85 public methods total
+(backed by `httpx.AsyncClient`). Apart from that lifecycle method, async
+signatures match their sync counterparts — just `await` them.
 
 ### Constructors
 
@@ -556,6 +560,11 @@ update_agent(
 ```
 
 `PUT /v1/agent/update`
+
+`name` and `boot_bio` are independent partial-update fields. Leaving either
+argument as `None` omits it from the request and preserves its current canonical
+value; updating only the display name does not erase the boot bio, and updating
+only the boot bio does not erase the display name.
 
 ---
 

@@ -199,6 +199,45 @@ func TestAppV23MemoryListFirstPageOverFiveThousandDoesNotFail(t *testing.T) {
 	require.False(t, response.TotalExact)
 }
 
+func TestAppV23MemoryListSmallFirstPageDoesNotClaimLowerBoundIsExact(t *testing.T) {
+	srv, badger, readerID, ownerID, _ := setupAppV23RESTAccess(t)
+	memStore := &appV23PagingStore{rbacMockMemoryStore: newRBACMockMemoryStore()}
+	memStore.badger = badger
+	srv.store = memStore
+
+	now := time.Now()
+	for i := range 4 {
+		rec := appV23PagingRecord(
+			fmt.Sprintf("small-visible-%d", i), ownerID, "owner.home",
+			"visible memory", memory.TypeObservation, memory.StatusCommitted,
+			now.Add(-time.Duration(i)*time.Second),
+		)
+		memStore.listed = append(memStore.listed, rec)
+		require.NoError(t, badger.SetMemoryHash(
+			rec.MemoryID, rec.ContentHash, string(rec.Status),
+		))
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/memory/list?limit=1", nil)
+	req = req.WithContext(middleware.WithAgentID(req.Context(), readerID))
+	out := httptest.NewRecorder()
+	srv.handleListMemoriesAuth(out, req)
+	require.Equal(t, http.StatusOK, out.Code, out.Body.String())
+
+	var response struct {
+		Memories   []*memory.MemoryRecord `json:"memories"`
+		Total      int                    `json:"total"`
+		HasMore    bool                   `json:"has_more"`
+		TotalExact bool                   `json:"total_exact"`
+	}
+	require.NoError(t, json.Unmarshal(out.Body.Bytes(), &response))
+	require.Len(t, response.Memories, 1)
+	require.Equal(t, 2, response.Total)
+	require.True(t, response.HasMore)
+	require.False(t, response.TotalExact,
+		"a look-ahead lower bound must not be advertised as an exact total")
+}
+
 func TestAppV23MemoryListQuarantinesMalformedHistoricalDomainWithoutHidingValidRows(t *testing.T) {
 	srv, badger, readerID, ownerID, _ := setupAppV23RESTAccess(t)
 	memStore := &appV23PagingStore{rbacMockMemoryStore: newRBACMockMemoryStore()}

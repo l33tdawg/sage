@@ -8849,6 +8849,7 @@ function AppV23AccessControl() {
     const [displayNameDraft, setDisplayNameDraft] = useState('');
     const [renameBusy, setRenameBusy] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [rejectBusy, setRejectBusy] = useState(false);
     const [groupBusy, setGroupBusy] = useState('');
     const [pendingConfirmation, setPendingConfirmation] = useState('');
     // React state updates are asynchronous, so state alone cannot prevent two
@@ -9243,6 +9244,35 @@ function AppV23AccessControl() {
             showToast(e.message || 'The display-name change was not committed.', 'error', 9000);
         } finally {
             setRenameBusy(false);
+            endMutation(mutationKey);
+        }
+    };
+
+    const rejectPendingAgent = async () => {
+        const mutationKey = `reject:${selected?.agent_id || ''}`;
+        if (!selected || selected.enrollment_active || rejectBusy ||
+            !beginMutation(mutationKey)) return;
+        const confirmed = await showConfirmation(
+            `Reject ${selected.name || selected.agent_id.slice(0, 8)}?\n\n` +
+            'It has no authority yet. CEREBRUM will remove it from the review queue without erasing chain history. ' +
+            'If the same key registers again, it will return as a fresh review request.',
+            { title: 'Reject agent registration', confirmLabel: 'Reject & remove' },
+        );
+        if (!confirmed) {
+            endMutation(mutationKey);
+            return;
+        }
+        setRejectBusy(true);
+        try {
+            // Do not force removal: if historical memories exist, the server
+            // requires the operator to resolve them before rejecting identity.
+            await removeAgent(selected.agent_id, false);
+            showToast('Registration rejected and removed from the review queue.', 'success');
+            await load();
+        } catch (e) {
+            showToast(e.message || 'The registration could not be rejected.', 'error', 9000);
+        } finally {
+            setRejectBusy(false);
             endMutation(mutationKey);
         }
     };
@@ -10065,6 +10095,12 @@ function AppV23AccessControl() {
                                             ? 'Consent & activate'
                                             : 'Save policy'}
                             </button>
+                            ${selected.needs_approval && !selected.enrollment_active && html`
+                                <button class="btn btn-danger" disabled=${rejectBusy || saving || !mutationReady}
+                                    onClick=${rejectPendingAgent}>
+                                    ${rejectBusy ? 'Rejecting…' : 'Reject registration'}
+                                </button>
+                            `}
                         </div>
                         <${AgentMemoryRecoveryPanel}
                             agent=${selected}

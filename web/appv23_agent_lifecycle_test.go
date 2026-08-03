@@ -139,6 +139,113 @@ func TestAppV23RemoveDirectoryOnlyAgentSettlesAndIsIdempotent(t *testing.T) {
 	assert.Contains(t, second.Body.String(), `"already_removed":true`)
 }
 
+func TestAppV23RejectPendingRegistrationHidesProjectionButPreservesChainIdentity(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	_, pendingKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	pendingID := agentIDForKey(pendingKey)
+	require.NoError(t, fixture.badger.RegisterAgentWithCapabilities(
+		pendingID, "Pending immutable name", store.AppV23RoleMember,
+		"pending boot purpose", "test", "", 2,
+		store.DefaultSelfRegisteredAgentCapabilities,
+	))
+
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	for _, agent := range []*store.AgentEntry{
+		{AgentID: fixture.agentID, Name: "Companion", Role: "member", Status: "active", Clearance: 1},
+		{AgentID: pendingID, Name: "Pending immutable name", RegisteredName: "Pending immutable name",
+			Role: "member", BootBio: "pending boot purpose", Status: "active", Clearance: 1,
+			Capabilities: store.DefaultSelfRegisteredAgentCapabilities},
+	} {
+		require.NoError(t, sqlStore.CreateAgent(context.Background(), agent))
+	}
+	h := appV23AccessTestHandler(fixture, "http://unused.invalid", map[string]ed25519.PrivateKey{pendingID: pendingKey})
+
+	list := func() []appV23AgentAccessView {
+		req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/network/access", nil)
+		rec := httptest.NewRecorder()
+		h.handleAppV23AccessState(sqlStore).ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var response struct {
+			Agents []appV23AgentAccessView `json:"agents"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+		return response.Agents
+	}
+	contains := func(agents []appV23AgentAccessView, id string) bool {
+		for _, agent := range agents {
+			if agent.AgentID == id {
+				return true
+			}
+		}
+		return false
+	}
+	require.True(t, contains(list(), pendingID), "fresh pending registration must enter review")
+
+	removeReq := appV23AccessRequest(
+		t, http.MethodDelete, "/agents/"+pendingID, "id", pendingID, nil,
+	)
+	removeReq = appV23AccessAs(removeReq, fixture.rootID)
+	removeRec := httptest.NewRecorder()
+	h.handleRemoveAgent(sqlStore).ServeHTTP(removeRec, removeReq)
+	require.Equal(t, http.StatusOK, removeRec.Code, removeRec.Body.String())
+	require.Contains(t, removeRec.Body.String(), `"local_only":true`)
+
+	local, err := sqlStore.GetAgent(context.Background(), pendingID)
+	require.NoError(t, err)
+	require.Equal(t, "removed", local.Status)
+	require.NotNil(t, local.RemovedAt)
+	require.False(t, contains(list(), pendingID), "rejected pending registration must leave the review roster")
+
+	immutable, err := fixture.badger.GetRegisteredAgent(pendingID)
+	require.NoError(t, err)
+	require.Equal(t, pendingID, immutable.AgentID)
+	require.Equal(t, "Pending immutable name", immutable.RegisteredName)
+	require.Equal(t, "pending boot purpose", immutable.BootBio)
+	require.Equal(t, int64(2), immutable.RegisteredAt)
+	enrollment, err := fixture.badger.GetAppV23Enrollment(pendingID)
+	require.NoError(t, err)
+	require.Nil(t, enrollment, "rejecting pending identity must not create or activate authority")
+}
+
+func TestAppV23RejectPendingRegistrationWithoutForceIsBlockedByMemories(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	_, pendingKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	pendingID := agentIDForKey(pendingKey)
+	require.NoError(t, fixture.badger.RegisterAgentWithCapabilities(
+		pendingID, "Pending with history", store.AppV23RoleMember, "", "test", "", 2,
+		store.DefaultSelfRegisteredAgentCapabilities,
+	))
+
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	require.NoError(t, sqlStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: pendingID, Name: "Pending with history", Role: "member",
+		Status: "active", Clearance: 1,
+	}))
+	insertTestMemoryWithAgent(t, sqlStore, "pending-history", "pending-domain", pendingID)
+
+	h := appV23AccessTestHandler(fixture, "http://unused.invalid", map[string]ed25519.PrivateKey{pendingID: pendingKey})
+	req := appV23AccessRequest(
+		t, http.MethodDelete, "/agents/"+pendingID, "id", pendingID, nil,
+	)
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleRemoveAgent(sqlStore).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"code":"agent_has_memories"`)
+	require.Contains(t, rec.Body.String(), `"memory_count":1`)
+	local, err := sqlStore.GetAgent(context.Background(), pendingID)
+	require.NoError(t, err)
+	require.Equal(t, "active", local.Status)
+	require.Nil(t, local.RemovedAt)
+}
+
 func TestAppV26RemoveDoesNotTrustStaleRemovedProjectionOverActiveConsensus(t *testing.T) {
 	fixture := newAppV23AccessFixture(t)
 	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))

@@ -10299,6 +10299,16 @@ func (app *SageApp) flushPendingWrites(ctx context.Context, s store.OffchainStor
 						err = createErr
 					default:
 						err = s.UpdateAgent(ctx, agent)
+						if err == nil && agent.Status != "" {
+							// A signed idempotent registration is also the explicit
+							// retry path for a Root-rejected pending identity. UpdateAgent
+							// intentionally preserves lifecycle columns, so restore the
+							// projected status separately in this same transaction. Both
+							// SQLite and PostgreSQL clear removed_at when status becomes
+							// active, making the identity visible for a fresh review without
+							// rewriting its immutable on-chain registration.
+							err = s.UpdateAgentStatus(ctx, agent.AgentID, agent.Status)
+						}
 					}
 				}
 			}

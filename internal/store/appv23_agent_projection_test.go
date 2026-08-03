@@ -54,3 +54,40 @@ func TestReconcileAppV23AgentProjectionsNormalizesStaleAgentShapedPolicy(t *test
 	require.Error(t, err)
 	require.Nil(t, rootProjection)
 }
+
+func TestUpdateAgentMetaSynchronizesAppV23AgentProjection(t *testing.T) {
+	badgerStore, err := NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, badgerStore.CloseBadger()) })
+
+	appV23Register(t, badgerStore, "projection-root", AppV23RoleAdmin, 1, 0)
+	agentID := appV23Register(t, badgerStore, "registered-name", AppV23RoleMember, 2, 0)
+	require.NoError(t, badgerStore.EnsureAppV23Root("projection-rename", 10))
+	before, err := badgerStore.GetRegisteredAgent(agentID)
+	require.NoError(t, err)
+
+	require.NoError(t, badgerStore.UpdateAgentMeta(agentID, "renamed display", "updated bio"))
+
+	agent, err := badgerStore.GetRegisteredAgent(agentID)
+	require.NoError(t, err)
+	require.Equal(t, "renamed display", agent.Name)
+	require.Equal(t, "registered-name", agent.RegisteredName)
+	require.Equal(t, "updated bio", agent.BootBio)
+	require.Equal(t, before.Role, agent.Role)
+	require.Equal(t, before.Clearance, agent.Clearance)
+	require.Equal(t, before.Capabilities, agent.Capabilities)
+
+	agents, err := badgerStore.ListRegisteredAgents()
+	require.NoError(t, err)
+	require.Len(t, agents, 2)
+	var listed *OnChainAgent
+	for i := range agents {
+		if agents[i].AgentID == agentID {
+			listed = &agents[i]
+			break
+		}
+	}
+	require.NotNil(t, listed)
+	require.Equal(t, "renamed display", listed.Name)
+	require.Equal(t, "registered-name", listed.RegisteredName)
+}

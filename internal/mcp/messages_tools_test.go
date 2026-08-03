@@ -105,6 +105,94 @@ func TestCanonicalMessageToolsSendReceiveReplyAndStatus(t *testing.T) {
 	require.Contains(t, status.(map[string]any)["message"], "does not prove comprehension")
 }
 
+func TestPipeReceiptStatusUsesExactSignedSenderProjection(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	wantAgentID := fmt.Sprintf("%x", privateKey.Public().(ed25519.PublicKey))
+
+	t.Run("confirmed read preserves independent states", func(t *testing.T) {
+		requestCount := 0
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount++
+			require.Equal(t, http.MethodGet, r.Method)
+			require.Equal(t, "/v1/pipe/pipe%2Fwith%20space/receipt", r.URL.EscapedPath())
+			requireSignedToolRequest(t, r)
+			require.Equal(t, wantAgentID, r.Header.Get("X-Agent-ID"))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pipe_id":          "pipe/with space",
+				"transport_status": "delivered",
+				"claim_status":     "confirmed",
+				"read_status":      "confirmed",
+				"workflow_status":  "pending",
+				"terminal_status":  "active",
+			})
+		}))
+		t.Cleanup(ts.Close)
+
+		result, callErr := NewServer(ts.URL, privateKey).toolPipeReceiptStatus(
+			context.Background(), map[string]any{"pipe_id": "pipe/with space"},
+		)
+		require.NoError(t, callErr)
+		require.Equal(t, 1, requestCount)
+		status := result.(map[string]any)
+		require.Equal(t, "delivered", status["transport_status"])
+		require.Equal(t, "confirmed", status["claim_status"])
+		require.Equal(t, "confirmed", status["read_status"])
+		require.Equal(t, "pending", status["workflow_status"])
+		require.Equal(t, "active", status["terminal_status"])
+		require.Contains(t, status["message"], "exact recipient credential")
+		require.Contains(t, status["message"], "does not prove comprehension")
+	})
+
+	t.Run("unsupported read remains explicitly unconfirmed", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, "/v1/pipe/legacy-pipe/receipt", r.URL.EscapedPath())
+			requireSignedToolRequest(t, r)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"pipe_id":          "legacy-pipe",
+				"transport_status": "delivered",
+				"claim_status":     "unsupported",
+				"read_status":      "unsupported",
+				"workflow_status":  "completed",
+				"terminal_status":  "completed",
+			})
+		}))
+		t.Cleanup(ts.Close)
+
+		result, callErr := NewServer(ts.URL, privateKey).toolPipeReceiptStatus(
+			context.Background(), map[string]any{"pipe_id": "legacy-pipe"},
+		)
+		require.NoError(t, callErr)
+		status := result.(map[string]any)
+		require.Equal(t, "unsupported", status["read_status"])
+		require.Contains(t, status["message"], "unconfirmed or unsupported")
+		require.Contains(t, status["message"], "remain independent")
+	})
+
+	t.Run("missing id and sender denial propagate without a fallback", func(t *testing.T) {
+		requestCount := 0
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount++
+			require.Equal(t, "/v1/pipe/not-owned/receipt", r.URL.EscapedPath())
+			requireSignedToolRequest(t, r)
+			http.Error(w, "not found", http.StatusNotFound)
+		}))
+		t.Cleanup(ts.Close)
+		s := NewServer(ts.URL, privateKey)
+
+		_, missingErr := s.toolPipeReceiptStatus(context.Background(), map[string]any{})
+		require.ErrorContains(t, missingErr, "'pipe_id' is required")
+		require.Equal(t, 0, requestCount)
+
+		_, deniedErr := s.toolPipeReceiptStatus(
+			context.Background(), map[string]any{"pipe_id": "not-owned"},
+		)
+		require.ErrorContains(t, deniedErr, "federated pipe receipt status")
+		require.ErrorContains(t, deniedErr, "404")
+		require.Equal(t, 1, requestCount)
+	})
+}
+
 func TestCanonicalReceiveReturnsClaimedWorkWhenExactAckFails(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {

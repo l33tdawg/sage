@@ -943,10 +943,10 @@ components:
       properties:
         name:
           type: string
-          description: Updated agent name.
+          description: Updated agent name. Omit to preserve the current name.
         boot_bio:
           type: string
-          description: Updated agent bio.
+          description: Updated agent bio. Omit to preserve the current bio.
 
     RegisteredAgent:
       type: object
@@ -3452,7 +3452,9 @@ paths:
     put:
       operationId: updateAgent
       summary: Update the authenticated agent's name and bio.
-      description: Self-update only — agents can only modify their own metadata.
+      description: >-
+        Self-update only — agents can only modify their own metadata. Omitted
+        name or boot_bio fields preserve their current canonical values.
       tags:
         - Agent
       requestBody:

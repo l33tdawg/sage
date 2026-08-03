@@ -34,3 +34,19 @@ test('Access Control reads preserve an ordinary transport failure', async t => {
 
     await assert.rejects(fetchAppV23Access(), error => error === transport);
 });
+
+test('Access Control reads always bypass browser authority-state caches', async t => {
+    const originalFetch = globalThis.fetch;
+    t.after(() => { globalThis.fetch = originalFetch; });
+    let request;
+    globalThis.fetch = async (...args) => {
+        request = args;
+        return new Response(JSON.stringify({ active: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+        });
+    };
+
+    await fetchAppV23Access();
+    assert.equal(request[1].cache, 'no-store');
+});

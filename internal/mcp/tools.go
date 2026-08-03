@@ -27,9 +27,6 @@ type Tool struct {
 	Description string                                                        `json:"description"`
 	InputSchema map[string]any                                                `json:"inputSchema"`
 	Handler     func(ctx context.Context, params map[string]any) (any, error) `json:"-"`
-	// Hidden tools remain callable for one compatibility window but are not
-	// advertised to new agents through tools/list.
-	Hidden bool `json:"-"`
 }
 
 func (s *Server) registerTools() map[string]Tool {
@@ -206,17 +203,6 @@ func (s *Server) registerTools() map[string]Tool {
 				"properties": map[string]any{},
 			},
 			Handler: s.toolInception,
-		},
-		"sage_red_pill": {
-			Name: "sage_red_pill",
-			Description: "Deprecated alias for sage_inception, kept for backward compatibility. " +
-				"Initializes your persistent memory session and returns your operating instructions. Prefer sage_inception.",
-			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
-			},
-			Handler: s.toolInception,
-			Hidden:  true,
 		},
 		"sage_turn": {
 			Name: "sage_turn",

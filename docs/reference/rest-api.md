@@ -814,6 +814,10 @@ curl -X POST http://localhost:8080/v1/agent/register \
 ### `PUT /v1/agent/update`
 
 Self-update only. Agent can only update its own name and bio. Broadcasts `TxTypeAgentUpdate`.
+Each field is independently optional: omitting `name` preserves the current
+canonical display name, and omitting `boot_bio` preserves the current canonical
+bio. An SDK caller can therefore update either field without first fetching and
+resending the other one.
 
 **Request body:**
 

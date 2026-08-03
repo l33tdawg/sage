@@ -835,9 +835,8 @@ func sagePermissionsConfig(settings map[string]any) map[string]any {
 	if existing, ok := perms["allow"].([]any); ok {
 		for _, v := range existing {
 			if s, ok := v.(string); ok {
-				// Remove the one hidden compatibility alias from generated
-				// permissions during self-heal.  It remains callable for old
-				// clients but new agent sessions must see/use sage_inception.
+				// Remove the retired alias from generated permissions during
+				// self-heal. Current MCP servers expose only sage_inception.
 				if s == "mcp__sage__sage_red_pill" {
 					continue
 				}

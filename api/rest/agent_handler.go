@@ -88,6 +88,18 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 					status = "pending_review"
 				}
 			}
+			retryRemovedPending := false
+			if approvalRequired && s.agentStore != nil {
+				// Root may reject a zero-authority pending registration from
+				// CEREBRUM. The immutable identity record remains in chain
+				// history, while its node-local projection is marked removed.
+				// A later signed register call is the agent's explicit new
+				// request: let the idempotent consensus transaction run again so
+				// Commit can restore the pending projection for another review.
+				local, localErr := s.agentStore.GetAgent(r.Context(), agentID)
+				retryRemovedPending = localErr == nil && local != nil &&
+					(local.Status == "removed" || local.RemovedAt != nil)
+			}
 
 			if s.agentStore != nil && s.isPostV23ForNextTx() && !approvalRequired {
 				// Direct app-v23 genesis and state sync commit the ordinary-agent
@@ -133,19 +145,21 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			writeJSON(w, http.StatusOK, map[string]any{
-				"agent_id":          existing.AgentID,
-				"name":              name,
-				"registered_name":   registeredName,
-				"role":              existing.Role,
-				"provider":          provider,
-				"clearance":         existing.Clearance,
-				"capabilities":      existing.Capabilities,
-				"status":            status,
-				"approval_required": approvalRequired,
-				"on_chain_height":   existing.RegisteredAt,
-			})
-			return
+			if !retryRemovedPending {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"agent_id":          existing.AgentID,
+					"name":              name,
+					"registered_name":   registeredName,
+					"role":              existing.Role,
+					"provider":          provider,
+					"clearance":         existing.Clearance,
+					"capabilities":      existing.Capabilities,
+					"status":            status,
+					"approval_required": approvalRequired,
+					"on_chain_height":   existing.RegisteredAt,
+				})
+				return
+			}
 		}
 	}
 
@@ -320,8 +334,8 @@ func (s *Server) registerMintedAgentIdentity(ctx context.Context, tokenPub ed255
 // Self-update only — agent can only update its own metadata.
 func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name    string `json:"name"`
-		BootBio string `json:"boot_bio"`
+		Name    *string `json:"name"`
+		BootBio *string `json:"boot_bio"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -340,6 +354,35 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 			"CEREBRUM Root metadata cannot be edited through the agent API.")
 		return
 	}
+	if s.badgerStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Agent state unavailable",
+			"The current agent metadata could not be read.")
+		return
+	}
+	if !s.badgerStore.IsAgentRegistered(agentID) {
+		writeProblem(w, http.StatusNotFound, "Agent not found",
+			"The authenticated agent is not registered.")
+		return
+	}
+	current, currentErr := s.badgerStore.GetRegisteredAgent(agentID)
+	if currentErr != nil || current == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Agent state unavailable",
+			"The current agent metadata could not be read.")
+		return
+	}
+
+	// AgentUpdate is a replacement transaction on-chain, while this REST
+	// endpoint exposes optional fields. Resolve omitted fields from canonical
+	// state before constructing the transaction so a name-only update cannot
+	// erase the boot bio (and a bio-only update cannot erase the display name).
+	name := current.Name
+	bootBio := current.BootBio
+	if req.Name != nil {
+		name = *req.Name
+	}
+	if req.BootBio != nil {
+		bootBio = *req.BootBio
+	}
 
 	updateTx := &tx.ParsedTx{
 		Type:      tx.TxTypeAgentUpdate,
@@ -347,8 +390,8 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 		Timestamp: time.Now(),
 		AgentUpdateTx: &tx.AgentUpdate{
 			AgentID: agentID,
-			Name:    req.Name,
-			BootBio: req.BootBio,
+			Name:    name,
+			BootBio: bootBio,
 		},
 	}
 
@@ -375,7 +418,7 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"agent_id": agentID,
-		"name":     req.Name,
+		"name":     name,
 		"status":   "updated",
 		"tx_hash":  txHash,
 	})

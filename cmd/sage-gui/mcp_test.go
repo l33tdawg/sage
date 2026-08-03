@@ -158,7 +158,7 @@ func TestSageClaudeMDBlock_ContainsEssentials(t *testing.T) {
 	assert.Contains(t, sageClaudeMDBlock, ".mcp.json")
 }
 
-func TestSagePermissionsConfigDoesNotAdvertiseHiddenCompatibilityAliases(t *testing.T) {
+func TestSagePermissionsConfigRemovesRetiredAliases(t *testing.T) {
 	permissions := sagePermissionsConfig(map[string]any{
 		"permissions": map[string]any{
 			"allow": []any{

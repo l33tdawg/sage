@@ -578,7 +578,11 @@ class SageClient:
         return AgentRegistration.model_validate(resp.json())
 
     def update_agent(self, name: str | None = None, boot_bio: str | None = None) -> dict:
-        """Update the current agent's profile."""
+        """Partially update the current agent's profile.
+
+        A ``None`` argument is omitted and its current canonical value is
+        preserved by the server.
+        """
         body: dict[str, Any] = {}
         if name is not None:
             body["name"] = name

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -157,7 +156,7 @@ func TestHandleToolsList(t *testing.T) {
 		actual = append(actual, name)
 	}
 	assert.ElementsMatch(t, expected, actual)
-	assert.False(t, names["sage_red_pill"], "deprecated aliases must not be advertised")
+	assert.False(t, names["sage_red_pill"], "retired aliases must not be registered")
 	assert.True(t, names["sage_remember"])
 	assert.True(t, names["sage_recall"])
 	assert.True(t, names["sage_pipe_history"])
@@ -206,19 +205,8 @@ func TestHandleToolsList(t *testing.T) {
 	assert.Contains(t, idempotencySchema["description"], "every later identical call returns that existing task")
 }
 
-func TestDeprecatedRedPillAliasIsHiddenButDispatchesToInception(t *testing.T) {
+func TestToolRegistrySchemasAreSelfContained(t *testing.T) {
 	s, _ := testServer(t)
-	inception, ok := s.tools["sage_inception"]
-	require.True(t, ok)
-	alias, ok := s.tools["sage_red_pill"]
-	require.True(t, ok)
-	require.True(t, alias.Hidden)
-	assert.Equal(t, reflect.ValueOf(inception.Handler).Pointer(), reflect.ValueOf(alias.Handler).Pointer())
-}
-
-func TestToolRegistrySchemasAreSelfContainedAndOnlyExpectedAliasIsHidden(t *testing.T) {
-	s, _ := testServer(t)
-	hidden := make([]string, 0, 1)
 	for key, tool := range s.tools {
 		require.Equal(t, key, tool.Name, "registry key and advertised tool name must match")
 		require.NotNil(t, tool.Handler, "%s must have a callable handler", key)
@@ -231,27 +219,22 @@ func TestToolRegistrySchemasAreSelfContainedAndOnlyExpectedAliasIsHidden(t *test
 					"%s requires %s but does not document it in the tool schema", key, name)
 			}
 		}
-		if tool.Hidden {
-			hidden = append(hidden, key)
-		}
 	}
-	require.Equal(t, []string{"sage_red_pill"}, hidden)
+	require.NotContains(t, s.tools, "sage_red_pill")
 }
 
 func TestAdvertisedToolsExactlyMatchReferenceHeadings(t *testing.T) {
 	s, _ := testServer(t)
-	advertised := make([]string, 0, len(s.tools))
+	registered := make([]string, 0, len(s.tools))
 	for _, tool := range s.tools {
-		if !tool.Hidden {
-			advertised = append(advertised, tool.Name)
-		}
+		registered = append(registered, tool.Name)
 	}
 	_, source, _, ok := runtime.Caller(0)
 	require.True(t, ok)
 	docPath := filepath.Join(filepath.Dir(source), "..", "..", "docs", "reference", "mcp-tools.md")
 	doc, err := os.ReadFile(docPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(doc), "SAGE exposes 34 MCP tools",
+	assert.Contains(t, string(doc), "SAGE exposes exactly 34 registered and callable MCP tools",
 		"the human-readable inventory count must match tools/list")
 	re := regexp.MustCompile(`(?m)^### (sage_[a-z_]+)$`)
 	matches := re.FindAllStringSubmatch(string(doc), -1)
@@ -259,8 +242,8 @@ func TestAdvertisedToolsExactlyMatchReferenceHeadings(t *testing.T) {
 	for _, match := range matches {
 		documented = append(documented, match[1])
 	}
-	assert.ElementsMatch(t, advertised, documented,
-		"every advertised MCP tool must have exactly one reference heading, and hidden aliases must not be advertised as current tools")
+	assert.ElementsMatch(t, registered, documented,
+		"every callable MCP tool must have exactly one reference heading, and retired aliases must stay absent")
 }
 
 func TestHandleToolsCall_UnknownTool(t *testing.T) {
@@ -278,6 +261,25 @@ func TestHandleToolsCall_UnknownTool(t *testing.T) {
 	resp := s.handleRequest(context.Background(), req)
 	require.NotNil(t, resp)
 	assert.NotNil(t, resp.Error)
+	assert.Equal(t, -32602, resp.Error.Code)
+	assert.Contains(t, resp.Error.Message, "Unknown tool")
+}
+
+func TestHandleToolsCall_RetiredRedPillAliasIsUnknown(t *testing.T) {
+	s, _ := testServer(t)
+	params, _ := json.Marshal(map[string]any{
+		"name":      "sage_red_pill",
+		"arguments": map[string]any{},
+	})
+	req := &jsonRPCRequest{
+		JSONRPC: "2.0",
+		ID:      float64(31),
+		Method:  "tools/call",
+		Params:  params,
+	}
+	resp := s.handleRequest(context.Background(), req)
+	require.NotNil(t, resp)
+	require.NotNil(t, resp.Error)
 	assert.Equal(t, -32602, resp.Error.Code)
 	assert.Contains(t, resp.Error.Message, "Unknown tool")
 }

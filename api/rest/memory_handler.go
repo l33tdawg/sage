@@ -3909,7 +3909,13 @@ func (s *Server) listAppV23VisibleMemories(
 	if hasMore {
 		visible = visible[:requestedLimit]
 	}
-	return visible, totalVisibleLowerBound, hasMore, exhausted, nil
+	// Breaking after the look-ahead row can happen inside the store's final
+	// batch. In that case the backing stream is exhausted, but the authorized
+	// stream has not been counted to completion because unvisited rows remain
+	// in that batch. A page with has_more=true is therefore always a lower
+	// bound, never an exact total.
+	totalExact := exhausted && !hasMore
+	return visible, totalVisibleLowerBound, hasMore, totalExact, nil
 }
 
 // handleListMemoriesAuth handles GET /v1/memory/list (authenticated, agent-isolated).

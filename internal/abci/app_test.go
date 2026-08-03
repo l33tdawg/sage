@@ -678,6 +678,68 @@ func TestProcessAgentRegister_IdempotentReregister_PreservesPermissions(t *testi
 	assert.Equal(t, `["crypto"]`, post.DomainAccess, "Bug 1: idempotent re-register must NOT blank domain_access")
 }
 
+func TestProcessAgentRegister_IdempotentRetryRestoresRejectedPendingProjection(t *testing.T) {
+	app := setupTestApp(t)
+	root := newAgentKey(t)
+	bundled := newAgentKey(t)
+	pending := newAgentKey(t)
+	require.NoError(t, app.badgerStore.BootstrapAppV23Genesis(store.AppV23GenesisBootstrap{
+		RootID: root.id, Scope: "pending-retry", AgentID: bundled.id,
+		Profile: store.AppV23ProfileStandard, HomeDomain: "bundled.home",
+		Clearance: 1, Capabilities: 0, Height: 1, BootstrapDigest: "fixture",
+	}))
+	require.NoError(t, app.badgerStore.RegisterAgentWithCapabilities(
+		pending.id, "immutable registration", store.AppV23RoleMember,
+		"boot purpose", "test", "", 2,
+		store.DefaultSelfRegisteredAgentCapabilities,
+	))
+	app.appV23AppliedHeight = 1
+
+	ctx := context.Background()
+	require.NoError(t, app.offchainStore.CreateAgent(ctx, &store.AgentEntry{
+		AgentID: pending.id, Name: "immutable registration",
+		RegisteredName: "immutable registration", Role: store.AppV23RoleMember,
+		BootBio: "boot purpose", Provider: "test", Status: "active",
+		Clearance: 1, Capabilities: store.DefaultSelfRegisteredAgentCapabilities,
+		OnChainHeight: 2,
+	}))
+	require.NoError(t, app.offchainStore.RemoveAgent(ctx, pending.id))
+	removed, err := app.offchainStore.GetAgent(ctx, pending.id)
+	require.NoError(t, err)
+	require.Equal(t, "removed", removed.Status)
+	require.NotNil(t, removed.RemovedAt)
+
+	// The same key explicitly retries its signed registration. Consensus keeps
+	// the immutable identity record and emits an idempotent projection write.
+	retry := makeAgentRegisterTx(
+		t, pending, "attempted replacement", store.AppV23RoleAdmin,
+		"different wire bio", "different-provider", "",
+	)
+	result := app.processAgentRegister(retry, 3, time.Now())
+	require.Zero(t, result.Code, result.Log)
+	require.NoError(t, app.offchainStore.RunInAgentContactTx(ctx, func(s store.OffchainStore) error {
+		return app.flushPendingWrites(ctx, s, app.pendingWrites)
+	}))
+
+	restored, err := app.offchainStore.GetAgent(ctx, pending.id)
+	require.NoError(t, err)
+	require.Equal(t, "active", restored.Status)
+	require.Nil(t, restored.RemovedAt)
+	require.Equal(t, "immutable registration", restored.Name)
+	require.Equal(t, "immutable registration", restored.RegisteredName)
+	require.Equal(t, "boot purpose", restored.BootBio)
+	require.Equal(t, store.AppV23RoleMember, restored.Role)
+
+	onChain, err := app.badgerStore.GetRegisteredAgent(pending.id)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), onChain.RegisteredAt)
+	require.Equal(t, "immutable registration", onChain.RegisteredName)
+	require.Equal(t, "boot purpose", onChain.BootBio)
+	enrollment, err := app.badgerStore.GetAppV23Enrollment(pending.id)
+	require.NoError(t, err)
+	require.Nil(t, enrollment, "retry restores review visibility without self-approving")
+}
+
 // seedSQLAgent seeds an agent row directly in the SQL mirror, bypassing the
 // chain register path. Mirrors the deployment paths that legitimately write
 // network_agents out of band (sage-gui startup seeding, GUI Create Agent).

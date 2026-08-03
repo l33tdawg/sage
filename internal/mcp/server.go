@@ -327,9 +327,6 @@ func (s *Server) handleInitialize(req *jsonRPCRequest) *jsonRPCResponse {
 func (s *Server) handleToolsList(req *jsonRPCRequest) *jsonRPCResponse {
 	toolList := make([]map[string]any, 0, len(s.tools))
 	for _, t := range s.tools {
-		if t.Hidden {
-			continue
-		}
 		toolList = append(toolList, map[string]any{
 			"name":        t.Name,
 			"description": t.Description,
@@ -376,7 +373,7 @@ func (s *Server) handleToolsCall(ctx context.Context, req *jsonRPCRequest) *json
 	s.conversationMu.Lock()
 	if !conversation.inceptionChecked {
 		conversation.inceptionChecked = true
-		if params.Name != "sage_inception" && params.Name != "sage_red_pill" {
+		if params.Name != "sage_inception" {
 			doAutoInception = true
 		}
 	}

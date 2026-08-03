@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -66,6 +67,75 @@ func TestAppV23AgentRegisterReturnsCommittedPendingPolicy(t *testing.T) {
 	require.Equal(t, "pending_review", response.Status)
 	require.Equal(t, store.DefaultSelfRegisteredAgentCapabilities, response.Capabilities)
 	require.True(t, response.ApprovalRequired)
+}
+
+func TestAppV23RejectedPendingAgentSignedRetryReentersReview(t *testing.T) {
+	srv, _, badger, agents := newRBACTestServer(t)
+	rootID := appV23RESTAgentID("71")
+	bundledID := appV23RESTAgentID("72")
+	retryingID := appV23RESTAgentID("73")
+	require.NoError(t, badger.BootstrapAppV23Genesis(store.AppV23GenesisBootstrap{
+		RootID: rootID, Scope: "pending-registration-retry", AgentID: bundledID,
+		Profile: store.AppV23ProfileStandard, HomeDomain: "bundled.home",
+		Clearance: 1, Capabilities: 0, Height: 1, BootstrapDigest: "bootstrap",
+	}))
+	require.NoError(t, badger.RegisterAgentWithCapabilities(
+		retryingID, "immutable pending name", store.AppV23RoleMember,
+		"immutable purpose", "codex", "", 2,
+		store.DefaultSelfRegisteredAgentCapabilities,
+	))
+	removedAt := time.Now().UTC()
+	agents.agents[retryingID] = &store.AgentEntry{
+		AgentID: retryingID, Name: "immutable pending name",
+		RegisteredName: "immutable pending name", Role: store.AppV23RoleMember,
+		Status: "removed", RemovedAt: &removedAt,
+	}
+	srv.SetPostV23ForNextTxAccessor(func() bool { return true })
+
+	var broadcasts int
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		broadcasts++
+		raw, err := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("tx"), "0x"))
+		require.NoError(t, err)
+		parsed, err := tx.DecodeTx(raw)
+		require.NoError(t, err)
+		require.NotNil(t, parsed.AgentRegister)
+		require.Equal(t, retryingID, parsed.AgentRegister.AgentID)
+		_, _ = fmt.Fprint(w, `{"result":{"check_tx":{"code":0},"tx_result":{"code":0},"hash":"RETRY","height":"3"}}`)
+	}))
+	defer rpc.Close()
+	srv.cometbftRPC = rpc.URL
+
+	req := httptest.NewRequest(
+		http.MethodPost, "/v1/agent/register",
+		bytes.NewBufferString(`{"name":"attempted replacement","role":"admin","provider":"other"}`),
+	)
+	req = req.WithContext(middleware.WithAgentID(req.Context(), retryingID))
+	rec := httptest.NewRecorder()
+	srv.handleAgentRegister(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	require.Equal(t, 1, broadcasts, "removed pending projection must not short-circuit the signed retry")
+	var response struct {
+		Name             string `json:"name"`
+		RegisteredName   string `json:"registered_name"`
+		Status           string `json:"status"`
+		ApprovalRequired bool   `json:"approval_required"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.Equal(t, "immutable pending name", response.Name)
+	require.Equal(t, "immutable pending name", response.RegisteredName)
+	require.Equal(t, "pending_review", response.Status)
+	require.True(t, response.ApprovalRequired)
+
+	immutable, err := badger.GetRegisteredAgent(retryingID)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), immutable.RegisteredAt)
+	require.Equal(t, "immutable pending name", immutable.RegisteredName)
+	require.Equal(t, "immutable purpose", immutable.BootBio)
+	enrollment, err := badger.GetAppV23Enrollment(retryingID)
+	require.NoError(t, err)
+	require.Nil(t, enrollment, "retry must return to review without granting standing")
 }
 
 func TestAppV23AgentRegisterRejectsEveryRootCredentialGeneration(t *testing.T) {

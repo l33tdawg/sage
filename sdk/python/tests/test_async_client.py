@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import pytest_asyncio
 import httpx
@@ -76,6 +78,16 @@ async def test_owned_domains_is_typed_and_cursor_scoped(async_client, mock_api):
     assert page.has_more is False
     assert route.calls.last.request.url.query == b"limit=25&cursor=team.alpha"
     assert route.calls.last.request.headers["X-Agent-ID"]
+
+
+@pytest.mark.asyncio
+async def test_update_agent_bio_only_omits_name(async_client, mock_api):
+    route = mock_api.put("/v1/agent/update").mock(
+        return_value=httpx.Response(200, json={"status": "updated"})
+    )
+
+    assert await async_client.update_agent(boot_bio="updated bio") == {"status": "updated"}
+    assert json.loads(route.calls.last.request.content) == {"boot_bio": "updated bio"}
 
 
 @pytest.mark.asyncio

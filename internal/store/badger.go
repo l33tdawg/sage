@@ -6664,7 +6664,36 @@ func (s *BadgerStore) UpdateAgentMeta(agentID, name, bio string) error {
 		if err != nil {
 			return err
 		}
-		return s.txnSet(txn, agentOnChainKey(agentID), data)
+		if err := s.txnSet(txn, agentOnChainKey(agentID), data); err != nil {
+			return err
+		}
+
+		// App-v23 policy activation materializes an authoritative agent-shaped
+		// projection. GetRegisteredAgent and ListRegisteredAgents deliberately
+		// prefer that record, so changing only the legacy base row leaves
+		// CEREBRUM reading the old name and invites duplicate rename submissions.
+		// Keep the mutable presentation fields synchronized in this same Badger
+		// transaction while preserving all policy fields from the projection.
+		var projected OnChainAgent
+		projectionErr := s.appV23ReadEffectiveJSONTxn(
+			txn, appV23ProjectedAgentKey(agentID), &projected,
+		)
+		if projectionErr == nil {
+			if projected.AgentID != agentID {
+				return fmt.Errorf("projected agent identity mismatch: key %s value %s", agentID, projected.AgentID)
+			}
+			projected.Name = name
+			projected.BootBio = bio
+			projectedData, marshalErr := json.Marshal(&projected)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			return s.txnSet(txn, appV23ProjectedAgentKey(agentID), projectedData)
+		}
+		if !errors.Is(projectionErr, badger.ErrKeyNotFound) {
+			return projectionErr
+		}
+		return nil
 	})
 }
 

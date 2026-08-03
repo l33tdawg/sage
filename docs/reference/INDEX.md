@@ -8,7 +8,8 @@ If you are an agent (or building one) and you have a question about how SAGE beh
 the answer is here or in a linked file — **read this before reverse-engineering the source.**
 
 Every document in this directory was verified against the actual code and cites
-`file:line` for non-obvious behavior. Where this reference disagrees with `docs/ARCHITECTURE.md`
+stable source files and symbols (and exact lines where useful) for non-obvious
+behavior. Where this reference disagrees with `docs/ARCHITECTURE.md`
 or `api/openapi.yaml`, **trust this reference** — those two have known drift (see *Known-stale sources* below).
 
 ---
@@ -62,7 +63,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 ## Critical facts (the ones agents get wrong)
 
 ### Boot sequence (MCP)
-1. `sage_inception` — **very first action every conversation.** Loads your stored memory context. Historical `sage_red_pill` calls remain accepted for one compatibility window but are not advertised to new clients.
+1. `sage_inception` — **very first action every conversation.** Loads your stored memory context. The superseded `sage_red_pill` alias is no longer registered or callable.
 2. `sage_turn` — **every turn.** Atomically recalls committed memories for the topic *and* stores your observation. Also auto-checks the pipeline inbox.
 3. `sage_reflect` — after tasks. Store dos and don'ts.
 
@@ -166,7 +167,7 @@ CometBFT without treating the consensus RPC as proof of application storage.
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 
-- **`api/openapi.yaml`** — the machine-readable spec, reconciled to the core REST surface (including the v11.5 `reinstateMemory` operation; `classification` on `MemorySubmitRequest`; `task` in `MemoryType`; `tx_hash` on vote responses; clearance-0 labeled PUBLIC; `/v1/agent/register` documents 201-new / 200-idempotent). [`rest-api.md`](rest-api.md) remains the human-readable narrative. *(A few org/federation/dept GET responses are typed as generic objects — their store models live outside the REST package; fill in later if needed.)*
+- **`api/openapi.yaml`** — the machine-readable **network/agent REST** spec, reconciled to the core remotely callable surface (including the v11.5 `reinstateMemory` operation; `classification` on `MemorySubmitRequest`; `task` in `MemoryType`; `tx_hash` on vote responses; clearance-0 labeled PUBLIC; `/v1/agent/register` documents 201-new / 200-idempotent). It intentionally excludes the same-machine, loopback-only human CEREBRUM control plane under `/v1/dashboard/**`; those operator routes are documented in [`rest-api.md`](rest-api.md), the app-v23 design, and the app-v26 Access Group reference. This exclusion is a trust boundary, not missing SDK coverage. *(A few org/federation/dept GET responses are typed as generic objects — their store models live outside the REST package; fill in later if needed.)*
 - **`docs/ARCHITECTURE.md`** — accurate: it documents *both* the operational and data-classification meanings of the 0–4 integer, and treats BadgerDB as authoritative with SQLite as legacy fallback. Documents PoE-weighted quorum (Phase 2, live since v8.2/`app-v3` and complete through v8.4/`app-v5`): post-fork blocks weight each vote by the validator's demonstrated PoE track record; the equal-weight (1.0) branch is retained only for pre-fork byte-identical replay. For precise per-record gate logic with file:line, prefer [`concepts/`](concepts/).
 - **`sdk/python/README.md`** — reconciled: signing docs now include the nonce/`X-Nonce`, `propose()` documents `classification`, and `hybrid()`/`forget()`/`list_orgs_by_name()` are in the tables. [`python-sdk.md`](python-sdk.md) is the fuller reference.
 

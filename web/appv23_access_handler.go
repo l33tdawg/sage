@@ -755,6 +755,10 @@ func writeAppV23CommitUnconfirmed(w http.ResponseWriter, action string) {
 // import the browser's historical localStorage groups.
 func (h *DashboardHandler) handleAppV23AccessState(agentStore store.AgentStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// This response is live consensus authority state. Browser/proxy caching
+		// can otherwise resurrect a pre-commit roster after rename, approval, or
+		// group changes and tempt the operator into submitting a duplicate.
+		w.Header().Set("Cache-Control", "no-store")
 		if h.BadgerStore == nil {
 			writeAppV23AccessError(w, http.StatusServiceUnavailable, "consensus_state_unavailable",
 				"Consensus access-control state is unavailable.")
@@ -835,6 +839,24 @@ func (h *DashboardHandler) handleAppV23AccessState(agentStore store.AgentStore) 
 				writeAppV23AccessError(w, http.StatusInternalServerError, "enrollment_state_unavailable",
 					"Could not load local enrollment state.")
 				return
+			}
+			// A Root-rejected pending identity remains in immutable chain history,
+			// but its removed node-local projection keeps it out of the actionable
+			// review queue. A later signed registration request restores that
+			// projection and makes the identity visible for a fresh review.
+			local := metadata[agent.AgentID]
+			if local == nil && (enrollment == nil || !enrollment.Active) {
+				// ListAgents intentionally excludes removed rows. Consult the exact
+				// identity only for an already non-active consensus principal so a
+				// rejected pending registration does not reappear merely because the
+				// broad local roster correctly hid its removed projection.
+				if exact, exactErr := agentStore.GetAgent(r.Context(), agent.AgentID); exactErr == nil {
+					local = exact
+				}
+			}
+			if local != nil &&
+				local.Status == "removed" && (enrollment == nil || !enrollment.Active) {
+				continue
 			}
 			role, roleErr := h.BadgerStore.GetAppV23Role(agent.AgentID)
 			if roleErr != nil {
