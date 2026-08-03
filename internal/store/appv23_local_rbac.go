@@ -4454,8 +4454,13 @@ func (s *BadgerStore) MigrateAppV26AccessGroupAuthorities(height int64) error {
 			if err := appV23ReadJSON(txn, appV23RootKey(), &root); err != nil {
 				return err
 			}
-			_, err := s.reconcileAppV26InactiveDomainOwnersToRootTxn(txn, root, height)
-			return err
+			if err := s.repairAppV26EnrollmentHomesTxn(txn, height); err != nil {
+				return err
+			}
+			if _, err := s.reconcileAppV26InactiveDomainOwnersToRootTxn(txn, root, height); err != nil {
+				return err
+			}
+			return s.rebuildAppV26DomainOwnerIndexTxn(txn)
 		})
 	})
 }
@@ -5010,6 +5015,18 @@ func (s *BadgerStore) AppV23AdditionalModifyHolders(domain string, shared bool, 
 }
 
 func (s *BadgerStore) ValidateAppV23State() error {
+	return s.validateAppV23State(false)
+}
+
+// ValidateAppV23StateForPreV26Recovery validates every ordinary invariant but
+// permits the narrow home-domain defects produced by the historical app-v25
+// batch continuity bug. It is read-only and must be used only to reach the
+// app-v26 consensus repair; app-v26-applied state always uses strict validation.
+func (s *BadgerStore) ValidateAppV23StateForPreV26Recovery() error {
+	return s.validateAppV23State(true)
+}
+
+func (s *BadgerStore) validateAppV23State(allowRecoverableHomes bool) error {
 	root, err := s.GetAppV23Root()
 	if err != nil || root == nil {
 		return errors.New("app-v23 state has no root")
@@ -5505,34 +5522,12 @@ func (s *BadgerStore) ValidateAppV23State() error {
 			// rebuilds its SQLite projection from the canonical policy instead of
 			// bricking the whole node over that recoverable drift.
 			if enrollment.Active && agentID != root.PrincipalID && enrollment.Profile != AppV23ProfileReadOnly {
-				if enrollment.HomeDomain == "" &&
-					AppV23AllowsMigratedDomainless(
-						enrollment.Profile, enrollment.Capabilities,
-					) {
-					continue
-				}
-				if err := ValidateAppV23DomainName(enrollment.HomeDomain); err != nil {
-					return fmt.Errorf(
-						"app-v23 agent %s has invalid home domain: %w",
-						agentID, err,
-					)
-				}
-				shared, err := appV23DomainIsSharedTxn(txn, enrollment.HomeDomain)
+				reason, defective, err := s.appV23RecoverableHomeDefectTxn(txn, enrollment)
 				if err != nil {
-					return err
+					return fmt.Errorf("app-v23 agent %s has invalid home domain: %w", agentID, err)
 				}
-				if enrollment.HomeDomain == "" || shared {
-					return fmt.Errorf("app-v23 agent %s has no non-shared home domain", agentID)
-				}
-				var owner string
-				value, err := s.appV23ReadEffectiveValueTxn(txn, domainKey(enrollment.HomeDomain))
-				if err == nil {
-					var decodeErr error
-					owner, _, decodeErr = decodeString(value, 0)
-					err = decodeErr
-				}
-				if err != nil || owner != agentID {
-					return fmt.Errorf("app-v23 home domain owner mismatch for %s", agentID)
+				if defective && !allowRecoverableHomes {
+					return fmt.Errorf("app-v23 agent %s has recoverable %s", agentID, reason)
 				}
 			}
 			if enrollment.Active && enrollment.Profile == AppV23ProfileReadOnly &&

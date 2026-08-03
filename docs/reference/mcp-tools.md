@@ -2,7 +2,7 @@ Reconciled against internal/mcp for SAGE v11.17.0.
 
 # SAGE MCP Tools Reference
 
-SAGE exposes 33 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
+SAGE exposes 34 MCP tools over JSON-RPC 2.0. Stdio tools sign REST calls with
 the local Ed25519 identity; SSE and Streamable-HTTP use the MCP bearer-token/OAuth
 flow. Under app-v23 each HTTP bearer unlocks and signs with its own distinct
 restricted Member identity pending CEREBRUM review; it never inherits the
@@ -11,6 +11,14 @@ bearer-derived AEAD envelope whose SQLite digest alone cannot decrypt the
 signer, regardless of optional ledger state. Older vault-sealed keyed rows
 rewrap on their next successful unlocked authentication. Only
 consensus-committed memories are returned to callers.
+
+The MCP server owns request authentication. Tools never require callers to
+repeat their own `agent_id`, signature, timestamp, or nonce in tool arguments:
+stdio uses the configured Ed25519 identity, while HTTP MCP binds the request to
+the authenticated bearer identity. An `agent_id`, `to`, `message_id`,
+`pipe_id`, or `memory_id` parameter always names a target or resource, never a
+missing self-authentication field. Use `sage_status` to inspect the calling
+identity and `sage_domains` to page its owned domains.
 
 ### App-v25 recovery is automatic; agents do not repair history themselves
 
@@ -97,7 +105,10 @@ before any other action in every new conversation.
 - `bookend`: call `sage_turn` only at session start/end to conserve tokens.
 - `on-demand`: SAGE tools are passive; only call when the user explicitly asks.
 
-**REST:** `GET /v1/dashboard/stats`, `POST /v1/agent/register`,
+**REST:** `POST /v1/agent/register`, then the signed caller-scoped
+`GET /v1/memory/list?limit=1&status=committed` count path. Optional boot
+preferences use their dedicated dashboard settings routes; inception never
+uses the CEREBRUM operator-only `/v1/dashboard/stats` surface.
 `GET /v1/dashboard/settings/boot-instructions`,
 `GET /v1/dashboard/settings/memory-mode`, `POST /v1/embed`,
 `POST /v1/memory/submit`
@@ -105,21 +116,6 @@ before any other action in every new conversation.
 **When to call:** First action of every new conversation. No exceptions —
 not even for greetings. The server also runs auto-inception silently on the
 first non-inception tool call if the brain is empty (`server.go:239-248`).
-
----
-
-### sage_red_pill
-
-**Purpose:** Deprecated alias for `sage_inception`. Identical behavior, identical handler.
-
-**Source:** `tools.go:119-128`
-
-**Parameters:** None.
-
-**Returns:** Same as `sage_inception`.
-
-**When to call:** Interchangeable with `sage_inception`. Prefer `sage_inception`;
-`sage_red_pill` is deprecated and retained only for backward compatibility.
 
 ---
 
@@ -400,7 +396,9 @@ they currently expose to this SAGE.
 
 **Source:** `tools.go:62-70` (definition), `tools.go:884-1013` (handler)
 
-**Parameters:** none.
+**Parameters:** optional `peer_cursor`, the bounded continuation returned by a
+previous incomplete call. Omit it for the first page. One MCP call performs one
+bounded caller-authorized peer page and never walks every connected node automatically.
 
 **Returns:**
 - `connections`: active, reachable SAGEs whose authenticated remote grant
@@ -414,11 +412,14 @@ they currently expose to this SAGE.
   advertises them.
 - `sync`: caller-filtered subscribed domains, saved-copy counts, and bounded
   reconciliation health without endpoints, pins, secrets, or raw outbox rows.
+- `complete` and `next_peer_cursor`: bounded-scan state and, while another page
+  remains, the caller/query-bound short-lived continuation. The token exposes
+  no peer ID or hidden agreement count.
 
-The REST broker probes active peers concurrently (bounded at eight and one
-shared timeout), then filters the authenticated disclosures for the signed
-caller. It does not change trust, permissions, subscriptions, or contacts;
-those routes remain exact-node-operator-only.
+The REST broker probes one caller-authorized page concurrently under a shared timeout,
+then filters the authenticated disclosures for the signed caller. It does not
+change trust, permissions, subscriptions, or contacts; those routes remain
+exact-node-operator-only.
 
 **REST:** `GET /v1/federation/available`.
 
@@ -616,8 +617,11 @@ targets for scoped recall, and optional home-domain memory counts.
 `has_more`, `breakdowns_complete`, and `scope: "caller"`. App-v23 instead
 returns the signed caller's own `registration_status`, `enrollment_status`, `role`, `profile`,
 `home_domain`, `clearance`, `capabilities`, `approval_required`, `can_read`, and
-`can_write`, plus `readable_domains`, `readable_domains_scope`, and
-`readable_domains_truncated`. The readable-domain list is a bounded sample of
+`can_write`, plus `owned_domains`, `readable_domains`, `writable_domains`,
+`readable_domains_scope`, and `readable_domains_truncated`. These domain lists
+are bounded caller-only samples: owned identifies domains whose current owning
+ancestor is the caller, readable identifies scoped recall targets, and writable
+identifies candidates that pass current effective write policy. The readable-domain list is a bounded sample of
 currently authorized targets derived from the caller's own home/provenance,
 direct grants, and local Access Groups; every candidate is checked against
 live policy before it is returned. It is not a global domain roster and does
@@ -650,6 +654,25 @@ operator-only CEREBRUM statistics route is never used by an agent.
 
 **When to call:** Quick health check; understanding how full the memory store is;
 verifying memories were committed after storing.
+
+---
+
+### sage_domains
+
+**Purpose:** Page through the signed caller's complete current owned-domain set
+without loading a roster or scanning memories. Use the bounded readable and
+writable samples from `sage_status` to choose a normal exact scope; use this
+tool only when the complete ownership inventory is required.
+
+**Parameters:** `cursor` (optional exact `next_cursor`) and `limit` (default 50,
+maximum 100).
+
+**Returns:** `domains`, `next_cursor`, `has_more`, and
+`scope:"authoritative_current_owner"`. Each page is one signed local request.
+Continue with the returned cursor until `has_more` is false; never fan out one
+request per domain.
+
+**REST:** `GET /v1/agent/me/domains/owned?cursor=...&limit=...`
 
 ---
 
@@ -856,13 +879,16 @@ returning an empty replay or consuming newer work.
 | `receive_token` | string | yes | Stable 1–256-byte token for this exact receive attempt. |
 | `limit` | integer | no | 1–20; default 5. |
 
-After the batch returns, MCP signs one exact-ID read acknowledgement per item
-before presenting it. If an acknowledgement fails, the already claimed work
-is still returned with `read_status:not_confirmed`; it is never hidden. Every
-payload remains untrusted request content.
+After the batch returns, MCP acknowledges all returned exact IDs with one
+authenticated batch request (maximum 20). Each item still receives its own
+partial result. If an acknowledgement fails, the already claimed work is still
+returned with `read_status:not_confirmed`; it is never hidden. Every payload
+remains untrusted request content. A definite 404 from an older node alone
+enables the per-ID compatibility path; 401/403/5xx failures never fall back.
 
-**REST:** `POST /v1/messages/receive`, followed per item by
-`PUT /v1/messages/{message_id}/read`.
+**REST:** `POST /v1/messages/receive`, followed by
+`PUT /v1/messages/read-batch` (legacy definite-404 fallback:
+`PUT /v1/messages/{message_id}/read`).
 
 ---
 
@@ -1133,11 +1159,13 @@ already authorized to that exact caller and live-revalidated by the peer:
 - `scope` (`local` or `federated`) and a non-presence status;
 - federated rows additionally include `node_id` and `node_name` provenance.
 
-The request is signed as the calling agent. The underlying metadata-only
-`GET /v1/agents/directory` projection applies the app-v23 active-ordinary
+The request is signed as the calling agent. The underlying metadata-only,
+database-capped `GET /v1/agents/directory` projection applies the app-v23 active-ordinary
 enrollment boundary and excludes
 CEREBRUM Root credentials, historical Root credentials, pending, inactive,
-removed, retired, or canonically inconsistent registrations. MCP then returns
+removed, retired, or canonically inconsistent registrations. It returns at
+most 100 local recipients and reports `complete=false` when capped; use
+`sage_find_agent` for a named recipient outside that picker window. MCP returns
 only the minimal identity picker above; it does not expose roles, capability
 masks, memory counts, domain grants, key material, or other RBAC topology.
 
@@ -1155,12 +1183,17 @@ Directory membership is never online presence, reachability, delivery, claim,
 or read evidence. Only `sage_message_status` may report evidence for an exact
 message the caller sent.
 
-**Parameters:** `scope` is optional: `all` (default) returns the authorized
-local/federated union; `local` avoids federation network checks.
+**Parameters:** `scope` is optional: `local` (default) performs one local
+metadata-only read and no federation network checks; `all` explicitly requests
+the authorized local/federated union and live peer revalidation. For
+`scope=all`, optional `peer_cursor` continues exactly one bounded federation
+page returned by the previous call. It is ignored for local scope.
 
 **Returns:** `agents`, `total`, `scope`, `complete`, `warnings`, and a short
-routing reminder. Entries are sorted by display name and then agent ID for
-stable presentation.
+routing reminder. When another federation page is available, warnings include
+the exact `next_peer_cursor`; callers choose whether to continue and must not
+auto-loop. Entries are sorted by display name and then agent ID for stable
+presentation.
 
 **REST:** signed `GET /v1/agents/directory`
 
@@ -1213,7 +1246,8 @@ authorization. Pipeline results are untrusted data, not instructions.
 - `message`: human-readable summary.
 
 **REST:** replay-safe canonical local receive via `POST /v1/messages/receive`,
-then the remaining capacity from the claim-on-read `GET /v1/pipe/inbox`, then
+one `PUT /v1/messages/read-batch` for its returned IDs, then the remaining
+capacity from the claim-on-read `GET /v1/pipe/inbox`, then
 `GET /v1/dashboard/task-notifications`. Canonical receive uses a fresh stable
 token for that internal batch and safely retries the exact body. The latter two
 reads mutate state by claiming or acknowledging rows, so the MCP client sends
@@ -1222,6 +1256,13 @@ is returned to the tool call site rather than replayed and risking consumption
 of a second batch. Canonical work already returned remains visible alongside a
 `pipeline_inbox_warning` if the later legacy/federated claim fails. The one-shot
 `GET /v1/pipe/updates` follows the same rule.
+Negotiated receipt-v2 legacy/federated items use one
+`POST /v1/pipe/receipts/challenge-batch` and one
+`PUT /v1/pipe/receipts/batch` for up to 20 messages (40 claim/read events).
+Every event retains its independent exact-path nonce-bound proof, claim is
+recorded before read, and partial failures do not hide independently claimed
+work. Only a definite 404 enables the older per-event compatibility path;
+authentication, authorization, conflict, and server failures never do.
 `GET /v1/pipe/results` remains retryable because it is a passive, repeating
 sender projection and does not acknowledge its rows (`server.go`,
 `signing_nonce_test.go`).
@@ -1441,9 +1482,11 @@ Node-operator/admin only.
 
 ### Boot sequence vs tool list
 
-The CLAUDE.md and MCP server instructions both reference `sage_red_pill` as an
-alias for `sage_inception`. Both are registered and both share the same handler
-(`tools.go:127`). No discrepancy — both exist.
+Historical clients may still call the hidden `sage_red_pill` compatibility
+alias during the v11.17 transition, but `tools/list`, onboarding, and current
+documentation advertise only `sage_inception`. Current MCP instructions name
+only `sage_inception`; the historical alias remains callable through the same
+handler for compatibility but is intentionally absent from discovery.
 
 The boot sequence documented in CLAUDE.md (`sage_inception → sage_turn →
 sage_reflect`) exactly matches the tools registered in `registerTools()`. No
@@ -1481,15 +1524,16 @@ registration name from `sage_register` is untouched.
 
 ## Summary
 
-**29 tools documented:**
+**34 tools documented:**
 
 | Category     | Tools |
 |--------------|-------|
-| Boot / lifecycle | `sage_inception`, `sage_red_pill`, `sage_turn`, `sage_reflect` |
+| Boot / lifecycle | `sage_inception`, `sage_turn`, `sage_reflect` |
 | Core memory  | `sage_remember`, `sage_recall`, `sage_forget`, `sage_reinstate`, `sage_corroborate`, `sage_link` |
 | Federation   | `sage_federation` |
-| Browse       | `sage_list`, `sage_timeline`, `sage_status` |
+| Browse       | `sage_list`, `sage_timeline`, `sage_status`, `sage_domains` |
 | Tasks        | `sage_task`, `sage_backlog` |
 | Identity     | `sage_register`, `sage_rename`, `sage_directory` |
-| Pipeline     | `sage_find_agent`, `sage_pipe`, `sage_inbox`, `sage_pipe_history`, `sage_pipe_result` |
+| Messages     | `sage_message_send`, `sage_messages_receive`, `sage_message_reply`, `sage_message_status` |
+| Pipeline     | `sage_pipe`, `sage_pipe_receipt_status`, `sage_find_agent`, `sage_inbox`, `sage_pipe_history`, `sage_pipe_result` |
 | Governance   | `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status`, `sage_scope_list`, `sage_scope_get` |

@@ -634,33 +634,35 @@ On upgrade to v3, existing genesis validators are auto-seeded into this table so
 | `visible_agents` | TEXT | JSON array of agent IDs this agent can read from ("*" or empty = all) |
 | `provider` | TEXT | MCP provider identifier (e.g., "claude-code", "cursor") |
 
-On-chain state is also stored in BadgerDB under the `agent:{agentID}` key prefix, containing clearance, domain access, and visibility rules. The ABCI app processes three new transaction types:
+Historical agent records remain under the `agent:{agentID}` prefix. Current
+governed authority additionally uses app-v23/app-v26 enrollment, role,
+home-domain, Access Group, grant, and ownership indexes. The legacy transaction
+codec still decodes these earlier transaction types for deterministic replay:
 
 | Tx Type | ID | Who Sends | Purpose |
 |---------|---:|-----------|---------|
 | `AgentRegister` | 20 | Agent (self) | Register on chain with name, bio, provider |
 | `AgentUpdate` | 21 | Agent (self) | Update own name/bio |
-| `AgentSetPermission` | 22 | Admin | Set clearance, domain access, visible agents |
+| `AgentSetPermission` | 22 | Historical only | Replay pre-app-v23 policy records; current mutation is retired |
 
 ### Agent Lifecycle
 
 ```
-Creation → Active → Key Rotation → Removal
-              ↓           ↓
-          Suspended    Re-keyed (new Ed25519 identity,
-              ↓         memories re-attributed atomically)
-           Retired
+Pending review → Active → Suspended/Retired
+                    ↓
+          governed ownership handover
+          (authorship/history unchanged)
 ```
 
-1. **Creation** — Admin adds agent via CEREBRUM dashboard or REST API. Agent receives an Ed25519 keypair, role, clearance level, and domain access map.
-2. **Active** — Agent participates in the network. Reads and writes are enforced against its `domain_access` map and `clearance` level.
-3. **Key Rotation** — Admin triggers key rotation. A new Ed25519 keypair is generated, all memories attributed to the old key are re-attributed to the new key in a single atomic transaction, and the old key is marked as retired.
+1. **Creation** — An agent generates and keeps its own Ed25519 key, then self-registers as a pending ordinary identity. CEREBRUM Root/Admin approves its atomic role, profile, clearance, capabilities, and home-domain policy.
+2. **Active** — Agent participation is enforced against the current app-v26 home-domain ownership, Access Group authority, explicit grants, classification/clearance, and operating profile.
+3. **Key/ownership handover** — Current ownership may move through governed CEREBRUM operations. Existing memory authorship and on-chain history are never rewritten; only future authority changes.
 4. **Suspension** — Admin suspends agent. All requests from the agent's key are rejected with 403.
 5. **Removal** — Admin removes agent. The record is soft-deleted (status set to `retired`). Memories remain attributed for audit purposes.
 
 **Auto-Registration (v3.5+):** Agents connecting via MCP for the first time automatically register on-chain during the boot sequence (`sage_inception` -> `autoRegister`). The registration is idempotent — calling it again returns the existing record.
 
-**Permission Enforcement (v3.5+):** Memory operations check on-chain state (BadgerDB) first for clearance and domain access. If the agent isn't registered on-chain (legacy), it falls back to the SQLite record. The `visible_agents` field filters query results — agents only see memories from agents in their visibility list (or all, if the list is empty/"*").
+**Permission Enforcement (app-v26):** Memory operations use consensus state for active enrollment, role/profile, home-domain ownership, Access Group authority, explicit grants, and classification/clearance. SQLite is a projection, not an authority fallback.
 
 ### Agent Registration & Updates (v5.0.1+)
 
@@ -670,17 +672,20 @@ Agents register on-chain via REST, providing identity metadata that is committed
 
 **Update Profile:** `PUT /v1/agent/update` — agents update their own `name` or `boot_bio`. The request is signed and committed on-chain for auditability.
 
-**Set Permissions:** `PUT /v1/agent/{id}/permission` — admin-only. Sets `clearance`, `domain_access`, and `visible_agents` for a target agent. This is the only way to change an agent's access level after registration.
+**Govern policy:** The local human uses loopback CEREBRUM Access Controls to commit role, profile, clearance, capabilities, home-domain approval, and Access Groups atomically. The pre-app-v23 per-field permission route is retired and absent from the current SDK/OpenAPI.
 
-**Agent Roles (v5.0.1):**
+**Current local agent roles:**
 
 | Role | Description |
 |------|-------------|
-| `member` | Default role. Can read and write based on clearance and domain access |
-| `admin` | Full control. Can set permissions for other agents, manage domains |
-| `observer` | Read-only. Blocked from all write operations regardless of domain grants |
+| `member` | Owns/writes its home domain and receives explicit group/grant access |
+| `admin` | Broad local node control; still separate from sovereign CEREBRUM Root |
+| `manager` | Member access plus configured group write/modify authority |
 
-**Visibility Controls:** The `visible_agents` field is a JSON array of agent IDs. When set, the agent can only see memories authored by agents in that list. An empty array or `"*"` means the agent sees all memories (subject to domain and clearance checks). This allows fine-grained compartmentalization — e.g., a review agent that only sees output from a specific working group.
+**Visibility Controls:** Access Groups grant explicit domain authority tiers;
+federated linked readers remain separate and read-only. Removing a local agent
+from a group removes only group-derived access and never its own home-domain
+authority.
 
 ### Redeployment Orchestrator
 
@@ -889,20 +894,22 @@ The (S)AGE REST API uses Ed25519 signature authentication and follows the OpenAP
 
 ### Authentication
 
-All authenticated endpoints require three headers; current clients should also
-send the optional nonce header:
+Current authenticated clients send all four headers:
 
 | Header | Value |
 |--------|-------|
 | `X-Agent-ID` | Hex-encoded Ed25519 public key |
 | `X-Signature` | Ed25519 signature of `SHA-256(method + " " + path[?query] + "\n" + body) + big-endian int64(timestamp) [+ nonce]` |
 | `X-Timestamp` | Unix epoch seconds |
-| `X-Nonce` | Optional hex bytes; current clients send 8 random bytes |
+| `X-Nonce` | Fresh 8 random bytes, hex encoded |
 
 The Python SDK handles signing automatically. For raw HTTP access, construct the
 canonical method/path/body string exactly as shown above, hash it, append the
-timestamp and decoded nonce bytes, and sign with your Ed25519 private key. After
-app-v17 activation, consensus independently binds a delegated proof to that
+timestamp and decoded nonce bytes, and sign with your Ed25519 private key. The
+generic verifier recognizes the historical nonce-less shape only for a
+compatibility window; exact message, receipt, acknowledgement, and delegated
+governance actions reject it. New clients must not rely on legacy signing.
+After app-v17 activation, consensus independently binds a delegated proof to that
 exact action, deterministic block-time freshness, and a single-use AppHash
 marker; see `docs/reference/rest-api.md` for the authoritative details.
 
@@ -927,7 +934,6 @@ marker; see `docs/reference/rest-api.md` for the authoritative details.
 | `PUT` | `/v1/memory/{id}/task-status` | Yes | Update a task memory's status |
 | `POST` | `/v1/agent/register` | Yes | Register agent on-chain (name, role, boot_bio, provider) |
 | `PUT` | `/v1/agent/update` | Yes | Update agent's own profile (name, boot_bio) |
-| `PUT` | `/v1/agent/{id}/permission` | Yes | Admin: set clearance, domain access, visible_agents |
 | `POST` | `/v1/pipe/send` | Yes | Send a pipeline message to an agent or provider |
 | `GET` | `/v1/pipe/inbox` | Yes | List pending pipeline messages for the agent |
 | `PUT` | `/v1/pipe/{id}/claim` | Yes | Claim a pending pipeline message |

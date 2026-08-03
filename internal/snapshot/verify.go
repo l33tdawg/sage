@@ -33,12 +33,21 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	dbm "github.com/cometbft/cometbft-db"
+	cmtjson "github.com/cometbft/cometbft/libs/json"
+	"github.com/cometbft/cometbft/p2p"
+	"github.com/cometbft/cometbft/privval"
+	cmtstate "github.com/cometbft/cometbft/state"
+	cmtstore "github.com/cometbft/cometbft/store"
+	cmttypes "github.com/cometbft/cometbft/types"
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/l33tdawg/sage/internal/consensuskeys"
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 // AppHashComputer lets the verifier hash a restored BadgerDB without
@@ -73,6 +82,19 @@ type VerifyOptions struct {
 	// Used by the integration commit to inject the real
 	// store.BadgerStore.ComputeAppHash.
 	AppHashComputer AppHashComputer
+
+	// RequireRecoveryConfig makes verification prove that the config archive
+	// contains the three identities required to boot the same chain.
+	RequireRecoveryConfig bool
+	// RequireVaultKey additionally requires vault.key in the config archive.
+	RequireVaultKey bool
+
+	// CometDBBackend is the backend used by the captured CometBFT databases.
+	// When ExpectedCometHeight is positive, verification extracts and opens the
+	// captured state and block stores and binds them to the manifest tuple.
+	CometDBBackend       string
+	ExpectedCometHeight  int64
+	ExpectedCometAppHash []byte
 }
 
 // Verify checks that the snapshot at dir is structurally complete and
@@ -84,6 +106,22 @@ type VerifyOptions struct {
 // candidate snapshot.
 func Verify(dir string) error {
 	return VerifyWithOptions(dir, VerifyOptions{})
+}
+
+// ReadManifest returns the immutable descriptor for one finalized or staging
+// snapshot. Callers still must run VerifyWithOptions before treating it as a
+// recovery point; this helper exists so an updater can bind a verified bundle
+// to the exact height, AppHash, and running-binary provenance it requested.
+func ReadManifest(dir string) (*Manifest, error) {
+	manifestBytes, err := os.ReadFile(filepath.Join(dir, chunkManifest))
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot manifest: %w", err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return nil, fmt.Errorf("parse snapshot manifest: %w", err)
+	}
+	return &manifest, nil
 }
 
 // VerifyWithOptions is the configurable form of Verify.
@@ -217,9 +255,218 @@ func VerifyWithOptions(dir string, opts VerifyOptions) error {
 		if err := tarHeaderWalk(cometSrc); err != nil {
 			return fmt.Errorf("verify: cometbft tar: %w", err)
 		}
+		if opts.ExpectedCometHeight > 0 {
+			if err := verifyCometState(cometSrc, opts.CometDBBackend, opts.ExpectedCometHeight, opts.ExpectedCometAppHash); err != nil {
+				return fmt.Errorf("verify: cometbft state provenance: %w", err)
+			}
+		}
+	} else if opts.ExpectedCometHeight > 0 {
+		return errors.New("verify: cometbft data missing")
+	}
+
+	if opts.RequireRecoveryConfig {
+		cfgSrc, cfgCleanup, cfgErr := materialize(dir, &m, chunkConfig, opts.VaultPassphrase)
+		if cfgErr != nil {
+			return fmt.Errorf("verify: materialize config tar: %w", cfgErr)
+		}
+		defer cfgCleanup()
+		if cfgSrc == "" {
+			return errors.New("verify: recovery config archive missing")
+		}
+		if err := verifyRecoveryConfig(cfgSrc, opts.RequireVaultKey, opts.VaultPassphrase); err != nil {
+			return fmt.Errorf("verify: recovery config: %w", err)
+		}
 	}
 
 	return nil
+}
+
+func verifyRecoveryConfig(archivePath string, requireVault bool, vaultPassphrase string) error {
+	root, err := os.MkdirTemp("", "sage-verify-config-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(root) }()
+	if err := untarZstd(archivePath, root); err != nil {
+		return fmt.Errorf("extract: %w", err)
+	}
+	configDir := filepath.Join(root, "cometbft", "config")
+	genesisRaw, err := os.ReadFile(filepath.Join(configDir, "genesis.json"))
+	if err != nil {
+		return fmt.Errorf("read genesis.json: %w", err)
+	}
+	genesis, err := cmttypes.GenesisDocFromJSON(genesisRaw)
+	if err != nil {
+		return fmt.Errorf("parse genesis.json: %w", err)
+	}
+	nodeKey, err := p2p.LoadNodeKey(filepath.Join(configDir, "node_key.json"))
+	if err != nil || nodeKey == nil || nodeKey.PrivKey == nil || nodeKey.ID() == "" {
+		return fmt.Errorf("parse node_key.json: %w", errors.Join(err, errors.New("node identity is incomplete")))
+	}
+	validatorRaw, err := os.ReadFile(filepath.Join(configDir, "priv_validator_key.json"))
+	if err != nil {
+		return fmt.Errorf("read priv_validator_key.json: %w", err)
+	}
+	var validatorKey privval.FilePVKey
+	if err := cmtjson.Unmarshal(validatorRaw, &validatorKey); err != nil {
+		return fmt.Errorf("parse priv_validator_key.json: %w", err)
+	}
+	if validatorKey.PrivKey == nil {
+		return errors.New("priv_validator_key.json has no private key")
+	}
+	derivedPub := validatorKey.PrivKey.PubKey()
+	if derivedPub == nil || (validatorKey.PubKey != nil && !validatorKey.PubKey.Equals(derivedPub)) ||
+		(len(validatorKey.Address) > 0 && !bytes.Equal(validatorKey.Address, derivedPub.Address())) {
+		return errors.New("priv_validator_key.json identity fields do not match")
+	}
+	// Do not require membership in the immutable genesis validator list. SAGE
+	// supports governed validator-set changes and one-shot state-sync receivers
+	// deliberately begin as non-validators. The recovery invariant here is that
+	// the private/public/address identity is internally consistent and bootable;
+	// the captured Comet state remains the authority for current membership.
+	_ = genesis
+	if requireVault {
+		vaultPath := filepath.Join(root, "vault.key")
+		if err := verifyVaultKey(vaultPath, vaultPassphrase); err != nil {
+			return fmt.Errorf("open vault.key: %w", err)
+		}
+	}
+	return nil
+}
+
+func verifyVaultKey(path, passphrase string) (err error) {
+	if passphrase == "" {
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		var envelope struct {
+			Salt         []byte `json:"salt"`
+			EncryptedKey []byte `json:"encrypted_key"`
+			Nonce        []byte `json:"nonce"`
+			VerifyHash   []byte `json:"verify_hash"`
+		}
+		if parseErr := json.Unmarshal(raw, &envelope); parseErr != nil {
+			return parseErr
+		}
+		if len(envelope.Salt) != 16 || len(envelope.Nonce) != 12 ||
+			len(envelope.EncryptedKey) != 48 || len(envelope.VerifyHash) != sha256.Size {
+			return errors.New("invalid vault key envelope lengths")
+		}
+		return nil
+	}
+	// The production loader historically assumed structurally valid nonce and
+	// ciphertext lengths and can panic on a corrupt file. Snapshot verification
+	// must classify that as an unusable recovery identity, never crash updater.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("invalid vault key structure: %v", recovered)
+		}
+	}()
+	_, err = vault.Open(path, passphrase)
+	return err
+}
+
+func verifyCometState(archivePath, backend string, expectedHeight int64, expectedAppHash []byte) (err error) {
+	if backend == "" {
+		return errors.New("CometBFT DB backend is required")
+	}
+	if expectedHeight <= 0 || len(expectedAppHash) != sha256.Size {
+		return errors.New("expected CometBFT height and AppHash are invalid")
+	}
+	root, err := os.MkdirTemp("", "sage-verify-comet-*")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(root) }()
+	if extractErr := untarZstd(archivePath, root); extractErr != nil {
+		return fmt.Errorf("extract: %w", extractErr)
+	}
+	// Comet's block store intentionally panics on corrupt encodings. Convert a
+	// torn live-file capture into a verification error rather than crashing the
+	// updater process.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("open captured CometBFT databases: %v", recovered)
+		}
+	}()
+	stateDB, err := dbm.NewDB("state", dbm.BackendType(backend), root)
+	if err != nil {
+		return fmt.Errorf("open state DB: %w", err)
+	}
+	state, loadErr := cmtstate.NewStore(stateDB, cmtstate.StoreOptions{}).Load()
+	stateCloseErr := stateDB.Close()
+	if loadErr != nil {
+		return fmt.Errorf("load state DB: %w", loadErr)
+	}
+	if stateCloseErr != nil {
+		return fmt.Errorf("close state DB: %w", stateCloseErr)
+	}
+	if state.LastBlockHeight != expectedHeight || !bytes.Equal(state.AppHash, expectedAppHash) {
+		return fmt.Errorf("state tuple is height=%d AppHash=%x, expected height=%d AppHash=%x", state.LastBlockHeight, state.AppHash, expectedHeight, expectedAppHash)
+	}
+	if !state.LastBlockID.IsComplete() {
+		return errors.New("state has an incomplete LastBlockID")
+	}
+	blockDB, err := dbm.NewDB("blockstore", dbm.BackendType(backend), root)
+	if err != nil {
+		return fmt.Errorf("open blockstore DB: %w", err)
+	}
+	blockStore := cmtstore.NewBlockStore(blockDB)
+	defer func() { _ = blockStore.Close() }()
+	if blockStore.Height() != expectedHeight {
+		return fmt.Errorf("blockstore height=%d, expected %d", blockStore.Height(), expectedHeight)
+	}
+	meta := blockStore.LoadBlockMeta(expectedHeight)
+	if meta == nil || !meta.BlockID.Equals(state.LastBlockID) {
+		return errors.New("blockstore tip does not match state LastBlockID")
+	}
+	seenCommit := blockStore.LoadSeenCommit(expectedHeight)
+	if seenCommit == nil || seenCommit.Height != expectedHeight || !seenCommit.BlockID.Equals(state.LastBlockID) {
+		return errors.New("blockstore tip is missing the matching seen commit")
+	}
+	if err := seenCommit.ValidateBasic(); err != nil {
+		return fmt.Errorf("blockstore tip seen commit is invalid: %w", err)
+	}
+	return nil
+}
+
+func walkTarNames(path string, visit func(string)) error {
+	return walkTar(path, func(hdr *tar.Header, tr io.Reader) error {
+		name := filepath.ToSlash(filepath.Clean(hdr.Name))
+		if strings.HasPrefix(name, "../") || name == ".." || filepath.IsAbs(name) {
+			return fmt.Errorf("tar entry escapes root: %q", hdr.Name)
+		}
+		visit(name)
+		_, err := io.Copy(io.Discard, tr)
+		return err
+	})
+}
+
+func walkTar(path string, visit func(*tar.Header, io.Reader) error) error {
+	in, err := os.Open(path) //nolint:gosec // verified snapshot-owned path
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+	zr, err := zstd.NewReader(in)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := visit(hdr, tr); err != nil {
+			return err
+		}
+	}
 }
 
 // materialize returns a filesystem path containing the plaintext bytes

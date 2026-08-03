@@ -228,6 +228,23 @@ func TestFindAnchorSnapshot_NewestWins(t *testing.T) {
 	}
 }
 
+func TestFindAnchorSnapshotAcceptsPreservedSameHeightAnchor(t *testing.T) {
+	snapsDir := t.TempDir()
+	preserved := makeSnapshot(t, snapsDir, "anchor-200-v11.16.4-deadbeef", "v11.16.4", 200)
+	makeSnapshot(t, snapsDir, "200", "v11.17.0", 200)
+
+	dir, manifest, err := findAnchorSnapshot(snapsDir, "v11.16.4")
+	if err != nil {
+		t.Fatalf("find preserved rollback anchor: %v", err)
+	}
+	if dir != preserved {
+		t.Fatalf("expected preserved anchor %s, got %s", preserved, dir)
+	}
+	if manifest.Height != 200 || manifest.BinaryVersion != "v11.16.4" {
+		t.Fatalf("unexpected preserved manifest: %+v", manifest)
+	}
+}
+
 func TestFindAnchorSnapshot_SkipsStagingAndUnsealed(t *testing.T) {
 	snapsDir := t.TempDir()
 	good := makeSnapshot(t, snapsDir, "100", "v7.1.0", 100)

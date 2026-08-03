@@ -284,7 +284,9 @@ func (m *Manager) handleLinkedMessageDirectory(
 	var candidates []*store.AgentEntry
 	var err error
 	if req.Enumerate {
-		candidates, err = ss.ListAgentDirectory(lookupCtx)
+		candidates, err = ss.ListAgentDirectory(
+			lookupCtx, maxLinkedMessageDirectoryInventory+1,
+		)
 	} else {
 		candidates, err = ss.FindPipeContactLookupCandidates(
 			lookupCtx, req.Name, maxPipeContactLookupCandidates,
@@ -315,7 +317,15 @@ func (m *Manager) handleLinkedMessageDirectory(
 		return
 	}
 
-	entries := make([]LinkedMessageDirectoryEntry, 0, min(req.Limit, len(candidates)))
+	// Capacity is derived only from compile-time protocol bounds. Although the
+	// decoder validates req.Limit above, keeping attacker-controlled JSON out of
+	// allocation sizing makes that safety property local and auditable.
+	entryCapacity := maxLinkedMessageDirectoryResults
+	if req.Enumerate {
+		entryCapacity = maxLinkedMessageDirectoryInventory
+	}
+	entryCapacity = min(entryCapacity, len(candidates))
+	entries := make([]LinkedMessageDirectoryEntry, 0, entryCapacity)
 	switch req.Direction {
 	case LinkedMessageGuestToMember:
 		for _, candidate := range candidates {
@@ -511,6 +521,79 @@ func (m *Manager) hostedDirectoryRelations(
 	return relations, nil
 }
 
+// CallerMayHaveLinkedMessagePeer reports whether a caller-scoped linked
+// message lookup may need to probe one active peer. It never performs a remote
+// request or enumerates the remote directory.
+//
+// On a host, the locally signed guest rows and current access-group membership
+// are authoritative, so absence is conclusive. On a guest, the host owns the
+// only authoritative guest-to-member relation; an eligible local caller must
+// therefore be allowed one bounded live probe rather than being hidden by a
+// false-negative local cache. The remote host revalidates the exact relation.
+func (m *Manager) CallerMayHaveLinkedMessagePeer(
+	ctx context.Context,
+	remoteChainID, callerID string,
+) (bool, error) {
+	if !isCanonicalAgentID(callerID) || callerID != strings.ToLower(callerID) ||
+		!m.linkedMessageLocalAgentEligible(callerID) {
+		return false, nil
+	}
+	agreement, err := m.ActiveAgreement(remoteChainID)
+	if err != nil {
+		return false, nil
+	}
+	peerAgentID, err := m.ResolvePeerOperatorAgentID(ctx, remoteChainID)
+	if err != nil {
+		return false, nil
+	}
+	peer := &peerIdentity{
+		ChainID: remoteChainID, AgentID: peerAgentID, Agreement: agreement,
+	}
+	ss := m.syncStore()
+	if ss == nil || m.badger == nil {
+		return false, nil
+	}
+
+	policyUnlock := ss.LockSyncPolicyRead()
+	defer policyUnlock()
+	ownerUnlock := m.badger.LockDomainOwnershipRead()
+	defer ownerUnlock()
+
+	// currentLinkedMessagePolicy rejects paused, stale, replaced, and
+	// agreement-mismatched policy generations. The sync control additionally
+	// freezes the host/guest role and peer operator used by this decision.
+	policy, _, err := m.currentLinkedMessagePolicy(ctx, agreement, peerAgentID)
+	if err != nil || policy == nil {
+		return false, nil
+	}
+	control, err := ss.GetSyncControl(ctx, remoteChainID)
+	if err != nil {
+		return false, err
+	}
+	if control == nil || !m.syncControlPeerBound(control, peer) ||
+		control.PolicyEpoch != policy.PolicyEpoch {
+		return false, nil
+	}
+	switch control.Role {
+	case "guest":
+		// Only the remote host can prove the exact guest-to-member edge.
+		return true, nil
+	case "host":
+		relations, relationErr := m.hostedDirectoryRelations(
+			ctx, peer, agreement, callerID,
+		)
+		if errors.Is(relationErr, ErrRemotePipeTargetNotFound) {
+			return false, nil
+		}
+		if relationErr != nil {
+			return false, relationErr
+		}
+		return len(relations) != 0, nil
+	default:
+		return false, nil
+	}
+}
+
 // FindRemoteLinkedMessageContacts performs a live, caller-scoped friendly-name
 // lookup over one authenticated peer. Both linked directions are checked, and
 // every returned address is suitable for the existing exact
@@ -662,7 +745,7 @@ func (m *Manager) remoteLinkedMessageContacts(
 				}
 				updated := *original
 				updated.ReceiverConsentRevision = entry.ConsentRevision
-				if err := updated.sign(m.agentKey); err != nil {
+				if signErr := updated.sign(m.agentKey); signErr != nil {
 					return nil, ErrFederatedPipeInvalid
 				}
 				entry.Relation = &updated

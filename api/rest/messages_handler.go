@@ -3,7 +3,6 @@ package rest
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -93,7 +92,7 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 	}
 	senderID := middleware.ContextAgentID(r.Context())
 	fromProvider := ""
-	if sender, err := s.agentStore.GetAgent(r.Context(), senderID); err == nil && sender != nil {
+	if sender, senderErr := s.agentStore.GetAgent(r.Context(), senderID); senderErr == nil && sender != nil {
 		fromProvider = sender.Provider
 	}
 	ttl := 60
@@ -288,6 +287,57 @@ func (s *Server) handleMessageRead(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+const maxMessageReadBatch = 20
+
+type messageReadBatchRequest struct {
+	MessageIDs []string `json:"message_ids"`
+}
+
+// handleMessageReadBatch acknowledges an already-returned exact-recipient
+// batch in one authenticated request. Per-item outcomes preserve partial
+// failure without turning a 20-message inbox into 20 additional HTTP calls.
+func (s *Server) handleMessageReadBatch(w http.ResponseWriter, r *http.Request) {
+	if !requireExactSignedMessageAction(w, r) {
+		return
+	}
+	var req messageReadBatchRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if len(req.MessageIDs) == 0 || len(req.MessageIDs) > maxMessageReadBatch {
+		writeProblem(w, http.StatusBadRequest, "Invalid message batch", "message_ids must contain between 1 and 20 exact message IDs")
+		return
+	}
+	messageStore, ok := canonicalMessageStore(s)
+	if !ok {
+		writeProblem(w, http.StatusNotImplemented, "Messages unavailable", "The active store does not support canonical messages.")
+		return
+	}
+	receiverID := middleware.ContextAgentID(r.Context())
+	items := make([]map[string]any, 0, len(req.MessageIDs))
+	seen := make(map[string]struct{}, len(req.MessageIDs))
+	for _, messageID := range req.MessageIDs {
+		messageID = strings.TrimSpace(messageID)
+		if messageID == "" {
+			items = append(items, map[string]any{"message_id": "", "read_status": "not_confirmed", "error": "invalid_message_id"})
+			continue
+		}
+		if _, duplicate := seen[messageID]; duplicate {
+			items = append(items, map[string]any{"message_id": messageID, "read_status": "not_confirmed", "error": "duplicate_message_id"})
+			continue
+		}
+		seen[messageID] = struct{}{}
+		replayed, err := messageStore.AcknowledgeLocalMessageRead(r.Context(), receiverID, messageID)
+		if err != nil {
+			items = append(items, map[string]any{"message_id": messageID, "read_status": "not_confirmed", "error": "not_found"})
+			continue
+		}
+		items = append(items, map[string]any{"message_id": messageID, "read_status": "confirmed", "idempotent_replay": replayed})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+}
+
 func (s *Server) handleMessageStatus(w http.ResponseWriter, r *http.Request) {
 	if !requireExactSignedMessageAction(w, r) {
 		return
@@ -304,13 +354,4 @@ func (s *Server) handleMessageStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
-}
-
-// parseMessageLimit is retained for compatibility wrappers that receive a
-// query limit and delegate into the canonical POST receive service.
-func parseMessageLimit(raw string, fallback int) int {
-	if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 1 && parsed <= 20 {
-		return parsed
-	}
-	return fallback
 }

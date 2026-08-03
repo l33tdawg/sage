@@ -327,6 +327,9 @@ func (s *Server) handleInitialize(req *jsonRPCRequest) *jsonRPCResponse {
 func (s *Server) handleToolsList(req *jsonRPCRequest) *jsonRPCResponse {
 	toolList := make([]map[string]any, 0, len(s.tools))
 	for _, t := range s.tools {
+		if t.Hidden {
+			continue
+		}
 		toolList = append(toolList, map[string]any{
 			"name":        t.Name,
 			"description": t.Description,
@@ -689,11 +692,17 @@ func classifySignedRequestReplay(method, path string) signedRequestReplaySafety 
 		if retryableIdempotentPOSTPaths[path] {
 			return signedRequestReplaySafe
 		}
+		if path == "/v1/pipe/receipts/challenge-batch" {
+			return signedRequestReplaySafe
+		}
 		if path == "/v1/messages" || path == "/v1/messages/receive" ||
 			matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/reply") {
 			return signedRequestReplaySafe
 		}
 	case http.MethodPut:
+		if path == "/v1/messages/read-batch" || path == "/v1/pipe/receipts/batch" {
+			return signedRequestReplaySafe
+		}
 		if matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/read") {
 			return signedRequestReplaySafe
 		}

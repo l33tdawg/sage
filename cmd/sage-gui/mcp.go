@@ -592,7 +592,10 @@ func healHooks(projectDir, hookDir, identityPath string) error {
 	}
 
 	if !needsRewrite && hasBinRef && !legacyDetected {
-		return nil
+		// Hook bytes can already be current while the generated permissions
+		// still advertise a retired/hidden tool from an older installer. Keep
+		// settings synchronized independently of whether scripts need repair.
+		return syncClaudeSettings(projectDir)
 	}
 
 	for name, tpl := range expected {
@@ -603,19 +606,8 @@ func healHooks(projectDir, hookDir, identityPath string) error {
 		}
 	}
 
-	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
-	settings := make(map[string]any)
-	if existing, readErr := os.ReadFile(settingsPath); readErr == nil {
-		_ = json.Unmarshal(existing, &settings)
-	}
-	settings["hooks"] = sageHooksConfig("${CLAUDE_PROJECT_DIR}/.claude/hooks")
-	settings["permissions"] = sagePermissionsConfig(settings)
-	data, marshalErr := json.MarshalIndent(settings, "", "  ")
-	if marshalErr != nil {
-		return fmt.Errorf("marshal settings: %w", marshalErr)
-	}
-	if writeErr := os.WriteFile(settingsPath, append(data, '\n'), 0600); writeErr != nil {
-		return fmt.Errorf("write settings: %w", writeErr)
+	if err := syncClaudeSettings(projectDir); err != nil {
+		return err
 	}
 
 	switch {
@@ -625,6 +617,32 @@ func healHooks(projectDir, hookDir, identityPath string) error {
 		fmt.Fprintf(os.Stderr, "SAGE: installed Claude Code hooks (first-time on this project)\n")
 	default:
 		fmt.Fprintf(os.Stderr, "SAGE: refreshed Claude Code hook scripts\n")
+	}
+	return nil
+}
+
+// syncClaudeSettings keeps the installer-owned hooks and safe SAGE tool
+// permissions current even when the hook scripts themselves need no rewrite.
+// Existing non-SAGE permissions and settings are preserved.
+func syncClaudeSettings(projectDir string) error {
+	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
+	settings := make(map[string]any)
+	existing, readErr := os.ReadFile(settingsPath)
+	if readErr == nil {
+		_ = json.Unmarshal(existing, &settings)
+	}
+	settings["hooks"] = sageHooksConfig("${CLAUDE_PROJECT_DIR}/.claude/hooks")
+	settings["permissions"] = sagePermissionsConfig(settings)
+	data, marshalErr := json.MarshalIndent(settings, "", "  ")
+	if marshalErr != nil {
+		return fmt.Errorf("marshal settings: %w", marshalErr)
+	}
+	data = append(data, '\n')
+	if readErr == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	if writeErr := os.WriteFile(settingsPath, data, 0600); writeErr != nil {
+		return fmt.Errorf("write settings: %w", writeErr)
 	}
 	return nil
 }
@@ -790,7 +808,6 @@ func sageHooksConfig(hookDirExpr string) map[string]any {
 func sagePermissionsConfig(settings map[string]any) map[string]any {
 	sageTools := []string{
 		"mcp__sage__sage_inception",
-		"mcp__sage__sage_red_pill",
 		"mcp__sage__sage_turn",
 		"mcp__sage__sage_remember",
 		"mcp__sage__sage_recall",
@@ -818,6 +835,12 @@ func sagePermissionsConfig(settings map[string]any) map[string]any {
 	if existing, ok := perms["allow"].([]any); ok {
 		for _, v := range existing {
 			if s, ok := v.(string); ok {
+				// Remove the one hidden compatibility alias from generated
+				// permissions during self-heal.  It remains callable for old
+				// clients but new agent sessions must see/use sage_inception.
+				if s == "mcp__sage__sage_red_pill" {
+					continue
+				}
 				allowList = append(allowList, s)
 			}
 		}

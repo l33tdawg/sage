@@ -102,11 +102,10 @@ neither.
 | `sage_reinstate` | Withdraw or resolve an app-v17 two-phase challenge. |
 | `sage_list` | List memories with filters (domain, type, status). |
 | `sage_timeline` | View memory activity over time. |
-| `sage_status` | Check brain health — memory counts, domains, last activity. |
+| `sage_status` | Check this signed caller's registration, policy, and bounded caller-visible memory counts. |
 | `sage_register` | Register this agent with the SAGE node. |
 | `sage_task` | Create/update tasks for tracking work. |
 | `sage_backlog` | View pending tasks. |
-| `sage_red_pill` | Deprecated alias for sage_inception. |
 
 ## Inbox Security Boundary
 

@@ -8,12 +8,19 @@ from urllib.parse import quote
 import httpx
 
 from sage_sdk.auth import AgentIdentity
-from sage_sdk.client import _encode_gov_payload, _looks_like_org_id
+from sage_sdk.client import (
+    _encode_gov_payload,
+    _httpx_verify,
+    _looks_like_org_id,
+    _receipt_batch_proof_item,
+)
 from sage_sdk.exceptions import SageAPIError, SageNotFoundError
 from sage_sdk.models import (
     AgentDirectoryResponse,
+    AgentDomainAccessSample,
     AgentInfo,
     AgentLookupResponse,
+    OwnedDomainPage,
     AgentProfile,
     AgentRegistration,
     ChallengeRequest,
@@ -74,10 +81,7 @@ class AsyncSageClient:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._identity = identity
-        if ca_cert is None:
-            verify: bool | str = True
-        else:
-            verify = ca_cert
+        verify = _httpx_verify(ca_cert)
         self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout, verify=verify)
 
     async def _request(
@@ -493,30 +497,6 @@ class AsyncSageClient:
         resp = await self._request("GET", f"/v1/agent/{agent_id}")
         return AgentInfo.model_validate(resp.json())
 
-    async def set_agent_permission(
-        self,
-        agent_id: str,
-        clearance: int | None = None,
-        domain_access: str | None = None,
-        visible_agents: str | None = None,
-        org_id: str | None = None,
-        dept_id: str | None = None,
-    ) -> dict:
-        """Update an agent's permissions (admin only)."""
-        body: dict[str, Any] = {}
-        if clearance is not None:
-            body["clearance"] = clearance
-        if domain_access is not None:
-            body["domain_access"] = domain_access
-        if visible_agents is not None:
-            body["visible_agents"] = visible_agents
-        if org_id is not None:
-            body["org_id"] = org_id
-        if dept_id is not None:
-            body["dept_id"] = dept_id
-        resp = await self._request("PUT", f"/v1/agent/{agent_id}/permission", json=body)
-        return resp.json()
-
     async def list_agents(self) -> dict:
         """List active ordinary agents visible to this signed caller."""
         resp = await self._request("GET", "/v1/agents")
@@ -536,6 +516,21 @@ class AsyncSageClient:
             "GET", "/v1/agents/lookup", params={"name": name, "limit": limit}
         )
         return AgentLookupResponse.model_validate(resp.json())
+
+    async def owned_domains(
+        self, cursor: str | None = None, limit: int = 50
+    ) -> OwnedDomainPage:
+        """List one bounded page of domains currently owned by this agent."""
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        resp = await self._request("GET", "/v1/agent/me/domains/owned", params=params)
+        return OwnedDomainPage.model_validate(resp.json())
+
+    async def domain_access_sample(self) -> AgentDomainAccessSample:
+        """Return bounded readable/writable/owned samples for choosing a scope."""
+        resp = await self._request("GET", "/v1/agent/me/domains")
+        return AgentDomainAccessSample.model_validate(resp.json())
 
     # --- Validator -------------------------------------------------------------
 
@@ -715,6 +710,41 @@ class AsyncSageClient:
         encoded_id = quote(message_id, safe="")
         resp = await self._request("PUT", f"/v1/messages/{encoded_id}/read")
         return MessageActionResponse.model_validate(resp.json())
+
+    async def messages_mark_read_batch(self, message_ids: list[str]) -> dict:
+        """Acknowledge up to 20 fetched messages in one signed request."""
+        resp = await self._request("PUT", "/v1/messages/read-batch", json={"message_ids": message_ids})
+        return resp.json()
+
+    async def pipe_receipt_challenge(self, pipe_id: str, kind: str) -> dict:
+        """Fetch the payload-free receipt-v2 body for claimed/read evidence."""
+        encoded_id = quote(pipe_id, safe="")
+        resp = await self._request("GET", f"/v1/pipe/{encoded_id}/receipt/challenge/{kind}")
+        return resp.json()
+
+    async def pipe_receipt_record(self, pipe_id: str, kind: str, challenge: dict) -> dict:
+        """Sign and queue one exact receipt-v2 event using the SDK identity."""
+        encoded_id = quote(pipe_id, safe="")
+        body = challenge.get("challenge", challenge)
+        resp = await self._request("PUT", f"/v1/pipe/{encoded_id}/receipt/{kind}", json=body)
+        return resp.json()
+
+    async def pipe_receipt_challenge_batch(self, items: list[dict]) -> dict:
+        """Fetch up to 40 independent receipt-v2 challenges in one request."""
+        resp = await self._request("POST", "/v1/pipe/receipts/challenge-batch", json={"items": items})
+        return resp.json()
+
+    async def pipe_receipt_record_batch(self, challenge_items: list[dict]) -> dict:
+        """Sign and submit up to 40 ready receipt-v2 challenge items."""
+        proofs = [_receipt_batch_proof_item(self._identity, item) for item in challenge_items]
+        resp = await self._request("PUT", "/v1/pipe/receipts/batch", json={"items": proofs})
+        return resp.json()
+
+    async def pipe_receipt_status(self, pipe_id: str) -> dict:
+        """Return exact-sender, payload-free federated receipt-v2 evidence."""
+        encoded_id = quote(pipe_id, safe="")
+        resp = await self._request("GET", f"/v1/pipe/{encoded_id}/receipt")
+        return resp.json()
 
     async def message_status(self, message_id: str) -> MessageStatusResponse:
         """Return payload-free receipt/workflow metadata to the exact sender."""

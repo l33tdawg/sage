@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	authmw "github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/store"
 )
 
 func TestCanonicalMessageToolsSendReceiveReplyAndStatus(t *testing.T) {
@@ -127,6 +129,72 @@ func TestCanonicalReceiveReturnsClaimedWorkWhenExactAckFails(t *testing.T) {
 	require.Equal(t, "must not vanish", items[0]["payload"])
 	require.Equal(t, "not_confirmed", items[0]["read_status"])
 	require.Contains(t, items[0], "read_confirmation_error")
+}
+
+func TestCanonicalReceiveTwentyMessagesUsesExactlyTwoLocalRequests(t *testing.T) {
+	requests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		items := make([]map[string]any, 20)
+		for i := range items {
+			items[i] = map[string]any{"message_id": fmt.Sprintf("local-%02d", i), "from_agent": "alice", "payload": "work"}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "count": len(items)})
+	})
+	mux.HandleFunc("/v1/messages/read-batch", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body struct {
+			MessageIDs []string `json:"message_ids"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Len(t, body.MessageIDs, 20)
+		items := make([]map[string]any, 0, len(body.MessageIDs))
+		for _, id := range body.MessageIDs {
+			items = append(items, map[string]any{"message_id": id, "read_status": "confirmed"})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "count": len(items)})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	result, err := NewServer(ts.URL, privateKey).toolMessagesReceive(context.Background(), map[string]any{
+		"receive_token": "one-bounded-poll", "limit": 20,
+	})
+	require.NoError(t, err)
+	require.Len(t, result.(map[string]any)["items"], 20)
+	require.Equal(t, 2, requests, "receive plus one batch read acknowledgement")
+}
+
+func TestCanonicalReadBatchNeverFallsBackOnAuthorizationFailure(t *testing.T) {
+	individualCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{"message_id": "local-a", "from_agent": "alice", "payload": "work"}}, "count": 1,
+		})
+	})
+	mux.HandleFunc("/v1/messages/read-batch", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+	mux.HandleFunc("/v1/messages/local-a/read", func(w http.ResponseWriter, _ *http.Request) {
+		individualCalls++
+		http.Error(w, "must not be called", http.StatusInternalServerError)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	result, err := NewServer(ts.URL, privateKey).toolMessagesReceive(context.Background(), map[string]any{
+		"receive_token": "no-auth-fallback", "limit": 1,
+	})
+	require.NoError(t, err)
+	items := result.(map[string]any)["items"].([]map[string]any)
+	require.Equal(t, "not_confirmed", items[0]["read_status"])
+	require.Zero(t, individualCalls)
 }
 
 func TestUnifiedInboxKeepsFederatedWorkVisibleWhenCanonicalMessagesExist(t *testing.T) {
@@ -246,6 +314,116 @@ func TestUnifiedInboxAtomicallyClaimsAndReadsNegotiatedFederatedReceiptV2(t *tes
 	mu.Lock()
 	require.Equal(t, []string{"challenge:claimed", "record:claimed", "challenge:read", "record:read"}, called)
 	mu.Unlock()
+}
+
+func TestUnifiedInboxTwentyFederatedReceiptsUsesFourLocalRequests(t *testing.T) {
+	requests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		items := make([]map[string]any, 20)
+		for i := range items {
+			items[i] = map[string]any{
+				"pipe_id": fmt.Sprintf("foreign-%02d", i), "from_agent": strings.Repeat("ab", 32),
+				"source_chain_id": "remote-chain", "source_pipe_id": fmt.Sprintf("remote-%02d", i),
+				"payload": "work", "receipt_protocol_version": 2,
+			}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "count": len(items)})
+	})
+	mux.HandleFunc("/v1/pipe/receipts/challenge-batch", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body struct {
+			Items []map[string]string `json:"items"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Len(t, body.Items, 40)
+		items := make([]map[string]any, 0, len(body.Items))
+		for _, item := range body.Items {
+			items = append(items, map[string]any{
+				"pipe_id": item["pipe_id"], "event_kind": item["kind"], "status": "ready",
+				"challenge": map[string]any{"version": 2, "message_id": item["pipe_id"], "event_kind": item["kind"]},
+			})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "count": len(items)})
+	})
+	mux.HandleFunc("/v1/pipe/receipts/batch", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		var body struct {
+			Items []struct {
+				PipeID string                   `json:"pipe_id"`
+				Kind   string                   `json:"kind"`
+				Proof  store.PipelineAgentProof `json:"proof"`
+			} `json:"items"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Len(t, body.Items, 40)
+		items := make([]map[string]any, 0, len(body.Items))
+		for i, item := range body.Items {
+			require.NotEmpty(t, item.Proof.Signature)
+			require.Contains(t, string(item.Proof.CanonicalRequest), "/v1/pipe/"+item.PipeID+"/receipt/"+item.Kind)
+			if i%2 == 0 {
+				require.Equal(t, "claimed", item.Kind)
+			} else {
+				require.Equal(t, "read", item.Kind)
+			}
+			items = append(items, map[string]any{"pipe_id": item.PipeID, "event_kind": item.Kind, "receipt_status": "queued"})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "count": len(items)})
+	})
+	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	result, err := NewServer(ts.URL, privateKey).toolInbox(context.Background(), map[string]any{"limit": 20})
+	require.NoError(t, err)
+	items := result.(map[string]any)["items"].([]map[string]any)
+	require.Len(t, items, 20)
+	for _, item := range items {
+		require.Equal(t, "queued", item["claim_status"])
+		require.Equal(t, "queued", item["read_status"])
+	}
+	require.Equal(t, 4, requests, "receive, legacy inbox, one challenge batch, and one record batch; a full inbox defers task notices")
+}
+
+func TestFederatedReceiptBatchNeverFallsBackOnAuthorizationFailure(t *testing.T) {
+	individualCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{{
+			"pipe_id": "foreign-v2", "payload": "hidden", "receipt_protocol_version": 2,
+		}}, "count": 1})
+	})
+	mux.HandleFunc("/v1/pipe/receipts/challenge-batch", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	})
+	mux.HandleFunc("/v1/pipe/foreign-v2/receipt/challenge/claimed", func(w http.ResponseWriter, _ *http.Request) {
+		individualCalls++
+		http.Error(w, "must not be called", http.StatusInternalServerError)
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	items, _, warning, receiveErr := NewServer(ts.URL, privateKey).
+		receiveUnifiedPipelineInbox(context.Background(), "no-auth-fallback", 1)
+	require.NoError(t, receiveErr)
+	require.Empty(t, items)
+	require.Error(t, warning)
+	require.Zero(t, individualCalls)
 }
 
 func TestUnifiedInboxNeverPresentsNegotiatedFederatedPayloadWhenClaimFails(t *testing.T) {

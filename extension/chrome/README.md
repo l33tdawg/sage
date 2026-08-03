@@ -9,7 +9,7 @@ This extension bridges ChatGPT's web interface with your local (S)AGE memory nod
 - **Sidebar panel** on ChatGPT with connection status, memory stats, and quick-action buttons
 - **Response monitoring** detects `[SAGE_CALL: ...]` patterns in ChatGPT's responses and auto-executes them against your local (S)AGE node
 - **System prompt injection** teaches ChatGPT the (S)AGE tool format with one click
-- **Ed25519 signed requests** for authenticated communication with your (S)AGE node
+- **Nonce-bound Ed25519 signed requests** for authenticated communication with your (S)AGE node. The extension owns its identity and signing fields; ChatGPT never supplies an agent ID, signature, timestamp, or nonce as a tool argument.
 
 ## Install
 
@@ -44,7 +44,9 @@ Since ChatGPT's web UI does not expose MCP or tool-calling APIs to extensions, t
 
 ## Requirements
 
-- (S)AGE running locally on `http://localhost:8080` (configurable in popup)
+- (S)AGE running on this machine. The popup accepts only a loopback origin
+  (`localhost` or `127.0.0.1`, with a configurable port); the extension never
+  sends its signed identity to a remote host.
 - Chrome 109+ or Firefox 128+ (for Ed25519 Web Crypto support)
 
 ## Architecture
@@ -79,12 +81,19 @@ background.js (Ed25519 signing + REST API calls)
 | Tool | Description |
 |------|-------------|
 | `sage_inception` | Initialize persistent memory |
-| `sage_turn` | Per-turn recall + store (call every turn) |
+| `sage_turn` | Recall + optional observation store; follow the memory mode returned by inception |
 | `sage_recall` | Semantic memory search |
 | `sage_remember` | Store a new memory |
 | `sage_forget` | Deprecate a memory |
 | `sage_reinstate` | Withdraw or resolve an open challenge |
 | `sage_reflect` | Post-task dos and don'ts |
-| `sage_status` | Memory statistics |
+| `sage_status` | This browser identity's registration and access standing |
+| `sage_domains` | Efficiently page this browser identity's owned domains |
 | `sage_list` | Browse memories with filters |
 | `sage_timeline` | Time-range memory view |
+
+All authenticated calls derive the browser identity inside the extension and
+use a fresh nonce. Never add `agent_id`, signature, timestamp, or nonce fields
+to a tool call. For recall/list/timeline on a mature store, choose an exact
+domain returned by `sage_domains`; a deliberately unscoped request remains
+caller-filtered but may be rejected by SAGE's bounded authorization scan.

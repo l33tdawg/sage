@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -94,10 +95,22 @@ func TestReleaseAssetVersionBindsCanonicalTag(t *testing.T) {
 
 func TestHandleRestartQueuesCoordinatedLifecycle(t *testing.T) {
 	var calls atomic.Int32
-	h := &DashboardHandler{BootID: "boot-a", RequestRestart: func() error {
-		calls.Add(1)
-		return nil
-	}}
+	execPath := filepath.Join(t.TempDir(), "sage-gui")
+	if runtime.GOOS != "windows" {
+		require.NoError(t, os.WriteFile(execPath, []byte("#!/bin/sh\necho sage-gui 11.16.4\n"), 0o755))
+	}
+	h := &DashboardHandler{
+		BootID: "boot-a", Version: "11.16.4", ExecPath: execPath,
+		RequestRestart: func() error { return nil },
+		PrepareRestartDrain: func(context.Context) (func(), func(), error) {
+			return func() {}, func() {}, nil
+		},
+		RequestRestartPrepared: func(_ func(), commit func(), _ func()) error {
+			commit()
+			calls.Add(1)
+			return nil
+		},
+	}
 	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/update/restart", nil)
 	markUnencryptedLoopbackCEREBRUM(req)
 	w := httptest.NewRecorder()
@@ -111,6 +124,131 @@ func TestHandleRestartQueuesCoordinatedLifecycle(t *testing.T) {
 	require.Equal(t, int32(1), calls.Load())
 	assert.Contains(t, w.Body.String(), `"status":"draining"`)
 	assert.Contains(t, w.Body.String(), `"boot_id":"boot-a"`)
+}
+
+func TestHandleRestartNewVersionRequiresVerifiedSnapshot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("in-process restart is unsupported on Windows")
+	}
+	makeVersionBinary := func(t *testing.T, version string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "sage-gui")
+		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\necho sage-gui "+version+"\n"), 0o755))
+		return path
+	}
+
+	t.Run("failure leaves process running", func(t *testing.T) {
+		var restartCalls atomic.Int32
+		var snapshotCalls atomic.Int32
+		execPath := makeVersionBinary(t, "11.17.0")
+		before, err := os.ReadFile(execPath)
+		require.NoError(t, err)
+		h := &DashboardHandler{
+			Version:  "11.16.4",
+			ExecPath: execPath,
+			PrepareRestartDrain: func(context.Context) (func(), func(), error) {
+				return func() {}, func() {}, nil
+			},
+			RequestRestartPrepared: func(func(), func(), func()) error { return nil },
+			PrepareVersionTransition: func(_ context.Context, target string) (func(), error) {
+				snapshotCalls.Add(1)
+				require.Equal(t, "11.17.0", target)
+				return nil, errors.New("verification failed")
+			},
+			RequestRestart: func() error {
+				restartCalls.Add(1)
+				return nil
+			},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/update/restart", nil)
+		markUnencryptedLoopbackCEREBRUM(req)
+		w := httptest.NewRecorder()
+		h.handleRestart(w, req)
+		require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+		require.Equal(t, int32(1), snapshotCalls.Load())
+		require.Zero(t, restartCalls.Load())
+		after, err := os.ReadFile(execPath)
+		require.NoError(t, err)
+		require.Equal(t, before, after)
+	})
+
+	t.Run("success preserves exact target provenance", func(t *testing.T) {
+		var restartCalls atomic.Int32
+		var releaseCalls atomic.Int32
+		var transferred func()
+		var target string
+		h := &DashboardHandler{
+			Version:        "11.16.4",
+			ExecPath:       makeVersionBinary(t, "v11.17.0"),
+			RequestRestart: func() error { return nil },
+			PrepareRestartDrain: func(context.Context) (func(), func(), error) {
+				return func() {}, func() {}, nil
+			},
+			PrepareVersionTransition: func(_ context.Context, requested string) (func(), error) {
+				target = requested
+				return func() { releaseCalls.Add(1) }, nil
+			},
+			RequestRestartPrepared: func(release, commit, _ func()) error {
+				restartCalls.Add(1)
+				commit()
+				transferred = release
+				return nil
+			},
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/update/restart", nil)
+		markUnencryptedLoopbackCEREBRUM(req)
+		w := httptest.NewRecorder()
+		h.handleRestart(w, req)
+		require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+		require.Equal(t, "v11.17.0", target)
+		require.Equal(t, int32(1), restartCalls.Load())
+		require.Zero(t, releaseCalls.Load(), "handler must transfer, not release, the restart fence")
+		require.NotNil(t, transferred)
+		transferred()
+		require.Equal(t, int32(1), releaseCalls.Load())
+	})
+}
+
+func TestHandleRestartFailsClosedWhenDiskVersionIsUnknown(t *testing.T) {
+	var restartCalls atomic.Int32
+	path := filepath.Join(t.TempDir(), "sage-gui")
+	require.NoError(t, os.WriteFile(path, []byte("not executable"), 0o600))
+	h := &DashboardHandler{
+		Version: "11.16.4", ExecPath: path,
+		RequestRestart: func() error { restartCalls.Add(1); return nil },
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/update/restart", nil)
+	markUnencryptedLoopbackCEREBRUM(req)
+	w := httptest.NewRecorder()
+	h.handleRestart(w, req)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	require.Zero(t, restartCalls.Load())
+}
+
+func TestHandleRestartPreparedEnqueueFailureAbortsWithoutCommit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("in-process restart is unsupported on Windows")
+	}
+	execPath := filepath.Join(t.TempDir(), "sage-gui")
+	require.NoError(t, os.WriteFile(execPath, []byte("#!/bin/sh\necho sage-gui 11.16.4\n"), 0o755))
+	var commits, aborts atomic.Int32
+	h := &DashboardHandler{
+		Version: "11.16.4", ExecPath: execPath, RequestRestart: func() error { return nil },
+		PrepareRestartDrain: func(ctx context.Context) (func(), func(), error) {
+			deadline, ok := ctx.Deadline()
+			require.True(t, ok, "restart preparation must have an explicit deadline")
+			require.LessOrEqual(t, time.Until(deadline), 15*time.Second)
+			return func() { commits.Add(1) }, func() { aborts.Add(1) }, nil
+		},
+		RequestRestartPrepared: func(func(), func(), func()) error { return errors.New("queue full") },
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/settings/update/restart", nil)
+	markUnencryptedLoopbackCEREBRUM(req)
+	w := httptest.NewRecorder()
+	h.handleRestart(w, req)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	require.Zero(t, commits.Load())
+	require.Equal(t, int32(1), aborts.Load())
 }
 
 func TestHandleRestartRejectsAgentAndUpdateRace(t *testing.T) {
@@ -139,11 +277,12 @@ func TestHandleApplyUpdateRequiresTrustedChecksum(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.handleApplyUpdate(w, req)
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		assert.Contains(t, w.Body.String(), "signed DMG")
-	} else if runtime.GOOS == "windows" {
+	case "windows":
 		assert.Contains(t, w.Body.String(), "signed release installer")
-	} else {
+	default:
 		assert.Contains(t, w.Body.String(), "checksum")
 	}
 }
@@ -186,11 +325,12 @@ func TestUnencryptedLoopbackCEREBRUMReachesUpdaterThroughRouter(t *testing.T) {
 	router.ServeHTTP(w, req)
 
 	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		assert.Contains(t, w.Body.String(), "signed DMG")
-	} else if runtime.GOOS == "windows" {
+	case "windows":
 		assert.Contains(t, w.Body.String(), "signed release installer")
-	} else {
+	default:
 		assert.Contains(t, w.Body.String(), "checksum")
 	}
 }
@@ -510,7 +650,7 @@ func TestLinuxPackagedBinarySwapEndToEnd(t *testing.T) {
 	require.True(t, archiveInfo.Mode().IsRegular())
 	require.Zero(t, archiveInfo.Mode()&os.ModeSymlink)
 
-	archive, err := os.Open(archivePath) //nolint:gosec -- release-job supplied exact artifact path
+	archive, err := os.Open(archivePath) //nolint:gosec // Release job supplied the exact artifact path.
 	require.NoError(t, err)
 	extractedPath, err := extractBinaryFromTarGz(archive, "sage-gui")
 	require.NoError(t, err)

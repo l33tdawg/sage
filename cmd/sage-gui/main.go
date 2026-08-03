@@ -20,6 +20,10 @@ var (
 	// fixtures may register a private command surface without teaching release
 	// binaries any fixture command or environment-variable names.
 	optionalCommandHandler func([]string) (bool, error)
+	// restartExecOverride is set only after a stopped-state safety-gate failure
+	// chooses the exact pinned executable preserved before drain. It is never a
+	// directory scan or a version guess.
+	restartExecOverride string
 )
 
 // nativeShellAlreadyRunningExitCode is the only sidecar exit result that
@@ -71,6 +75,10 @@ func main() {
 		}
 		if errors.Is(err, errCoordinatedRestart) {
 			execPath, pathErr := os.Executable()
+			if restartExecOverride != "" {
+				execPath, pathErr = restartExecOverride, nil
+				restartExecOverride = ""
+			}
 			if pathErr != nil {
 				err = fmt.Errorf("restart: determine executable: %w", pathErr)
 			} else if prepErr := lock.PrepareExec(); prepErr != nil {

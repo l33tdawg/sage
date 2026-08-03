@@ -1,3 +1,4 @@
+import base64
 import json
 
 import pytest
@@ -59,6 +60,37 @@ def test_agent_directory_and_lookup_are_typed_and_signed(client, mock_api):
     assert client.lookup_agents("mynah", limit=7).agents[0].match_kind == "exact"
     assert directory.calls.last.request.headers["X-Agent-ID"]
     assert lookup.calls.last.request.url.query == b"name=mynah&limit=7"
+
+
+def test_owned_domains_is_typed_signed_and_cursor_scoped(client, mock_api):
+    route = mock_api.get("/v1/agent/me/domains/owned").mock(
+        return_value=httpx.Response(200, json={
+            "domains": ["team.beta"],
+            "next_cursor": "team.beta",
+            "has_more": True,
+            "scope": "authoritative_current_owner",
+        })
+    )
+    page = client.owned_domains(cursor="team.alpha+one", limit=75)
+    assert page.domains == ["team.beta"]
+    assert page.has_more is True
+    assert route.calls.last.request.headers["X-Agent-ID"]
+    assert route.calls.last.request.url.query == b"limit=75&cursor=team.alpha%2Bone"
+
+
+def test_domain_access_sample_is_typed_and_signed(client, mock_api):
+    route = mock_api.get("/v1/agent/me/domains").mock(return_value=httpx.Response(200, json={
+        "domains": ["home"], "owned_domains": ["home"],
+        "readable_domains": ["home", "team"], "writable_domains": ["home"],
+        "truncated": False, "scope": "bounded_policy_and_provenance",
+    }))
+    sample = client.domain_access_sample()
+    assert sample.readable_domains == ["home", "team"]
+    assert route.calls.last.request.headers["X-Agent-ID"]
+
+
+def test_obsolete_post_appv23_permission_method_is_not_exposed(client):
+    assert not hasattr(client, "set_agent_permission")
 
 
 def test_propose_memory(client, mock_api, sample_submit_response):
@@ -736,6 +768,29 @@ def test_canonical_messages_cover_idempotent_receive_reply_read_and_status(clien
     assert replied.status == "completed"
     assert read.read_status == "confirmed"
     assert status.read_evidence == "local_exact_ack"
+
+
+def test_batch_reads_and_federated_receipt_v2_routes_are_signed(client, mock_api):
+    read_batch = mock_api.put("/v1/messages/read-batch").mock(return_value=httpx.Response(200, json={"items": [], "count": 2}))
+    challenge = mock_api.get("/v1/pipe/p%2F1/receipt/challenge/read").mock(return_value=httpx.Response(200, json={"pipe_id": "p/1", "event_kind": "read", "challenge": {"version": 2}}))
+    record = mock_api.put("/v1/pipe/p%2F1/receipt/read").mock(return_value=httpx.Response(200, json={}))
+    challenge_batch = mock_api.post("/v1/pipe/receipts/challenge-batch").mock(return_value=httpx.Response(200, json={}))
+    record_batch = mock_api.put("/v1/pipe/receipts/batch").mock(return_value=httpx.Response(200, json={}))
+    receipt_status = mock_api.get("/v1/pipe/p%2F1/receipt").mock(return_value=httpx.Response(200, json={}))
+    client.messages_mark_read_batch(["m1", "m2"])
+    challenge_response = client.pipe_receipt_challenge("p/1", "read")
+    client.pipe_receipt_record("p/1", "read", challenge_response)
+    client.pipe_receipt_challenge_batch([{"pipe_id": "p/1", "kind": "read"}])
+    client.pipe_receipt_record_batch([challenge_response])
+    client.pipe_receipt_status("p/1")
+    assert json.loads(read_batch.calls.last.request.read()) == {"message_ids": ["m1", "m2"]}
+    assert json.loads(record.calls.last.request.read()) == {"version": 2}
+    proof_item = json.loads(record_batch.calls.last.request.read())["items"][0]
+    assert proof_item["pipe_id"] == "p/1" and proof_item["kind"] == "read"
+    assert proof_item["proof"]["agent_id"]
+    assert base64.b64decode(proof_item["proof"]["canonical_request"]).startswith(b"PUT /v1/pipe/p%2F1/receipt/read\n")
+    for route in (read_batch, challenge, record, challenge_batch, record_batch, receipt_status):
+        assert route.calls.last.request.headers["X-Agent-ID"]
 
 
 def test_pipeline_trust_metadata_keeps_prompt_injection_untrusted(client, mock_api):

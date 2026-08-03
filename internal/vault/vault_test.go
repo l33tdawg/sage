@@ -1,6 +1,8 @@
 package vault
 
 import (
+	"crypto/sha256"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,6 +28,49 @@ func TestInitAndOpen(t *testing.T) {
 	// Open with wrong passphrase
 	_, err = Open(keyFile, "wrong-passphrase")
 	assert.ErrorIs(t, err, ErrWrongPassphrase)
+}
+
+func TestOpenRejectsMalformedKeyFileWithoutPanic(t *testing.T) {
+	keyPath := filepath.Join(t.TempDir(), "vault.key")
+	const passphrase = "test-passphrase-123!"
+	require.NoError(t, Init(keyPath, passphrase))
+	raw, err := os.ReadFile(keyPath)
+	require.NoError(t, err)
+	var valid keyFile
+	require.NoError(t, json.Unmarshal(raw, &valid))
+
+	tests := []struct {
+		name   string
+		mutate func(*keyFile)
+	}{
+		{name: "missing salt", mutate: func(kf *keyFile) { kf.Salt = nil }},
+		{name: "oversized salt", mutate: func(kf *keyFile) { kf.Salt = make([]byte, saltLen+1) }},
+		{name: "missing nonce", mutate: func(kf *keyFile) { kf.Nonce = nil }},
+		{name: "oversized nonce", mutate: func(kf *keyFile) { kf.Nonce = make([]byte, nonceLen+1) }},
+		{name: "truncated ciphertext", mutate: func(kf *keyFile) { kf.EncryptedKey = kf.EncryptedKey[:len(kf.EncryptedKey)-1] }},
+		{name: "oversized ciphertext", mutate: func(kf *keyFile) { kf.EncryptedKey = append(kf.EncryptedKey, 0) }},
+		{name: "missing verify hash", mutate: func(kf *keyFile) { kf.VerifyHash = nil }},
+		{name: "oversized verify hash", mutate: func(kf *keyFile) { kf.VerifyHash = make([]byte, sha256.Size+1) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			corrupt := valid
+			corrupt.Salt = append([]byte(nil), valid.Salt...)
+			corrupt.EncryptedKey = append([]byte(nil), valid.EncryptedKey...)
+			corrupt.Nonce = append([]byte(nil), valid.Nonce...)
+			corrupt.VerifyHash = append([]byte(nil), valid.VerifyHash...)
+			test.mutate(&corrupt)
+			encoded, marshalErr := json.Marshal(corrupt)
+			require.NoError(t, marshalErr)
+			path := filepath.Join(t.TempDir(), "corrupt-vault.key")
+			require.NoError(t, os.WriteFile(path, encoded, 0o600))
+
+			require.NotPanics(t, func() {
+				_, openErr := Open(path, passphrase)
+				require.ErrorIs(t, openErr, ErrInvalidKeyFile)
+			})
+		})
+	}
 }
 
 func TestEncryptDecrypt(t *testing.T) {

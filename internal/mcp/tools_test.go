@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -703,8 +704,10 @@ func TestSageFederationDiscoversRemoteDomainsAndAgents(t *testing.T) {
 
 func TestSageFindAgentPrefersLocalActiveMatches(t *testing.T) {
 	var federationRequested bool
+	var lookupRequests int
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents/lookup", func(w http.ResponseWriter, _ *http.Request) {
+		lookupRequests++
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"agents": []map[string]any{
 				{"agent_id": "local-innovium", "name": "Innovium", "registered_name": "claude-code/innovium", "provider": "claude-code", "status": "active"},
@@ -724,6 +727,7 @@ func TestSageFindAgentPrefersLocalActiveMatches(t *testing.T) {
 	result, err := s.toolFindAgent(context.Background(), map[string]any{"name": "innovium"})
 	require.NoError(t, err)
 	assert.False(t, federationRequested, "a local match must not probe federation")
+	assert.Equal(t, 1, lookupRequests, "one name resolution must remain one bounded local lookup")
 
 	out := result.(map[string]any)
 	assert.Equal(t, []string{"local"}, out["searched"])
@@ -735,10 +739,39 @@ func TestSageFindAgentPrefersLocalActiveMatches(t *testing.T) {
 	assert.Equal(t, "local-innovium", matches[0]["to"])
 }
 
+func TestSageFindAgentKeepsLocalPartialsWhenFederationIsUnavailable(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agents/lookup", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"agents": []map[string]any{{
+			"agent_id": "local-voice", "name": "Voice helper",
+			"registered_name": "agent/voice-helper", "match_kind": "substring",
+		}}})
+	})
+	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "discovery budget exhausted", http.StatusTooManyRequests)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	result, err := NewServer(ts.URL, priv).toolFindAgent(
+		context.Background(), map[string]any{"name": "voice"},
+	)
+	require.NoError(t, err)
+	out := result.(map[string]any)
+	require.Equal(t, false, out["complete"])
+	require.NotEmpty(t, out["federated_lookup_error"])
+	matches := out["matches"].([]map[string]any)
+	require.Len(t, matches, 1)
+	require.Equal(t, "local-voice", matches[0]["to"])
+}
+
 func TestSageDirectoryReturnsMinimalExactLocalRecipientRoster(t *testing.T) {
 	var signed bool
+	var federationRequested bool
+	var directoryRequests int
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agents/directory", func(w http.ResponseWriter, r *http.Request) {
+		directoryRequests++
 		signed = r.Header.Get("X-Agent-ID") != "" &&
 			r.Header.Get("X-Signature") != "" &&
 			r.Header.Get("X-Timestamp") != ""
@@ -760,6 +793,7 @@ func TestSageDirectoryReturnsMinimalExactLocalRecipientRoster(t *testing.T) {
 		})
 	})
 	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
+		federationRequested = true
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"connections": []map[string]any{}, "total": 0,
 		})
@@ -772,11 +806,13 @@ func TestSageDirectoryReturnsMinimalExactLocalRecipientRoster(t *testing.T) {
 	result, err := s.toolDirectory(context.Background(), nil)
 	require.NoError(t, err)
 	require.True(t, signed, "the local roster must use the signed caller identity")
+	require.False(t, federationRequested, "default directory scope must not probe federation")
+	require.Equal(t, 1, directoryRequests, "default directory lookup must remain one local request")
 
 	out := result.(map[string]any)
-	require.Equal(t, "all", out["scope"])
-	require.Equal(t, false, out["complete"])
-	require.NotEmpty(t, out["warnings"])
+	require.Equal(t, "local", out["scope"])
+	require.Equal(t, true, out["complete"])
+	require.Empty(t, out["warnings"])
 	require.Equal(t, 2, out["total"])
 	agents := out["agents"].([]map[string]any)
 	require.Len(t, agents, 2)
@@ -789,6 +825,44 @@ func TestSageDirectoryReturnsMinimalExactLocalRecipientRoster(t *testing.T) {
 	require.Equal(t, "agent/sage-voice-bridge", agents[1]["registered_name"])
 	require.NotContains(t, agents[1], "role")
 	require.NotContains(t, agents[1], "memory_count")
+}
+
+func TestSageDirectoryRejectsInvalidScopeBeforeAnyRequest(t *testing.T) {
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		requests++
+	}))
+	defer ts.Close()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	_, err := NewServer(ts.URL, priv).toolDirectory(
+		context.Background(), map[string]any{"scope": "global"},
+	)
+	require.ErrorContains(t, err, "scope must be all or local")
+	require.Zero(t, requests)
+}
+
+func TestSageDirectoryReportsBoundedLocalProjectionAsIncomplete(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agents/directory", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agents": []map[string]any{{
+				"agent_id": "local-a", "name": "Local A",
+				"registered_name": "codex/local-a", "provider": "codex",
+			}},
+			"total": 1, "truncated": true,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	result, err := NewServer(ts.URL, priv).toolDirectory(context.Background(), nil)
+	require.NoError(t, err)
+	out := result.(map[string]any)
+	require.Equal(t, false, out["complete"])
+	warnings := out["warnings"].([]string)
+	require.Len(t, warnings, 1)
+	require.Contains(t, warnings[0], "sage_find_agent")
 }
 
 func TestSageDirectoryReturnsCallerAuthorizedFederatedUnionWithoutPresence(t *testing.T) {
@@ -823,7 +897,7 @@ func TestSageDirectoryReturnsCallerAuthorizedFederatedUnionWithoutPresence(t *te
 
 	_, priv, _ := ed25519.GenerateKey(nil)
 	s := NewServer(ts.URL, priv)
-	result, err := s.toolDirectory(context.Background(), nil)
+	result, err := s.toolDirectory(context.Background(), map[string]any{"scope": "all"})
 	require.NoError(t, err)
 	out := result.(map[string]any)
 	require.Equal(t, false, out["complete"])
@@ -1703,6 +1777,25 @@ func TestSageList(t *testing.T) {
 	assert.EqualValues(t, 1, m["total_count"])
 }
 
+func TestSageListBoundsCallerPaginationBeforeREST(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "20", r.URL.Query().Get("limit"))
+		require.Equal(t, "0", r.URL.Query().Get("offset"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"memories": []any{},
+			"total":    0,
+		})
+	}))
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	_, err := NewServer(ts.URL, priv).toolList(context.Background(), map[string]any{
+		"limit":  float64(1_000_000),
+		"offset": float64(-1),
+	})
+	require.NoError(t, err)
+}
+
 func TestSageListSurfacesCallerScopedPartialAndFiltering(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/memory/list", r.URL.Path)
@@ -1780,6 +1873,35 @@ func TestSageStatus(t *testing.T) {
 	m := result.(map[string]any)
 	assert.Equal(t, 1, m["total_memories"])
 	assert.Equal(t, "caller", m["scope"])
+}
+
+func TestSageDomainsUsesOneCursorScopedRequest(t *testing.T) {
+	var requests int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/me/domains/owned", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		require.Equal(t, "75", r.URL.Query().Get("limit"))
+		require.Equal(t, "team.alpha+one", r.URL.Query().Get("cursor"))
+		require.NotEmpty(t, r.Header.Get("X-Agent-ID"))
+		require.NotEmpty(t, r.Header.Get("X-Signature"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"domains": []string{"team.beta"}, "next_cursor": "team.beta",
+			"has_more": true, "scope": "authoritative_current_owner",
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	result, err := NewServer(ts.URL, priv).toolDomains(context.Background(), map[string]any{
+		"limit": 75, "cursor": "team.alpha+one",
+	})
+	require.NoError(t, err)
+	page := result.(map[string]any)
+	require.Equal(t, []string{"team.beta"}, page["domains"])
+	require.Equal(t, "team.beta", page["next_cursor"])
+	require.Equal(t, true, page["has_more"])
+	require.Equal(t, 1, requests, "one page must cost exactly one local request")
 }
 
 func TestSageStatusReturnsPendingCallerStandingWithoutMemoryRead(t *testing.T) {
@@ -1988,9 +2110,10 @@ func TestSageStatusReturnsStandingWhenHomeCountRemainsTooBroad(t *testing.T) {
 }
 
 func TestSageStatusLargeCallerNeverStartsUnscopedWalkAndMeetsDeadline(t *testing.T) {
-	var unscopedReads, scopedReads int
+	var standingReads, domainReads, unscopedReads, scopedReads atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+		standingReads.Add(1)
 		require.Equal(t, "standing", r.URL.Query().Get("view"))
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"agent_id": r.Header.Get("X-Agent-ID"),
@@ -2000,6 +2123,7 @@ func TestSageStatusLargeCallerNeverStartsUnscopedWalkAndMeetsDeadline(t *testing
 		})
 	})
 	mux.HandleFunc("/v1/agent/me/domains", func(w http.ResponseWriter, r *http.Request) {
+		domainReads.Add(1)
 		// Simulate a wedged optional projection. The MCP tool must cancel this
 		// work and still return authenticated standing within its own budget.
 		select {
@@ -2011,10 +2135,10 @@ func TestSageStatusLargeCallerNeverStartsUnscopedWalkAndMeetsDeadline(t *testing
 	})
 	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("domain") == "" {
-			unscopedReads++
+			unscopedReads.Add(1)
 			<-time.After(5 * time.Second)
 		} else {
-			scopedReads++
+			scopedReads.Add(1)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"memories": []map[string]any{}, "total": 0,
@@ -2034,9 +2158,15 @@ func TestSageStatusLargeCallerNeverStartsUnscopedWalkAndMeetsDeadline(t *testing
 	status := result.(map[string]any)
 	require.Equal(t, "active", status["registration_status"])
 	require.Equal(t, []string{"large.home"}, status["readable_domains"])
-	require.Equal(t, 0, unscopedReads)
-	require.Equal(t, 0, scopedReads,
+	require.Equal(t, []string{}, status["owned_domains"],
+		"authenticated home standing does not prove current ownership after a transfer")
+	require.Equal(t, []string{"large.home"}, status["writable_domains"])
+	require.EqualValues(t, 0, unscopedReads.Load())
+	require.EqualValues(t, 0, scopedReads.Load(),
 		"the shared optional budget is already exhausted by domain discovery")
+	require.EqualValues(t, 1, standingReads.Load())
+	require.EqualValues(t, 1, domainReads.Load(),
+		"status must discover all caller-visible domain classes in one bounded request")
 }
 
 func TestSageStatusStandingLookupHasItsOwnDeadline(t *testing.T) {
@@ -3394,6 +3524,27 @@ func TestSageTaskLinksWithoutChangingStatus(t *testing.T) {
 	require.Equal(t, 1, linkRequests)
 	require.Equal(t, "linked", result.(map[string]any)["action"])
 	require.Equal(t, 1, result.(map[string]any)["linked"])
+}
+
+func TestSageTaskRejectsUnboundedLinkFanoutBeforeRequest(t *testing.T) {
+	requests := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		http.Error(w, "unexpected request", http.StatusInternalServerError)
+	}))
+	defer ts.Close()
+
+	links := make([]any, 21)
+	for i := range links {
+		links[i] = fmt.Sprintf("memory-%d", i)
+	}
+	_, priv, _ := ed25519.GenerateKey(nil)
+	_, err := NewServer(ts.URL, priv).toolTask(context.Background(), map[string]any{
+		"memory_id": "task-existing",
+		"link_to":   links,
+	})
+	require.ErrorContains(t, err, "at most 20")
+	require.Zero(t, requests)
 }
 
 func TestSageInception_ExistingMemories(t *testing.T) {

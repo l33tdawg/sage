@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -107,6 +109,14 @@ type Options struct {
 	// intervention. Defaults to true; disable in tests.
 	IncludeBinary bool
 
+	// BinarySource pins the executable inode that was running when the
+	// snapshot owner started. App-bundle updates can atomically replace the
+	// path returned by os.Executable while the old process is still alive;
+	// reopening that path would then put the *new* binary in a pre-upgrade
+	// rollback snapshot. When non-nil, Take copies from this already-open file
+	// descriptor instead. The caller retains ownership of the descriptor.
+	BinarySource *os.File
+
 	// LiveBadger, if non-nil, is the *badger.DB handle the running
 	// node already holds open against dataDir/badger. Take will call
 	// LiveBadger.Backup directly instead of reopening the directory,
@@ -115,6 +125,19 @@ type Options struct {
 	// recovery tools) leave this nil and Take opens its own handle.
 	LiveBadger *badger.DB
 }
+
+// Candidate is a fully written snapshot that has not yet been published as a
+// recovery point.  Its directory remains under the non-numeric .staging-
+// namespace and has no OK sentinel, so boot recovery and retention cannot see
+// it until Publish succeeds.
+type Candidate struct {
+	Manifest       *Manifest
+	stagingDir     string
+	finalDir       string
+	manifestSHA256 [sha256.Size]byte
+}
+
+var syncSnapshotDirectory = fsyncDir
 
 // Take captures all three storage layers and writes a snapshot to
 // dataDir/snapshots/<height>/. The flow is:
@@ -132,6 +155,18 @@ type Options struct {
 // The caller is responsible for fencing concurrent writers — see
 // docs/backup-restore.md for the abci.Commit RLock convention.
 func Take(ctx context.Context, dataDir string, height int64, appHash []byte, reason string, opts Options) (*Manifest, error) {
+	candidate, err := TakeCandidate(ctx, dataDir, height, appHash, reason, opts)
+	if err != nil {
+		return nil, err
+	}
+	return candidate.Publish()
+}
+
+// TakeCandidate writes and fsyncs every snapshot chunk and the manifest, but
+// deliberately leaves the result unpublished. The caller must run its
+// cross-component and live-state checks before calling Publish; Discard removes
+// only this nonce-bound candidate.
+func TakeCandidate(ctx context.Context, dataDir string, height int64, appHash []byte, reason string, opts Options) (*Candidate, error) {
 	if dataDir == "" {
 		return nil, fmt.Errorf("snapshot: dataDir is empty")
 	}
@@ -148,16 +183,14 @@ func Take(ctx context.Context, dataDir string, height int64, appHash []byte, rea
 	}
 
 	finalDir := filepath.Join(snapsRoot, fmt.Sprintf("%d", height))
-	if _, err := os.Stat(filepath.Join(finalDir, OKSentinel)); err == nil {
-		return nil, fmt.Errorf("snapshot: height %d already snapshotted (OK present)", height)
-	}
 
-	stagingDir := filepath.Join(snapsRoot, fmt.Sprintf("%s%d-%s", stagingPrefix, height, sanitizeReason(reason)))
-	// Reap any prior staging dir for this height — a previous attempt
-	// crashed. SweepStaging handles the general case at boot.
-	_ = os.RemoveAll(stagingDir)
-	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+	stagingDir, err := os.MkdirTemp(snapsRoot, fmt.Sprintf("%s%d-%s-", stagingPrefix, height, sanitizeReason(reason)))
+	if err != nil {
 		return nil, fmt.Errorf("snapshot: create staging dir: %w", err)
+	}
+	if chmodErr := os.Chmod(stagingDir, 0o700); chmodErr != nil {
+		_ = os.RemoveAll(stagingDir)
+		return nil, fmt.Errorf("snapshot: secure staging dir: %w", chmodErr)
 	}
 
 	// On failure, drop the partial staging dir. Success branches return
@@ -198,7 +231,7 @@ func Take(ctx context.Context, dataDir string, height int64, appHash []byte, rea
 	// don't touch these files outside the commit path.
 	cometDataDir := filepath.Join(dataDir, "cometbft", "data")
 	if _, statErr := os.Stat(cometDataDir); statErr == nil {
-		cChunk, cErr := writeCometDataTar(stagingDir, cometDataDir, opts)
+		cChunk, cErr := writeCometDataTar(ctx, stagingDir, cometDataDir, opts)
 		if cErr != nil {
 			return nil, fmt.Errorf("snapshot: cometbft tarball: %w", cErr)
 		}
@@ -206,7 +239,7 @@ func Take(ctx context.Context, dataDir string, height int64, appHash []byte, rea
 	}
 
 	// 4. Config tarball: genesis + node_key + priv_validator_key + vault.key.
-	cfgChunk, err := writeConfigTar(stagingDir, dataDir, opts)
+	cfgChunk, err := writeConfigTar(ctx, stagingDir, dataDir, opts)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: config tarball: %w", err)
 	}
@@ -216,8 +249,8 @@ func Take(ctx context.Context, dataDir string, height int64, appHash []byte, rea
 	// rollback. Best-effort: failure here is logged via the manifest but
 	// does not abort — the binary is recoverable from the release archive.
 	if opts.IncludeBinary {
-		if binPath, copyErr := copySelfBinary(stagingDir, opts.BinaryVersion); copyErr == nil {
-			binChunk, hErr := hashFile(binPath)
+		if binPath, copyErr := copySelfBinary(ctx, stagingDir, opts.BinaryVersion, opts.BinarySource); copyErr == nil {
+			binChunk, hErr := hashFileContext(ctx, binPath)
 			if hErr == nil {
 				rel, _ := filepath.Rel(stagingDir, binPath)
 				chunks = append(chunks, Chunk{Name: rel, SHA256: binChunk.SHA256, Size: binChunk.Size})
@@ -255,38 +288,188 @@ func Take(ctx context.Context, dataDir string, height int64, appHash []byte, rea
 		return nil, fmt.Errorf("snapshot: fsync staging dir: %w", err)
 	}
 
-	// Atomic rename. If finalDir already exists (e.g. a partial prior
-	// attempt without OK), remove it first — keeping a dir without OK
-	// is a bug magnet downstream.
-	if _, statErr := os.Stat(finalDir); statErr == nil {
-		if rmErr := os.RemoveAll(finalDir); rmErr != nil {
-			return nil, fmt.Errorf("snapshot: remove stale final dir: %w", rmErr)
+	ok = true
+	return &Candidate{
+		Manifest:       manifest,
+		stagingDir:     stagingDir,
+		finalDir:       finalDir,
+		manifestSHA256: sha256.Sum256(manifestBytes),
+	}, nil
+}
+
+func (c *Candidate) validateIdentity() error {
+	if c == nil || c.Manifest == nil || c.stagingDir == "" || c.finalDir == "" {
+		return errors.New("snapshot candidate is unavailable")
+	}
+	raw, err := os.ReadFile(filepath.Join(c.stagingDir, chunkManifest))
+	if err != nil {
+		return fmt.Errorf("read snapshot candidate manifest: %w", err)
+	}
+	if sha256.Sum256(raw) != c.manifestSHA256 {
+		return errors.New("snapshot candidate manifest identity changed")
+	}
+	return nil
+}
+
+// Publish atomically promotes this exact candidate into the numeric recovery
+// namespace and writes OK last. A pre-existing completed snapshot is never
+// overwritten.
+func (c *Candidate) Publish() (*Manifest, error) {
+	if err := c.validateIdentity(); err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(filepath.Join(c.finalDir, OKSentinel)); err == nil {
+		return nil, fmt.Errorf("snapshot: height %d already snapshotted (OK present)", c.Manifest.Height)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("snapshot: inspect final sentinel: %w", err)
+	}
+	if _, err := os.Stat(c.finalDir); err == nil {
+		if removeErr := os.RemoveAll(c.finalDir); removeErr != nil {
+			return nil, fmt.Errorf("snapshot: remove stale final dir: %w", removeErr)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("snapshot: inspect final dir: %w", err)
+	}
+	if err := os.Rename(c.stagingDir, c.finalDir); err != nil {
+		return nil, fmt.Errorf("snapshot: publish candidate: %w", err)
+	}
+	c.stagingDir = ""
+	rollbackPublication := func(publicationErr error) error {
+		removeErr := os.RemoveAll(c.finalDir)
+		syncErr := syncSnapshotDirectory(filepath.Dir(c.finalDir))
+		if removeErr != nil || syncErr != nil {
+			return fmt.Errorf("%w (rollback remove=%v fsync=%v)", publicationErr, removeErr, syncErr)
+		}
+		return publicationErr
+	}
+	if err := writeAndFsync(filepath.Join(c.finalDir, OKSentinel), nil); err != nil {
+		return nil, rollbackPublication(fmt.Errorf("snapshot: write OK sentinel: %w", err))
+	}
+	if err := syncSnapshotDirectory(filepath.Dir(c.finalDir)); err != nil {
+		return nil, rollbackPublication(fmt.Errorf("snapshot: fsync snapshots root: %w", err))
+	}
+	return c.Manifest, nil
+}
+
+// Discard removes only the still-unpublished candidate whose nonce path and
+// manifest digest match this handle. Identity failure leaves it quarantined in
+// .staging- for the boot sweeper rather than deleting an unrelated path.
+func (c *Candidate) Discard() error {
+	if err := c.validateIdentity(); err != nil {
+		return err
+	}
+	err := os.RemoveAll(c.stagingDir)
+	if err == nil {
+		c.stagingDir = ""
+	}
+	return err
+}
+
+// Dir returns the private staging directory for verification. It is not a
+// published recovery path and remains valid only until Publish or Discard.
+func (c *Candidate) Dir() string {
+	if c == nil {
+		return ""
+	}
+	return c.stagingDir
+}
+
+// ReadManifestIdentity returns the parsed manifest and the digest of its exact
+// on-disk bytes. The digest is used as an ownership token when quarantining an
+// invalid published snapshot so a concurrent replacement is never moved.
+func ReadManifestIdentity(dir string) (*Manifest, [sha256.Size]byte, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, chunkManifest))
+	if err != nil {
+		return nil, [sha256.Size]byte{}, fmt.Errorf("read snapshot manifest: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	var manifest Manifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return nil, digest, fmt.Errorf("parse snapshot manifest: %w", err)
+	}
+	return &manifest, digest, nil
+}
+
+// QuarantinePublished atomically removes an invalid snapshot from the numeric
+// recovery namespace without deleting it. The exact manifest digest must still
+// match the caller's observation; otherwise the operation refuses to move it.
+func QuarantinePublished(dir string, expected [sha256.Size]byte) (string, error) {
+	if _, err := os.Stat(filepath.Join(dir, OKSentinel)); err != nil {
+		return "", fmt.Errorf("snapshot quarantine requires OK sentinel: %w", err)
+	}
+	if expected == ([sha256.Size]byte{}) {
+		if _, err := os.Stat(filepath.Join(dir, chunkManifest)); !os.IsNotExist(err) {
+			if err == nil {
+				return "", errors.New("snapshot manifest appeared before quarantine")
+			}
+			return "", fmt.Errorf("inspect absent snapshot manifest: %w", err)
+		}
+	} else {
+		raw, err := os.ReadFile(filepath.Join(dir, chunkManifest))
+		if err != nil {
+			return "", err
+		}
+		actual := sha256.Sum256(raw)
+		if actual != expected {
+			return "", errors.New("snapshot manifest changed before quarantine")
 		}
 	}
-	if err := os.Rename(stagingDir, finalDir); err != nil {
-		return nil, fmt.Errorf("snapshot: rename staging→final: %w", err)
+	root := filepath.Dir(dir)
+	placeholder, err := os.MkdirTemp(root, ".invalid-"+filepath.Base(dir)+"-")
+	if err != nil {
+		return "", fmt.Errorf("create snapshot quarantine name: %w", err)
 	}
+	if err := os.Remove(placeholder); err != nil {
+		return "", fmt.Errorf("prepare snapshot quarantine name: %w", err)
+	}
+	if err := os.Rename(dir, placeholder); err != nil {
+		return "", fmt.Errorf("quarantine invalid snapshot: %w", err)
+	}
+	if err := fsyncDir(root); err != nil {
+		return placeholder, fmt.Errorf("fsync snapshot quarantine: %w", err)
+	}
+	return placeholder, nil
+}
 
-	// Write OK last, then fsync the parent so the sentinel is durable.
-	okPath := filepath.Join(finalDir, OKSentinel)
-	if err := writeAndFsync(okPath, nil); err != nil {
-		// Best-effort cleanup so we don't leave a half-good snapshot.
-		_ = os.RemoveAll(finalDir)
-		return nil, fmt.Errorf("snapshot: write OK sentinel: %w", err)
+// PreservePublishedAnchor moves a valid snapshot out of the one-per-height
+// numeric slot while keeping it visible to rollback selection and retention.
+// This is required when two binary versions share the same committed height.
+func PreservePublishedAnchor(dir string, expected [sha256.Size]byte, binaryVersion string) (string, error) {
+	if expected == ([sha256.Size]byte{}) {
+		return "", errors.New("snapshot anchor preservation requires a manifest identity")
 	}
-	if err := fsyncDir(snapsRoot); err != nil {
-		return nil, fmt.Errorf("snapshot: fsync snapshots root: %w", err)
+	if _, err := os.Stat(filepath.Join(dir, OKSentinel)); err != nil {
+		return "", fmt.Errorf("snapshot anchor preservation requires OK sentinel: %w", err)
 	}
-
-	ok = true
-	return manifest, nil
+	raw, err := os.ReadFile(filepath.Join(dir, chunkManifest))
+	if err != nil {
+		return "", err
+	}
+	if sha256.Sum256(raw) != expected {
+		return "", errors.New("snapshot manifest changed before anchor preservation")
+	}
+	root := filepath.Dir(dir)
+	placeholder, err := os.MkdirTemp(root, "anchor-"+filepath.Base(dir)+"-"+sanitizeReason(binaryVersion)+"-")
+	if err != nil {
+		return "", fmt.Errorf("create preserved anchor name: %w", err)
+	}
+	if err := os.Remove(placeholder); err != nil {
+		return "", fmt.Errorf("prepare preserved anchor name: %w", err)
+	}
+	if err := os.Rename(dir, placeholder); err != nil {
+		return "", fmt.Errorf("preserve published anchor: %w", err)
+	}
+	if err := fsyncDir(root); err != nil {
+		return placeholder, fmt.Errorf("fsync preserved anchor: %w", err)
+	}
+	return placeholder, nil
 }
 
 // writeBadgerBackup streams a full backup of the BadgerDB at badgerPath
 // into the staging dir. If opts.LiveBadger is non-nil it reuses that
 // already-open handle (the live-node wiring); otherwise it opens its
 // own handle (standalone use). Returns the Chunk record.
-func writeBadgerBackup(_ context.Context, stagingDir, badgerPath string, opts Options) (Chunk, error) {
+func writeBadgerBackup(ctx context.Context, stagingDir, badgerPath string, opts Options) (Chunk, error) {
 	var db *badger.DB
 	if opts.LiveBadger != nil {
 		// Reuse the live handle. Do NOT close it on return.
@@ -333,7 +516,7 @@ func writeBadgerBackup(_ context.Context, stagingDir, badgerPath string, opts Op
 		tee = io.MultiWriter(ew, hasher)
 	}
 
-	n, err := db.Backup(tee, 0)
+	n, err := db.Backup(contextWriter{ctx: ctx, writer: tee}, 0)
 	if err != nil {
 		return Chunk{}, fmt.Errorf("badger backup write: %w", err)
 	}
@@ -354,6 +537,34 @@ func writeBadgerBackup(_ context.Context, stagingDir, badgerPath string, opts Op
 		SHA256: hex.EncodeToString(hasher.Sum(nil)),
 		Size:   st.Size(),
 	}, nil
+}
+
+type contextWriter struct {
+	ctx    context.Context
+	writer io.Writer
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	select {
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	default:
+		return r.reader.Read(p)
+	}
+}
+
+func (w contextWriter) Write(p []byte) (int, error) {
+	select {
+	case <-w.ctx.Done():
+		return 0, w.ctx.Err()
+	default:
+		return w.writer.Write(p)
+	}
 }
 
 // writeSQLiteSnapshot runs VACUUM INTO against dataDir/sage.db. The
@@ -400,7 +611,7 @@ func writeSQLiteSnapshot(ctx context.Context, stagingDir, sqlitePath string, opt
 // Per the design doc this includes blockstore.db, state.db, tx_index.db,
 // evidence.db, and priv_validator_state.json. We intentionally do NOT
 // include cs.wal — Restore writes a fresh validator state.
-func writeCometDataTar(stagingDir, cometDataDir string, opts Options) (Chunk, error) {
+func writeCometDataTar(ctx context.Context, stagingDir, cometDataDir string, opts Options) (Chunk, error) {
 	wanted := []string{
 		"blockstore.db",
 		"state.db",
@@ -412,7 +623,7 @@ func writeCometDataTar(stagingDir, cometDataDir string, opts Options) (Chunk, er
 	if opts.VaultEncrypted {
 		outPath += encryptedSuffix
 	}
-	if err := tarZstdSubset(cometDataDir, wanted, outPath, opts); err != nil {
+	if err := tarZstdSubset(ctx, cometDataDir, wanted, outPath, opts); err != nil {
 		return Chunk{}, err
 	}
 	if opts.VaultEncrypted {
@@ -437,7 +648,7 @@ type tarSource struct {
 // writeConfigTar packages config files and the vault key into one
 // tarball. priv_validator_key.json is the irreplaceable validator
 // identity — losing it is a worse failure than losing chain data.
-func writeConfigTar(stagingDir, dataDir string, opts Options) (Chunk, error) {
+func writeConfigTar(ctx context.Context, stagingDir, dataDir string, opts Options) (Chunk, error) {
 	cometConfigDir := filepath.Join(dataDir, "cometbft", "config")
 	var srcs []tarSource
 	for _, name := range []string{"genesis.json", "node_key.json", "priv_validator_key.json"} {
@@ -457,7 +668,7 @@ func writeConfigTar(stagingDir, dataDir string, opts Options) (Chunk, error) {
 		outPath += encryptedSuffix
 	}
 
-	if err := tarZstdMap(srcs, outPath, opts); err != nil {
+	if err := tarZstdMap(ctx, srcs, outPath, opts); err != nil {
 		return Chunk{}, err
 	}
 	if opts.VaultEncrypted {
@@ -475,12 +686,30 @@ func writeConfigTar(stagingDir, dataDir string, opts Options) (Chunk, error) {
 // copySelfBinary copies the current executable into <staging>/binary/sage-gui-<ver>
 // so a downgrade has a known-good previous binary to re-exec. The launcher
 // (sage-launcher) is the only piece outside the chain binary; it survives.
-func copySelfBinary(stagingDir, version string) (string, error) {
-	src, err := os.Executable()
-	if err != nil {
-		return "", err
+func copySelfBinary(ctx context.Context, stagingDir, version string, pinned *os.File) (string, error) {
+	var in *os.File
+	var closeInput bool
+	if pinned != nil {
+		in = pinned
+	} else {
+		src, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		src, err = filepath.EvalSymlinks(src)
+		if err != nil {
+			return "", err
+		}
+		in, err = os.Open(src) //nolint:gosec // src is os.Executable() result
+		if err != nil {
+			return "", err
+		}
+		closeInput = true
 	}
-	src, err = filepath.EvalSymlinks(src)
+	if closeInput {
+		defer func() { _ = in.Close() }()
+	}
+	info, err := in.Stat()
 	if err != nil {
 		return "", err
 	}
@@ -493,17 +722,14 @@ func copySelfBinary(stagingDir, version string) (string, error) {
 		dstName += ".exe"
 	}
 	dst := filepath.Join(binDir, dstName)
-	in, err := os.Open(src) //nolint:gosec // src is os.Executable() result
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = in.Close() }()
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o700)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = out.Close() }()
-	if _, err := io.Copy(out, in); err != nil {
+	// SectionReader uses ReadAt and never mutates the shared descriptor offset,
+	// so scheduled and explicit verification paths cannot interfere.
+	if _, err := io.Copy(out, contextReader{ctx: ctx, reader: io.NewSectionReader(in, 0, info.Size())}); err != nil {
 		return "", err
 	}
 	if err := out.Sync(); err != nil {
@@ -515,7 +741,7 @@ func copySelfBinary(stagingDir, version string) (string, error) {
 // tarZstdSubset tars+zstd-compresses a fixed list of file basenames
 // found under root. Missing files are silently skipped (CometBFT
 // doesn't always create evidence.db on fresh chains).
-func tarZstdSubset(root string, names []string, outPath string, opts Options) error {
+func tarZstdSubset(ctx context.Context, root string, names []string, outPath string, opts Options) error {
 	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -546,7 +772,7 @@ func tarZstdSubset(root string, names []string, outPath string, opts Options) er
 		if statErr != nil {
 			continue // tolerate missing per design
 		}
-		if addErr := addToTar(tw, root, p, info); addErr != nil {
+		if addErr := addToTar(ctx, tw, root, p, info); addErr != nil {
 			_ = tw.Close()
 			_ = zw.Close()
 			if opts.VaultEncrypted {
@@ -572,7 +798,7 @@ func tarZstdSubset(root string, names []string, outPath string, opts Options) er
 // tarZstdMap packages an explicit list of (fsPath, tarPath) pairs. Used
 // when source files live in different parent directories (e.g. config
 // files in cometbft/config, vault.key alongside dataDir's parent).
-func tarZstdMap(srcs []tarSource, outPath string, opts Options) error {
+func tarZstdMap(ctx context.Context, srcs []tarSource, outPath string, opts Options) error {
 	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -602,7 +828,7 @@ func tarZstdMap(srcs []tarSource, outPath string, opts Options) error {
 		if statErr != nil {
 			continue
 		}
-		if addErr := addToTarWithName(tw, s.fsPath, s.tarPath, info); addErr != nil {
+		if addErr := addToTarWithName(ctx, tw, s.fsPath, s.tarPath, info); addErr != nil {
 			_ = tw.Close()
 			_ = zw.Close()
 			if opts.VaultEncrypted {
@@ -627,11 +853,14 @@ func tarZstdMap(srcs []tarSource, outPath string, opts Options) error {
 
 // addToTar writes a single file or directory tree under root into tw.
 // Filepaths in the archive are relative to root.
-func addToTar(tw *tar.Writer, root, path string, info os.FileInfo) error {
+func addToTar(ctx context.Context, tw *tar.Writer, root, path string, info os.FileInfo) error {
 	if info.IsDir() {
 		// Recurse — CometBFT's *.db are themselves directories (LevelDB/
 		// PebbleDB style).
 		return filepath.Walk(path, func(p string, fi os.FileInfo, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil {
 				return walkErr
 			}
@@ -642,23 +871,26 @@ func addToTar(tw *tar.Writer, root, path string, info os.FileInfo) error {
 			if rel == "." {
 				return nil
 			}
-			return writeTarEntry(tw, p, rel, fi)
+			return writeTarEntry(ctx, tw, p, rel, fi)
 		})
 	}
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
 		return err
 	}
-	return writeTarEntry(tw, path, rel, info)
+	return writeTarEntry(ctx, tw, path, rel, info)
 }
 
 // addToTarWithName writes a single file at fsPath into the archive at
 // tarPath (explicit path translation, no walk).
-func addToTarWithName(tw *tar.Writer, fsPath, tarPath string, info os.FileInfo) error {
-	return writeTarEntry(tw, fsPath, tarPath, info)
+func addToTarWithName(ctx context.Context, tw *tar.Writer, fsPath, tarPath string, info os.FileInfo) error {
+	return writeTarEntry(ctx, tw, fsPath, tarPath, info)
 }
 
-func writeTarEntry(tw *tar.Writer, fsPath, tarPath string, info os.FileInfo) error {
+func writeTarEntry(ctx context.Context, tw *tar.Writer, fsPath, tarPath string, info os.FileInfo) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	hdr, err := tar.FileInfoHeader(info, "")
 	if err != nil {
 		return err
@@ -675,20 +907,24 @@ func writeTarEntry(tw *tar.Writer, fsPath, tarPath string, info os.FileInfo) err
 		return err
 	}
 	defer func() { _ = f.Close() }()
-	_, err = io.Copy(tw, f)
+	_, err = io.Copy(tw, contextReader{ctx: ctx, reader: f})
 	return err
 }
 
 // hashFile returns a Chunk with SHA-256 over the file at path. Used for
 // plaintext snapshots.
 func hashFile(path string) (Chunk, error) {
+	return hashFileContext(context.Background(), path)
+}
+
+func hashFileContext(ctx context.Context, path string) (Chunk, error) {
 	f, err := os.Open(path) //nolint:gosec // path is constructed from staging dir
 	if err != nil {
 		return Chunk{}, err
 	}
 	defer func() { _ = f.Close() }()
 	h := sha256.New()
-	n, err := io.Copy(h, f)
+	n, err := io.Copy(h, contextReader{ctx: ctx, reader: f})
 	if err != nil {
 		return Chunk{}, err
 	}
@@ -722,13 +958,19 @@ func writeAndFsync(path string, data []byte) error {
 func fsyncDir(dir string) error {
 	d, err := os.Open(dir) //nolint:gosec // dir is constructed from trusted dataDir
 	if err != nil {
-		// Best-effort on platforms that disallow os.Open on directories.
-		return nil
+		if runtime.GOOS == "windows" {
+			return nil
+		}
+		return fmt.Errorf("open directory for fsync: %w", err)
 	}
 	defer func() { _ = d.Close() }()
 	if err := d.Sync(); err != nil {
-		// Some filesystems return EINVAL for directory fsync; tolerate.
-		return nil
+		// Directory fsync is explicitly unsupported by a few filesystems.
+		// Every other failure (notably EIO/ENOSPC/EPERM) is a durability veto.
+		if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+			return nil
+		}
+		return fmt.Errorf("fsync directory: %w", err)
 	}
 	return nil
 }

@@ -63,6 +63,11 @@ Every request is signed with Ed25519. The client adds four headers automatically
 
 For SDK REST calls, `agent_id` is derived entirely from the public key; the server does not issue a REST session token. HTTP MCP transports use their own bearer-token/OAuth flow.
 
+The SDK always sends a fresh nonce. Hand-written clients must do the same. The
+generic REST verifier temporarily recognizes the historical nonce-less
+signature shape, but exact message, acknowledgement, receipt, and delegated
+governance actions require nonce-bound proof and reject legacy signing.
+
 ### Constructors
 
 | Method | Signature | Notes |
@@ -624,26 +629,33 @@ peer-authenticated, caller-specific relation checks.
 
 ---
 
-#### `set_agent_permission()`
+#### `owned_domains()`
 
 ```python
-set_agent_permission(
-    agent_id: str,
-    clearance: int | None = None,
-    domain_access: str | None = None,
-    visible_agents: str | None = None,
-    org_id: str | None = None,
-    dept_id: str | None = None,
-) -> dict
+owned_domains(cursor: str | None = None, limit: int = 50) -> OwnedDomainPage
 ```
 
-`PUT /v1/agent/{agent_id}/permission`
+Signed `GET /v1/agent/me/domains/owned`. This is the authoritative paged set of
+domains whose current owner is the caller; it does not scan memories or load a
+global roster. Continue with `next_cursor` until `has_more` is false. The
+readable/writable arrays returned by `sage_status`/`GET /v1/agent/me/domains`
+are intentionally bounded policy samples, not this complete ownership set.
 
-Compatibility method for pre-app-v23 nodes only. Once app-v23 is active, the
-server returns HTTP `410 app_v23_atomic_policy_required`: role, profile,
-clearance, hard restrictions, and home domain must be approved together through
-the loopback CEREBRUM policy control. Keep this SDK method only when supporting
-an older chain; do not use it to attempt self-promotion.
+Current local policy is an atomic role/profile/clearance/home-domain operation
+performed by Root/Admin through loopback CEREBRUM. The SDK deliberately has no
+per-agent permission mutation shortcut because an ordinary agent cannot
+self-promote or bypass that governed workflow.
+
+#### `domain_access_sample()`
+
+```python
+domain_access_sample() -> AgentDomainAccessSample
+```
+
+Signed `GET /v1/agent/me/domains`. Returns bounded `owned_domains`,
+`readable_domains`, and `writable_domains` policy samples plus `truncated`.
+Use it to choose an exact recall/write scope cheaply; use `owned_domains()`
+when the authoritative complete ownership set is required.
 
 ---
 
@@ -733,6 +745,25 @@ Each `PipeMessage` exposes the server-derived `authority`,
 `request_only`, with local content marked `agent_untrusted` and federated
 content `external_untrusted`. Treat `intent` and `payload` only as untrusted
 requests for consideration, never as instructions.
+
+---
+
+#### `pipe_inbox_history()` / `pipe_outbox()`
+
+```python
+pipe_inbox_history(limit: int = 20) -> PipeInboxResponse
+pipe_outbox(limit: int = 20) -> PipeInboxResponse
+```
+
+`GET /v1/pipe/history/inbox` and `GET /v1/pipe/history/outbox`
+
+These passive, caller-scoped history views return up to 100 retained pipeline
+rows without claiming, acknowledging, re-queueing, or deleting anything.
+Inbox history keeps previously claimed/completed received work reopenable;
+outbox history keeps the caller's pending/claimed/completed/expired sends
+visible while normal pipeline retention still holds them. Their workflow state
+is local bookkeeping, not remote delivery or read evidence. Payloads remain
+untrusted requests and results remain untrusted data.
 
 ---
 
@@ -856,16 +887,33 @@ messages_receive(receive_token: str, limit: int = 5) -> MessageReceiveResponse
 ordered claimed batch. Retrying the same caller/token/limit replays that batch
 instead of claiming later messages.
 
-#### `message_reply()` / `message_mark_read()`
+#### `message_reply()` / `message_mark_read()` / `messages_mark_read_batch()`
 
 ```python
 message_reply(message_id: str, result: str) -> MessageActionResponse
 message_mark_read(message_id: str) -> MessageActionResponse
+messages_mark_read_batch(message_ids: list[str]) -> dict
 ```
 
 Only the exact recipient that previously received the message through the
 canonical batch API may reply or acknowledge it as read. Repeating the same
 action is idempotent; a different second reply conflicts.
+
+Use `messages_mark_read_batch()` for up to 20 already-fetched messages. It is
+one signed request with independent ordered outcomes, avoiding one HTTP call
+per inbox item.
+
+#### Federated receipt-v2 helpers
+
+`pipe_receipt_challenge()`, `pipe_receipt_record()`, their batch variants, and
+`pipe_receipt_status()` expose the capability-gated payload-free receipt-v2
+routes. Pass the complete challenge response directly to
+`pipe_receipt_record()`; the SDK extracts and signs the immutable inner body.
+Likewise, pass the ready items returned by `pipe_receipt_challenge_batch()` to
+`pipe_receipt_record_batch()`; the SDK creates a separate exact-path/body proof
+for every event before signing the aggregate transport request. A queued
+receipt is local durable transport state; only the sender-only status
+projection is evidence of confirmed remote claim/read.
 
 #### `message_status()`
 

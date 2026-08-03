@@ -158,6 +158,22 @@ func TestSageClaudeMDBlock_ContainsEssentials(t *testing.T) {
 	assert.Contains(t, sageClaudeMDBlock, ".mcp.json")
 }
 
+func TestSagePermissionsConfigDoesNotAdvertiseHiddenCompatibilityAliases(t *testing.T) {
+	permissions := sagePermissionsConfig(map[string]any{
+		"permissions": map[string]any{
+			"allow": []any{
+				"mcp__sage__sage_red_pill",
+				"mcp__other__tool",
+			},
+		},
+	})
+	allow, ok := permissions["allow"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, allow, "mcp__sage__sage_inception")
+	assert.NotContains(t, allow, "mcp__sage__sage_red_pill")
+	assert.Contains(t, allow, "mcp__other__tool", "non-SAGE permissions must be preserved")
+}
+
 // ─── Self-Heal Tests ───
 
 func TestSelfHeal_MigratesLegacyTwoScriptInstall(t *testing.T) {
@@ -212,11 +228,21 @@ func TestSelfHeal_DoesNotRewriteCurrentHooks(t *testing.T) {
 	}
 
 	infoBefore, _ := os.Stat(filepath.Join(hookDir, "sage-session-start.sh"))
+	settingsPath := filepath.Join(projectDir, ".claude", "settings.json")
+	require.NoError(t, os.WriteFile(settingsPath, []byte(`{
+  "permissions": {
+    "allow": ["mcp__sage__sage_red_pill", "mcp__other__tool"]
+  }
+}`), 0600))
 
 	selfHealProject(projectDir, sageHome)
 
 	infoAfter, _ := os.Stat(filepath.Join(hookDir, "sage-session-start.sh"))
 	assert.Equal(t, infoBefore.ModTime(), infoAfter.ModTime(), "current hooks should not be re-written")
+	settingsData, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(settingsData), "sage_red_pill", "settings migrate independently of hook bytes")
+	assert.Contains(t, string(settingsData), "mcp__other__tool")
 }
 
 func TestProjectMCPConfigMigratesLegacySharedNodeIdentity(t *testing.T) {

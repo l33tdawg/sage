@@ -61,6 +61,7 @@ func TestAppV23ReadableDomainsAreBoundedCurrentCallerAuthority(t *testing.T) {
 	// Historical association is only a candidate. The unrelated domain must
 	// not be disclosed because current RBAC denies it.
 	agents.domains[memberID] = []string{"member.home", "owner.home", "outsider.home"}
+	require.NoError(t, badger.RegisterDomain("direct.read", outsiderID, "", 4))
 	require.NoError(t, badger.SetAccessGrant("direct.read", memberID, 1, 0, outsiderID))
 	srv.agentStore = &indexedGrantAgentStore{
 		mockAgentStore: agents,
@@ -78,9 +79,15 @@ func TestAppV23ReadableDomainsAreBoundedCurrentCallerAuthority(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 	require.Equal(t, "bounded_policy_and_provenance", response.Scope)
 	require.Contains(t, response.Domains, "member.home")
+	require.Equal(t, response.Domains, response.ReadableDomains)
+	require.Contains(t, response.OwnedDomains, "member.home")
+	require.Contains(t, response.WritableDomains, "member.home")
 	require.Contains(t, response.Domains, "owner.home",
 		"a current group peer's home domain is a useful scoped-recall target")
+	require.NotContains(t, response.WritableDomains, "owner.home",
+		"read-only group membership must not be presented as write authority")
 	require.Contains(t, response.Domains, "direct.read")
+	require.NotContains(t, response.WritableDomains, "direct.read")
 	require.NotContains(t, response.Domains, "outsider.home",
 		"historical authorship must never be inferred as current access")
 }
@@ -183,4 +190,34 @@ func TestAppV23ReadableDomainsMarksConsensusCandidateCapTruncated(t *testing.T) 
 		"dropping consensus-derived candidates at the cap must be explicit")
 	require.LessOrEqual(t, len(response.Domains), callerReadableDomainLimit)
 	require.Contains(t, response.Domains, "member.home")
+}
+
+func TestOwnedDomainPageDiscoversTransferredNeverAuthoredDomain(t *testing.T) {
+	srv, badgerStore, memberID, _, outsiderID := setupAppV23RESTAccess(t)
+	require.NoError(t, badgerStore.RegisterDomain("transferred.unseen", outsiderID, "", 30))
+	require.NoError(t, badgerStore.MigrateAppV26AccessGroupAuthorities(31))
+	_, err := badgerStore.TransferDomainAppV26CAS(
+		"transferred.unseen", memberID, "", outsiderID,
+		"proposal-transferred-unseen", 32, false, 256,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/agent/me/domains/owned?limit=10", nil)
+	req = req.WithContext(middleware.WithAgentID(context.Background(), memberID))
+	rec := httptest.NewRecorder()
+	srv.handleGetAgentOwnedDomainsPage(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var response callerOwnedDomainsPageResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.Contains(t, response.Domains, "transferred.unseen")
+	require.Equal(t, "authoritative_current_owner", response.Scope)
+
+	readableReq := httptest.NewRequest(http.MethodGet, "/v1/agent/me/domains", nil)
+	readableReq = readableReq.WithContext(middleware.WithAgentID(context.Background(), memberID))
+	readableRec := httptest.NewRecorder()
+	srv.handleGetAgentReadableDomains(readableRec, readableReq)
+	require.Equal(t, http.StatusOK, readableRec.Code, readableRec.Body.String())
+	var readable callerReadableDomainsResponse
+	require.NoError(t, json.Unmarshal(readableRec.Body.Bytes(), &readable))
+	require.Contains(t, readable.OwnedDomains, "transferred.unseen")
 }

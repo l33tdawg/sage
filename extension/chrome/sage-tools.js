@@ -1,6 +1,7 @@
 /**
  * SAGE Tools — shared definitions for the Chrome extension.
- * Mirrors internal/mcp/tools.go
+ * Curated browser subset of the canonical tools in internal/mcp/tools.go.
+ * Compatibility aliases are deliberately not advertised here.
  */
 
 const SAGE_TOOLS = {
@@ -10,19 +11,13 @@ const SAGE_TOOLS = {
     params: {},
     required: []
   },
-  sage_red_pill: {
-    name: "sage_red_pill",
-    description: "Deprecated alias for sage_inception. Initializes your persistent memory session.",
-    params: {},
-    required: []
-  },
   sage_turn: {
     name: "sage_turn",
     description: "Per-turn memory cycle. Recalls relevant memories AND stores an observation atomically.",
     params: {
       topic: { type: "string", description: "Current conversation topic" },
       observation: { type: "string", description: "What happened this turn" },
-      domain: { type: "string", description: "Knowledge domain (e.g. go-debugging, user-prefs)", default: "general" }
+      domain: { type: "string", description: "Exact knowledge domain. Omit to use the caller's approved home domain." }
     },
     required: ["topic"]
   },
@@ -42,8 +37,8 @@ const SAGE_TOOLS = {
     description: "Store a memory in SAGE.",
     params: {
       content: { type: "string", description: "Memory content to store" },
-      domain: { type: "string", description: "Domain tag", default: "general" },
-      type: { type: "string", description: "fact | observation | inference", default: "observation" },
+      domain: { type: "string", description: "Exact domain tag. Omit to use the caller's approved home domain." },
+      type: { type: "string", description: "fact | observation | inference | task", default: "observation" },
       confidence: { type: "number", description: "Confidence 0-1", default: 0.8 }
     },
     required: ["content"]
@@ -73,7 +68,7 @@ const SAGE_TOOLS = {
       task_summary: { type: "string", description: "What the task was" },
       dos: { type: "string", description: "What went right" },
       donts: { type: "string", description: "What went wrong" },
-      domain: { type: "string", description: "Knowledge domain", default: "general" }
+      domain: { type: "string", description: "Exact knowledge domain. Omit to use the caller's approved home domain." }
     },
     required: ["task_summary"]
   },
@@ -101,8 +96,17 @@ const SAGE_TOOLS = {
   },
   sage_status: {
     name: "sage_status",
-    description: "Get memory store statistics.",
+    description: "Get this signed caller's bounded registration and access standing. No agent ID argument is needed.",
     params: {},
+    required: []
+  },
+  sage_domains: {
+    name: "sage_domains",
+    description: "Page this signed caller's owned domains without scanning memories or the global directory.",
+    params: {
+      limit: { type: "integer", description: "Page size from 1 to 100", default: 50 },
+      cursor: { type: "string", description: "Opaque cursor returned by the previous page" }
+    },
     required: []
   }
 };
@@ -151,11 +155,11 @@ Available tools:
 
 1. [SAGE_CALL: sage_inception()] — Initialize your persistent memory. Call this first.
 
-2. [SAGE_CALL: sage_turn({"topic": "current topic", "observation": "what happened", "domain": "topic-domain"})] — Call EVERY turn. Recalls relevant memories AND stores your observation atomically.
+2. [SAGE_CALL: sage_turn({"topic": "current topic", "observation": "what happened", "domain": "topic-domain"})] — Recall relevant memories and optionally preserve this turn. Follow the memory mode returned by inception.
 
-3. [SAGE_CALL: sage_recall({"query": "search terms"})] — Search your memories by semantic similarity.
+3. [SAGE_CALL: sage_recall({"query": "search terms", "domain": "exact-domain"})] — Search your memories by semantic similarity. Prefer an exact domain from sage_domains(); an unscoped search can be rejected on a large store.
 
-4. [SAGE_CALL: sage_remember({"content": "thing to remember", "domain": "domain", "type": "fact"})] — Store a new memory. Types: fact (high confidence), observation, inference.
+4. [SAGE_CALL: sage_remember({"content": "thing to remember", "domain": "domain", "type": "fact"})] — Store a new memory. Types: fact, observation, inference, task.
 
 5. [SAGE_CALL: sage_forget({"memory_id": "id", "reason": "why"})] — Deprecate an outdated memory.
 
@@ -163,9 +167,13 @@ Available tools:
 
 7. [SAGE_CALL: sage_reflect({"task_summary": "what was done", "dos": "what worked", "donts": "what failed"})] — Post-task reflection.
 
-8. [SAGE_CALL: sage_status()] — Check memory stats.
+8. [SAGE_CALL: sage_status()] — Check this caller's registration and access standing.
 
 9. [SAGE_CALL: sage_list({"domain": "specific-domain"})] — Browse stored memories.
+
+10. [SAGE_CALL: sage_domains()] — Page this caller's owned domains efficiently.
+
+11. [SAGE_CALL: sage_timeline({"domain": "exact-domain", "from": "ISO-8601", "to": "ISO-8601"})] — View a caller-readable domain over a time range.
 
 The SAGE Chrome extension will intercept these calls, execute them against your local SAGE node, and paste the results back. You can then use the returned memories in your response.
 

@@ -1,241 +1,98 @@
-# Admin Bootstrap
+# CEREBRUM Root and agent approval
 
-How to bring up a SAGE node and configure agent visibility for your deployment
-pattern. This doc is the canonical answer to "I just stood up a node and my
-agents can't see each other - what do I do?"
+<!-- Reconciled through SAGE v11.17.0/app-v26. -->
 
-If you're hitting empty `/v1/memory/list` or `/v1/memory/query` results
-post-deployment, jump to [Chain-reset visibility gotcha](#chain-reset-visibility-gotcha).
+This guide covers the current governed bootstrap and recovery workflow. The
+pre-app-v23 self-promotion and per-field permission APIs are retired and must
+not be used on a current node.
 
-## Deployment patterns
+## Authority model
 
-SAGE supports three visibility patterns. Pick the one that matches your trust
-model - the configuration differs significantly.
+- **CEREBRUM Root** is the machine-local sovereign operator credential. It is
+  not an agent, does not appear in agent rosters or Access Groups, and cannot be
+  demoted through an agent API.
+- **Admin** is a local ordinary-agent role with broad control over this node's
+  agents and data. Promotion requires that the exact agent key is held on this
+  machine. Admin is still distinct from Root.
+- **Manager** receives Member access plus the configured write/modify authority
+  inside its local Access Groups.
+- **Member** owns and writes its home domain and receives group-derived access.
+- Federated identities never become local Admins and never gain local write or
+  modify authority merely by being linked for reading or messaging.
 
-| Pattern             | Trust model                                                 | Config cost                       |
-| ------------------- | ----------------------------------------------------------- | --------------------------------- |
-| Single-org          | Everyone in the deployment trusts each other fully          | One org + TopSecret clearance     |
-| Multi-org federated | Multiple orgs, selective cross-org sharing                  | Orgs + federation agreements      |
-| Homogeneous-trust   | Everyone trusts everyone - legacy / research deployments    | `visible_agents="*"` per agent    |
+The full consensus rules are in
+[`reference/concepts/rbac-orgs-federation.md`](reference/concepts/rbac-orgs-federation.md).
 
-The homogeneous-trust pattern is no longer necessary as of v6.6.2 - use
-single-org with TopSecret clearance instead (see below).
+## First launch
 
-## The who-first problem
+1. Start the signed SAGE application normally.
+2. Open CEREBRUM through `http://127.0.0.1:8080/ui/` on that same machine.
+   Governance is intentionally loopback-only.
+3. Connect each local client from CEREBRUM or configure its dedicated
+   `SAGE_IDENTITY_PATH`. Each client must keep its own Ed25519 key; do not share
+   `~/.sage/agent.key` between projects.
+4. Let the client self-register. A fresh registration is pending review and
+   cannot self-promote or mint authority.
+5. In **Access Controls**, select the exact signer, choose role, operating mode,
+   clearance, and a non-shared home domain, then approve the atomic policy.
+6. Put local agents into Access Groups to share governed domain access. Group
+   authority is explicit (`read`, `read-write`, or `manage`) and removing an
+   agent removes only group-derived access; its own home domain remains intact.
 
-A SAGE node has no root account on boot. The first agent that submits *any*
-transaction to CometBFT is just "an agent" - no special status. Admin privileges
-are minted by the first `AgentSetPermission` tx with `role=admin`, which has
-to be broadcast by *something*. That something is usually one of:
+The agent can inspect its own standing and bounded domain samples with
+`sage_inception`, `sage_status`, and `sage_domains`. It does not need a global
+roster or the Root key.
 
-1. **`sage-gui` local seed flow** - the desktop app, on first launch, generates
-   an agent keypair and posts a self-permission tx elevating itself to `admin`
-   via `PUT /v1/agent/{self}/permission` with `clearance=4` and `role=admin`.
-   This is the default bootstrap for operator-run nodes.
-2. **Manual curl** - any keypair you control can sign a request to the local
-   node. The node won't reject it - there's no pre-existing admin to say no.
-   Bootstrap your first admin with a signed request:
+## Companion applications
 
-   ```bash
-   # Generate an identity (or bring your own Ed25519 keypair)
-   sage-cli identity new > bootstrap_admin.json
+A co-located application such as Mynah must generate its dedicated agent key
+*before* vendored genesis starts, place the canonical key where SAGE can
+discover it (normally below `~/.sage/agents/`), and consistently point its MCP
+and hooks at that same identity. CEREBRUM then approves the Companion profile
+and owned home domain. A Companion is an ordinary Member profile, never Root.
 
-   # Self-elevate to admin on a fresh node
-   sage-cli agent set-permission \
-     --target-id <bootstrap_admin_pubkey> \
-     --clearance 4 \
-     --visible-agents '*' \
-     --key bootstrap_admin.json
-   ```
+## Root handover
 
-3. **Genesis file** - pre-seed admin state in the CometBFT genesis file for
-   production deployments. This is the most secure path but requires planning
-   at chain-init time. See `cmd/sage/genesis.go`.
+Root handover is available only in loopback CEREBRUM. It changes the current
+credential controlling Root-owned domains and future governance; it does not
+rewrite memory authorship or chain history. Existing memories and domains stay
+readable under the new current authority.
 
-After any of these, the admin can register orgs, add members, and grant per-domain
-access via the REST API.
+Do not delete or discard the current Root credential. Complete the governed
+handover first and verify the new credential. CEREBRUM presents the destructive
+confirmation because losing the only current Root key is not repairable by an
+ordinary agent.
 
-## Pattern 1: single-org (recommended for levelup-style deployments)
+## Current programmatic surfaces
 
-One organization where every agent is trusted to see every other agent's
-memories. This is the typical pattern for a single-tenant platform (a CTF trainer,
-an internal R&D assistant, a personal memory node).
+The supported agent-facing surfaces are:
 
-### Setup
+- `POST /v1/agent/register` for self-registration;
+- signed `GET /v1/agent/me` for the caller's own standing;
+- signed `GET /v1/agent/me/domains` and
+  `GET /v1/agent/me/domains/owned` for bounded caller-scoped domain discovery;
+- the canonical MCP tools documented in
+  [`reference/mcp-tools.md`](reference/mcp-tools.md).
 
-1. **Bootstrap an admin** (see above).
-2. **Register the org** - admin signs:
+Role, profile, clearance, capabilities, home-domain approval, Access Groups,
+and Root handover are governed through loopback CEREBRUM. There is no current
+SDK shortcut for per-agent permission mutation. The old permission endpoint
+returns HTTP 410 on governed nodes and is intentionally absent from the current
+SDK and OpenAPI surface.
 
-   ```
-   POST /v1/org/register
-   { "name": "acme", "description": "Acme Inc" }
-   ```
+## Troubleshooting
 
-   Returns `{ "org_id": "<hex>", "tx_hash": "..." }`. Save `org_id` - you'll
-   use it for every member add.
+- **Pending/review agent:** open CEREBRUM locally and approve that exact signer.
+  Do not substitute Root's key into the client.
+- **Can write but cannot read:** verify that the client uses the same key for
+  hooks and MCP, then inspect `sage_status` and its home-domain policy.
+- **Missing home domain after an upgrade:** app-v26 performs the deterministic
+  historical repair during activation. A post-app-v26 invalid state is rejected
+  rather than silently assigning a different agent's data.
+- **Federated contact absent:** local and federated groups are separate. Confirm
+  the active agreement plus an explicit shared-domain or linked-message edge;
+  directory membership is authorization metadata, not online presence.
 
-3. **Add each agent as a TopSecret member**:
-
-   ```
-   POST /v1/org/{org_id}/member
-   { "agent_id": "<pubkey_hex>", "clearance": 4, "role": "member" }
-   ```
-
-   Clearance `4` (`ClearanceTopSecret`) is the key - as of v6.6.2, TopSecret
-   members bypass the `submitting_agents` RBAC filter automatically. They still
-   respect per-domain access control and per-record classification gates, but
-   within those envelopes they see across agents.
-
-4. **Domains auto-register on first submit**. The first agent to write to a
-   new domain becomes its owner - you don't need to `RegisterDomain` explicitly.
-   The owner's org inherits domain-level access, and other TopSecret members of
-   the same org see into it via `HasAccessMultiOrg`.
-
-### What you skip
-
-In this pattern you do **not** need:
-
-- `visible_agents="*"` on every agent - TopSecret handles it.
-- Per-agent domain grants - same-org TopSecret members see each other via the
-  HasAccessMultiOrg path.
-- Federation - there's only one org.
-
-## Pattern 2: multi-org federated
-
-Two or more orgs where each agent is tied to exactly one org, and cross-org
-sharing is explicitly negotiated per-federation agreement.
-
-### Setup
-
-1. **Bootstrap an admin per org** - each org's admin is separate.
-2. **Register each org** (`POST /v1/org/register`, one per org).
-3. **Add members to each org** at the clearance level appropriate for their
-   intra-org access (`clearance=1` Internal, `2` Confidential, `3` Secret,
-   `4` TopSecret - see `internal/tx/types.go`).
-4. **Propose a federation** from org A to org B:
-
-   ```
-   POST /v1/federation/propose
-   {
-     "target_org_id": "<org-B-id>",
-     "allowed_domains": ["shared.research"],
-     "max_clearance": 2,
-     "expires_at": 1767110400,
-     "requires_approval": true
-   }
-   ```
-
-   `max_clearance` caps cross-org reads - org B members can't read anything
-   above clearance 2 from org A domains covered by the federation.
-
-5. **Org B admin approves** via `POST /v1/federation/{fed_id}/approve`.
-
-### Access model
-
-- Same-org agents with sufficient clearance see each other via `HasAccessMultiOrg`.
-- Cross-org access requires an active federation agreement AND the reading
-  agent's clearance must be ≥ memory classification AND ≤ federation
-  max_clearance.
-- Federation does **not** grant visibility into agents unrelated to the
-  federation's allowed_domains list.
-
-## Pattern 3: homogeneous-trust (legacy)
-
-Everyone sees everyone, no orgs, no classification. Configured by setting
-`visible_agents="*"` on every registered agent.
-
-```
-PUT /v1/agent/{agent_id}/permission
-{ "visible_agents": "*" }
-```
-
-This was the recommended pattern before v6.6.2. It still works, but pattern 1
-achieves the same thing with one org membership instead of N per-agent configs.
-
-If you already have a homogeneous-trust deployment and want to migrate, you
-can leave the wildcard in place - `visible_agents="*"` short-circuits
-`resolveVisibleAgents` before the TopSecret check, so the two mechanisms
-compose cleanly.
-
-## Chain-bootstrap window on fresh data dir
-
-On a fresh data directory (first deploy, or after a chain reset), CometBFT
-performs an init pass before the first block is committed. During this window
-`/health` returns 503 because `cometbftOK` flips to true only once the node is
-running. On modest hardware this can take **several minutes** — observed ~3 min
-on a single-node post-migration redeploy.
-
-What this looks like in practice:
-
-- Container shows `unhealthy` in `docker ps` for the first ~3 min.
-- REST server *is* bound on `:8080` — `curl /health` returns 503 with
-  `{"status":"unhealthy"}` (not connection refused).
-- After CometBFT finishes bootstrap, `/health` flips to 200 and the container
-  goes `healthy`.
-
-**Don't roll back during this window.** The fix is on your orchestrator side:
-
-- **Docker compose / Docker**: the official `deploy/Dockerfile.abci` ships a
-  HEALTHCHECK with `start_period=5m` to cover the bootstrap window. If you
-  override this in your own compose, keep `start_period` ≥ 5 min.
-- **Kubernetes**: set `startupProbe` with `failureThreshold` × `periodSeconds`
-  ≥ 300s (e.g. `failureThreshold: 30, periodSeconds: 10`), and let `liveness` /
-  `readiness` only run after that.
-- **Confirming it's actually bootstrap, not a hang**: `curl localhost:8080/health`
-  from inside the container — 503 with body means REST bound, just waiting for
-  CometBFT. Connection refused means something else is wrong.
-
-## Chain-reset visibility gotcha
-
-If you reset the chain state (e.g., `rm -rf ~/.sage/badger/` or equivalent
-for a clean re-sync), **on-chain domain ownership is wiped**. This has two
-visible effects post-reset:
-
-1. **Domains with no post-reset writes** fall through to the "no owner = open"
-   path in `handleListMemoriesAuth` / `handleQueryMemory`. They appear visible
-   to any authenticated agent - which looks like a regression but is the
-   intentional backward-compat path for pre-RBAC setups.
-
-2. **Domains that get a fresh post-reset write** re-register the writer as the
-   new owner. If the writer is a different agent than the pre-reset owner,
-   other agents who could see the domain before the reset now can't - they've
-   been effectively locked out by auto-registration.
-
-The cleanest recovery paths:
-
-- **Single-org (pattern 1)**: add TopSecret clearance to the affected members
-  after reset. They see across auto-registered owners automatically.
-- **Multi-org**: re-run `RegisterDomain` (or re-broadcast the first-writer tx)
-  from the agent you want as owner before anyone else writes. Admin can also
-  call `TransferDomain` to hand ownership over.
-- **Homogeneous-trust**: unaffected - `visible_agents="*"` skips owner checks
-  on the caller side.
-
-A proper fix (opt-in auto-register, or a chain-reset marker that suspends
-auto-register until the operator says otherwise) is tracked as a separate
-design discussion; see the GitHub issue for context.
-
-## Quick reference
-
-| Task                              | Endpoint                                         |
-| --------------------------------- | ------------------------------------------------ |
-| Bootstrap an admin                | `PUT /v1/agent/{id}/permission` (self)           |
-| Register an org                   | `POST /v1/org/register`                          |
-| Add a member (with clearance)     | `POST /v1/org/{org_id}/member`                   |
-| Change clearance                  | `POST /v1/org/{org_id}/clearance`                |
-| List org members                  | `GET /v1/org/{org_id}/members`                   |
-| Set visible_agents wildcard       | `PUT /v1/agent/{id}/permission` + `{"visible_agents":"*"}` |
-| Grant domain read                 | `PUT /v1/agent/{id}/permission` + `{"domain_access":"[{...}]"}` |
-| Propose federation                | `POST /v1/federation/propose`                    |
-| Transfer domain ownership (admin) | `POST /v1/domain/{domain}/transfer`              |
-
-All endpoints require a signed request (`X-Agent-ID`, `X-Signature`,
-`X-Timestamp` headers). See `docs/GETTING_STARTED.md` for signing details.
-
-## See also
-
-- `docs/GETTING_STARTED.md` - client setup, request signing, SDK usage
-- `docs/ARCHITECTURE.md` - BFT consensus, ABCI lifecycle, memory flow
-- `internal/tx/types.go` - clearance levels, tx schema reference
-- `api/rest/memory_handler.go` - `resolveVisibleAgents`, `checkDomainAccess`,
-  `agentHasTopSecretClearance` (the TopSecret-as-seeAll entry point)
+For precise REST behavior and error codes, use
+[`reference/rest-api.md`](reference/rest-api.md). That reference supersedes old
+examples elsewhere in the repository when they disagree.

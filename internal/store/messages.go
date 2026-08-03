@@ -185,17 +185,17 @@ func (s *SQLiteStore) SendLocalMessage(ctx context.Context, idempotencyKey strin
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		if err := tx.InsertPipeline(ctx, msg); err != nil {
-			return err
+		if insertErr := tx.InsertPipeline(ctx, msg); insertErr != nil {
+			return insertErr
 		}
 		sealedHash, err := tx.sealMessageFingerprint(requestHash)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.writeExecContext(ctx,
+		if _, writeErr := tx.writeExecContext(ctx,
 			`INSERT INTO message_send_idempotency(sender_agent_id,key_hash,request_hash,message_id)
-			 VALUES(?,?,?,?)`, msg.FromAgent, keyHash, sealedHash, msg.PipeID); err != nil {
-			return err
+			 VALUES(?,?,?,?)`, msg.FromAgent, keyHash, sealedHash, msg.PipeID); writeErr != nil {
+			return writeErr
 		}
 		copy := *msg
 		result = &copy
@@ -320,23 +320,23 @@ func (s *SQLiteStore) ReceiveLocalMessages(ctx context.Context, agentID, provide
 		// unbounded stream of unique empty-poll tokens is a disk-exhaustion path.
 		// Keep a generous 48-hour replay window, then prune metadata only; inbox
 		// rows/history are governed by their independent pipeline retention.
-		if _, err := tx.writeExecContext(ctx,
+		if _, pruneErr := tx.writeExecContext(ctx,
 			`DELETE FROM message_receive_batches WHERE receiver_agent_id=? AND created_at < ?`,
-			agentID, formatTime(time.Now().UTC().Add(-messageReceiveBatchRetention))); err != nil {
-			return err
+			agentID, formatTime(time.Now().UTC().Add(-messageReceiveBatchRetention))); pruneErr != nil {
+			return pruneErr
 		}
 		var retained int
-		if err := tx.conn.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM message_receive_batches WHERE receiver_agent_id=?`, agentID).Scan(&retained); err != nil {
-			return err
+		if countErr := tx.conn.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM message_receive_batches WHERE receiver_agent_id=?`, agentID).Scan(&retained); countErr != nil {
+			return countErr
 		}
 		if retained >= maxMessageReceiveBatchesPerAgent {
 			return ErrMessageReceiveQuota
 		}
-		if _, err := tx.writeExecContext(ctx,
+		if _, insertErr := tx.writeExecContext(ctx,
 			`INSERT INTO message_receive_batches(receiver_agent_id,token_hash,requested_limit)
-			 VALUES(?,?,?)`, agentID, tokenHash, limit); err != nil {
-			return err
+			 VALUES(?,?,?)`, agentID, tokenHash, limit); insertErr != nil {
+			return insertErr
 		}
 		pending, err := pendingExactLocalMessages(ctx, tx, agentID, limit)
 		if err != nil {
@@ -402,10 +402,10 @@ func (s *SQLiteStore) AcknowledgeLocalMessageRead(ctx context.Context, receiverI
 	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)
 		var addressed, provider, claimed, sourceChain, destinationChain string
-		if err := tx.conn.QueryRowContext(ctx,
+		if queryErr := tx.conn.QueryRowContext(ctx,
 			`SELECT to_agent, to_provider, claimed_by, source_chain_id, destination_chain_id
 			 FROM pipeline_messages WHERE pipe_id=?`, messageID).
-			Scan(&addressed, &provider, &claimed, &sourceChain, &destinationChain); err != nil {
+			Scan(&addressed, &provider, &claimed, &sourceChain, &destinationChain); queryErr != nil {
 			return ErrMessageNotFound
 		}
 		fetched, err := hasExactMessageFetch(ctx, tx, receiverID, messageID)
@@ -414,15 +414,15 @@ func (s *SQLiteStore) AcknowledgeLocalMessageRead(ctx context.Context, receiverI
 			return ErrMessageNotFound
 		}
 		var existing string
-		if err := tx.conn.QueryRowContext(ctx,
-			`SELECT receiver_agent_id FROM message_read_receipts WHERE message_id=?`, messageID).Scan(&existing); err == nil {
+		if receiptErr := tx.conn.QueryRowContext(ctx,
+			`SELECT receiver_agent_id FROM message_read_receipts WHERE message_id=?`, messageID).Scan(&existing); receiptErr == nil {
 			if existing != receiverID {
 				return ErrMessageNotFound
 			}
 			replayed = true
 			return nil
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
+		} else if !errors.Is(receiptErr, sql.ErrNoRows) {
+			return receiptErr
 		}
 		_, err = tx.writeExecContext(ctx,
 			`INSERT INTO message_read_receipts(message_id,receiver_agent_id) VALUES(?,?)`, messageID, receiverID)
@@ -464,26 +464,26 @@ func (s *SQLiteStore) ReplyLocalMessage(ctx context.Context, receiverID, message
 			return err
 		}
 		var provider, claimed, sourceChain, destinationChain string
-		if err := tx.conn.QueryRowContext(ctx,
+		if queryErr := tx.conn.QueryRowContext(ctx,
 			`SELECT to_provider,claimed_by,source_chain_id,destination_chain_id FROM pipeline_messages WHERE pipe_id=?`, messageID).
-			Scan(&provider, &claimed, &sourceChain, &destinationChain); err != nil {
+			Scan(&provider, &claimed, &sourceChain, &destinationChain); queryErr != nil {
 			return ErrMessageNotFound
 		}
 		fetched, err := hasExactMessageFetch(ctx, tx, receiverID, messageID)
 		if err != nil || !fetched || provider != "" || claimed != receiverID || sourceChain != "" || destinationChain != "" {
 			return ErrMessageNotFound
 		}
-		if err := tx.CompletePipeline(ctx, messageID, receiverID, result, ""); err != nil {
+		if completeErr := tx.CompletePipeline(ctx, messageID, receiverID, result, ""); completeErr != nil {
 			return ErrMessageNotFound
 		}
 		sealedHash, err := tx.sealMessageFingerprint(resultHash)
 		if err != nil {
 			return err
 		}
-		if _, err := tx.writeExecContext(ctx,
+		if _, insertErr := tx.writeExecContext(ctx,
 			`INSERT INTO message_replies(message_id,receiver_agent_id,result_hash) VALUES(?,?,?)`,
-			messageID, receiverID, sealedHash); err != nil {
-			return err
+			messageID, receiverID, sealedHash); insertErr != nil {
+			return insertErr
 		}
 		_, err = tx.writeExecContext(ctx,
 			`INSERT OR IGNORE INTO message_read_receipts(message_id,receiver_agent_id) VALUES(?,?)`,

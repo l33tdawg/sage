@@ -103,6 +103,146 @@ func newLinkedMessagingPair(t *testing.T) *linkedMessagingPair {
 	}
 }
 
+func TestCallerMayHaveLinkedMessagePeerUsesCurrentLocalAuthorityOnly(t *testing.T) {
+	ctx := context.Background()
+	t.Run("host and guest current", func(t *testing.T) {
+		pair := newLinkedMessagingPair(t)
+		hostMay, err := pair.host.mgr.CallerMayHaveLinkedMessagePeer(
+			ctx, pair.peer.chainID, pair.memberID,
+		)
+		require.NoError(t, err)
+		require.True(t, hostMay,
+			"host can prove its current local member-to-guest edge")
+	})
+
+	t.Run("guest defers exact edge to remote host", func(t *testing.T) {
+		m, ss, bs := newDrainTestManager(t)
+		m.postV23ForNextTx = func() bool { return true }
+		m.federatedGuestStore = ss
+		m.queryChallengeStore = ss
+		m.localGroupResolver = v23GroupResolverFake{"linked-guest": {}}
+		callerPub, _, err := ed25519.GenerateKey(rand.Reader)
+		require.NoError(t, err)
+		callerID := hex.EncodeToString(callerPub)
+		require.NoError(t, bs.BootstrapAppV23Genesis(store.AppV23GenesisBootstrap{
+			RootID: hex.EncodeToString(m.agentPub), Scope: "linked-guest-hint",
+			AgentID: callerID, Profile: store.AppV23ProfileStandard,
+			HomeDomain: "local-linked-guest", Clearance: 1, Capabilities: 0,
+			Height: 1, BootstrapDigest: strings.Repeat("91", 32),
+		}))
+		peerID := newPeerOperatorID(t)
+		agreement := configurePeerRBACConnection(
+			t, m, ss, bs, "chain-host", peerID, "guest", []string{"shared"}, 4,
+		)
+		seed := bytes.Repeat([]byte{0x31}, 32)
+		commitSeed, rollbackSeed, seedErr := m.stageSeed(
+			agreement.RemoteChainID, seed, seed, time.Now().Unix(),
+		)
+		require.NoError(t, seedErr)
+		t.Cleanup(rollbackSeed)
+		require.NoError(t, commitSeed())
+		control, err := ss.GetSyncControl(ctx, agreement.RemoteChainID)
+		require.NoError(t, err)
+		_, replaceErr := ss.ReplaceBoundPeerRBACPolicy(ctx, store.PeerRBACPolicy{
+			RemoteChainID: agreement.RemoteChainID, PeerAgentID: peerID,
+			PolicyEpoch: control.PolicyEpoch, RemoteCAPin: control.RemoteCAPin,
+			PolicyVersion: store.CurrentPeerRBACPolicyVersion,
+			Domains:       []store.PeerRBACDomainPermission{},
+		})
+		require.NoError(t, replaceErr)
+		eligible, eligibilityErr := m.localFederatedGuestAgentEligible(callerID)
+		require.NoError(t, eligibilityErr)
+		require.True(t, eligible)
+		resolvedPeer, resolveErr := m.ResolvePeerOperatorAgentID(ctx, agreement.RemoteChainID)
+		require.NoError(t, resolveErr)
+		require.Equal(t, peerID, resolvedPeer)
+		policy, _, policyErr := m.currentLinkedMessagePolicy(ctx, agreement, peerID)
+		require.NoError(t, policyErr)
+		require.NotNil(t, policy)
+		require.True(t, m.syncControlPeerBound(control, &peerIdentity{
+			ChainID: agreement.RemoteChainID, AgentID: peerID, Agreement: agreement,
+		}))
+
+		guestMay, err := m.CallerMayHaveLinkedMessagePeer(
+			ctx, agreement.RemoteChainID, callerID,
+		)
+		require.NoError(t, err)
+		require.True(t, guestMay,
+			"guest must not false-negative an edge only the remote host can prove")
+	})
+
+	t.Run("host has no active guest row", func(t *testing.T) {
+		pair := newLinkedMessagingPair(t)
+		paused := pair.guest
+		paused.Revision++
+		paused.State = store.FederatedGuestStatePaused
+		require.NoError(t, store.SignFederatedGroupGuest(&paused, pair.host.agentKey))
+		require.NoError(t, pipeSQLite(t, pair.host).PutFederatedGroupGuest(ctx, paused))
+
+		may, err := pair.host.mgr.CallerMayHaveLinkedMessagePeer(
+			ctx, pair.peer.chainID, pair.memberID,
+		)
+		require.NoError(t, err)
+		require.False(t, may)
+	})
+
+	t.Run("host member removed", func(t *testing.T) {
+		pair := newLinkedMessagingPair(t)
+		group, err := pair.host.badger.GetAppV23AccessGroup("linked-team")
+		require.NoError(t, err)
+		require.NoError(t, pair.host.badger.MutateAppV23AccessGroup(
+			hex.EncodeToString(pair.host.agentPub), group.GroupID, group.Name,
+			[]string{}, group.Revision, false, 20,
+		))
+
+		may, err := pair.host.mgr.CallerMayHaveLinkedMessagePeer(
+			ctx, pair.peer.chainID, pair.memberID,
+		)
+		require.NoError(t, err)
+		require.False(t, may)
+	})
+
+	t.Run("stale agreement generation", func(t *testing.T) {
+		pair := newLinkedMessagingPair(t)
+		agreement, err := pair.host.mgr.ActiveAgreement(pair.peer.chainID)
+		require.NoError(t, err)
+		stalePin := bytes.Repeat([]byte{0x7f}, ed25519.PublicKeySize)
+		require.NoError(t, pair.host.badger.SetCrossFed(
+			pair.peer.chainID, agreement.Endpoint, stalePin,
+			agreement.MaxClearance, agreement.ExpiresAt, agreement.AllowedDomains,
+			agreement.AllowedDepts, agreement.Status,
+		))
+
+		may, err := pair.host.mgr.CallerMayHaveLinkedMessagePeer(
+			ctx, pair.peer.chainID, pair.memberID,
+		)
+		require.NoError(t, err)
+		require.False(t, may)
+	})
+
+	t.Run("revoked agreement", func(t *testing.T) {
+		pair := newLinkedMessagingPair(t)
+		require.NoError(t, pair.host.badger.UpdateCrossFedStatus(
+			pair.peer.chainID, "revoked",
+		))
+		may, err := pair.host.mgr.CallerMayHaveLinkedMessagePeer(
+			ctx, pair.peer.chainID, pair.memberID,
+		)
+		require.NoError(t, err)
+		require.False(t, may)
+	})
+
+	t.Run("ineligible caller", func(t *testing.T) {
+		pair := newLinkedMessagingPair(t)
+		setLinkedTestAgentReadOnly(t, pair.host, pair.memberID, 50)
+		may, err := pair.host.mgr.CallerMayHaveLinkedMessagePeer(
+			ctx, pair.peer.chainID, pair.memberID,
+		)
+		require.NoError(t, err)
+		require.False(t, may)
+	})
+}
+
 func TestLinkedMessageDirectoryBidirectionalDiscoveryAndExactSend(t *testing.T) {
 	pair := newLinkedMessagingPair(t)
 	pair.enableBothDirections(t)
@@ -1473,6 +1613,18 @@ func TestLinkedMessagePrivateRoutesAreBoundedAndDoNotEnumerateFailures(t *testin
 			SourceAgentID: pair.guestID, TargetAgentID: unknownIDs[1],
 		},
 	)
+
+	oversizedDirectoryLimit := callLinkedMessageHandler(
+		t, pair.host.mgr.handleLinkedMessageDirectory,
+		"/fed/v1/pipe/linked/directory", authenticatedPeer,
+		LinkedMessageDirectoryRequest{
+			Version: linkedMessageDirectoryVersion, Direction: LinkedMessageGuestToMember,
+			SourceAgentID: pair.guestID, Name: "member",
+			Limit: maxLinkedMessageDirectoryResults + 1,
+		},
+	)
+	require.Equal(t, http.StatusNotFound, oversizedDirectoryLimit.Code,
+		"an attacker-controlled limit must be rejected before allocation")
 	assertSameUnavailable(
 		t, pair.host.mgr.handleLinkedMessageConsentOffer,
 		"/fed/v1/pipe/linked/consent-offer",

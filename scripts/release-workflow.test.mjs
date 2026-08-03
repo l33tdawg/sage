@@ -999,11 +999,18 @@ test('public mutations are serial, resumable, and downstream of the gate', () =>
     'verify-staged-macos-release',
     'release-metadata',
   ]);
-  assert.match(job('manual-publication-approval'), /github\.event_name == 'workflow_dispatch'/);
   assert.match(
     job('manual-publication-approval'),
-    /TESTED_PRIVATE_DRAFT_ON_TWO_MACS/,
+    /environment:\s*\n\s+name: release-two-mac-acceptance/,
   );
+  assert.doesNotMatch(job('manual-publication-approval'), /workflow_dispatch|inputs\./);
+  assert.match(job('manual-publication-approval'), /actions: read/);
+  assert.match(job('manual-publication-approval'), /deployments: read/);
+  assert.match(
+    job('manual-publication-approval'),
+    /environments\/release-two-mac-acceptance/,
+  );
+  assert.match(job('manual-publication-approval'), /required_reviewers/);
   assertNeeds('publish-docker-version', ['manual-publication-approval', 'release-metadata']);
   assertNeeds('publish-mcp', ['publish-docker-version', 'release-metadata']);
   assertNeeds('publish-pypi', ['publish-mcp', 'release-metadata']);

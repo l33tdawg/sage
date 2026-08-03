@@ -141,21 +141,26 @@ func listSnapshots(dataDir string) ([]snapshotEntry, error) {
 		if strings.HasPrefix(e.Name(), ".") || strings.HasPrefix(e.Name(), stagingPrefix) {
 			continue
 		}
-		h, parseErr := strconv.ParseInt(e.Name(), 10, 64)
-		if parseErr != nil {
-			continue
-		}
 		dir := filepath.Join(root, e.Name())
 		if _, err := os.Stat(filepath.Join(dir, OKSentinel)); err != nil {
 			continue
 		}
 		manifestBytes, readErr := os.ReadFile(filepath.Join(dir, chunkManifest))
 		var version string
+		var manifestHeight int64
 		if readErr == nil {
 			var m Manifest
 			if jsonErr := json.Unmarshal(manifestBytes, &m); jsonErr == nil {
 				version = m.BinaryVersion
+				manifestHeight = m.Height
 			}
+		}
+		h, parseErr := strconv.ParseInt(e.Name(), 10, 64)
+		if parseErr != nil {
+			if !strings.HasPrefix(e.Name(), "anchor-") || manifestHeight <= 0 {
+				continue
+			}
+			h = manifestHeight
 		}
 		out = append(out, snapshotEntry{height: h, dir: dir, binaryVersion: version})
 	}

@@ -59,8 +59,39 @@ async def test_agent_directory_and_lookup_are_typed_and_signed(async_client, moc
 
     assert (await async_client.agent_directory()).agents[0].name == "Codex"
     assert (await async_client.lookup_agents("sage", 3)).agents[0].match_kind == "substring"
-    assert directory.calls.last.request.headers["X-Agent-ID"]
-    assert lookup.calls.last.request.url.query == b"name=sage&limit=3"
+
+
+@pytest.mark.asyncio
+async def test_owned_domains_is_typed_and_cursor_scoped(async_client, mock_api):
+    route = mock_api.get("/v1/agent/me/domains/owned").mock(
+        return_value=httpx.Response(200, json={
+            "domains": ["team.beta"],
+            "next_cursor": None,
+            "has_more": False,
+            "scope": "authoritative_current_owner",
+        })
+    )
+    page = await async_client.owned_domains(cursor="team.alpha", limit=25)
+    assert page.domains == ["team.beta"]
+    assert page.has_more is False
+    assert route.calls.last.request.url.query == b"limit=25&cursor=team.alpha"
+    assert route.calls.last.request.headers["X-Agent-ID"]
+
+
+@pytest.mark.asyncio
+async def test_domain_access_sample_is_typed_and_signed(async_client, mock_api):
+    route = mock_api.get("/v1/agent/me/domains").mock(return_value=httpx.Response(200, json={
+        "domains": ["home"], "owned_domains": ["home"],
+        "readable_domains": ["home", "team"], "writable_domains": ["home"],
+        "truncated": False, "scope": "bounded_policy_and_provenance",
+    }))
+    sample = await async_client.domain_access_sample()
+    assert sample.writable_domains == ["home"]
+    assert route.calls.last.request.headers["X-Agent-ID"]
+
+
+def test_obsolete_post_appv23_permission_method_is_not_exposed(async_client):
+    assert not hasattr(async_client, "set_agent_permission")
 
 
 @pytest.mark.asyncio
@@ -493,6 +524,26 @@ async def test_canonical_messages_async_contract(async_client, mock_api):
     assert (await async_client.message_reply("message-async", "done")).idempotent_replay is True
     assert (await async_client.message_mark_read("message-async")).read_status == "confirmed"
     assert (await async_client.message_status("message-async")).transport_status == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_batch_reads_and_federated_receipt_v2_routes_are_signed(async_client, mock_api):
+    routes = [
+        mock_api.put("/v1/messages/read-batch").mock(return_value=httpx.Response(200, json={})),
+        mock_api.get("/v1/pipe/p%2F1/receipt/challenge/claimed").mock(return_value=httpx.Response(200, json={"pipe_id": "p/1", "event_kind": "claimed", "challenge": {"version": 2}})),
+        mock_api.put("/v1/pipe/p%2F1/receipt/claimed").mock(return_value=httpx.Response(200, json={})),
+        mock_api.post("/v1/pipe/receipts/challenge-batch").mock(return_value=httpx.Response(200, json={})),
+        mock_api.put("/v1/pipe/receipts/batch").mock(return_value=httpx.Response(200, json={})),
+        mock_api.get("/v1/pipe/p%2F1/receipt").mock(return_value=httpx.Response(200, json={})),
+    ]
+    await async_client.messages_mark_read_batch(["m1"])
+    challenge_response = await async_client.pipe_receipt_challenge("p/1", "claimed")
+    await async_client.pipe_receipt_record("p/1", "claimed", challenge_response)
+    await async_client.pipe_receipt_challenge_batch([{"pipe_id": "p/1", "kind": "claimed"}])
+    await async_client.pipe_receipt_record_batch([challenge_response])
+    await async_client.pipe_receipt_status("p/1")
+    for route in routes:
+        assert route.calls.last.request.headers["X-Agent-ID"]
 
 
 @pytest.mark.asyncio

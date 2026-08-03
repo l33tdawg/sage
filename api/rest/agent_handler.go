@@ -875,7 +875,7 @@ type agentNameFinder interface {
 }
 
 type agentDirectoryLister interface {
-	ListAgentDirectory(ctx context.Context) ([]*store.AgentEntry, error)
+	ListAgentDirectory(ctx context.Context, limit int) ([]*store.AgentEntry, error)
 }
 
 type agentDirectoryEntry struct {
@@ -890,6 +890,7 @@ type agentDirectoryEntry struct {
 // avoids ListAgents' derived memory-count query because sage_directory never
 // exposes administrative records or per-agent memory totals.
 func (s *Server) handleListAgentDirectory(w http.ResponseWriter, r *http.Request) {
+	const maxLocalDirectoryEntries = 100
 	if s.agentStore == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "Agent store unavailable", "Agent store not configured.")
 		return
@@ -900,12 +901,19 @@ func (s *Server) handleListAgentDirectory(w http.ResponseWriter, r *http.Request
 			"The configured agent store does not support metadata-only directory reads.")
 		return
 	}
-	agents, err := lister.ListAgentDirectory(r.Context())
+	// Fetch one sentinel row beyond the public cap so callers learn that the
+	// projection is incomplete without a second count query or an unbounded
+	// roster scan. Named discovery remains available through /v1/agents/find.
+	agents, err := lister.ListAgentDirectory(r.Context(), maxLocalDirectoryEntries+1)
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Directory error", "The agent directory could not be read.")
 		return
 	}
-	directory := make([]agentDirectoryEntry, 0, len(agents))
+	directory := make([]agentDirectoryEntry, 0, min(len(agents), maxLocalDirectoryEntries))
+	// The sentinel is evaluated before canonical filtering. Some SQL-visible
+	// rows may be pending/inactive on chain, so the bounded page can contain
+	// fewer than 100 returned recipients and still be incomplete.
+	truncated := len(agents) > maxLocalDirectoryEntries
 	for _, agent := range agents {
 		if agent == nil || agent.AgentID == "" {
 			continue
@@ -919,23 +927,41 @@ func (s *Server) handleListAgentDirectory(w http.ResponseWriter, r *http.Request
 		if !active {
 			continue
 		}
+		if len(directory) == maxLocalDirectoryEntries {
+			break
+		}
 		directory = append(directory, agentDirectoryEntry{
 			AgentID: agent.AgentID, Name: agent.Name,
 			RegisteredName: agent.RegisteredName, Provider: agent.Provider,
 			Status: "active",
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agents": directory, "total": len(directory)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"agents": directory, "total": len(directory), "truncated": truncated,
+	})
 }
 
 type agentNamePageFinder interface {
 	FindAgentsByNamePage(ctx context.Context, name string, limit, offset int) ([]*store.AgentEntry, error)
 }
 
+type agentLookupCandidateFinder interface {
+	FindAgentLookupCandidates(ctx context.Context, name string, limit int) ([]*store.AgentEntry, error)
+}
+
 type agentLookupResult struct {
 	*store.AgentEntry
 	MatchKind string `json:"match_kind"`
 }
+
+const (
+	agentLookupCandidatePageSize  = 20
+	agentLookupCandidateBatchSize = 160
+	// Candidate enrollment is rechecked against consensus one row at a time.
+	// Bound a hostile pending-registration prefix so one friendly-name lookup
+	// cannot amplify into thousands of SQL pages and Badger reads.
+	maxAgentLookupCandidatePages = 8
+)
 
 // equalAgentLookupField applies the lookup endpoint's documented comparison:
 // ASCII letters are case-insensitive while every non-ASCII byte retains its
@@ -961,7 +987,8 @@ func equalAgentLookupField(left, right string) bool {
 
 func agentLookupMatchKind(query string, agent *store.AgentEntry) string {
 	if agent != nil &&
-		(equalAgentLookupField(query, agent.Name) ||
+		(equalAgentLookupField(query, agent.AgentID) ||
+			equalAgentLookupField(query, agent.Name) ||
 			equalAgentLookupField(query, agent.RegisteredName) ||
 			equalAgentLookupField(query, agent.Provider)) {
 		return "exact"
@@ -1002,24 +1029,26 @@ func (s *Server) handleFindRegisteredAgents(w http.ResponseWriter, r *http.Reque
 	// requested number of canonical recipients is found or the query is
 	// exhausted. Applying the public limit before this filter lets 20 pending
 	// self-registrations hide every later active match.
-	const (
-		candidatePageSize = 20
-		maxCandidatePages = 256
-	)
 	pager, paged := s.agentStore.(agentNamePageFinder)
+	candidateFinder, hasCandidateFinder := s.agentStore.(agentLookupCandidateFinder)
 	sanitized := make([]agentLookupResult, 0, limit)
 	seen := make(map[string]struct{}, limit)
+	foundExact := false
 	for offset := 0; len(sanitized) < limit; {
-		if paged && offset/candidatePageSize >= maxCandidatePages {
+		if !hasCandidateFinder && paged && offset/agentLookupCandidatePageSize >= maxAgentLookupCandidatePages {
 			writeProblem(w, http.StatusServiceUnavailable, "Lookup incomplete",
 				"The bounded agent candidate scan was exhausted; narrow the name query.")
 			return
 		}
 		var agents []*store.AgentEntry
 		var err error
-		if paged {
+		if hasCandidateFinder {
+			agents, err = candidateFinder.FindAgentLookupCandidates(
+				r.Context(), name, agentLookupCandidateBatchSize,
+			)
+		} else if paged {
 			agents, err = pager.FindAgentsByNamePage(
-				r.Context(), name, candidatePageSize, offset,
+				r.Context(), name, agentLookupCandidatePageSize, offset,
 			)
 		} else {
 			// Compatibility for tests and third-party stores that implement the
@@ -1048,15 +1077,22 @@ func (s *Server) handleFindRegisteredAgents(w http.ResponseWriter, r *http.Reque
 			if !active {
 				continue
 			}
+			matchKind := agentLookupMatchKind(name, agent)
+			foundExact = foundExact || matchKind == "exact"
 			sanitized = append(sanitized, agentLookupResult{
 				AgentEntry: sanitizeAgentForRead(agent, false),
-				MatchKind:  agentLookupMatchKind(name, agent),
+				MatchKind:  matchKind,
 			})
 			if len(sanitized) == limit {
 				break
 			}
 		}
-		if !paged || len(agents) < candidatePageSize {
+		if hasCandidateFinder && len(agents) == agentLookupCandidateBatchSize && len(sanitized) < limit && !foundExact {
+			writeProblem(w, http.StatusServiceUnavailable, "Lookup incomplete",
+				"The bounded agent candidate scan was exhausted; narrow the name query.")
+			return
+		}
+		if hasCandidateFinder || !paged || len(agents) < agentLookupCandidatePageSize {
 			break
 		}
 		offset += len(agents)

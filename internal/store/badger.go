@@ -272,7 +272,7 @@ func (s *BadgerStore) update(fn func(*badger.Txn) error) error {
 // savepoint-like safety property: Badger has no rollback-to-savepoint, so a
 // boundary that errors after touching the transaction poisons the whole outer
 // transaction and Commit is refused.
-func (s *BadgerStore) txnSet(txn *badger.Txn, key, value []byte) error {
+func (s *BadgerStore) txnSetPrimitive(txn *badger.Txn, key, value []byte) error {
 	if s.txn != nil {
 		s.writeAttempts++
 		if s.writeFaultHook != nil {
@@ -297,6 +297,46 @@ func (s *BadgerStore) txnSet(txn *badger.Txn, key, value []byte) error {
 		}
 	}
 	return err
+}
+
+func (s *BadgerStore) txnSet(txn *badger.Txn, key, value []byte) error {
+	var oldOwner, newOwner, domain string
+	indexActive := false
+	if bytes.HasPrefix(key, []byte("domain:")) {
+		var activeErr error
+		indexActive, activeErr = appV26DomainOwnerIndexActiveTxn(txn)
+		if activeErr != nil {
+			return activeErr
+		}
+		if indexActive {
+			domain = strings.TrimPrefix(string(key), "domain:")
+			var decodeErr error
+			newOwner, decodeErr = decodeDomainOwner(value)
+			if decodeErr != nil {
+				return decodeErr
+			}
+			if oldValue, readErr := s.appV23ReadEffectiveValueTxn(txn, key); readErr == nil {
+				oldOwner, decodeErr = decodeDomainOwner(oldValue)
+				if decodeErr != nil {
+					return decodeErr
+				}
+			} else if !errors.Is(readErr, badger.ErrKeyNotFound) {
+				return readErr
+			}
+		}
+	}
+	if err := s.txnSetPrimitive(txn, key, value); err != nil {
+		return err
+	}
+	if !indexActive {
+		return nil
+	}
+	if oldOwner != "" && oldOwner != newOwner {
+		if err := s.txnDelete(txn, appV26DomainOwnerIndexKey(oldOwner, domain)); err != nil {
+			return err
+		}
+	}
+	return s.txnSetPrimitive(txn, appV26DomainOwnerIndexKey(newOwner, domain), []byte{1})
 }
 
 func (s *BadgerStore) txnDelete(txn *badger.Txn, key []byte) error {

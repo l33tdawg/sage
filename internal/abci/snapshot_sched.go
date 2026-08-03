@@ -33,8 +33,16 @@
 package abci
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,6 +107,16 @@ type SnapshotSchedulerConfig struct {
 	// Required when HeightInterval or TimeInterval is non-zero so the
 	// scheduler can call (*badger.DB).Backup without lockfile conflict.
 	LiveBadger *badger.DB
+
+	// CometDBBackend is the backend used by cometbft/{state,blockstore}.db.
+	// Verified upgrade snapshots reopen the captured copies with this backend.
+	CometDBBackend string
+
+	// binarySourcePath is a test-only source override. Production callers leave
+	// it empty so the scheduler pins the inode returned by os.Executable. Keeping
+	// this unexported prevents runtime configuration from substituting some other
+	// file for the executable embedded in a recovery snapshot.
+	binarySourcePath string
 }
 
 // SnapshotScheduler coordinates Commit-tail snapshot triggers.
@@ -120,11 +138,27 @@ type SnapshotScheduler struct {
 	// idleCheckEvery is the idle-flush poll cadence, resolved from
 	// defaultIdleFlushCheckInterval in NewSnapshotScheduler. Tests may
 	// shorten it before the first Tick (the loop starts lazily there).
-	idleCheckEvery time.Duration
-	stopIdle       chan struct{}
-	stopOnce       sync.Once
+	idleCheckEvery  time.Duration
+	stopIdle        chan struct{}
+	stopOnce        sync.Once
+	scheduledCtx    context.Context
+	cancelScheduled context.CancelFunc
 
-	inFlight atomic.Bool
+	inFlight      atomic.Bool
+	quiesced      atomic.Bool
+	draining      atomic.Bool
+	flightMu      sync.Mutex
+	flightDone    chan struct{}
+	prepareMu     sync.Mutex
+	prepareActive bool
+
+	// binarySource is opened once while this process still owns its original
+	// executable inode. A macOS/Linux updater may replace os.Executable()'s
+	// pathname before restart; retaining this descriptor prevents a rollback
+	// snapshot from accidentally embedding the incoming binary instead.
+	binarySource    *os.File
+	binarySHA256    string
+	requireVaultKey bool
 }
 
 // NewSnapshotScheduler builds a scheduler from cfg + logger. Returns nil
@@ -144,13 +178,43 @@ func NewSnapshotScheduler(cfg SnapshotSchedulerConfig, logger zerolog.Logger) *S
 	if cfg.KeepLast <= 0 {
 		cfg.KeepLast = defaultSnapshotKeepLast
 	}
+	schedulingCtx, cancelScheduling := context.WithCancel(context.Background())
 	s := &SnapshotScheduler{
-		cfg:            cfg,
-		logger:         logger.With().Str("component", "snapshot-scheduler").Logger(),
-		lastTime:       time.Now(),
-		idleCheckEvery: defaultIdleFlushCheckInterval,
-		stopIdle:       make(chan struct{}),
+		cfg:             cfg,
+		logger:          logger.With().Str("component", "snapshot-scheduler").Logger(),
+		lastTime:        time.Now(),
+		idleCheckEvery:  defaultIdleFlushCheckInterval,
+		stopIdle:        make(chan struct{}),
+		flightDone:      make(chan struct{}),
+		scheduledCtx:    schedulingCtx,
+		cancelScheduled: cancelScheduling,
 	}
+	if cfg.VaultKeyPath != "" {
+		if info, statErr := os.Stat(cfg.VaultKeyPath); statErr == nil && !info.IsDir() {
+			s.requireVaultKey = true
+		}
+	}
+	close(s.flightDone)
+	executable := cfg.binarySourcePath
+	var executableErr error
+	if executable == "" {
+		executable, executableErr = os.Executable()
+	}
+	if executableErr == nil {
+		if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil {
+			if source, openErr := os.Open(resolved); openErr == nil { //nolint:gosec // current process executable
+				s.binarySource = source
+				hash := sha256.New()
+				if info, statErr := source.Stat(); statErr == nil {
+					_, _ = io.Copy(hash, io.NewSectionReader(source, 0, info.Size()))
+					s.binarySHA256 = hex.EncodeToString(hash.Sum(nil))
+				}
+			}
+		}
+	}
+	// Initialization can hash a large signed app binary. Cadence begins only
+	// after that work finishes, not while the scheduler is still being built.
+	s.lastTime = time.Now()
 	s.logger.Info().
 		Int64("height_interval", cfg.HeightInterval).
 		Dur("time_interval", cfg.TimeInterval).
@@ -167,7 +231,7 @@ func NewSnapshotScheduler(cfg SnapshotSchedulerConfig, logger zerolog.Logger) *S
 // firing is dispatched to a goroutine. height and appHash describe the
 // block we just committed.
 func (s *SnapshotScheduler) Tick(height int64, appHash []byte) {
-	if s == nil {
+	if s == nil || s.quiesced.Load() {
 		return
 	}
 
@@ -196,7 +260,7 @@ func (s *SnapshotScheduler) Tick(height int64, appHash []byte) {
 	if !fire {
 		return
 	}
-	if !s.inFlight.CompareAndSwap(false, true) {
+	if !s.beginFlight(false) {
 		// Previous snapshot still running — skip this tick.
 		return
 	}
@@ -209,16 +273,277 @@ func (s *SnapshotScheduler) Tick(height int64, appHash []byte) {
 // snapshot runs on a goroutine. If a snapshot is already in flight the
 // call is a no-op (the watchdog can poll inFlight or just retry).
 func (s *SnapshotScheduler) Trigger(height int64, appHash []byte, reason string) {
-	if s == nil {
+	if s == nil || s.quiesced.Load() {
 		return
 	}
-	if !s.inFlight.CompareAndSwap(false, true) {
+	if !s.beginFlight(false) {
 		s.logger.Warn().Int64("height", height).Str("reason", reason).Msg("snapshot trigger skipped: another snapshot in flight")
 		return
 	}
 	ahCopy := make([]byte, len(appHash))
 	copy(ahCopy, appHash)
 	go s.runTake(height, ahCopy, reason)
+}
+
+// TakeVerified blocks until a complete, functionally restorable snapshot of
+// the exact requested committed state exists. It is the update/restart safety
+// gate: callers must not mutate an installed executable or request process
+// restart unless this method returns nil.
+//
+// A completed snapshot at the same height may be reused, but only after full
+// verification and exact height/AppHash/running-binary provenance checks.
+func (s *SnapshotScheduler) TakeVerified(
+	ctx context.Context,
+	height int64,
+	appHash []byte,
+	reason string,
+	confirm func(*snapshot.Manifest) error,
+) (*snapshot.Manifest, error) {
+	if s == nil {
+		return nil, fmt.Errorf("verified snapshot scheduler is unavailable")
+	}
+	if height <= 0 || len(appHash) == 0 {
+		return nil, fmt.Errorf("verified snapshot requires a committed height and AppHash")
+	}
+	if s.binarySource == nil || s.binarySHA256 == "" {
+		return nil, fmt.Errorf("running binary provenance is unavailable")
+	}
+	if !s.beginFlight(true) {
+		return nil, fmt.Errorf("another snapshot is already in progress; retry after it finishes")
+	}
+	defer s.endFlight()
+
+	snapshotDir := filepath.Join(s.cfg.DataDir, "snapshots", fmt.Sprintf("%d", height))
+	var manifest *snapshot.Manifest
+	var publishedIdentity [sha256.Size]byte
+	if _, sentinelErr := os.Stat(filepath.Join(snapshotDir, snapshot.OKSentinel)); sentinelErr == nil {
+		var readErr error
+		manifest, publishedIdentity, readErr = snapshot.ReadManifestIdentity(snapshotDir)
+		if readErr == nil {
+			readErr = s.verifySnapshotIntrinsic(snapshotDir, manifest)
+		}
+		if readErr != nil {
+			if _, quarantineErr := snapshot.QuarantinePublished(snapshotDir, publishedIdentity); quarantineErr != nil {
+				return nil, fmt.Errorf("published snapshot is invalid (%v) and could not be quarantined: %w", readErr, quarantineErr)
+			}
+			manifest = nil
+		} else if manifest.Height != height || !bytes.Equal(manifest.AppHash, appHash) {
+			return nil, fmt.Errorf("snapshot state provenance mismatch at height %d", height)
+		} else if currentErr := s.verifyCurrentBinaryProvenance(manifest); currentErr != nil {
+			if _, preserveErr := snapshot.PreservePublishedAnchor(snapshotDir, publishedIdentity, manifest.BinaryVersion); preserveErr != nil {
+				return nil, fmt.Errorf("preserve valid prior-version snapshot: %w", preserveErr)
+			}
+			manifest = nil
+		}
+	} else if !os.IsNotExist(sentinelErr) {
+		return nil, fmt.Errorf("inspect published snapshot: %w", sentinelErr)
+	}
+
+	var candidate *snapshot.Candidate
+	if manifest == nil {
+		var takeErr error
+		candidate, takeErr = snapshot.TakeCandidate(ctx, s.cfg.DataDir, height, appHash, reason, snapshot.Options{
+			BinaryVersion:   s.cfg.BinaryVersion,
+			VaultKeyPath:    s.cfg.VaultKeyPath,
+			VaultEncrypted:  s.cfg.VaultEncrypted,
+			VaultPassphrase: s.cfg.VaultPassphrase,
+			IncludeBinary:   true,
+			BinarySource:    s.binarySource,
+			LiveBadger:      s.cfg.LiveBadger,
+		})
+		if takeErr != nil {
+			return nil, fmt.Errorf("take pre-upgrade snapshot: %w", takeErr)
+		}
+		manifest = candidate.Manifest
+		snapshotDir = candidate.Dir()
+	}
+	discardCandidate := func() {
+		if candidate != nil {
+			_ = candidate.Discard()
+		}
+	}
+	if err := s.verifyTransitionSnapshot(snapshotDir, manifest, height, appHash); err != nil {
+		discardCandidate()
+		return nil, err
+	}
+	if confirm != nil {
+		if err := confirm(manifest); err != nil {
+			discardCandidate()
+			return nil, err
+		}
+	}
+	if candidate != nil {
+		published, err := candidate.Publish()
+		if err != nil {
+			discardCandidate()
+			return nil, fmt.Errorf("publish pre-upgrade snapshot: %w", err)
+		}
+		manifest = published
+	}
+
+	s.mu.Lock()
+	s.lastHeight = height
+	s.lastTime = time.Now()
+	s.mu.Unlock()
+	s.pruneRetention()
+	return manifest, nil
+}
+
+func (s *SnapshotScheduler) verifyTransitionSnapshot(snapshotDir string, manifest *snapshot.Manifest, height int64, appHash []byte) error {
+	if err := s.verifySnapshotIntrinsic(snapshotDir, manifest); err != nil {
+		return err
+	}
+	if manifest == nil || manifest.Height != height || !bytes.Equal(manifest.AppHash, appHash) {
+		return fmt.Errorf("snapshot state provenance mismatch at height %d", height)
+	}
+	return s.verifyCurrentBinaryProvenance(manifest)
+}
+
+func (s *SnapshotScheduler) verifyCurrentBinaryProvenance(manifest *snapshot.Manifest) error {
+	if manifest.BinaryVersion != s.cfg.BinaryVersion {
+		return fmt.Errorf("snapshot binary version %q does not match running %q", manifest.BinaryVersion, s.cfg.BinaryVersion)
+	}
+	wantBinaryName := filepath.ToSlash(filepath.Join("binary", "sage-gui-"+s.cfg.BinaryVersion))
+	if os.PathSeparator == '\\' {
+		wantBinaryName += ".exe"
+	}
+	foundBinary := false
+	for _, chunk := range manifest.Chunks {
+		if filepath.ToSlash(chunk.Name) != wantBinaryName {
+			continue
+		}
+		foundBinary = true
+		if chunk.SHA256 != s.binarySHA256 {
+			return fmt.Errorf("snapshot binary provenance mismatch (got %s want %s)", chunk.SHA256, s.binarySHA256)
+		}
+	}
+	if !foundBinary {
+		return errors.New("snapshot omits the running rollback binary")
+	}
+	return nil
+}
+
+// PreserveRunningBinary materializes the exact executable inode pinned when
+// this scheduler was created. A Finder drag-replacement may already have
+// replaced os.Executable()'s pathname by restart time; this independently
+// verified recovery path lets the drained process re-exec its actual old
+// binary if the final stopped-state snapshot gate fails. It never scans for an
+// arbitrary older binary and never mutates chain data.
+func (s *SnapshotScheduler) PreserveRunningBinary() (string, error) {
+	if s == nil || s.binarySource == nil || len(s.binarySHA256) != sha256.Size*2 || s.cfg.BinaryVersion == "" {
+		return "", errors.New("running executable provenance is unavailable")
+	}
+	recoveryDir := filepath.Join(s.cfg.DataDir, "recovery")
+	if err := os.MkdirAll(recoveryDir, 0o700); err != nil {
+		return "", fmt.Errorf("create executable recovery directory: %w", err)
+	}
+	versionPart := strings.NewReplacer("/", "_", "\\", "_", string(os.PathSeparator), "_").Replace(s.cfg.BinaryVersion)
+	destination := filepath.Join(recoveryDir, "sage-gui-"+versionPart+"-"+s.binarySHA256[:16])
+	verify := func(path string) error {
+		file, err := os.Open(path) //nolint:gosec // fixed recovery path under configured data directory
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		hash := sha256.New()
+		if _, err := io.Copy(hash, file); err != nil {
+			return err
+		}
+		if got := hex.EncodeToString(hash.Sum(nil)); got != s.binarySHA256 {
+			return fmt.Errorf("recovery executable hash %s does not match pinned %s", got, s.binarySHA256)
+		}
+		return nil
+	}
+	if info, err := os.Lstat(destination); err == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return "", errors.New("recovery executable is not a real regular file")
+		}
+		if err := verify(destination); err != nil {
+			return "", err
+		}
+		return destination, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("inspect recovery executable: %w", err)
+	}
+	temp, err := os.CreateTemp(recoveryDir, ".sage-gui-recovery-*")
+	if err != nil {
+		return "", fmt.Errorf("create recovery executable: %w", err)
+	}
+	tempPath := temp.Name()
+	keep := false
+	defer func() {
+		_ = temp.Close()
+		if !keep {
+			_ = os.Remove(tempPath)
+		}
+	}()
+	info, err := s.binarySource.Stat()
+	if err != nil {
+		return "", fmt.Errorf("stat pinned executable: %w", err)
+	}
+	if _, err := io.Copy(temp, io.NewSectionReader(s.binarySource, 0, info.Size())); err != nil {
+		return "", fmt.Errorf("copy pinned executable: %w", err)
+	}
+	if err := temp.Chmod(0o700); err != nil {
+		return "", fmt.Errorf("make recovery executable launchable: %w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		return "", fmt.Errorf("sync recovery executable: %w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return "", fmt.Errorf("close recovery executable: %w", err)
+	}
+	if err := verify(tempPath); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tempPath, destination); err != nil {
+		return "", fmt.Errorf("publish recovery executable: %w", err)
+	}
+	keep = true
+	dir, err := os.Open(recoveryDir) //nolint:gosec // configured recovery directory
+	if err != nil {
+		return "", fmt.Errorf("open recovery directory for sync: %w", err)
+	}
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	if syncErr != nil || closeErr != nil {
+		return "", errors.Join(syncErr, closeErr)
+	}
+	if err := verify(destination); err != nil {
+		return "", err
+	}
+	return destination, nil
+}
+
+func (s *SnapshotScheduler) verifySnapshotIntrinsic(snapshotDir string, manifest *snapshot.Manifest) error {
+	if manifest == nil || manifest.Height <= 0 || len(manifest.AppHash) == 0 || manifest.BinaryVersion == "" {
+		return errors.New("snapshot manifest provenance is incomplete")
+	}
+	wantBinaryName := filepath.ToSlash(filepath.Join("binary", "sage-gui-"+manifest.BinaryVersion))
+	if os.PathSeparator == '\\' {
+		wantBinaryName += ".exe"
+	}
+	foundBinary := false
+	for _, chunk := range manifest.Chunks {
+		if filepath.ToSlash(chunk.Name) == wantBinaryName {
+			foundBinary = true
+			break
+		}
+	}
+	if !foundBinary {
+		return errors.New("snapshot omits its declared rollback binary")
+	}
+	if err := snapshot.VerifyWithOptions(snapshotDir, snapshot.VerifyOptions{
+		VaultPassphrase:       s.cfg.VaultPassphrase,
+		RequireRecoveryConfig: true,
+		RequireVaultKey:       s.requireVaultKey,
+		CometDBBackend:        s.cfg.CometDBBackend,
+		ExpectedCometHeight:   manifest.Height,
+		ExpectedCometAppHash:  append([]byte(nil), manifest.AppHash...),
+	}); err != nil {
+		return fmt.Errorf("verify pre-upgrade snapshot: %w", err)
+	}
+	return nil
 }
 
 // shouldFireLocked consults the cadence config. Caller holds s.mu.
@@ -280,23 +605,128 @@ func (s *SnapshotScheduler) Close() {
 	if s == nil {
 		return
 	}
+	s.flightMu.Lock()
+	s.quiesced.Store(true)
+	s.flightMu.Unlock()
+	s.cancelScheduled()
 	s.stopOnce.Do(func() { close(s.stopIdle) })
+}
+
+// Quiesce permanently disables cadence/idle triggers for this scheduler and
+// waits for any snapshot already in flight. The explicit TakeVerified gate is
+// still available afterward for the final stopped-node snapshot.
+func (s *SnapshotScheduler) Quiesce(ctx context.Context) error {
+	commit, abort, err := s.PrepareQuiesce(ctx)
+	if err != nil {
+		return err
+	}
+	commit()
+	_ = abort
+	return nil
+}
+
+// PrepareQuiesce creates a reversible pre-drain barrier. No new scheduled
+// snapshot can start while preparation is pending. The caller must invoke
+// exactly one returned closure: commit permanently closes cadence, while abort
+// restores admission after a failed/abandoned restart.
+func (s *SnapshotScheduler) PrepareQuiesce(ctx context.Context) (commit func(), abort func(), err error) {
+	if s == nil {
+		return nil, nil, errors.New("snapshot scheduler is unavailable")
+	}
+	s.prepareMu.Lock()
+	if s.quiesced.Load() {
+		s.prepareMu.Unlock()
+		return func() {}, func() {}, nil
+	}
+	if s.prepareActive {
+		s.prepareMu.Unlock()
+		return nil, nil, errors.New("snapshot drain preparation already in progress")
+	}
+	s.prepareActive = true
+	s.draining.Store(true)
+	s.prepareMu.Unlock()
+	s.flightMu.Lock()
+	done := s.flightDone
+	s.flightMu.Unlock()
+	select {
+	case <-done:
+		var once sync.Once
+		commit = func() {
+			once.Do(func() {
+				s.prepareMu.Lock()
+				s.quiesced.Store(true)
+				s.prepareActive = false
+				s.Close()
+				s.prepareMu.Unlock()
+			})
+		}
+		abort = func() {
+			once.Do(func() {
+				s.prepareMu.Lock()
+				s.draining.Store(false)
+				s.prepareActive = false
+				s.prepareMu.Unlock()
+			})
+		}
+		return commit, abort, nil
+	case <-ctx.Done():
+		// Preparation is reversible until every in-flight reader has left. A
+		// restart timeout therefore leaves the live node and scheduler usable.
+		s.prepareMu.Lock()
+		s.draining.Store(false)
+		s.prepareActive = false
+		s.prepareMu.Unlock()
+		return nil, nil, fmt.Errorf("wait for in-flight snapshot: %w", ctx.Err())
+	}
+}
+
+// WaitIdle joins the current snapshot after Quiesce has canceled it. Lifecycle
+// owners that cannot safely close live stores while a backup still owns their
+// handles can use this after any operator-visible grace deadline.
+func (s *SnapshotScheduler) WaitIdle() {
+	if s == nil {
+		return
+	}
+	s.flightMu.Lock()
+	done := s.flightDone
+	s.flightMu.Unlock()
+	<-done
+}
+
+func (s *SnapshotScheduler) beginFlight(manual bool) bool {
+	s.flightMu.Lock()
+	defer s.flightMu.Unlock()
+	if s.inFlight.Load() || (!manual && (s.quiesced.Load() || s.draining.Load())) {
+		return false
+	}
+	s.flightDone = make(chan struct{})
+	s.inFlight.Store(true)
+	return true
+}
+
+func (s *SnapshotScheduler) endFlight() {
+	s.flightMu.Lock()
+	if s.inFlight.Swap(false) {
+		close(s.flightDone)
+	}
+	s.flightMu.Unlock()
 }
 
 // runTake is the goroutine body. It calls snapshot.Take, updates the
 // last-success markers on success, and clears inFlight unconditionally.
 func (s *SnapshotScheduler) runTake(height int64, appHash []byte, reason string) {
-	defer s.inFlight.Store(false)
+	defer s.endFlight()
 
 	start := time.Now()
 	s.logger.Info().Int64("height", height).Str("reason", reason).Msg("snapshot.Take starting")
 
-	manifest, err := snapshot.Take(context.Background(), s.cfg.DataDir, height, appHash, reason, snapshot.Options{
+	manifest, err := snapshot.Take(s.scheduledCtx, s.cfg.DataDir, height, appHash, reason, snapshot.Options{
 		BinaryVersion:   s.cfg.BinaryVersion,
 		VaultKeyPath:    s.cfg.VaultKeyPath,
 		VaultEncrypted:  s.cfg.VaultEncrypted,
 		VaultPassphrase: s.cfg.VaultPassphrase,
 		IncludeBinary:   true,
+		BinarySource:    s.binarySource,
 		LiveBadger:      s.cfg.LiveBadger,
 	})
 	if err != nil {

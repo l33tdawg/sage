@@ -310,8 +310,8 @@ func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineM
 		// message provenance. It is bound by the event and filled by the caller
 		// before admission; reject an absent/aliased value rather than guess.
 		inboundReceipt.RecipientChainID = msg.FederationReceiptRecipientChainID
-		if err := validateFederatedReceiptBinding(*inboundReceipt); err != nil {
-			return "", false, err
+		if validationErr := validateFederatedReceiptBinding(*inboundReceipt); validationErr != nil {
+			return "", false, validationErr
 		}
 	}
 	err = s.runPipelineTx(ctx, func(txStore OffchainStore) error {

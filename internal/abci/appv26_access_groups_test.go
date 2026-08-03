@@ -187,8 +187,8 @@ func TestAppV26AgentDeactivationMovesCurrentDomainAuthorityToRootAtHPlusOne(t *t
 			require.Zero(t, result.Code, result.Log)
 
 			for _, domain := range []string{"retired-home", "retired-shared"} {
-				owner, err := app.badgerStore.GetDomainOwner(domain)
-				require.NoError(t, err)
+				owner, ownerErr := app.badgerStore.GetDomainOwner(domain)
+				require.NoError(t, ownerErr)
 				if test.wantRoot {
 					require.Equal(t, root.PrincipalID, owner)
 				} else {
@@ -234,6 +234,16 @@ func TestAppV26ActivationMigratesGroupsAndCrashReplayIsDeterministic(t *testing.
 	legacy, err := app.badgerStore.GetAppV23AccessGroup("legacy-team")
 	require.NoError(t, err)
 	require.Empty(t, legacy.MemberAuthority)
+	ownerEnrollmentBeforeRepair, err := app.badgerStore.GetAppV23Enrollment(owner.id)
+	require.NoError(t, err)
+	// Persist the exact invalid home shape emitted by the historical app-v25
+	// batch bug so activation crash/replay covers both group authority and the
+	// local-RBAC repair in one consensus transaction.
+	require.NoError(t, app.badgerStore.SetState(
+		"shared_domain:"+ownerEnrollmentBeforeRepair.HomeDomain, []byte{1},
+	))
+	require.Error(t, app.badgerStore.ValidateAppV23State())
+	require.NoError(t, app.badgerStore.ValidateAppV23StateForPreV26Recovery())
 
 	app.appV20AppliedHeight = 10
 	app.appV21AppliedHeight = 20
@@ -287,6 +297,8 @@ func TestAppV26ActivationMigratesGroupsAndCrashReplayIsDeterministic(t *testing.
 	stillLegacy, err := app.badgerStore.GetAppV23AccessGroup("legacy-team")
 	require.NoError(t, err)
 	require.Empty(t, stillLegacy.MemberAuthority)
+	require.Error(t, app.badgerStore.ValidateAppV23State(),
+		"discarding the activation overlay must also discard the home repair")
 	replayed, err := app.FinalizeBlock(context.Background(), request)
 	require.NoError(t, err)
 	require.Equal(t, firstHash, replayed.AppHash)
@@ -297,6 +309,10 @@ func TestAppV26ActivationMigratesGroupsAndCrashReplayIsDeterministic(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, store.AppV26GroupAuthorityRead, migrated.MemberAuthority)
 	require.Equal(t, legacy.Revision, migrated.Revision)
+	require.NoError(t, app.badgerStore.ValidateAppV23State())
+	ownerEnrollmentAfterRepair, err := app.badgerStore.GetAppV23Enrollment(owner.id)
+	require.NoError(t, err)
+	require.NotEqual(t, ownerEnrollmentBeforeRepair.HomeDomain, ownerEnrollmentAfterRepair.HomeDomain)
 	retiredOwner, err := app.badgerStore.GetDomainOwner("activation-height-retiring")
 	require.NoError(t, err)
 	require.Equal(t, rootState.PrincipalID, retiredOwner)

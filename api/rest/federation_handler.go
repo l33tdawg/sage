@@ -30,6 +30,20 @@ const (
 	maxFederatedContactAuthorizationBytes   = 256
 )
 
+func (s *Server) acquireFederationProbe(ctx context.Context) (func(), bool) {
+	if s.federationProbeSem == nil {
+		// Preserve small hand-built test servers while production NewServer
+		// always installs the process-wide budget.
+		return func() {}, true
+	}
+	select {
+	case s.federationProbeSem <- struct{}{}:
+		return func() { <-s.federationProbeSem }, true
+	case <-ctx.Done():
+		return nil, false
+	}
+}
+
 // requireNodeOperator gates local control of off-consensus federation work.
 // The historical name reflects the pre-v23 exact-node-operator rule. App-v23
 // separates that peer-pinned transport identity from CEREBRUM control, so only
@@ -98,6 +112,14 @@ type federationAgreementMutationLeaser interface {
 
 type federationSyncPolicyGenerationLeaser interface {
 	BeginSyncPolicyGenerationMutation(remoteChainID string) *federation.SyncPolicyGenerationMutation
+}
+
+// federationLinkedMessagePeerHint answers only whether one active agreement
+// may contain a caller-scoped linked-message edge. It is deliberately a local
+// authority hint, not a contact lookup: the bounded live peer request still
+// performs the exact recipient authorization and reveals no unrelated agent.
+type federationLinkedMessagePeerHint interface {
+	CallerMayHaveLinkedMessagePeer(ctx context.Context, remoteChainID, callerID string) (bool, error)
 }
 
 var _ federationAgreementMutationLeaser = (*federation.Manager)(nil)
@@ -556,8 +578,13 @@ type federationLinkedMessageDirectoryLister interface {
 }
 
 const (
-	maxAgentFederationTargets    = 64
-	maxFederationAvailablePeers  = 64
+	maxAgentFederationTargets   = 64
+	maxFederationAvailablePeers = 64
+	// A friendly-name lookup is a convenience path, not a topology crawl. One
+	// peer may require status plus legacy and linked-directory probes, so keep
+	// the default negative-lookup fan-out small. Callers that already know an
+	// exact agent_id@chain address bypass discovery entirely.
+	maxFederatedNameLookupPeers  = 8
 	maxConcurrentFedAvailability = 8
 )
 
@@ -632,18 +659,16 @@ func (s *Server) federationRecallTargets(ctx context.Context, requested []string
 		status *federation.StatusResponse
 	}
 	probes := make([]probe, len(candidates))
-	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	for i, chain := range candidates {
 		wg.Add(1)
 		go func(index int, chainID string) {
 			defer wg.Done()
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
+			release, acquired := s.acquireFederationProbe(ctx)
+			if !acquired {
 				return
 			}
+			defer release()
 			status, statusErr := s.federation.PeerStatus(ctx, chainID)
 			if statusErr == nil {
 				probes[index] = probe{chain: chainID, status: status}
@@ -711,6 +736,32 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 		}
 		agentLimit = parsed
 	}
+	peerCursor := strings.TrimSpace(r.URL.Query().Get("peer_cursor"))
+	if len(peerCursor) > 128 {
+		writeProblem(w, http.StatusBadRequest, "Invalid peer cursor", "peer_cursor must be the bounded continuation returned by the previous call")
+		return
+	}
+	if _, bypass := r.Context().Value(federationAvailabilityCacheBypassKey{}).(bool); !bypass &&
+		s.federationAvailability != nil {
+		cacheKey := callerID + "\x00" + agentName + "\x00" + strconv.Itoa(agentLimit) + "\x00" + peerCursor
+		response, cacheErr := s.federationAvailability.load(
+			r.Context(), cacheKey, func(loadCtx context.Context) federationAvailabilityResponse {
+				recorder := newFederationAvailabilityRecorder()
+				loadCtx = context.WithValue(loadCtx, federationAvailabilityCacheBypassKey{}, true)
+				s.handleFederationAvailable(recorder, r.Clone(loadCtx))
+				return federationAvailabilityResponse{
+					status: recorder.status, header: recorder.header.Clone(),
+					body: append([]byte(nil), recorder.body.Bytes()...),
+				}
+			},
+		)
+		if cacheErr != nil {
+			writeProblem(w, http.StatusGatewayTimeout, "Federation discovery timed out", "The bounded federation discovery budget was exhausted.")
+			return
+		}
+		writeFederationAvailabilityResponse(w, response)
+		return
+	}
 	records, err := s.badgerStore.ListCrossFed()
 	if err != nil {
 		writeProblem(w, http.StatusInternalServerError, "Read error", "Failed to discover federation connections.")
@@ -719,23 +770,88 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 	now := time.Now().Unix()
 	active := make([]string, 0, len(records))
 	for _, record := range records {
-		if record.Status == "active" && (record.ExpiresAt == 0 || now < record.ExpiresAt) {
+		if record.Status != "active" || (record.ExpiresAt != 0 && now >= record.ExpiresAt) {
+			continue
+		}
+		// Paginate only peers for which this caller has a local messaging/read
+		// edge. That caller-authorized peer inventory is safe to report honestly;
+		// unrelated agreements neither consume probes nor influence cursors or
+		// rate-limit cadence.
+		authorized := false
+		for _, domain := range record.AllowedDomains {
+			if len(s.federationVisibleRemoteScopes(r.Context(), callerID, domain)) != 0 {
+				authorized = true
+				break
+			}
+		}
+		if !authorized {
+			if hint, ok := s.federation.(federationLinkedMessagePeerHint); ok {
+				linked, hintErr := hint.CallerMayHaveLinkedMessagePeer(
+					r.Context(), record.RemoteChainID, callerID,
+				)
+				// A hint failure cannot widen visibility. The exact live lookup
+				// remains separately bounded and authoritative when the local
+				// state can prove that this peer may be relevant.
+				authorized = hintErr == nil && linked
+			}
+		}
+		if authorized {
 			active = append(active, record.RemoteChainID)
 		}
 	}
 	sort.Strings(active)
-	if len(active) > maxFederationAvailablePeers {
-		// This ordinary-agent discovery view is intentionally bounded. It is not
-		// a topology API, and a large agreement table must not create one goroutine
-		// or retained peer response per row on a name lookup.
-		active = active[:maxFederationAvailablePeers]
+	peerOffset := 0
+	if peerCursor != "" {
+		cursor, ok := s.federationAvailability.getPeerCursor(peerCursor, callerID, agentName, agentLimit)
+		if !ok {
+			writeProblem(w, http.StatusBadRequest, "Invalid peer cursor", "peer_cursor expired or does not belong to this exact signed lookup")
+			return
+		}
+		active, peerOffset = cursor.peers, cursor.offset
+	} else {
+		if len(active) > federationScanHorizonPeers {
+			active = active[:federationScanHorizonPeers]
+		}
 	}
-
 	contactFinder, hasContactFinder := s.federation.(federationPipeContactFinder)
 	statusContactFinder, hasStatusContactFinder := s.federation.(federationPipeContactStatusFinder)
 	lookupStatusFinder, hasLookupStatusFinder := s.federation.(federationPipeLookupStatusFinder)
 	linkedContactFinder, hasLinkedContactFinder := s.federation.(federationLinkedMessageContactFinder)
 	linkedDirectoryLister, hasLinkedDirectoryLister := s.federation.(federationLinkedMessageDirectoryLister)
+	peerCallCost := 1 // authenticated peer status
+	if agentName != "" {
+		if hasContactFinder || hasStatusContactFinder {
+			peerCallCost++
+		}
+		if callerMayPipe && hasLinkedContactFinder {
+			peerCallCost++
+		}
+	} else if callerMayPipe && hasLinkedDirectoryLister {
+		peerCallCost++
+	}
+	peerLimit := maxFederationAvailablePeers
+	if agentName != "" {
+		peerLimit = maxFederatedNameLookupPeers
+	}
+	// A page may never reserve more outbound calls than the public per-caller
+	// window. Charge the full page even when fewer hidden agreements exist so a
+	// caller cannot infer agreement count from 429 cadence. Continuation is
+	// explicit: MCP returns one bounded page and never loops over the topology.
+	peerLimit = min(peerLimit, federationProbeBudgetPerCaller/peerCallCost)
+	if peerOffset > len(active) {
+		writeProblem(w, http.StatusBadRequest, "Invalid peer cursor", "peer_cursor is outside the bounded scan horizon")
+		return
+	}
+	end := min(len(active), peerOffset+peerLimit)
+	hasMore := end < len(active)
+	pagePeers := active
+	active = active[peerOffset:end]
+	if !s.federationProbeBudget.reserve(callerID, len(active)*peerCallCost, time.Now()) {
+		w.Header().Set("Retry-After", strconv.Itoa(int(federationProbeBudgetWindow/time.Second)))
+		writeProblem(w, http.StatusTooManyRequests, "Federation discovery budget exhausted",
+			"Too many distinct peer lookups were requested. Retry after the bounded discovery window; exact saved agent IDs do not require directory discovery.")
+		return
+	}
 	type peerResult struct {
 		connection *availableFederationConnection
 	}
@@ -750,6 +866,10 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 		go func() {
 			defer wg.Done()
 			for index := range jobs {
+				release, acquired := s.acquireFederationProbe(ctx)
+				if !acquired {
+					continue
+				}
 				chain := active[index]
 				var status *federation.StatusResponse
 				var statusErr error
@@ -759,6 +879,7 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 					status, statusErr = s.federation.PeerStatus(ctx, chain)
 				}
 				if statusErr != nil || status == nil {
+					release()
 					continue
 				}
 				var lookup *federation.PipeContactLookupResponse
@@ -792,6 +913,7 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 				); ok {
 					results[index].connection = connection
 				}
+				release()
 			}
 		}()
 	}
@@ -813,11 +935,20 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 		}
 		return connections[i].RemoteChainID < connections[j].RemoteChainID
 	})
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"connections": connections,
 		"total":       len(connections),
+		"complete":    !hasMore,
 		"message":     "Use sage_recall with scope=auto and one of these exact domains. Federation mutations remain operator-only.",
-	})
+	}
+	if hasMore {
+		response["next_peer_cursor"] = s.federationAvailability.putPeerCursor(federationPeerCursor{
+			callerID: callerID, agentName: agentName, agentLimit: agentLimit,
+			peers: pagePeers, offset: end,
+		})
+		response["message"] = "This is one bounded federation page. Pass next_peer_cursor as peer_cursor to continue; exact saved agent IDs do not require directory discovery."
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // availableFederationConnectionForCaller turns one authenticated peer response

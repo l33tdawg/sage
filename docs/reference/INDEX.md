@@ -60,7 +60,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 ## Critical facts (the ones agents get wrong)
 
 ### Boot sequence (MCP)
-1. `sage_inception` (deprecated alias `sage_red_pill`) — **very first action every conversation.** Loads your stored memory context.
+1. `sage_inception` — **very first action every conversation.** Loads your stored memory context. Historical `sage_red_pill` calls remain accepted for one compatibility window but are not advertised to new clients.
 2. `sage_turn` — **every turn.** Atomically recalls committed memories for the topic *and* stores your observation. Also auto-checks the pipeline inbox.
 3. `sage_reflect` — after tasks. Store dos and don'ts.
 
@@ -146,7 +146,7 @@ app-v23, do not infer Member/Manager/Admin from this number. See
 - The INTERNAL default you may have heard about applies only to the **wire codec when replaying old on-chain txs** that predate the classification byte — it does *not* affect new submissions.
 
 ### Request signing
-All authenticated REST endpoints use an Ed25519 signed-request scheme. The signed message includes the **method, path, body, timestamp, and an 8-byte nonce**, with the nonce sent in the `X-Nonce` header. The SDK does this for you. If you sign by hand, **include the nonce** — the server still accepts the legacy nonce-less form for backward compatibility, but new integrations should send it. After app-v17 activation, consensus also binds delegated proofs to that exact signed action, block-time freshness, and a single-use on-chain marker; the REST process is not trusted to attest the action. See [`python-sdk.md`](python-sdk.md) (`auth.py`) and [`rest-api.md`](rest-api.md).
+All authenticated REST endpoints use an Ed25519 signed-request scheme. The signed message includes the **method, path, body, timestamp, and a fresh 8-byte nonce**, with the nonce sent in the `X-Nonce` header. The SDK does this for you. Hand-written current clients must also include it: although the generic verifier temporarily recognizes the historical nonce-less shape, exact message, acknowledgement, receipt, and delegated-governance actions reject it. After app-v17 activation, consensus also binds delegated proofs to that exact signed action, block-time freshness, and a single-use on-chain marker; the REST process is not trusted to attest the action. See [`python-sdk.md`](python-sdk.md) (`auth.py`) and [`rest-api.md`](rest-api.md).
 
 After app-v20, governance adds a validator-and-chain session binding: the
 configured operator first signs `GET /v1/governance/context`, then includes its

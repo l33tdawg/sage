@@ -213,7 +213,6 @@ Just chat normally. Claude now has 13 memory tools:
 | `sage_register` | Register an agent on-chain (auto-called on first connection) |
 | `sage_task` | Create and manage persistent task items |
 | `sage_backlog` | View and prioritize your task backlog |
-| `sage_red_pill` | Deprecated alias for sage_inception |
 
 ### First Time: Inception
 
@@ -343,7 +342,10 @@ Starting in v3.5, agent identity is a first-class on-chain concept. When you add
 - Every agent registration is cryptographically signed and committed to the chain
 - Identity changes (name, bio, permissions) are auditable on-chain
 - Agents auto-register on their first MCP connection — no manual setup required
-- The REST API provides full agent management: `POST /v1/agent/register`, `PUT /v1/agent/update`, `PUT /v1/agent/{id}/permission`
+- Agents self-register through `POST /v1/agent/register`; the local human then
+  approves or changes role, operating mode, clearance, home domain, and Access
+  Groups atomically in CEREBRUM Access Controls. The historical per-field
+  permission mutation route is retired on governed nodes.
 - Existing agents from pre-v3.5 are automatically migrated to on-chain identity on first boot
 
 **Visible Agents:** You can restrict which agents' memories are visible to a given agent. Set this in the agent's Access Control tab on the Network page. By default, all agents can see all memories (open model). Set specific agent IDs to restrict visibility.

@@ -75,7 +75,10 @@ func (s *SQLiteStore) ListLegacyMemoryRecoveryInventoryPage(
 		return nil, "", fmt.Errorf("list legacy recovery inventory page: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	items := make([]LegacyMemoryRecoveryInventoryItem, 0, limit)
+	// Do not derive allocation capacity from an HTTP-controlled page size. The
+	// query is bounded above, and append growth remains independent of tainted
+	// capacity input for static analysis and defensive resource accounting.
+	items := make([]LegacyMemoryRecoveryInventoryItem, 0)
 	for rows.Next() {
 		var item LegacyMemoryRecoveryInventoryItem
 		var revision int64
@@ -195,8 +198,8 @@ func (s *SQLiteStore) AssignLegacyMemoryRecoverySelection(
 		strings.TrimSpace(targetAgentID) == "" || strings.TrimSpace(authorizedBy) == "" {
 		return 0, ErrLegacyMemoryRecoverySnapshotChanged
 	}
-	if err := s.ensureLegacyMemoryRecoveryAssignmentTable(ctx); err != nil {
-		return 0, err
+	if ensureErr := s.ensureLegacyMemoryRecoveryAssignmentTable(ctx); ensureErr != nil {
+		return 0, ensureErr
 	}
 	txn, unlock, err := s.beginTxLocked(ctx)
 	if err != nil {
@@ -347,8 +350,8 @@ func (s *SQLiteStore) DeprecateLegacyMemoryRecoverySelection(
 	if err != nil || expectedRevision == 0 || expectedCount <= 0 || strings.TrimSpace(authorizedBy) == "" {
 		return 0, ErrLegacyMemoryRecoverySnapshotChanged
 	}
-	if err := s.ensureLegacyMemoryRecoveryAssignmentTable(ctx); err != nil {
-		return 0, err
+	if ensureErr := s.ensureLegacyMemoryRecoveryAssignmentTable(ctx); ensureErr != nil {
+		return 0, ensureErr
 	}
 	txn, unlock, err := s.beginTxLocked(ctx)
 	if err != nil {
@@ -401,12 +404,16 @@ func (s *SQLiteStore) DeprecateLegacyMemoryRecoverySelection(
 		) VALUES (?, 'deprecated', ?, ?, ?)`, id, reason, expectedRevision, authorizedBy); err != nil {
 			return 0, fmt.Errorf("record selected legacy recovery disposition %s: %w", id, err)
 		}
-	}
-	if _, err := txn.ExecContext(ctx, `UPDATE legacy_memory_recovery
-		SET resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		WHERE projection_revision = ? AND memory_id IN (`+sqlPlaceholders(len(ids))+`)`,
-		append([]any{expectedRevision}, stringSliceAny(ids)...)...); err != nil {
-		return 0, fmt.Errorf("resolve selected legacy recovery rows: %w", err)
+		result, resolveErr := txn.ExecContext(ctx, `UPDATE legacy_memory_recovery
+			SET resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			WHERE projection_revision = ? AND memory_id = ?`, expectedRevision, id)
+		if resolveErr != nil {
+			return 0, fmt.Errorf("resolve selected legacy recovery row %s: %w", id, resolveErr)
+		}
+		resolved, rowsErr := result.RowsAffected()
+		if rowsErr != nil || resolved != 1 {
+			return 0, ErrLegacyMemoryRecoverySnapshotChanged
+		}
 	}
 	if err := updateLegacyRecoveryProgressTxn(ctx, txn, expectedRevision, expectedCount, len(ids)); err != nil {
 		return 0, err
@@ -415,21 +422,6 @@ func (s *SQLiteStore) DeprecateLegacyMemoryRecoverySelection(
 		return 0, fmt.Errorf("commit selected legacy recovery deprecation: %w", err)
 	}
 	return len(ids), nil
-}
-
-func sqlPlaceholders(n int) string {
-	if n <= 0 {
-		return ""
-	}
-	return strings.TrimRight(strings.Repeat("?,", n), ",")
-}
-
-func stringSliceAny(values []string) []any {
-	result := make([]any, len(values))
-	for i := range values {
-		result[i] = values[i]
-	}
-	return result
 }
 
 func updateLegacyRecoveryProgressTxn(

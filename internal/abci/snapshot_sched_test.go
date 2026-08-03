@@ -1,19 +1,35 @@
 package abci
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	dbm "github.com/cometbft/cometbft-db"
+	cmtcrypto "github.com/cometbft/cometbft/crypto/ed25519"
+	"github.com/cometbft/cometbft/p2p"
+	"github.com/cometbft/cometbft/privval"
+	cmtproto "github.com/cometbft/cometbft/proto/tendermint/types"
+	cmtstate "github.com/cometbft/cometbft/state"
+	cmtstore "github.com/cometbft/cometbft/store"
+	cmttypes "github.com/cometbft/cometbft/types"
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/rs/zerolog"
 	_ "modernc.org/sqlite"
+
+	"github.com/l33tdawg/sage/internal/snapshot"
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 // seedTestDataDir builds a minimal SAGE data dir that snapshot.Take can
@@ -62,6 +78,109 @@ func seedTestDataDir(t *testing.T) (dataDir string, live *badger.DB) {
 	}
 
 	return dataDir, db
+}
+
+func seedVerifiedCometState(t *testing.T, dataDir string, height int64, appHash []byte) {
+	t.Helper()
+	configDir := filepath.Join(dataDir, "cometbft", "config")
+	priv := cmtcrypto.GenPrivKey()
+	pub := priv.PubKey()
+	genesis := &cmttypes.GenesisDoc{
+		GenesisTime:     time.Unix(1, 0).UTC(),
+		ChainID:         "snapshot-test",
+		InitialHeight:   1,
+		ConsensusParams: cmttypes.DefaultConsensusParams(),
+		Validators: []cmttypes.GenesisValidator{{
+			Address: pub.Address(), PubKey: pub, Power: 10, Name: "validator",
+		}},
+	}
+	if err := genesis.SaveAs(filepath.Join(configDir, "genesis.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&p2p.NodeKey{PrivKey: cmtcrypto.GenPrivKey()}).SaveAs(filepath.Join(configDir, "node_key.json")); err != nil {
+		t.Fatal(err)
+	}
+	pv := privval.NewFilePV(priv, filepath.Join(configDir, "priv_validator_key.json"), filepath.Join(dataDir, "cometbft", "data", "priv_validator_state.json"))
+	pv.Save()
+	state, err := cmtstate.MakeGenesisState(genesis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := state.MakeBlock(height, nil, &cmttypes.Commit{}, nil, pub.Address())
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := block.MakePartSet(cmttypes.BlockPartSizeBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockID := cmttypes.BlockID{Hash: block.Hash(), PartSetHeader: parts.Header()}
+	vote := &cmttypes.Vote{
+		ValidatorAddress: pub.Address(), ValidatorIndex: 0, Height: height,
+		Round: 0, Type: cmtproto.PrecommitType, BlockID: blockID, Timestamp: time.Unix(2, 0).UTC(),
+	}
+	protoVote := vote.ToProto()
+	if err := cmttypes.NewMockPVWithParams(priv, false, false).SignVote(state.ChainID, protoVote); err != nil {
+		t.Fatal(err)
+	}
+	seenCommit := &cmttypes.Commit{
+		Height: height, Round: 0, BlockID: blockID,
+		Signatures: []cmttypes.CommitSig{{
+			BlockIDFlag: cmttypes.BlockIDFlagCommit, ValidatorAddress: pub.Address(),
+			Timestamp: vote.Timestamp, Signature: append([]byte(nil), protoVote.Signature...),
+		}},
+	}
+	if err := seenCommit.ValidateBasic(); err != nil {
+		t.Fatal(err)
+	}
+	cometDataDir := filepath.Join(dataDir, "cometbft", "data")
+	blockDB, err := dbm.NewDB("blockstore", dbm.GoLevelDBBackend, cometDataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockStore := cmtstore.NewBlockStore(blockDB)
+	blockStore.SaveBlock(block, parts, seenCommit)
+	if err := blockStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	state.LastBlockHeight = height
+	state.LastBlockID = blockID
+	state.LastBlockTime = block.Time
+	state.LastValidators = state.Validators.Copy()
+	state.AppHash = append([]byte(nil), appHash...)
+	stateDB, err := dbm.NewDB("state", dbm.GoLevelDBBackend, cometDataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmtstate.NewStore(stateDB, cmtstate.StoreOptions{}).Save(state); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func newVerifiedSnapshotScheduler(t *testing.T, dataDir string, db *badger.DB) *SnapshotScheduler {
+	t.Helper()
+	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
+		DataDir: dataDir, BinaryVersion: "v11.17.0-test", HeightInterval: 1_000_000,
+		LiveBadger: db, CometDBBackend: string(dbm.GoLevelDBBackend), KeepLast: 1,
+		binarySourcePath: testSnapshotExecutable(t),
+	}, zerolog.Nop())
+	if sched == nil {
+		t.Fatal("expected scheduler")
+	}
+	return sched
+}
+
+func testSnapshotExecutable(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sage-gui-test")
+	if err := os.WriteFile(path, []byte("bounded exact test executable\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // waitForSnapshotDir polls for snapshots/<height>/OK with a generous
@@ -114,10 +233,11 @@ func TestSnapshotScheduler_HeightTriggerFires(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
-		DataDir:        dataDir,
-		BinaryVersion:  "v7.5.0-test",
-		HeightInterval: 5,
-		LiveBadger:     db,
+		DataDir:          dataDir,
+		BinaryVersion:    "v7.5.0-test",
+		HeightInterval:   5,
+		LiveBadger:       db,
+		binarySourcePath: testSnapshotExecutable(t),
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
@@ -145,10 +265,11 @@ func TestSnapshotScheduler_ConcurrentTicksCoalesce(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
-		DataDir:        dataDir,
-		BinaryVersion:  "v7.5.0-test",
-		HeightInterval: 1,
-		LiveBadger:     db,
+		DataDir:          dataDir,
+		BinaryVersion:    "v7.5.0-test",
+		HeightInterval:   1,
+		LiveBadger:       db,
+		binarySourcePath: testSnapshotExecutable(t),
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
@@ -198,10 +319,11 @@ func TestSnapshotScheduler_KeepLastDefaults(t *testing.T) {
 
 	// Unset KeepLast (zero value) must resolve to the package default.
 	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
-		DataDir:        dataDir,
-		BinaryVersion:  "v7.5.0-test",
-		HeightInterval: 5,
-		LiveBadger:     db,
+		DataDir:          dataDir,
+		BinaryVersion:    "v7.5.0-test",
+		HeightInterval:   5,
+		LiveBadger:       db,
+		binarySourcePath: testSnapshotExecutable(t),
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
@@ -212,11 +334,12 @@ func TestSnapshotScheduler_KeepLastDefaults(t *testing.T) {
 
 	// An explicit value is honored verbatim.
 	sched2 := NewSnapshotScheduler(SnapshotSchedulerConfig{
-		DataDir:        dataDir,
-		BinaryVersion:  "v7.5.0-test",
-		HeightInterval: 5,
-		KeepLast:       3,
-		LiveBadger:     db,
+		DataDir:          dataDir,
+		BinaryVersion:    "v7.5.0-test",
+		HeightInterval:   5,
+		KeepLast:         3,
+		LiveBadger:       db,
+		binarySourcePath: testSnapshotExecutable(t),
 	}, zerolog.Nop())
 	if sched2.cfg.KeepLast != 3 {
 		t.Fatalf("KeepLast explicit: got %d want 3", sched2.cfg.KeepLast)
@@ -245,11 +368,12 @@ func TestSnapshotScheduler_RetentionPrunesAfterTake(t *testing.T) {
 	}
 
 	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
-		DataDir:        dataDir,
-		BinaryVersion:  "v7.5.0-test",
-		HeightInterval: 5,
-		KeepLast:       2,
-		LiveBadger:     db,
+		DataDir:          dataDir,
+		BinaryVersion:    "v7.5.0-test",
+		HeightInterval:   5,
+		KeepLast:         2,
+		LiveBadger:       db,
+		binarySourcePath: testSnapshotExecutable(t),
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
@@ -365,10 +489,11 @@ func TestSnapshotScheduler_IdleFlushFires(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
-		DataDir:       dataDir,
-		BinaryVersion: "v10.5.1-test",
-		TimeInterval:  300 * time.Millisecond,
-		LiveBadger:    db,
+		DataDir:          dataDir,
+		BinaryVersion:    "v10.5.1-test",
+		TimeInterval:     300 * time.Millisecond,
+		LiveBadger:       db,
+		binarySourcePath: testSnapshotExecutable(t),
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
@@ -413,10 +538,11 @@ func TestSnapshotScheduler_IdleFlushNotArmedWithoutTimeInterval(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
-		DataDir:        dataDir,
-		BinaryVersion:  "v10.5.1-test",
-		HeightInterval: 1_000_000,
-		LiveBadger:     db,
+		DataDir:          dataDir,
+		BinaryVersion:    "v10.5.1-test",
+		HeightInterval:   1_000_000,
+		LiveBadger:       db,
+		binarySourcePath: testSnapshotExecutable(t),
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
@@ -446,10 +572,11 @@ func TestSnapshotScheduler_CloseStopsIdleFlush(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
-		DataDir:       dataDir,
-		BinaryVersion: "v10.5.1-test",
-		TimeInterval:  150 * time.Millisecond,
-		LiveBadger:    db,
+		DataDir:          dataDir,
+		BinaryVersion:    "v10.5.1-test",
+		TimeInterval:     150 * time.Millisecond,
+		LiveBadger:       db,
+		binarySourcePath: testSnapshotExecutable(t),
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
@@ -474,10 +601,11 @@ func TestSnapshotScheduler_TriggerForceFires(t *testing.T) {
 	defer func() { _ = db.Close() }()
 
 	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
-		DataDir:        dataDir,
-		BinaryVersion:  "v7.5.0-test",
-		HeightInterval: 1_000_000, // big number — cadence won't fire
-		LiveBadger:     db,
+		DataDir:          dataDir,
+		BinaryVersion:    "v7.5.0-test",
+		HeightInterval:   1_000_000, // big number — cadence won't fire
+		LiveBadger:       db,
+		binarySourcePath: testSnapshotExecutable(t),
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
@@ -485,4 +613,443 @@ func TestSnapshotScheduler_TriggerForceFires(t *testing.T) {
 
 	sched.Trigger(42, []byte{0x42}, "pre-upgrade-test")
 	waitForSnapshotDir(t, dataDir, 42)
+}
+
+func TestSnapshotSchedulerTakeVerifiedBindsStateAndRunningBinary(t *testing.T) {
+	dataDir, db := seedTestDataDir(t)
+	defer func() { _ = db.Close() }()
+	appHash := sha256.Sum256([]byte("smoke:1present"))
+	seedVerifiedCometState(t, dataDir, 77, appHash[:])
+
+	sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
+		DataDir:          dataDir,
+		BinaryVersion:    "v11.17.0-test",
+		HeightInterval:   1_000_000,
+		LiveBadger:       db,
+		CometDBBackend:   string(dbm.GoLevelDBBackend),
+		binarySourcePath: testSnapshotExecutable(t),
+	}, zerolog.Nop())
+	if sched == nil {
+		t.Fatal("expected scheduler")
+	}
+	manifest, err := sched.TakeVerified(context.Background(), 77, appHash[:], "pre-upgrade-v11.17.0", nil)
+	if err != nil {
+		t.Fatalf("TakeVerified: %v", err)
+	}
+	if manifest.Height != 77 || manifest.BinaryVersion != "v11.17.0-test" {
+		t.Fatalf("unexpected manifest provenance: %+v", manifest)
+	}
+
+	// A caller asking to reuse the same height under a different committed
+	// AppHash must fail rather than blessing the existing recovery point.
+	wrong := sha256.Sum256([]byte("different-state"))
+	if _, err := sched.TakeVerified(context.Background(), 77, wrong[:], "pre-upgrade-v11.17.1", nil); err == nil {
+		t.Fatal("expected state provenance mismatch")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "77", snapshot.OKSentinel)); err != nil {
+		t.Fatalf("wrong requested hash displaced valid anchor: %v", err)
+	}
+}
+
+func TestTakeVerifiedProductionVaultPathSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		createVault bool
+	}{
+		{name: "default path absent"},
+		{name: "locked vault structurally verified", createVault: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir, db := seedTestDataDir(t)
+			defer func() { _ = db.Close() }()
+			appHash := sha256.Sum256([]byte("smoke:1present"))
+			seedVerifiedCometState(t, dataDir, 77, appHash[:])
+			vaultPath := filepath.Join(filepath.Dir(dataDir), "vault.key")
+			if tc.createVault {
+				if err := vault.Init(vaultPath, "locked-test-passphrase"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sched := NewSnapshotScheduler(SnapshotSchedulerConfig{
+				DataDir: dataDir, BinaryVersion: "v11.17.0-test", HeightInterval: 1_000_000,
+				LiveBadger: db, CometDBBackend: string(dbm.GoLevelDBBackend), VaultKeyPath: vaultPath,
+				binarySourcePath: testSnapshotExecutable(t),
+				// Deliberately no passphrase: GUI may still be locked at update time.
+			}, zerolog.Nop())
+			if _, err := sched.TakeVerified(context.Background(), 77, appHash[:], "vault-path", nil); err != nil {
+				t.Fatalf("production vault-path policy rejected recoverable snapshot: %v", err)
+			}
+		})
+	}
+}
+
+func TestTakeVerifiedRejectsAdvancementWithoutPublishingOrPruning(t *testing.T) {
+	dataDir, db := seedTestDataDir(t)
+	defer func() { _ = db.Close() }()
+	appHash := sha256.Sum256([]byte("smoke:1present"))
+	seedVerifiedCometState(t, dataDir, 77, appHash[:])
+	if _, err := snapshot.Take(context.Background(), dataDir, 76, appHash[:], "prior", snapshot.Options{
+		BinaryVersion: "v11.16.4-test", LiveBadger: db,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sched := newVerifiedSnapshotScheduler(t, dataDir, db)
+	_, err := sched.TakeVerified(context.Background(), 77, appHash[:], "advancing", func(*snapshot.Manifest) error {
+		return errors.New("committed state advanced")
+	})
+	if err == nil {
+		t.Fatal("expected confirmation rejection")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "77", snapshot.OKSentinel)); !os.IsNotExist(err) {
+		t.Fatalf("rejected candidate became visible: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "76", snapshot.OKSentinel)); err != nil {
+		t.Fatalf("prior rollback anchor was pruned: %v", err)
+	}
+}
+
+func TestTakeVerifiedQuarantinesInvalidExactHeightAndReplacesIt(t *testing.T) {
+	for _, tc := range []string{"missing binary", "malformed manifest", "missing manifest"} {
+		t.Run(tc, func(t *testing.T) {
+			dataDir, db := seedTestDataDir(t)
+			defer func() { _ = db.Close() }()
+			appHash := sha256.Sum256([]byte("smoke:1present"))
+			seedVerifiedCometState(t, dataDir, 77, appHash[:])
+			finalDir := filepath.Join(dataDir, "snapshots", "77")
+			switch tc {
+			case "missing binary":
+				if _, err := snapshot.Take(context.Background(), dataDir, 77, appHash[:], "invalid", snapshot.Options{
+					BinaryVersion: "v11.17.0-test", LiveBadger: db,
+				}); err != nil {
+					t.Fatal(err)
+				}
+			case "malformed manifest", "missing manifest":
+				if err := os.MkdirAll(finalDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(finalDir, snapshot.OKSentinel), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if tc == "malformed manifest" {
+					if err := os.WriteFile(filepath.Join(finalDir, "manifest.json"), []byte("{"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			sched := newVerifiedSnapshotScheduler(t, dataDir, db)
+			manifest, err := sched.TakeVerified(context.Background(), 77, appHash[:], "replace", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if manifest.Height != 77 {
+				t.Fatalf("unexpected replacement: %+v", manifest)
+			}
+			entries, err := os.ReadDir(filepath.Join(dataDir, "snapshots"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			quarantined := false
+			for _, entry := range entries {
+				quarantined = quarantined || strings.HasPrefix(entry.Name(), ".invalid-77-")
+			}
+			if !quarantined {
+				t.Fatal("invalid published snapshot was not preserved in quarantine")
+			}
+			if _, err := os.Stat(filepath.Join(finalDir, snapshot.OKSentinel)); err != nil {
+				t.Fatalf("replacement was not published: %v", err)
+			}
+		})
+	}
+}
+
+func TestSnapshotSchedulerQuiesceClosesTriggerRaceAndWaitsInFlight(t *testing.T) {
+	dataDir, db := seedTestDataDir(t)
+	defer func() { _ = db.Close() }()
+	sched := newVerifiedSnapshotScheduler(t, dataDir, db)
+	if !sched.beginFlight(true) {
+		t.Fatal("could not seed in-flight snapshot")
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- sched.Quiesce(context.Background())
+	}()
+	time.Sleep(30 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("Quiesce returned before in-flight work ended: %v", err)
+	default:
+	}
+	sched.endFlight()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	sched.Trigger(88, []byte{0x88}, "after-quiesce")
+	time.Sleep(30 * time.Millisecond)
+	if sched.inFlight.Load() {
+		t.Fatal("trigger acquired in-flight slot after quiescence")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "88", snapshot.OKSentinel)); !os.IsNotExist(err) {
+		t.Fatalf("trigger published after quiescence: %v", err)
+	}
+}
+
+func TestSnapshotSchedulerPrepareQuiesceAbortRetryAndCommit(t *testing.T) {
+	dataDir, db := seedTestDataDir(t)
+	defer func() { _ = db.Close() }()
+	sched := newVerifiedSnapshotScheduler(t, dataDir, db)
+	if !sched.beginFlight(true) {
+		t.Fatal("could not seed in-flight work")
+	}
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	_, _, err := sched.PrepareQuiesce(timeoutCtx)
+	cancel()
+	if err == nil || sched.draining.Load() || sched.quiesced.Load() {
+		t.Fatalf("timed-out preparation was not reversible: err=%v draining=%v quiesced=%v", err, sched.draining.Load(), sched.quiesced.Load())
+	}
+	sched.endFlight()
+	if !sched.beginFlight(false) {
+		t.Fatal("scheduled admission did not recover after abort")
+	}
+	sched.endFlight()
+
+	commit, abort, err := sched.PrepareQuiesce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := sched.PrepareQuiesce(context.Background()); err == nil {
+		t.Fatal("concurrent restart preparation acquired the active drain token")
+	}
+	abort()
+	if !sched.beginFlight(false) {
+		t.Fatal("explicit abort did not restore scheduled admission")
+	}
+	sched.endFlight()
+
+	commit, abort, err = sched.PrepareQuiesce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit()
+	abort() // paired closure is idempotent and cannot undo a committed drain.
+	if sched.beginFlight(false) {
+		t.Fatal("scheduled admission reopened after committed quiescence")
+	}
+	if !sched.beginFlight(true) {
+		t.Fatal("manual final snapshot gate was blocked after quiescence")
+	}
+	sched.endFlight()
+}
+
+func TestSnapshotSchedulerTimedOutPrepareCanCloseAndJoinWithoutStoreRace(t *testing.T) {
+	sched := &SnapshotScheduler{
+		stopIdle:        make(chan struct{}),
+		flightDone:      make(chan struct{}),
+		scheduledCtx:    context.Background(),
+		cancelScheduled: func() {},
+	}
+	sched.inFlight.Store(true)
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	_, _, err := sched.PrepareQuiesce(timeoutCtx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("PrepareQuiesce error = %v, want deadline exceeded", err)
+	}
+
+	// This is the ordinary SIGTERM/serve-error fallback: after the reversible
+	// preparation deadline, shutdown becomes permanent and joins the worker
+	// before any owner may close Badger/SQLite.
+	sched.Close()
+	joined := make(chan struct{})
+	go func() {
+		sched.WaitIdle()
+		close(joined)
+	}()
+	select {
+	case <-joined:
+		t.Fatal("WaitIdle returned while the snapshot still owned live stores")
+	case <-time.After(10 * time.Millisecond):
+	}
+	sched.endFlight()
+	select {
+	case <-joined:
+	case <-time.After(time.Second):
+		t.Fatal("WaitIdle did not join the completed snapshot")
+	}
+	if sched.beginFlight(false) {
+		t.Fatal("Close must permanently block new cadence work")
+	}
+}
+
+func TestSnapshotSchedulerPreservesExactPinnedExecutableForFinderRecovery(t *testing.T) {
+	dataDir := t.TempDir()
+	sourcePath := filepath.Join(t.TempDir(), "running-sage-gui")
+	content := []byte("exact old executable inode")
+	if err := os.WriteFile(sourcePath, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	sum := sha256.Sum256(content)
+	sched := &SnapshotScheduler{
+		cfg:          SnapshotSchedulerConfig{DataDir: dataDir, BinaryVersion: "v11.16.4"},
+		binarySource: source, binarySHA256: fmt.Sprintf("%x", sum[:]),
+	}
+	path, err := sched.PreserveRunningBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("preserved executable = %q, err=%v", got, err)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o100 == 0 {
+		t.Fatalf("recovery executable mode invalid: %v err=%v", info, err)
+	}
+	if second, err := sched.PreserveRunningBinary(); err != nil || second != path {
+		t.Fatalf("idempotent preserve = %q, %v; want %q", second, err, path)
+	}
+	if err := os.WriteFile(path, []byte("tampered"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sched.PreserveRunningBinary(); err == nil {
+		t.Fatal("tampered recovery executable was accepted")
+	}
+}
+
+func TestTakeVerifiedRejectsCrossComponentCometMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		cometHeight int64
+		cometHash   []byte
+	}{
+		{name: "height", cometHeight: 78},
+		{name: "app hash", cometHeight: 77, cometHash: []byte("wrong-comet-app-hash")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir, db := seedTestDataDir(t)
+			defer func() { _ = db.Close() }()
+			appHash := sha256.Sum256([]byte("smoke:1present"))
+			cometHash := tc.cometHash
+			if cometHash == nil {
+				cometHash = appHash[:]
+			}
+			seedVerifiedCometState(t, dataDir, tc.cometHeight, cometHash)
+			sched := newVerifiedSnapshotScheduler(t, dataDir, db)
+			if _, err := sched.TakeVerified(context.Background(), 77, appHash[:], "mismatch", nil); err == nil {
+				t.Fatal("cross-component mismatch was accepted")
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "77", snapshot.OKSentinel)); !os.IsNotExist(err) {
+				t.Fatalf("mismatched candidate became visible: %v", err)
+			}
+		})
+	}
+}
+
+func TestTakeVerifiedRejectsCometBlockIdentityMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "state last block ID",
+			mutate: func(t *testing.T, dataDir string) {
+				db, err := dbm.NewDB("state", dbm.GoLevelDBBackend, filepath.Join(dataDir, "cometbft", "data"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				store := cmtstate.NewStore(db, cmtstate.StoreOptions{})
+				state, err := store.Load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				state.LastBlockID.Hash[0] ^= 0xff
+				if err := store.Save(state); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "seen commit block ID",
+			mutate: func(t *testing.T, dataDir string) {
+				db, err := dbm.NewDB("blockstore", dbm.GoLevelDBBackend, filepath.Join(dataDir, "cometbft", "data"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				store := cmtstore.NewBlockStore(db)
+				commit := store.LoadSeenCommit(77)
+				if commit == nil {
+					t.Fatal("missing seeded seen commit")
+				}
+				commit.BlockID.Hash[0] ^= 0xff
+				if err := store.SaveSeenCommit(77, commit); err != nil {
+					t.Fatal(err)
+				}
+				if err := store.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir, db := seedTestDataDir(t)
+			defer func() { _ = db.Close() }()
+			appHash := sha256.Sum256([]byte("smoke:1present"))
+			seedVerifiedCometState(t, dataDir, 77, appHash[:])
+			tc.mutate(t, dataDir)
+			sched := newVerifiedSnapshotScheduler(t, dataDir, db)
+			if _, err := sched.TakeVerified(context.Background(), 77, appHash[:], "block-id-mismatch", nil); err == nil {
+				t.Fatal("inconsistent Comet block identity was accepted")
+			}
+			if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "77", snapshot.OKSentinel)); !os.IsNotExist(err) {
+				t.Fatalf("inconsistent candidate became visible: %v", err)
+			}
+		})
+	}
+}
+
+func TestTakeVerifiedPreservesPriorVersionAtSameIdleHeight(t *testing.T) {
+	dataDir, db := seedTestDataDir(t)
+	defer func() { _ = db.Close() }()
+	appHash := sha256.Sum256([]byte("smoke:1present"))
+	seedVerifiedCometState(t, dataDir, 77, appHash[:])
+	pinned, err := os.Open(testSnapshotExecutable(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = pinned.Close() }()
+	if _, err := snapshot.Take(context.Background(), dataDir, 77, appHash[:], "old-version", snapshot.Options{
+		BinaryVersion: "v11.16.4-test", LiveBadger: db, IncludeBinary: true, BinarySource: pinned,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sched := newVerifiedSnapshotScheduler(t, dataDir, db)
+	if _, err := sched.TakeVerified(context.Background(), 77, appHash[:], "new-version", nil); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "snapshots"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preserved := false
+	for _, entry := range entries {
+		preserved = preserved || strings.HasPrefix(entry.Name(), "anchor-77-v11.16.4-test-")
+	}
+	if !preserved {
+		t.Fatal("prior-version rollback anchor was not preserved")
+	}
+	heights, err := snapshot.ListSnapshots(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(heights) != 2 || heights[0] != 77 || heights[1] != 77 {
+		t.Fatalf("same-height version anchors not recovery-visible: %v", heights)
+	}
 }

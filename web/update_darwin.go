@@ -301,7 +301,7 @@ func installPendingAppBundleWithVerifier(execPath, stagedBundle, version, rollba
 	// signature cache bound to its staging path. Copy it once more without
 	// verifying or executing the copy; its first validation happens only after
 	// the atomic swap places it at the final launch path.
-	if err := copyFreshAppBundle(stagedBundle, activationBundle); err != nil {
+	if err = copyFreshAppBundle(stagedBundle, activationBundle); err != nil {
 		_ = os.RemoveAll(backupPath)
 		return fmt.Errorf("prepare fresh app activation copy: %w", err)
 	}
@@ -372,7 +372,7 @@ func copyFreshAppBundle(source, destination string) error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect fresh app destination: %w", err)
 	}
-	copyCmd := exec.Command("/usr/bin/ditto", source, destination) // #nosec G204 -- fixed tool; updater-owned verified source and adjacent destination
+	copyCmd := exec.CommandContext(context.Background(), "/usr/bin/ditto", source, destination) // #nosec G204 -- fixed tool; updater-owned verified source and adjacent destination
 	if out, err := copyCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("copy app bundle: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -398,7 +398,7 @@ func syncAppBundleTree(root string) error {
 			directories = append(directories, path)
 			return nil
 		case info.Mode().IsRegular():
-			file, openErr := os.Open(path) //nolint:gosec -- updater-owned app tree
+			file, openErr := os.Open(path) //nolint:gosec // G122: Walk root is an updater-owned, freshly copied app tree.
 			if openErr != nil {
 				return openErr
 			}
@@ -508,10 +508,10 @@ func rollbackPendingAppBundleWithVerifier(execPath string, verifyRollback func(s
 		return true, false, fmt.Errorf("pending app marker has an invalid size")
 	}
 	backupPath := destination + ".update-old"
-	if err := requireRealDirectory(backupPath, "pending app rollback bundle"); err != nil {
+	if err = requireRealDirectory(backupPath, "pending app rollback bundle"); err != nil {
 		return true, false, err
 	}
-	markerData, err := os.ReadFile(markerPath) //nolint:gosec -- marker was Lstat-verified above
+	markerData, err := os.ReadFile(markerPath) //nolint:gosec // Marker was Lstat-verified above.
 	if err != nil {
 		return true, false, fmt.Errorf("read pending app update marker: %w", err)
 	}
@@ -573,7 +573,7 @@ func confirmPendingAppBundle(execPath string) (bool, error) {
 		markerInfo.Size() <= 0 || markerInfo.Size() > 4096 {
 		return true, fmt.Errorf("confirmed app update marker must be a real regular file with a valid size")
 	}
-	markerData, err := os.ReadFile(markerPath) //nolint:gosec -- Lstat-verified app sibling
+	markerData, err := os.ReadFile(markerPath) //nolint:gosec // Lstat-verified app sibling.
 	if err != nil || decodePendingUpdateRecord(markerData).Version == "" {
 		return true, fmt.Errorf("confirmed app update marker is unreadable")
 	}
@@ -583,11 +583,11 @@ func confirmPendingAppBundle(execPath string) (bool, error) {
 	legacyMarker := execPath + pendingUpdateSuffix
 	if legacyMarker != markerPath {
 		if _, err := os.Lstat(legacyMarker); err == nil {
-			if err := removeFileDurable(legacyMarker); err != nil {
+			if removeErr := removeFileDurable(legacyMarker); removeErr != nil {
 				// Keep the known-good rollback app until the pending marker is
 				// definitely gone. A crash or permission failure must never leave a
 				// marker that names an update after deleting its only rollback copy.
-				return true, fmt.Errorf("clear confirmed legacy app update marker: %w", err)
+				return true, fmt.Errorf("clear confirmed legacy app update marker: %w", removeErr)
 			}
 		} else if !os.IsNotExist(err) {
 			// Keep the known-good rollback app until the pending marker is

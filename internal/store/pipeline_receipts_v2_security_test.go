@@ -258,6 +258,16 @@ func TestReceiptV2RetentionUsesTerminalAgeAndCascadesEvidence(t *testing.T) {
 	require.Zero(t, evidence, "purging content must cascade the bounded receipt proof metadata")
 }
 
+func TestGetFederatedReceiptForSenderDoesNotHideDatabaseFailureAsUnconfirmed(t *testing.T) {
+	ctx := context.Background()
+	store := newReceiptV2SecurityStore(t)
+	require.NoError(t, store.Close())
+	_, err := store.GetFederatedReceiptForSender(ctx, strings.Repeat("a", 64), "pipe-closed-db")
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrFederatedReceiptNotFound,
+		"only a genuine missing row may become sender-visible unconfirmed status")
+}
+
 func TestReceiptV2TerminalCASNeverErasesParticipantEvidence(t *testing.T) {
 	ctx := context.Background()
 	store := newReceiptV2SecurityStore(t)

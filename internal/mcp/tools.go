@@ -27,6 +27,9 @@ type Tool struct {
 	Description string                                                        `json:"description"`
 	InputSchema map[string]any                                                `json:"inputSchema"`
 	Handler     func(ctx context.Context, params map[string]any) (any, error) `json:"-"`
+	// Hidden tools remain callable for one compatibility window but are not
+	// advertised to new agents through tools/list.
+	Hidden bool `json:"-"`
 }
 
 func (s *Server) registerTools() map[string]Tool {
@@ -80,8 +83,10 @@ func (s *Server) registerTools() map[string]Tool {
 			Name:        "sage_federation",
 			Description: "Discover the connected SAGEs, remote domains, agents, and copy status this caller is authorized to consume. Read-only and caller-filtered; pairing, sharing, subscriptions, and other mutations remain operator-only.",
 			InputSchema: map[string]any{
-				"type":       "object",
-				"properties": map[string]any{},
+				"type": "object",
+				"properties": map[string]any{
+					"peer_cursor": map[string]any{"type": "string", "description": "Opaque bounded-page continuation returned by the previous call. Omit for the first page; MCP never auto-walks federation pages."},
+				},
 			},
 			Handler: s.toolFederation,
 		},
@@ -91,8 +96,9 @@ func (s *Server) registerTools() map[string]Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":  map[string]any{"type": "string", "description": "Human display-name, registered-name, or provider substring to find (for example, \"mynah\" finds \"MYNAH (SAGE Voice Bridge Agent)\"). ASCII matching is case-insensitive and bounded; non-ASCII code points require registered casing; exact field matches rank first."},
-					"limit": map[string]any{"type": "integer", "description": "Maximum matches to return (default: 10, max: 20).", "default": 10, "minimum": 1, "maximum": 20},
+					"name":        map[string]any{"type": "string", "description": "Human display-name, registered-name, or provider substring to find (for example, \"mynah\" finds \"MYNAH (SAGE Voice Bridge Agent)\"). ASCII matching is case-insensitive and bounded; non-ASCII code points require registered casing; exact field matches rank first."},
+					"limit":       map[string]any{"type": "integer", "description": "Maximum matches to return (default: 10, max: 20).", "default": 10, "minimum": 1, "maximum": 20},
+					"peer_cursor": map[string]any{"type": "string", "description": "Bounded federated continuation returned by an incomplete previous lookup. Omit for the first page."},
 				},
 				"required": []string{"name"},
 			},
@@ -100,14 +106,15 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_directory": {
 			Name:        "sage_directory",
-			Description: "List recipients this signed caller is currently authorized to address. Returns active ordinary agents on the local SAGE plus live-revalidated federated contacts already authorized by an exact shared-domain or linked-reader messaging edge. Each row includes display name, immutable registered name, provider, exact agent_id/to, and local/federated provenance. This is authorization metadata, never online presence, reachability, delivery, or read evidence. Older peers without safe enumeration support are omitted and reported as an incomplete federated view.",
+			Description: "List recipients this signed caller is currently authorized to address. The default local scope is one metadata-only database read and performs no federation probes. Request scope=all explicitly to add live-revalidated federated contacts already authorized by an exact shared-domain or linked-reader messaging edge. Each row includes display name, immutable registered name, provider, exact agent_id/to, and local/federated provenance. This is authorization metadata, never online presence, reachability, delivery, or read evidence. Older peers without safe enumeration support are omitted and reported as an incomplete federated view.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"scope": map[string]any{
 						"type": "string", "enum": []string{"all", "local"},
-						"default": "all", "description": "Use local to avoid federation network checks; all returns the caller-authorized local/federated union.",
+						"default": "local", "description": "The default local scope performs no federation network checks; all explicitly requests the caller-authorized local/federated union.",
 					},
+					"peer_cursor": map[string]any{"type": "string", "description": "Bounded federated continuation returned by a previous scope=all call. Ignored for local scope."},
 				},
 			},
 			Handler: s.toolDirectory,
@@ -147,8 +154,8 @@ func (s *Server) registerTools() map[string]Tool {
 					"domain": map[string]any{"type": "string", "description": "Filter by domain tag"},
 					"tag":    map[string]any{"type": "string", "description": "Filter by user-defined tag"},
 					"status": map[string]any{"type": "string", "description": "Filter by status (proposed, committed, deprecated)"},
-					"limit":  map[string]any{"type": "integer", "description": "Max results to return", "default": 20},
-					"offset": map[string]any{"type": "integer", "description": "Pagination offset", "default": 0},
+					"limit":  map[string]any{"type": "integer", "description": "Max results to return (default: 20, max: 200)", "minimum": 1, "maximum": 200, "default": 20},
+					"offset": map[string]any{"type": "integer", "description": "Pagination offset", "minimum": 0, "default": 0},
 					"sort":   map[string]any{"type": "string", "enum": []string{"newest", "oldest", "confidence"}, "default": "newest"},
 				},
 			},
@@ -176,13 +183,24 @@ func (s *Server) registerTools() map[string]Tool {
 			},
 			Handler: s.toolStatus,
 		},
+		"sage_domains": {
+			Name:        "sage_domains",
+			Description: "List this signed caller's authoritative current owned domains without reading a global domain roster or scanning memories. Results are stable, bounded, and cursor-paginated; continue with next_cursor until has_more is false. Use sage_status for the cheap first policy sample of readable and writable domains.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"cursor": map[string]any{"type": "string", "description": "Exact next_cursor returned by the previous page; omit for the first page."},
+					"limit":  map[string]any{"type": "integer", "description": "Maximum domains per page (default 50, max 100).", "minimum": 1, "maximum": 100, "default": 50},
+				},
+			},
+			Handler: s.toolDomains,
+		},
 		"sage_inception": {
 			Name: "sage_inception",
 			Description: "Initialize your persistent memory session. " +
 				"Call this once at the start of every new conversation with SAGE. " +
 				"It checks if you already have stored memories and returns your operating instructions. " +
-				"On a brand-new installation it seeds starter memories about how to use the memory system effectively. " +
-				"Alias: sage_red_pill (deprecated)",
+				"On a brand-new installation it seeds starter memories about how to use the memory system effectively.",
 			InputSchema: map[string]any{
 				"type":       "object",
 				"properties": map[string]any{},
@@ -198,6 +216,7 @@ func (s *Server) registerTools() map[string]Tool {
 				"properties": map[string]any{},
 			},
 			Handler: s.toolInception,
+			Hidden:  true,
 		},
 		"sage_turn": {
 			Name: "sage_turn",
@@ -237,7 +256,7 @@ func (s *Server) registerTools() map[string]Tool {
 					"domain":          map[string]any{"type": "string", "description": "Domain tag for the task. Omit to use your approved app-v23 owned home domain (legacy nodes use general). Explicit values are never silently remapped."},
 					"memory_id":       map[string]any{"type": "string", "description": "Existing task memory ID (for updates)"},
 					"status":          map[string]any{"type": "string", "enum": []string{"planned", "in_progress", "done", "dropped"}, "description": "Task status. New tasks default to planned; existing tasks require an explicit mutable status."},
-					"link_to":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Memory IDs to link this task to"},
+					"link_to":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 20, "description": "Memory IDs to link this task to (max: 20)"},
 					"idempotency_key": map[string]any{"type": "string", "description": "Optional permanent creation identity. Omit to derive one deterministically from the caller, resolved domain, and canonical task content; every later identical call returns that existing task even after it is done or dropped. Supply a new explicit key only when intentionally creating another task with the same content and domain."},
 				},
 			},
@@ -888,7 +907,10 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 	return result, nil
 }
 
-const correctionCommitWait = 30 * time.Second
+const (
+	correctionCommitWait      = 30 * time.Second
+	maxCorrectionCommitChecks = 10
+)
 
 // waitForCorrectionCommit waits only for the replacement side of a correction.
 // It deliberately returns the last observed state instead of propagating a
@@ -899,7 +921,8 @@ func (s *Server) waitForCorrectionCommit(ctx context.Context, memoryID string) s
 
 	status := "proposed"
 	path := "/v1/memory/" + url.PathEscape(memoryID)
-	for {
+	delay := 200 * time.Millisecond
+	for attempt := 0; attempt < maxCorrectionCommitChecks; attempt++ {
 		var detail struct {
 			Status string `json:"status"`
 		}
@@ -911,13 +934,22 @@ func (s *Server) waitForCorrectionCommit(ctx context.Context, memoryID string) s
 				return status
 			}
 		}
+		if attempt == maxCorrectionCommitChecks-1 {
+			return status
+		}
 
+		timer := time.NewTimer(delay)
 		select {
 		case <-waitCtx.Done():
+			timer.Stop()
 			return status
-		case <-time.After(200 * time.Millisecond):
+		case <-timer.C:
+		}
+		if delay < 3200*time.Millisecond {
+			delay *= 2
 		}
 	}
+	return status
 }
 
 // vaultEncryptedSearchMarker is a substring of the SearchByText error returned
@@ -1334,7 +1366,7 @@ func (s *Server) recallSemantic(ctx context.Context, query, domain string, topK 
 	return nil
 }
 
-func (s *Server) toolFederation(ctx context.Context, _ map[string]any) (any, error) {
+func (s *Server) toolFederation(ctx context.Context, args map[string]any) (any, error) {
 	if err := s.requireBoundFederatedCaller(ctx); err != nil {
 		return nil, err
 	}
@@ -1342,14 +1374,22 @@ func (s *Server) toolFederation(ctx context.Context, _ map[string]any) (any, err
 		Connections []map[string]any `json:"connections"`
 		Total       int              `json:"total"`
 		Message     string           `json:"message"`
+		Complete    *bool            `json:"complete"`
+		NextCursor  string           `json:"next_peer_cursor"`
 	}
-	if err := s.doSignedJSON(ctx, "GET", "/v1/federation/available", nil, &available); err != nil {
+	path := "/v1/federation/available"
+	if cursor := strings.TrimSpace(stringParam(args, "peer_cursor", "")); cursor != "" {
+		path += "?peer_cursor=" + url.QueryEscape(cursor)
+	}
+	if err := s.doSignedJSON(ctx, "GET", path, nil, &available); err != nil {
 		return nil, fmt.Errorf("discover available federation scopes: %w", err)
 	}
 	return map[string]any{
-		"connections": available.Connections,
-		"total":       available.Total,
-		"message":     available.Message,
+		"connections":      available.Connections,
+		"total":            available.Total,
+		"message":          available.Message,
+		"complete":         available.Complete == nil || *available.Complete,
+		"next_peer_cursor": available.NextCursor,
 	}, nil
 }
 
@@ -1370,8 +1410,16 @@ func (s *Server) toolDirectory(ctx context.Context, args map[string]any) (any, e
 	if err := s.requireBoundFederatedCaller(ctx); err != nil {
 		return nil, err
 	}
+	scope, _ := args["scope"].(string)
+	if scope == "" {
+		scope = "local"
+	}
+	if scope != "all" && scope != "local" {
+		return nil, fmt.Errorf("scope must be all or local")
+	}
 	var roster struct {
-		Agents []findAgentLocalResult `json:"agents"`
+		Agents    []findAgentLocalResult `json:"agents"`
+		Truncated bool                   `json:"truncated"`
 	}
 	if err := s.doSignedJSON(ctx, "GET", "/v1/agents/directory", nil, &roster); err != nil {
 		return nil, fmt.Errorf("list local agent directory: %w", err)
@@ -1395,15 +1443,14 @@ func (s *Server) toolDirectory(ctx context.Context, args map[string]any) (any, e
 			"to":              agent.AgentID,
 		})
 	}
-	scope, _ := args["scope"].(string)
-	if scope == "" {
-		scope = "all"
-	}
-	if scope != "all" && scope != "local" {
-		return nil, fmt.Errorf("scope must be all or local")
-	}
 	complete := true
 	warnings := make([]string, 0)
+	nextPeerCursor := ""
+	if roster.Truncated {
+		complete = false
+		warnings = append(warnings,
+			"The local directory is capped at 100 recipients; use sage_find_agent for a recipient not shown.")
+	}
 	if scope == "all" {
 		// The projection can prove every row it returns, but an older peer may
 		// not advertise safe linked-directory enumeration at all. /available
@@ -1414,10 +1461,21 @@ func (s *Server) toolDirectory(ctx context.Context, args map[string]any) (any, e
 			"Federated recipient enumeration is best effort; peers without the negotiated safe-directory capability are omitted.")
 		var available struct {
 			Connections []findAgentFederatedConnection `json:"connections"`
+			Complete    *bool                          `json:"complete"`
+			NextCursor  string                         `json:"next_peer_cursor"`
 		}
-		if err := s.doSignedJSON(ctx, "GET", "/v1/federation/available", nil, &available); err != nil {
+		path := "/v1/federation/available"
+		if cursor := strings.TrimSpace(stringParam(args, "peer_cursor", "")); cursor != "" {
+			path += "?peer_cursor=" + url.QueryEscape(cursor)
+		}
+		if err := s.doSignedJSON(ctx, "GET", path, nil, &available); err != nil {
 			warnings = append(warnings, "Federated directory could not be revalidated; local recipients are still shown.")
 		} else {
+			nextPeerCursor = available.NextCursor
+			if available.Complete != nil && !*available.Complete {
+				complete = false
+				warnings = append(warnings, "More federated peers remain; pass next_peer_cursor as peer_cursor to continue one bounded page at a time.")
+			}
 			seen := make(map[string]struct{}, len(agents))
 			for _, agent := range agents {
 				seen["local:"+agent["agent_id"].(string)] = struct{}{}
@@ -1461,11 +1519,12 @@ func (s *Server) toolDirectory(ctx context.Context, args map[string]any) (any, e
 	})
 
 	return map[string]any{
-		"agents":   agents,
-		"total":    len(agents),
-		"scope":    scope,
-		"complete": complete,
-		"warnings": warnings,
+		"agents":           agents,
+		"total":            len(agents),
+		"scope":            scope,
+		"complete":         complete,
+		"next_peer_cursor": nextPeerCursor,
+		"warnings":         warnings,
 		"message": "Caller-authorized recipient directory. Pass an agent's exact to value to " +
 			"sage_pipe. Membership proves neither presence nor delivery; use sage_message_status " +
 			"for evidence about a message you actually sent.",
@@ -1939,6 +1998,7 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 	if limit > 20 {
 		limit = 20
 	}
+	peerCursor := strings.TrimSpace(stringParam(params, "peer_cursor", ""))
 
 	var localResponse struct {
 		Agents []findAgentLocalResult `json:"agents"`
@@ -2013,27 +2073,54 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 			"message":   "Found local agent matches. Pass a match's to value directly to sage_pipe.",
 		}
 	}
+	localPartialResult := func(err error) map[string]any {
+		result := localResult(localPartial, []string{"local", "federated"})
+		result["complete"] = false
+		result["federated_lookup_error"] = err.Error()
+		result["message"] = "Local partial matches are shown, but federated discovery could not be revalidated. Do not treat this incomplete result as proof that a saved exact remote address is offline."
+		return result
+	}
 	if len(localExact) > 0 {
 		return localResult(localExact, []string{"local"}), nil
 	}
 
 	connections, cacheHit := s.cachedFederatedAgentConnections(ctx, query)
+	if peerCursor != "" {
+		cacheHit = false
+		connections = nil
+	}
+	federatedComplete, nextPeerCursor := true, ""
 	if cacheHit {
 		var err error
 		connections, err = s.reauthorizeCachedFederatedAgentConnections(ctx, connections)
 		if err != nil {
+			if len(localPartial) > 0 {
+				return localPartialResult(err), nil
+			}
 			return nil, err
 		}
 	} else {
 		var federationResponse struct {
 			Connections []findAgentFederatedConnection `json:"connections"`
+			Complete    *bool                          `json:"complete"`
+			NextCursor  string                         `json:"next_peer_cursor"`
 		}
 		path := "/v1/federation/available?agent_name=" + url.QueryEscape(query) + "&agent_limit=20"
+		if peerCursor != "" {
+			path += "&peer_cursor=" + url.QueryEscape(peerCursor)
+		}
 		if err := s.doSignedJSON(ctx, "GET", path, nil, &federationResponse); err != nil {
+			if len(localPartial) > 0 {
+				return localPartialResult(err), nil
+			}
 			return nil, fmt.Errorf("discover federated agents after local miss: %w", err)
 		}
 		connections = boundedFederatedAgentConnections(federationResponse.Connections)
-		s.cacheFederatedAgentConnections(ctx, query, connections)
+		federatedComplete = federationResponse.Complete == nil || *federationResponse.Complete
+		nextPeerCursor = federationResponse.NextCursor
+		if peerCursor == "" && federatedComplete {
+			s.cacheFederatedAgentConnections(ctx, query, connections)
+		}
 	}
 
 	type federatedMatch struct {
@@ -2108,12 +2195,14 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 		cacheState = "live"
 	}
 	return map[string]any{
-		"matches":         matches,
-		"total":           len(federatedMatches),
-		"searched":        []string{"local", "federated"},
-		"federated_cache": cacheState,
-		"truncated":       remoteTruncated || len(federatedMatches) > len(matches),
-		"message":         "No local agent matched. Federated results are limited to current caller-authorized recipient relations; pass a match's to value directly to sage_pipe. sage_pipe always re-checks the target registration, route, and authorization before sending. A directory result is not an online/offline verdict and is not reachable, accepting, delivery, or read evidence.",
+		"matches":          matches,
+		"total":            len(federatedMatches),
+		"searched":         []string{"local", "federated"},
+		"federated_cache":  cacheState,
+		"truncated":        remoteTruncated || len(federatedMatches) > len(matches),
+		"complete":         federatedComplete,
+		"next_peer_cursor": nextPeerCursor,
+		"message":          "No local agent matched. Federated results are limited to current caller-authorized recipient relations; pass a match's to value directly to sage_pipe. sage_pipe always re-checks the target registration, route, and authorization before sending. A directory result is not an online/offline verdict and is not reachable, accepting, delivery, or read evidence.",
 	}, nil
 }
 
@@ -2209,6 +2298,12 @@ func (s *Server) toolList(ctx context.Context, params map[string]any) (any, erro
 	limit := intParam(params, "limit", 20)
 	offset := intParam(params, "offset", 0)
 	sort := stringParam(params, "sort", "newest")
+	if limit <= 0 || limit > 200 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
 
 	q := url.Values{}
 	if domain != "" {
@@ -2359,6 +2454,35 @@ func (s *Server) toolStatus(ctx context.Context, _ map[string]any) (any, error) 
 	return stats, nil
 }
 
+func (s *Server) toolDomains(ctx context.Context, params map[string]any) (any, error) {
+	if err := s.requireBoundFederatedCaller(ctx); err != nil {
+		return nil, err
+	}
+	limit := intParam(params, "limit", 50)
+	if limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("limit must be between 1 and 100")
+	}
+	cursor := strings.TrimSpace(stringParam(params, "cursor", ""))
+	path := "/v1/agent/me/domains/owned?limit=" + strconv.Itoa(limit)
+	if cursor != "" {
+		path += "&cursor=" + url.QueryEscape(cursor)
+	}
+	var page struct {
+		Domains    []string `json:"domains"`
+		NextCursor string   `json:"next_cursor"`
+		HasMore    bool     `json:"has_more"`
+		Scope      string   `json:"scope"`
+	}
+	if err := s.doSignedJSON(ctx, http.MethodGet, path, nil, &page); err != nil {
+		return nil, fmt.Errorf("list caller-owned domains: %w", err)
+	}
+	return map[string]any{
+		"domains": page.Domains, "next_cursor": page.NextCursor,
+		"has_more": page.HasMore, "scope": page.Scope,
+		"request_cost": "one signed local request; no memory or directory scan",
+	}, nil
+}
+
 const (
 	callerStatusStandingBudget = 1500 * time.Millisecond
 	callerStatusOptionalBudget = 750 * time.Millisecond
@@ -2374,19 +2498,30 @@ func (s *Server) callerBoundedStatus(ctx context.Context, self selfWritePolicy) 
 	standing := callerStanding(self, true)
 	standing["counts_available"] = false
 	standing["counts_scope"] = "home_domain"
+	standing["owned_domains"] = []string{}
 	standing["readable_domains"] = []string{}
+	standing["writable_domains"] = []string{}
 	standing["readable_domains_scope"] = "bounded_policy_sample"
 
 	diagnosticCtx, cancel := context.WithTimeout(ctx, callerStatusOptionalBudget)
 	defer cancel()
 
 	var domains struct {
-		Domains   []string `json:"domains"`
-		Truncated bool     `json:"truncated"`
-		Scope     string   `json:"scope"`
+		Domains         []string `json:"domains"`
+		OwnedDomains    []string `json:"owned_domains"`
+		ReadableDomains []string `json:"readable_domains"`
+		WritableDomains []string `json:"writable_domains"`
+		Truncated       bool     `json:"truncated"`
+		Scope           string   `json:"scope"`
 	}
 	if err := s.doSignedJSON(diagnosticCtx, http.MethodGet, "/v1/agent/me/domains", nil, &domains); err == nil {
-		standing["readable_domains"] = domains.Domains
+		readable := domains.ReadableDomains
+		if readable == nil {
+			readable = domains.Domains
+		}
+		standing["owned_domains"] = domains.OwnedDomains
+		standing["readable_domains"] = readable
+		standing["writable_domains"] = domains.WritableDomains
 		standing["readable_domains_truncated"] = domains.Truncated
 		if domains.Scope != "" {
 			standing["readable_domains_scope"] = domains.Scope
@@ -2394,8 +2529,13 @@ func (s *Server) callerBoundedStatus(ctx context.Context, self selfWritePolicy) 
 	} else if self.HomeDomain != "" && self.CanRead {
 		// The home domain is already part of authenticated consensus standing;
 		// retaining it here reveals nothing new and leaves a useful scoped-recall
-		// hint when the optional projection is unavailable.
+		// hint when the optional projection is unavailable. Home-domain standing
+		// does not prove current ownership after a transfer, so never synthesize
+		// owned_domains from it.
 		standing["readable_domains"] = []string{self.HomeDomain}
+		if self.CanWrite {
+			standing["writable_domains"] = []string{self.HomeDomain}
+		}
 		standing["readable_domains_truncated"] = true
 		standing["readable_domains_degraded_reason"] = "bounded readable-domain discovery is temporarily unavailable; showing the authenticated home domain"
 	}
@@ -3395,6 +3535,9 @@ func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, erro
 	var linkTo []string
 	if raw, ok := params["link_to"]; ok {
 		if arr, ok := raw.([]any); ok {
+			if len(arr) > 20 {
+				return nil, fmt.Errorf("link_to may contain at most 20 memory IDs")
+			}
 			for _, v := range arr {
 				if s, ok := v.(string); ok && s != "" {
 					linkTo = append(linkTo, s)
@@ -4266,6 +4409,60 @@ func (s *Server) acknowledgeCanonicalMessage(ctx context.Context, messageID stri
 	return response.ReadStatus, err
 }
 
+type messageReadBatchWireItem struct {
+	MessageID  string `json:"message_id"`
+	ReadStatus string `json:"read_status"`
+	Error      string `json:"error,omitempty"`
+}
+
+func (s *Server) acknowledgeCanonicalMessageBatch(
+	ctx context.Context, items []pipelineInboxWireItem,
+) map[string]messageReadBatchWireItem {
+	results := make(map[string]messageReadBatchWireItem, len(items))
+	if len(items) == 0 {
+		return results
+	}
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		ids = append(ids, item.PipeID)
+	}
+	body, _ := json.Marshal(map[string]any{"message_ids": ids})
+	var response struct {
+		Items []messageReadBatchWireItem `json:"items"`
+	}
+	if err := s.doSignedJSON(ctx, http.MethodPut, "/v1/messages/read-batch", body, &response); err != nil {
+		if isAPIStatus(err, http.StatusNotFound) {
+			// Mixed-version compatibility only. v11.17+ performs one batch call.
+			for _, item := range items {
+				status, ackErr := s.acknowledgeCanonicalMessage(ctx, item.PipeID)
+				result := messageReadBatchWireItem{MessageID: item.PipeID, ReadStatus: status}
+				if ackErr != nil {
+					result.Error = ackErr.Error()
+				}
+				results[item.PipeID] = result
+			}
+			return results
+		}
+		for _, item := range items {
+			results[item.PipeID] = messageReadBatchWireItem{
+				MessageID: item.PipeID, ReadStatus: "not_confirmed", Error: err.Error(),
+			}
+		}
+		return results
+	}
+	for _, item := range response.Items {
+		results[item.MessageID] = item
+	}
+	for _, item := range items {
+		if result, ok := results[item.PipeID]; !ok || result.ReadStatus == "" {
+			results[item.PipeID] = messageReadBatchWireItem{
+				MessageID: item.PipeID, ReadStatus: "not_confirmed", Error: "batch response omitted this message",
+			}
+		}
+	}
+	return results
+}
+
 func (s *Server) toolMessagesReceive(ctx context.Context, params map[string]any) (any, error) {
 	if err := s.requireBoundFederatedCaller(ctx); err != nil {
 		return nil, err
@@ -4286,14 +4483,15 @@ func (s *Server) toolMessagesReceive(ctx context.Context, params map[string]any)
 		return nil, fmt.Errorf("messages receive: %w", err)
 	}
 	items := make([]map[string]any, 0, len(received))
+	readResults := s.acknowledgeCanonicalMessageBatch(ctx, received)
 	for _, item := range received {
-		readStatus, ackErr := s.acknowledgeCanonicalMessage(ctx, item.PipeID)
+		readResult := readResults[item.PipeID]
 		formatted := formatPipelineInboxItem(item)
 		formatted["message_id"] = item.PipeID
 		delete(formatted, "pipe_id")
-		formatted["read_status"] = readStatus
-		if ackErr != nil {
-			formatted["read_confirmation_error"] = ackErr.Error()
+		formatted["read_status"] = readResult.ReadStatus
+		if readResult.Error != "" {
+			formatted["read_confirmation_error"] = readResult.Error
 		}
 		items = append(items, formatted)
 	}
@@ -4508,6 +4706,151 @@ func (s *Server) acknowledgeFederatedPipeReceipt(
 	return "queued", nil
 }
 
+type pipeReceiptBatchChallengeItem struct {
+	PipeID    string          `json:"pipe_id"`
+	EventKind string          `json:"event_kind"`
+	Status    string          `json:"status"`
+	Challenge json.RawMessage `json:"challenge"`
+	Error     string          `json:"error,omitempty"`
+}
+
+type pipeReceiptBatchRecordItem struct {
+	PipeID        string `json:"pipe_id"`
+	EventKind     string `json:"event_kind"`
+	ReceiptStatus string `json:"receipt_status"`
+	Error         string `json:"error,omitempty"`
+}
+
+func pipelineProofFromPrepared(prepared *preparedSignedRequest) (store.PipelineAgentProof, error) {
+	if prepared == nil {
+		return store.PipelineAgentProof{}, fmt.Errorf("prepared receipt proof is nil")
+	}
+	signature, err := hex.DecodeString(prepared.signature)
+	if err != nil {
+		return store.PipelineAgentProof{}, err
+	}
+	nonce, err := hex.DecodeString(prepared.nonce)
+	if err != nil {
+		return store.PipelineAgentProof{}, err
+	}
+	timestamp, err := strconv.ParseInt(prepared.timestamp, 10, 64)
+	if err != nil {
+		return store.PipelineAgentProof{}, err
+	}
+	canonical := append([]byte(prepared.method+" "+prepared.path+"\n"), prepared.body...)
+	return store.PipelineAgentProof{
+		AgentID: prepared.agentID, Signature: signature, Timestamp: timestamp,
+		Nonce: nonce, CanonicalRequest: canonical,
+	}, nil
+}
+
+// acknowledgeNegotiatedFederatedInboxBatch reduces up to twenty receipt-v2
+// messages to one challenge request and one record request. Every event keeps
+// its own exact-path signature for remote verification; the batch is transport
+// aggregation only, not shared authority or all-or-nothing state.
+func (s *Server) acknowledgeNegotiatedFederatedInboxBatch(
+	ctx context.Context,
+	candidates []pipelineInboxWireItem,
+	metadata map[string]map[string]any,
+) ([]pipelineInboxWireItem, error, bool) {
+	v2 := make([]pipelineInboxWireItem, 0, len(candidates))
+	for _, item := range candidates {
+		if item.ReceiptProtocolVersion == 2 {
+			v2 = append(v2, item)
+		}
+	}
+	if len(v2) == 0 {
+		return append([]pipelineInboxWireItem(nil), candidates...), nil, true
+	}
+	challengeItems := make([]map[string]string, 0, len(v2)*2)
+	for _, item := range v2 {
+		challengeItems = append(challengeItems,
+			map[string]string{"pipe_id": item.PipeID, "kind": "claimed"},
+			map[string]string{"pipe_id": item.PipeID, "kind": "read"},
+		)
+	}
+	challengeBody, _ := json.Marshal(map[string]any{"items": challengeItems})
+	var challengeResponse struct {
+		Items []pipeReceiptBatchChallengeItem `json:"items"`
+	}
+	if err := s.doSignedJSON(ctx, http.MethodPost, "/v1/pipe/receipts/challenge-batch", challengeBody, &challengeResponse); err != nil {
+		if isAPIStatus(err, http.StatusNotFound) {
+			return nil, nil, false
+		}
+		return nil, err, true
+	}
+	recordItems := make([]map[string]any, 0, len(challengeResponse.Items))
+	for _, item := range challengeResponse.Items {
+		if item.Status != "ready" || len(item.Challenge) == 0 {
+			continue
+		}
+		path := fmt.Sprintf("/v1/pipe/%s/receipt/%s", url.PathEscape(item.PipeID), item.EventKind)
+		prepared, err := s.prepareSignedRequest(ctx, http.MethodPut, path, []byte(item.Challenge))
+		if err != nil {
+			continue
+		}
+		proof, err := pipelineProofFromPrepared(prepared)
+		if err != nil {
+			continue
+		}
+		recordItems = append(recordItems, map[string]any{
+			"pipe_id": item.PipeID, "kind": item.EventKind, "proof": proof,
+		})
+	}
+	if len(recordItems) == 0 {
+		return nil, fmt.Errorf("receipt-v2 batch returned no signable challenges"), true
+	}
+	recordBody, _ := json.Marshal(map[string]any{"items": recordItems})
+	var recordResponse struct {
+		Items []pipeReceiptBatchRecordItem `json:"items"`
+	}
+	if err := s.doSignedJSON(ctx, http.MethodPut, "/v1/pipe/receipts/batch", recordBody, &recordResponse); err != nil {
+		return nil, err, true
+	}
+	byPipe := make(map[string]map[string]pipeReceiptBatchRecordItem, len(v2))
+	for _, item := range recordResponse.Items {
+		if byPipe[item.PipeID] == nil {
+			byPipe[item.PipeID] = make(map[string]pipeReceiptBatchRecordItem)
+		}
+		byPipe[item.PipeID][item.EventKind] = item
+	}
+	visible := make([]pipelineInboxWireItem, 0, len(candidates))
+	var warning error
+	for _, item := range candidates {
+		if item.ReceiptProtocolVersion != 2 {
+			visible = append(visible, item)
+			continue
+		}
+		claim := byPipe[item.PipeID]["claimed"]
+		read := byPipe[item.PipeID]["read"]
+		if claim.ReceiptStatus == "" {
+			claim.ReceiptStatus = "unconfirmed"
+			if claim.Error == "" {
+				claim.Error = "batch response omitted claim receipt"
+			}
+		}
+		if read.ReceiptStatus == "" {
+			read.ReceiptStatus = "unconfirmed"
+			if read.Error == "" {
+				read.Error = "batch response omitted read receipt"
+			}
+		}
+		itemMetadata := map[string]any{"claim_status": claim.ReceiptStatus, "read_status": read.ReceiptStatus}
+		metadata[item.PipeID] = itemMetadata
+		if claim.ReceiptStatus != "queued" {
+			itemMetadata["claim_confirmation_error"] = claim.Error
+			warning = errors.Join(warning, fmt.Errorf("federated message %s was not claimed", item.PipeID))
+			continue
+		}
+		if read.ReceiptStatus != "queued" {
+			itemMetadata["read_confirmation_error"] = read.Error
+			warning = errors.Join(warning, fmt.Errorf("federated message %s read receipt is pending", item.PipeID))
+		}
+		visible = append(visible, item)
+	}
+	return visible, warning, true
+}
+
 // acknowledgeNegotiatedFederatedInbox claims negotiated receipt-v2 work
 // before it becomes visible to the agent. A failed claim omits the item: the
 // pending row remains available for a later inbox call, while exposing its
@@ -4518,6 +4861,9 @@ func (s *Server) acknowledgeNegotiatedFederatedInbox(
 	candidates []pipelineInboxWireItem,
 	metadata map[string]map[string]any,
 ) ([]pipelineInboxWireItem, error) {
+	if visible, warning, supported := s.acknowledgeNegotiatedFederatedInboxBatch(ctx, candidates, metadata); supported {
+		return visible, warning
+	}
 	visible := make([]pipelineInboxWireItem, 0, len(candidates))
 	var warning error
 	for _, item := range candidates {
@@ -4719,13 +5065,14 @@ func (s *Server) receiveUnifiedPipelineInbox(
 	}
 
 	items := append([]pipelineInboxWireItem(nil), canonicalItems...)
+	readResults := s.acknowledgeCanonicalMessageBatch(ctx, canonicalItems)
 	for _, item := range canonicalItems {
 		// Exact read acknowledgement is best effort. Claimed work stays visible
 		// even if its independent receipt write is temporarily unavailable.
-		readStatus, ackErr := s.acknowledgeCanonicalMessage(ctx, item.PipeID)
-		readMetadata[item.PipeID] = map[string]any{"read_status": readStatus}
-		if ackErr != nil {
-			readMetadata[item.PipeID]["read_confirmation_error"] = ackErr.Error()
+		readResult := readResults[item.PipeID]
+		readMetadata[item.PipeID] = map[string]any{"read_status": readResult.ReadStatus}
+		if readResult.Error != "" {
+			readMetadata[item.PipeID]["read_confirmation_error"] = readResult.Error
 		}
 	}
 	remaining := limit - len(items)
@@ -4932,7 +5279,8 @@ func (s *Server) toolPipeResult(ctx context.Context, params map[string]any) (any
 		SourcePipeID       string `json:"source_pipe_id"`
 		ReplySourceChainID string `json:"reply_source_chain_id"`
 	}
-	if err := s.doSignedJSON(ctx, "GET", "/v1/pipe/"+pipeID, nil, &meta); err != nil {
+	escapedPipeID := url.PathEscape(pipeID)
+	if err := s.doSignedJSON(ctx, "GET", "/v1/pipe/"+escapedPipeID, nil, &meta); err != nil {
 		return nil, fmt.Errorf("pipeline result preflight: %w", err)
 	}
 	bodyFields := map[string]any{"result": result}
@@ -4962,7 +5310,7 @@ func (s *Server) toolPipeResult(ctx context.Context, params map[string]any) (any
 		JournalID string `json:"journal_id"`
 		Journaled bool   `json:"journaled"`
 	}
-	if err := s.doSignedJSON(ctx, "PUT", "/v1/pipe/"+pipeID+"/result", body, &resp); err != nil {
+	if err := s.doSignedJSON(ctx, "PUT", "/v1/pipe/"+escapedPipeID+"/result", body, &resp); err != nil {
 		return nil, fmt.Errorf("pipeline result: %w", err)
 	}
 

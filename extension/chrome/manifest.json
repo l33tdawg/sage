@@ -5,7 +5,10 @@
   "description": "Give your AI a secure, permanent memory. Works with ChatGPT, and more — even on free plans.",
   "permissions": ["storage"],
   "host_permissions": [
-    "http://localhost:8080/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://localhost/*",
+    "https://127.0.0.1/*",
     "https://chatgpt.com/*",
     "https://chat.openai.com/*"
   ],

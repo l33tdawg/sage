@@ -811,6 +811,12 @@ func TestAppV25DomainContinuityBatchPrevalidatesWholeBatchAndReusesUniqueGroup(t
 		require.NoError(t, enrollmentErr)
 		require.Equal(t, beforeRevisions[writer]+1, enrollment.Revision,
 			"each writer is revised once for the complete batch")
+		if enrollment.Active && enrollment.Profile != AppV23ProfileReadOnly {
+			shared, sharedErr := s.IsAppV23SharedDomain(enrollment.HomeDomain)
+			require.NoError(t, sharedErr)
+			require.False(t, shared,
+				"a continuity batch must never leave an active writer's home pointing at a domain made shared by that batch")
+		}
 	}
 	require.NoError(t, s.TransferDomainAppV23(
 		"a-shared", unrelated, "", 122, true,

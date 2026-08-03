@@ -36,6 +36,12 @@ var ErrLocked = errors.New("vault is locked — passphrase required")
 // ErrWrongPassphrase is returned when the passphrase doesn't match.
 var ErrWrongPassphrase = errors.New("wrong passphrase")
 
+// ErrInvalidKeyFile is returned when a vault key file is structurally
+// malformed. Keep this distinct from ErrWrongPassphrase: malformed AEAD input
+// must never reach cipher.AEAD.Open (which panics for a wrong nonce length),
+// and telling an operator to retry a passphrase cannot repair corrupt bytes.
+var ErrInvalidKeyFile = errors.New("invalid vault key file")
+
 // ErrWrongRecoveryKey is returned when a syntactically valid or invalid
 // recovery key does not identify the data key already bound to this vault.
 var ErrWrongRecoveryKey = errors.New("recovery key does not match this vault")
@@ -130,6 +136,24 @@ func Open(keyFilePath, passphrase string) (*Vault, error) {
 	var kf keyFile
 	if unmarshalErr := json.Unmarshal(data, &kf); unmarshalErr != nil {
 		return nil, fmt.Errorf("parse key file: %w", unmarshalErr)
+	}
+	// Init and every supported rewrap path write these exact field lengths.
+	// Validate before Argon2/AES-GCM so a truncated or tampered local file
+	// returns a recoverable diagnostic instead of panicking in AEAD.Open.
+	if len(kf.Salt) != saltLen {
+		return nil, fmt.Errorf("%w: salt length is %d, want %d", ErrInvalidKeyFile, len(kf.Salt), saltLen)
+	}
+	if len(kf.Nonce) != nonceLen {
+		return nil, fmt.Errorf("%w: nonce length is %d, want %d", ErrInvalidKeyFile, len(kf.Nonce), nonceLen)
+	}
+	if len(kf.EncryptedKey) != argonKeyLen+aes.BlockSize {
+		return nil, fmt.Errorf(
+			"%w: encrypted key length is %d, want %d",
+			ErrInvalidKeyFile, len(kf.EncryptedKey), argonKeyLen+aes.BlockSize,
+		)
+	}
+	if len(kf.VerifyHash) != sha256.Size {
+		return nil, fmt.Errorf("%w: verify hash length is %d, want %d", ErrInvalidKeyFile, len(kf.VerifyHash), sha256.Size)
 	}
 
 	// Derive wrapping key from passphrase

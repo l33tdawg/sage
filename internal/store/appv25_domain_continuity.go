@@ -523,12 +523,19 @@ func (s *BadgerStore) prepareAppV25DomainContinuityBatchTxn(
 	if err := s.validateAppV25BatchGroupCapacityTxn(txn, plan.groups); err != nil {
 		return nil, err
 	}
+	sharedDomains := make(map[string]struct{}, len(plan.domains))
+	for _, domain := range plan.domains {
+		if domain.shared {
+			sharedDomains[domain.entry.Domain] = struct{}{}
+		}
+	}
 	for writer, prepared := range plan.writers {
 		if !prepared.enrollment.Active {
 			prepared.enrollment.Active = true
 			prepared.changed = true
 		}
-		if prepared.enrollment.HomeDomain == "" {
+		_, homeBecomesShared := sharedDomains[prepared.enrollment.HomeDomain]
+		if prepared.enrollment.HomeDomain == "" || homeBecomesShared {
 			home, err := appV25AllocateContinuityHomeTxn(s, txn, writer, height, false)
 			if err != nil {
 				return nil, err
@@ -1483,9 +1490,31 @@ func (s *BadgerStore) appV25ContinuityActivationMatchesTxn(
 	if err != nil {
 		return false, err
 	}
-	return activation.AgentID == enrollment.AgentID &&
-		activation.HomeDomain == enrollment.HomeDomain &&
+	baseMatches := activation.AgentID == enrollment.AgentID &&
 		activation.LegacyPolicyDigest == disposition.LegacyPolicyDigest &&
-		enrollment.Active &&
-		enrollment.Profile == disposition.Profile, nil
+		enrollment.Active && enrollment.Profile == disposition.Profile
+	if !baseMatches {
+		return false, nil
+	}
+	if activation.HomeDomain == enrollment.HomeDomain {
+		return true, nil
+	}
+	// App-v26 may have replaced only the invalid home binding committed by the
+	// historical app-v25 batch path. Preserve the original activation as audit
+	// history and accept the new enrollment only when the append-only repair
+	// record bridges both exact revisions and domains.
+	var repair AppV26HomeRepair
+	if err := appV23ReadJSON(txn, appV26HomeRepairKey(enrollment.AgentID), &repair); err != nil {
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return repair.AgentID == enrollment.AgentID &&
+		repair.PreviousHome == activation.HomeDomain &&
+		repair.ReplacementHome == enrollment.HomeDomain &&
+		repair.PreviousRevision == activation.EnrollmentRevision &&
+		repair.NewRevision == enrollment.Revision &&
+		repair.NewRevision == repair.PreviousRevision+1 &&
+		repair.AppliedHeight > activation.AppliedHeight, nil
 }

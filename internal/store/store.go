@@ -641,7 +641,10 @@ type AgentEntry struct {
 	ClaimExpiresAt  *time.Time        `json:"claim_expires_at,omitempty"` // When the claim token expires
 }
 
-const maxAgentNameLookupResults = 20
+const (
+	maxAgentNameLookupResults    = 20
+	maxAgentNameLookupCandidates = 160
+)
 
 // normalizeAgentNameLookup keeps the SQLite and Postgres recipient finders on
 // one bounded literal-substring contract. The escaped exact value is also safe

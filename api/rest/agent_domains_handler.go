@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,9 +19,63 @@ const (
 )
 
 type callerReadableDomainsResponse struct {
-	Domains   []string `json:"domains"`
-	Truncated bool     `json:"truncated"`
-	Scope     string   `json:"scope"`
+	// Domains is the backward-compatible alias for ReadableDomains.
+	Domains         []string `json:"domains"`
+	OwnedDomains    []string `json:"owned_domains"`
+	ReadableDomains []string `json:"readable_domains"`
+	WritableDomains []string `json:"writable_domains"`
+	Truncated       bool     `json:"truncated"`
+	Scope           string   `json:"scope"`
+}
+
+type callerOwnedDomainsPageResponse struct {
+	Domains    []string `json:"domains"`
+	NextCursor string   `json:"next_cursor,omitempty"`
+	HasMore    bool     `json:"has_more"`
+	Scope      string   `json:"scope"`
+}
+
+// handleGetAgentOwnedDomainsPage is the complete, caller-only ownership
+// projection. Unlike sage_status's cheap policy sample, this endpoint can be
+// paged until has_more=false without scanning memories or a global roster.
+func (s *Server) handleGetAgentOwnedDomainsPage(w http.ResponseWriter, r *http.Request) {
+	agentID := middleware.ContextAgentID(r.Context())
+	if agentID == "" {
+		writeProblem(w, http.StatusUnauthorized, "Unauthorized", "No agent ID in context.")
+		return
+	}
+	if !s.requireAppV23ActiveOrdinaryAgent(w, agentID, "owned domain discovery") {
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			writeProblem(w, http.StatusBadRequest, "Invalid limit", "limit must be between 1 and 100")
+			return
+		}
+		limit = parsed
+	}
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if cursor != "" {
+		if err := store.ValidateAppV23DomainName(cursor); err != nil {
+			writeProblem(w, http.StatusBadRequest, "Invalid cursor", "cursor must be an exact domain returned by the previous page")
+			return
+		}
+	}
+	domains, hasMore, err := s.badgerStore.ListOwnedDomainsPage(agentID, cursor, limit)
+	if err != nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Ownership projection unavailable", "The authoritative owned-domain index is not available yet.")
+		return
+	}
+	next := ""
+	if hasMore && len(domains) > 0 {
+		next = domains[len(domains)-1]
+	}
+	writeJSON(w, http.StatusOK, callerOwnedDomainsPageResponse{
+		Domains: domains, NextCursor: next, HasMore: hasMore,
+		Scope: "authoritative_current_owner",
+	})
 }
 
 // handleGetAgentReadableDomains returns a bounded, caller-only set of useful
@@ -128,6 +183,10 @@ func (s *Server) handleGetAgentReadableDomains(w http.ResponseWriter, r *http.Re
 	if groups, groupsErr := s.badgerStore.ListAppV23AgentGroups(agentID); groupsErr == nil {
 		for _, group := range groups {
 			for _, memberID := range group.Members {
+				if len(candidates) >= callerReadableDomainCandidateScan {
+					truncated = true
+					break
+				}
 				member, memberErr := s.badgerStore.GetAppV23Enrollment(memberID)
 				if memberErr != nil {
 					truncated = true
@@ -136,6 +195,9 @@ func (s *Server) handleGetAgentReadableDomains(w http.ResponseWriter, r *http.Re
 				if member != nil && member.Active {
 					add(member.HomeDomain)
 				}
+			}
+			if len(candidates) >= callerReadableDomainCandidateScan {
+				break
 			}
 		}
 	} else {
@@ -179,8 +241,28 @@ func (s *Server) handleGetAgentReadableDomains(w http.ResponseWriter, r *http.Re
 	}
 	sort.Strings(remaining)
 	ordered = append(ordered, remaining...)
+	owned := make([]string, 0, min(len(ordered), callerReadableDomainLimit))
+	ownedFromIndex := false
+	if indexed, more, indexErr := s.badgerStore.ListOwnedDomainsPage(agentID, "", callerReadableDomainLimit); indexErr == nil {
+		owned = indexed
+		ownedFromIndex = true
+		if more {
+			truncated = true
+		}
+	}
 	readable := make([]string, 0, min(len(ordered), callerReadableDomainLimit))
+	writable := make([]string, 0, min(len(ordered), callerReadableDomainLimit))
 	for _, domain := range ordered {
+		owner, _, ownerErr := s.badgerStore.ResolveAppV23OwningAncestor(domain)
+		if ownerErr != nil {
+			truncated = true
+		} else if owner == agentID && !ownedFromIndex {
+			if len(owned) < callerReadableDomainLimit {
+				owned = append(owned, domain)
+			} else {
+				truncated = true
+			}
+		}
 		allowed, accessErr := s.hasMemoryReadAccess(domain, agentID, 0, now)
 		if accessErr != nil {
 			truncated = true
@@ -191,12 +273,21 @@ func (s *Server) handleGetAgentReadableDomains(w http.ResponseWriter, r *http.Re
 		}
 		if len(readable) == callerReadableDomainLimit {
 			truncated = true
-			break
+		} else {
+			readable = append(readable, domain)
 		}
-		readable = append(readable, domain)
+		if checkAppV23EffectiveWriteAccess(s.badgerStore, agentID, domain, now) == nil {
+			if len(writable) < callerReadableDomainLimit {
+				writable = append(writable, domain)
+			} else {
+				truncated = true
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, callerReadableDomainsResponse{
-		Domains: readable, Truncated: truncated, Scope: "bounded_policy_and_provenance",
+		Domains: readable, OwnedDomains: owned, ReadableDomains: readable,
+		WritableDomains: writable, Truncated: truncated,
+		Scope: "bounded_policy_and_provenance",
 	})
 }

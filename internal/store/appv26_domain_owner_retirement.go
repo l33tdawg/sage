@@ -145,11 +145,11 @@ func (s *BadgerStore) validateAppV26DomainOwnerTargetTxn(
 	if err := s.appV23ReadEffectiveJSONTxn(
 		txn, appV23ProjectedAgentKey(targetID), &agent,
 	); errors.Is(err, badger.ErrKeyNotFound) {
-		if err := appV23ReadJSON(txn, agentOnChainKey(targetID), &agent); err != nil {
-			if errors.Is(err, badger.ErrKeyNotFound) {
+		if fallbackErr := appV23ReadJSON(txn, agentOnChainKey(targetID), &agent); fallbackErr != nil {
+			if errors.Is(fallbackErr, badger.ErrKeyNotFound) {
 				return ErrAppV26InvalidOwnerTarget
 			}
-			return err
+			return fallbackErr
 		}
 	} else if err != nil {
 		return err
@@ -231,10 +231,10 @@ func (s *BadgerStore) TransferDomainAppV26CAS(
 			if parent == "" {
 				parent = currentParent
 			}
-			if err := s.appV23ValidateHomeDomainReleaseTxn(
+			if releaseErr := s.appV23ValidateHomeDomainReleaseTxn(
 				txn, name, currentOwner, newOwnerID, makeShared,
-			); err != nil {
-				return err
+			); releaseErr != nil {
+				return releaseErr
 			}
 
 			prefix := []byte("grant:" + name + ":")

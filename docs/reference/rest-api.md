@@ -11,7 +11,7 @@ Most core `/v1/*` REST endpoints require Ed25519 request signing (`api/rest/midd
 | `X-Agent-ID` | 64-char hex Ed25519 pubkey | Identifies the agent |
 | `X-Signature` | hex-encoded Ed25519 sig | Signs the canonical payload |
 | `X-Timestamp` | unix epoch seconds | Prevents replay |
-| `X-Nonce` | hex bytes (optional) | Sub-second replay protection; include for concurrent requests |
+| `X-Nonce` | 8 random bytes, hex encoded | Fresh replay nonce; required for current clients and exact signed actions |
 
 The REST CORS preflight allowlist includes all four signing headers, including
 `X-Nonce`; browser clients do not need to fall back to the legacy nonce-less
@@ -24,7 +24,11 @@ canonical = METHOD + " " + PATH[?QUERY] + "\n" + BODY
 message   = SHA-256(canonical) + bigEndian(timestamp_int64) + nonce
 ```
 
-Include `X-Nonce` on current clients. If `X-Nonce` is absent, the server accepts the legacy nonce-less signature shape for backward compatibility.
+Always include a fresh 8-byte `X-Nonce` on current clients. The generic
+authentication middleware temporarily accepts the historical nonce-less
+signature shape for compatibility, but exact message, acknowledgement,
+receipt, and delegated-governance actions reject it. Do not build new clients
+against the legacy form.
 
 **Constraints:**
 - Timestamp must be within ±5 minutes of server time (`auth.go:79`).
@@ -709,11 +713,13 @@ efficient signed `GET /v1/agents/lookup` route.
 Signed metadata-only local recipient directory used by `sage_directory`. It
 applies the same active-ordinary canonical enrollment boundary as
 `GET /v1/agents`, but returns only `agent_id`, display/registered names,
-provider, and active status. SQLite and PostgreSQL deliberately avoid the full
-roster projection here, so this route does not derive memory counts that the
-recipient picker would immediately discard.
+provider, and active status. SQLite and PostgreSQL cap the database query at
+101 candidate rows and return at most 100 active recipients, so this route
+neither derives memory counts nor walks an unbounded roster merely to populate
+a picker. When `truncated` is true, use the bounded name lookup below.
 
-**Response** (HTTP 200): `{"agents": [...identity metadata...], "total": N}`
+**Response** (HTTP 200):
+`{"agents": [...identity metadata...], "total": N, "truncated": false}`
 
 This REST route remains deliberately local. MCP `sage_directory(scope="all")`
 combines it with the separately signed, caller-filtered federation availability
@@ -876,6 +882,29 @@ CEREBRUM Root and unregistered keys have no ordinary agent profile.
   misreading these booleans as authority over every domain. Pending/inactive
   callers receive explicit `false` values without probing memory routes.
 
+### `GET /v1/agent/me/domains`
+
+Signed caller-only bounded policy projection. `domains` and
+`readable_domains` contain up to 64 currently authorized exact recall targets;
+`writable_domains` contains a bounded current-policy write sample; and
+`owned_domains` is a bounded ownership sample. `truncated:true` means at least
+one sample is incomplete. These arrays deliberately avoid a global roster or
+memory scan and are suitable for choosing an exact scope, not proving complete
+ownership.
+
+### `GET /v1/agent/me/domains/owned`
+
+Signed caller-only authoritative owned-domain pagination. `limit` defaults to
+50 and is capped at 100; pass the exact returned `next_cursor` until
+`has_more:false`. The app-v26 consensus owner index makes each page one bounded
+local database read without enumerating agents or memories.
+
+**Response:**
+
+```json
+{"domains":["agent-home","project-a"],"next_cursor":"project-a","has_more":true,"scope":"authoritative_current_owner"}
+```
+
 ---
 
 ### `GET /v1/agent/{id}`
@@ -1032,10 +1061,11 @@ Invalid local request shapes return `400`; an inactive app-v23 node returns
 
 ---
 
-### `PUT /v1/agent/{id}/permission`
+### Retired pre-app-v23 agent-policy route
 
-**Retired at app-v23.** Once app-v23 is active this endpoint returns HTTP 410
-with problem code `app_v23_atomic_policy_required` and a machine-readable
+The historical per-field agent-permission mutation is deliberately omitted
+from the current OpenAPI and SDK surfaces. On governed nodes it returns HTTP
+410 with problem code `app_v23_atomic_policy_required` and a machine-readable
 replacement:
 
 ```json
@@ -1048,48 +1078,10 @@ replacement:
 }
 ```
 
-App-v23 requires role, profile, clearance, capabilities, and home-domain
-approval to commit atomically through CEREBRUM; the legacy
-`AgentSetPermission` transaction is no longer a valid mutation path.
-
-Before app-v23, this endpoint sets clearance, domain access, visibility,
-and—after governed app-v22 activation—the consensus-enforced capability mask
-on an agent. PATCH semantics: omitted fields preserve their on-chain value
-(`api/rest/agent_handler.go`).
-
-**Auth rules** (`agent_handler.go:213-240`): Self-set OR global `role=admin` OR org admin in any org the target belongs to. ABCI re-checks independently.
-
-**Request body:**
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `clearance` | *int | no | 0–4; preserved if omitted |
-| `domain_access` | *string | no | JSON: `[{"domain":"x","read":true,"write":false}]`; preserved if omitted |
-| `visible_agents` | *string | no | JSON array of agent IDs, or `"*"` for all; preserved if omitted |
-| `org_id` | *string | no | |
-| `dept_id` | *string | no | |
-| `capabilities` | *uint32 | no | App-v22 bit mask. Only a global `role=admin` may change it; non-zero values are rejected before app-v22 and unknown bits are always rejected. |
-
-All fields are nullable pointers — sending `null` explicitly resets to empty string / default.
-
-App-v22 capability bits are `1` read every domain (still bounded by the
-agent's numeric clearance), `2` deny shared-domain writes, `4` deny domain
-claims, `8` deny writes to domains owned by another agent, and `16` deny
-federated pipeline recipient discovery/delivery. The CEREBRUM co-located
-companion preset is `15`: it deliberately leaves local and federated inbox
-messaging enabled. A capability change cannot be self-cleared because ABCI
-independently requires a global administrator whenever the stored mask changes
-(`internal/store/agent_capabilities.go`;
-`internal/abci/app.go`; `internal/tx/codec.go`).
-
-Existing agents retain mask `0` across app-v22 activation. New
-self-registrations after activation receive the quarantine mask `30`
-(`2|4|8|16`) and cannot write/claim domains or discover/send to federated
-recipients until a global administrator assigns a deliberate profile. This is
-consensus-enforced, so generating a replacement local key cannot bypass an
-operator restriction.
-
-**Response** (HTTP 200): `{"agent_id": "...", "status": "permissions_updated", "tx_hash": "..."}`
+The only current mutation is the replacement shown above: it commits role,
+profile, clearance, capabilities, and home-domain approval atomically through
+loopback-only CEREBRUM. Current clients must not call the retired route or
+construct the old `AgentSetPermission` payload.
 
 ---
 
@@ -1953,7 +1945,7 @@ peer-authenticated contact domains. A local policy revoke therefore causes the
 same non-enumerating `404 Unknown target` as an absent remote contact, even if
 the address was resolved earlier (`api/rest/pipe_handler.go`).
 
-### `GET /v1/federation/available?agent_name=...`
+### `GET /v1/federation/available?agent_name=...&peer_cursor=...`
 
 Named ordinary-agent discovery merges two independently authorized,
 metadata-only recipient projections. The legacy projection requires a current
@@ -1965,7 +1957,14 @@ has enabled exact tuple consent. The linked result deliberately has no domain
 basis and grants no memory authority.
 
 The query is bounded to 512 UTF-8 bytes, at least two Unicode code points, 20
-returned contacts per peer, and 64 active peers in one bounded worker window.
+returned contacts per peer, and one bounded caller-authorized peer page. The response includes
+`complete` and, while the public bounded scan horizon remains,
+`next_peer_cursor`. A continuation is short lived, bound to the exact signed
+caller/name/limit tuple, and reveals neither peer identifiers nor the number of
+hidden agreements. Clients perform one page per call and must not auto-loop.
+Before any remote request, the node removes agreements that have no local
+caller-authorized domain or messaging edge; unrelated peer rows therefore do
+not consume the outbound budget or affect pagination.
 A linked result exposes only sanitized `display_name`, `registered_name`,
 `provider`, and exact `agent_id@chain_id`; it never exposes relation bytes,
 group IDs, consent revisions, roster totals/truncation, presence, delivery, or
@@ -1996,7 +1995,7 @@ malformed or oversize input receives 400.
 
 ### Canonical local Messages service (v11.17)
 
-The five `/v1/messages` operations are one same-node service over the existing
+The six `/v1/messages` operations are one same-node service over the existing
 encrypted `pipeline_messages` rows. They do not create a second inbox. Every
 route is inside the active-ordinary-agent boundary; Root is not a messaging
 principal.
@@ -2007,6 +2006,7 @@ principal.
 | `POST /v1/messages/receive` | Requires a 1–256-byte `receive_token`; optional limit 1–20. Claims and persists one exact ordered batch. Same caller/token/limit replays that batch after a lost response; a different limit is HTTP 409. Replay metadata is retained for 48 hours and capped at 4096 tokens per agent: capacity returns HTTP 429, while a purged/incomplete exact batch returns HTTP 410 instead of claiming later work. |
 | `POST /v1/messages/{message_id}/reply` | Exact fetched recipient only. Same result is idempotent; different second result is HTTP 409. Reply and local exact-read evidence commit atomically. |
 | `PUT /v1/messages/{message_id}/read` | Fresh nonce-bound exact-recipient signature. The message must already have been returned to that caller by canonical receive. Same acknowledgement is idempotent. |
+| `PUT /v1/messages/read-batch` | One fresh exact-recipient request acknowledges 1–20 already-fetched exact message IDs. Every item is authorized independently and returns `confirmed` or a generic per-item failure; one failure never rolls back independent successes. Exact replay is idempotent. |
 | `GET /v1/messages/{message_id}/status` | Exact sender only, payload-free metadata projection. Returns independent transport/read/workflow state and never decrypts content/proofs. |
 
 Every operation requires a fresh nonce-bound request signed by the exact active
@@ -2033,6 +2033,8 @@ these payload-free routes:
 |---|---|
 | `GET /v1/pipe/{pipe_id}/receipt/challenge/{kind}` | Exact imported-message recipient fetches the immutable body for `kind=claimed|read`. |
 | `PUT /v1/pipe/{pipe_id}/receipt/{kind}` | That exact recipient submits the challenge unchanged under a fresh nonce-bound signature; returns local `receipt_status:queued`. |
+| `POST /v1/pipe/receipts/challenge-batch` | Fetches 1–40 (`claimed`/`read`) immutable challenges for at most 20 imported messages in one local request. Per-item readiness/rejection is independent and no content or state transition is exposed. |
+| `PUT /v1/pipe/receipts/batch` | Records 1–40 independently signed exact-event proofs in request order. A failed claim suppresses that message's read event; other messages retain independent partial success. This aggregates transport only—the peer-verifiable per-event proof is unchanged. |
 | `GET /v1/pipe/{pipe_id}/receipt` | Exact original sender reads the payload-free independent evidence projection. |
 
 An imported inbox row advertises `receipt_protocol_version:2` only when both

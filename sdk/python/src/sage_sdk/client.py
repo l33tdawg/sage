@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import json as json_mod
+import ssl
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -11,8 +14,10 @@ from sage_sdk.auth import AgentIdentity
 from sage_sdk.exceptions import SageAPIError, SageNotFoundError
 from sage_sdk.models import (
     AgentDirectoryResponse,
+    AgentDomainAccessSample,
     AgentInfo,
     AgentLookupResponse,
+    OwnedDomainPage,
     AgentProfile,
     AgentRegistration,
     ChallengeRequest,
@@ -61,12 +66,50 @@ from sage_sdk.models import (
 )
 
 
+def _receipt_batch_proof_item(identity: AgentIdentity, item: dict[str, Any]) -> dict[str, Any]:
+    """Create the exact per-event proof required by the receipt-v2 batch route."""
+    pipe_id = str(item.get("pipe_id", ""))
+    kind = str(item.get("event_kind") or item.get("kind") or "")
+    challenge = item.get("challenge")
+    if not pipe_id or kind not in {"claimed", "read"} or not isinstance(challenge, dict):
+        raise ValueError("each ready receipt item requires pipe_id, event_kind, and challenge")
+    path = f"/v1/pipe/{quote(pipe_id, safe='')}/receipt/{kind}"
+    body = json_mod.dumps(challenge, separators=(",", ":")).encode()
+    headers = identity.sign_request("PUT", path, body)
+    canonical = b"PUT " + path.encode() + b"\n" + body
+    return {
+        "pipe_id": pipe_id,
+        "kind": kind,
+        "proof": {
+            "agent_id": headers["X-Agent-ID"],
+            "signature": base64.b64encode(bytes.fromhex(headers["X-Signature"])).decode(),
+            "timestamp": int(headers["X-Timestamp"]),
+            "nonce": base64.b64encode(bytes.fromhex(headers["X-Nonce"])).decode(),
+            "canonical_request": base64.b64encode(canonical).decode(),
+        },
+    }
+
+
 # OrgIDs are derived server-side as ``hex(sha256(adminID + ":" + name +
 # ":" + height)[:16])`` — a 32-char lowercase hex string. Anything else
 # (e.g. "levelup", "Acme Corp") is treated as a human-readable name and
 # routed through the by-name lookup. Conservative match: only treat
 # unambiguous orgIDs as IDs to avoid false positives on hex-looking names.
 _ORG_ID_HEX_LEN = 32
+
+
+def _httpx_verify(ca_cert: str | bool | None) -> ssl.SSLContext | bool:
+    """Build httpx's non-deprecated TLS verifier value.
+
+    httpx 0.28 deprecates passing a CA filename directly as ``verify``. Keep
+    the public SDK parameter stable while constructing the equivalent standard
+    library context explicitly.
+    """
+    if isinstance(ca_cert, str):
+        return ssl.create_default_context(cafile=ca_cert)
+    if ca_cert is None:
+        return True
+    return ca_cert
 
 
 def _looks_like_org_id(identifier: str) -> bool:
@@ -115,10 +158,7 @@ class SageClient:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._identity = identity
-        if ca_cert is None:
-            verify: bool | str = True
-        else:
-            verify = ca_cert
+        verify = _httpx_verify(ca_cert)
         self._client = httpx.Client(base_url=self._base_url, timeout=timeout, verify=verify)
 
     def _request(
@@ -552,30 +592,6 @@ class SageClient:
         resp = self._request("GET", f"/v1/agent/{agent_id}")
         return AgentInfo.model_validate(resp.json())
 
-    def set_agent_permission(
-        self,
-        agent_id: str,
-        clearance: int | None = None,
-        domain_access: str | None = None,
-        visible_agents: str | None = None,
-        org_id: str | None = None,
-        dept_id: str | None = None,
-    ) -> dict:
-        """Update an agent's permissions (admin only)."""
-        body: dict[str, Any] = {}
-        if clearance is not None:
-            body["clearance"] = clearance
-        if domain_access is not None:
-            body["domain_access"] = domain_access
-        if visible_agents is not None:
-            body["visible_agents"] = visible_agents
-        if org_id is not None:
-            body["org_id"] = org_id
-        if dept_id is not None:
-            body["dept_id"] = dept_id
-        resp = self._request("PUT", f"/v1/agent/{agent_id}/permission", json=body)
-        return resp.json()
-
     def list_agents(self) -> dict:
         """List active ordinary agents visible to this signed caller."""
         resp = self._request("GET", "/v1/agents")
@@ -595,6 +611,25 @@ class SageClient:
             "GET", "/v1/agents/lookup", params={"name": name, "limit": limit}
         )
         return AgentLookupResponse.model_validate(resp.json())
+
+    def owned_domains(
+        self, cursor: str | None = None, limit: int = 50
+    ) -> OwnedDomainPage:
+        """List one bounded page of domains currently owned by this agent.
+
+        This caller-only projection does not scan memories or load a global
+        domain roster. Continue with ``next_cursor`` until ``has_more`` is false.
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        resp = self._request("GET", "/v1/agent/me/domains/owned", params=params)
+        return OwnedDomainPage.model_validate(resp.json())
+
+    def domain_access_sample(self) -> AgentDomainAccessSample:
+        """Return bounded readable/writable/owned samples for choosing a scope."""
+        resp = self._request("GET", "/v1/agent/me/domains")
+        return AgentDomainAccessSample.model_validate(resp.json())
 
     # --- Validator -------------------------------------------------------------
 
@@ -772,6 +807,45 @@ class SageClient:
         encoded_id = quote(message_id, safe="")
         resp = self._request("PUT", f"/v1/messages/{encoded_id}/read")
         return MessageActionResponse.model_validate(resp.json())
+
+    def messages_mark_read_batch(self, message_ids: list[str]) -> dict:
+        """Acknowledge up to 20 fetched messages in one signed request.
+
+        Outcomes are independent and returned in request order. This avoids
+        turning one receive batch into one HTTP request per message.
+        """
+        resp = self._request("PUT", "/v1/messages/read-batch", json={"message_ids": message_ids})
+        return resp.json()
+
+    def pipe_receipt_challenge(self, pipe_id: str, kind: str) -> dict:
+        """Fetch the payload-free receipt-v2 body for claimed/read evidence."""
+        encoded_id = quote(pipe_id, safe="")
+        resp = self._request("GET", f"/v1/pipe/{encoded_id}/receipt/challenge/{kind}")
+        return resp.json()
+
+    def pipe_receipt_record(self, pipe_id: str, kind: str, challenge: dict) -> dict:
+        """Sign and queue one exact receipt-v2 event using the SDK identity."""
+        encoded_id = quote(pipe_id, safe="")
+        body = challenge.get("challenge", challenge)
+        resp = self._request("PUT", f"/v1/pipe/{encoded_id}/receipt/{kind}", json=body)
+        return resp.json()
+
+    def pipe_receipt_challenge_batch(self, items: list[dict]) -> dict:
+        """Fetch up to 40 independent receipt-v2 challenges in one request."""
+        resp = self._request("POST", "/v1/pipe/receipts/challenge-batch", json={"items": items})
+        return resp.json()
+
+    def pipe_receipt_record_batch(self, challenge_items: list[dict]) -> dict:
+        """Sign and submit up to 40 ready receipt-v2 challenge items."""
+        proofs = [_receipt_batch_proof_item(self._identity, item) for item in challenge_items]
+        resp = self._request("PUT", "/v1/pipe/receipts/batch", json={"items": proofs})
+        return resp.json()
+
+    def pipe_receipt_status(self, pipe_id: str) -> dict:
+        """Return exact-sender, payload-free federated receipt-v2 evidence."""
+        encoded_id = quote(pipe_id, safe="")
+        resp = self._request("GET", f"/v1/pipe/{encoded_id}/receipt")
+        return resp.json()
 
     def message_status(self, message_id: str) -> MessageStatusResponse:
         """Return payload-free receipt/workflow metadata to the exact sender."""

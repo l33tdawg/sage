@@ -56,10 +56,52 @@ type linkedLookupFederation struct {
 	*parallelStatusFederation
 	linked       map[string]*federation.LinkedMessageDirectoryResult
 	linkedErrors map[string]error
+	peerHints    map[string]bool
 	mu           sync.Mutex
 	callerID     string
 	name         string
 	calls        int
+	hintCalls    int
+}
+
+func (f *linkedLookupFederation) CallerMayHaveLinkedMessagePeer(
+	_ context.Context, chainID, _ string,
+) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.hintCalls++
+	return f.peerHints[chainID], nil
+}
+
+type amplifiedLookupFederation struct {
+	*parallelStatusFederation
+	totalMu sync.Mutex
+	total   int
+}
+
+func (f *amplifiedLookupFederation) addCall() {
+	f.totalMu.Lock()
+	f.total++
+	f.totalMu.Unlock()
+}
+
+func (f *amplifiedLookupFederation) PeerStatus(ctx context.Context, chainID string) (*federation.StatusResponse, error) {
+	f.addCall()
+	return f.parallelStatusFederation.PeerStatus(ctx, chainID)
+}
+
+func (f *amplifiedLookupFederation) FindRemotePipeContactsWithStatus(
+	_ context.Context, _ string, _ *federation.StatusResponse, _ string, _ int,
+) (*federation.PipeContactLookupResponse, error) {
+	f.addCall()
+	return nil, errors.New("no legacy match")
+}
+
+func (f *amplifiedLookupFederation) FindRemoteLinkedMessageContacts(
+	_ context.Context, _, _, _ string, _ int,
+) (*federation.LinkedMessageDirectoryResult, error) {
+	f.addCall()
+	return nil, errors.New("no linked match")
 }
 
 type provenanceMemoryStore struct {
@@ -565,8 +607,219 @@ func TestFederationAvailableBoundsNamedDiscoveryWorkersAndPeers(t *testing.T) {
 	fed.mu.Lock()
 	calls, maxWorkers := fed.calls, fed.max
 	fed.mu.Unlock()
-	assert.Equal(t, maxFederationAvailablePeers, calls, "ordinary discovery must not probe an unbounded agreement table")
+	assert.Equal(t, maxFederatedNameLookupPeers, calls,
+		"one friendly-name miss must not turn into a full federation topology crawl")
 	assert.LessOrEqual(t, maxWorkers, maxConcurrentFedAvailability, "status and lookup work share one bounded worker pool")
+}
+
+func TestFederationAvailableSharesProbeBudgetAcrossConcurrentAgents(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+
+	statuses := make(map[string]*federation.StatusResponse, maxFederatedNameLookupPeers)
+	for i := range maxFederatedNameLookupPeers {
+		chain := fmt.Sprintf("chain-%03d", i)
+		require.NoError(t, badger.SetCrossFed(
+			chain, "https://redacted.invalid", []byte(chain), 2, 0,
+			[]string{"*"}, nil, "active",
+		))
+		statuses[chain] = &federation.StatusResponse{
+			ChainID: chain,
+			PeerRBACGrant: &federation.PeerRBACGrant{Domains: []federation.PeerRBACDomainGrant{{
+				Domain: "research", Read: true,
+			}}},
+		}
+	}
+	fed := &parallelStatusFederation{
+		fakeFederation: &fakeFederation{}, statuses: statuses,
+		delay: 15 * time.Millisecond,
+	}
+	srv.SetFederation(fed)
+
+	const callers = 6
+	requests := make([]*http.Request, 0, callers)
+	for range callers {
+		req, callerID := signedRequest(
+			t, http.MethodGet,
+			"/v1/federation/available?agent_name=missing", nil,
+		)
+		require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+		require.NoError(t, badger.SetAgentPermission(
+			callerID, 1, `[{"domain":"research","read":true}]`, "*", "", "",
+		))
+		requests = append(requests, req)
+	}
+
+	var wg sync.WaitGroup
+	for _, req := range requests {
+		wg.Add(1)
+		go func(request *http.Request) {
+			defer wg.Done()
+			rr := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rr, request)
+			assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		}(req)
+	}
+	wg.Wait()
+
+	fed.mu.Lock()
+	peak := fed.max
+	fed.mu.Unlock()
+	assert.LessOrEqual(t, peak, maxConcurrentFedAvailability,
+		"concurrent MCP clients must share one node-wide peer-probe budget")
+}
+
+func TestFederationAvailableBoundsTotalDistinctLookupCallsPerCaller(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	srv.federationProbeBudget = newFederationProbeRateBudget()
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	statuses := make(map[string]*federation.StatusResponse, maxFederatedNameLookupPeers)
+	for i := range maxFederatedNameLookupPeers {
+		chain := fmt.Sprintf("chain-%03d", i)
+		require.NoError(t, badger.SetCrossFed(chain, "https://redacted.invalid", []byte(chain), 2, 0, []string{"*"}, nil, "active"))
+		statuses[chain] = &federation.StatusResponse{ChainID: chain}
+	}
+	fed := &parallelStatusFederation{fakeFederation: &fakeFederation{}, statuses: statuses}
+	srv.SetFederation(fed)
+	_, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available", nil)
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+	require.NoError(t, badger.SetAgentPermission(callerID, 1, `[{"domain":"research","read":true}]`, "*", "", ""))
+
+	for i := 0; i < 4; i++ {
+		req := httptest.NewRequest(http.MethodGet,
+			fmt.Sprintf("/v1/federation/available?agent_name=missing-%d", i), nil)
+		req = req.WithContext(middleware.WithAgentID(req.Context(), callerID))
+		rr := httptest.NewRecorder()
+		srv.handleFederationAvailable(rr, req)
+		if i < 3 {
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		} else {
+			require.Equal(t, http.StatusTooManyRequests, rr.Code, rr.Body.String())
+			require.Equal(t, "10", rr.Header().Get("Retry-After"))
+		}
+	}
+	fed.mu.Lock()
+	total := fed.calls
+	fed.mu.Unlock()
+	require.Equal(t, federationProbeBudgetPerCaller, total,
+		"distinct cache misses must consume a fixed total outbound-call budget")
+}
+
+func TestFederationAvailableBudgetsEveryAmplifiedUpstreamCall(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	srv.federationProbeBudget = newFederationProbeRateBudget()
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	statuses := make(map[string]*federation.StatusResponse, maxFederatedNameLookupPeers)
+	for i := range maxFederatedNameLookupPeers {
+		chain := fmt.Sprintf("chain-%03d", i)
+		require.NoError(t, badger.SetCrossFed(chain, "https://redacted.invalid", []byte(chain), 2, 0, []string{"*"}, nil, "active"))
+		statuses[chain] = &federation.StatusResponse{ChainID: chain}
+	}
+	fed := &amplifiedLookupFederation{parallelStatusFederation: &parallelStatusFederation{
+		fakeFederation: &fakeFederation{}, statuses: statuses,
+	}}
+	srv.SetFederation(fed)
+	_, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available", nil)
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+	require.NoError(t, badger.SetAgentPermission(callerID, 1, `[{"domain":"research","read":true}]`, "*", "", ""))
+
+	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		req := httptest.NewRequest(http.MethodGet,
+			fmt.Sprintf("/v1/federation/available?agent_name=unique-%d", i), nil)
+		req = req.WithContext(middleware.WithAgentID(req.Context(), callerID))
+		rr := httptest.NewRecorder()
+		srv.handleFederationAvailable(rr, req)
+		require.Equal(t, want, rr.Code, rr.Body.String())
+	}
+	fed.totalMu.Lock()
+	total := fed.total
+	fed.totalMu.Unlock()
+	require.Equal(t, federationProbeBudgetPerCaller, total,
+		"one accepted targeted page may spend 8*(status+legacy+linked), while the next distinct miss makes zero upstream calls")
+}
+
+func TestFederationAvailableLargeInventoryReturnsBoundedUsefulPage(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	srv.federationProbeBudget = newFederationProbeRateBudget()
+	badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = badger.CloseBadger() })
+	srv.badgerStore = badger
+	statuses := make(map[string]*federation.StatusResponse, 40)
+	for i := range 40 {
+		chain := fmt.Sprintf("chain-%03d", i)
+		require.NoError(t, badger.SetCrossFed(chain, "https://redacted.invalid", []byte(chain), 2, 0, []string{"*"}, nil, "active"))
+		statuses[chain] = &federation.StatusResponse{ChainID: chain, NetworkName: chain}
+	}
+	fed := &parallelStatusFederation{fakeFederation: &fakeFederation{}, statuses: statuses}
+	srv.SetFederation(fed)
+	_, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available", nil)
+	require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+	require.NoError(t, badger.SetAgentPermission(callerID, 1, `[{"domain":"research","read":true}]`, "*", "", ""))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/federation/available", nil)
+	req = req.WithContext(middleware.WithAgentID(req.Context(), callerID))
+	rr := httptest.NewRecorder()
+	srv.handleFederationAvailable(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var response struct {
+		Complete bool   `json:"complete"`
+		Next     string `json:"next_peer_cursor"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+	require.False(t, response.Complete)
+	require.NotEmpty(t, response.Next)
+	fed.mu.Lock()
+	calls := fed.calls
+	fed.mu.Unlock()
+	require.Equal(t, federationProbeBudgetPerCaller, calls,
+		"a large status-only inventory returns one useful bounded page instead of rejecting the whole request")
+}
+
+func TestFederationAvailableRateCadenceDoesNotRevealHiddenPeerCount(t *testing.T) {
+	run := func(hiddenPeerCount int) []int {
+		t.Helper()
+		srv, _, _ := newTestServer(t, "")
+		srv.federationProbeBudget = newFederationProbeRateBudget()
+		badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = badger.CloseBadger() })
+		srv.badgerStore = badger
+		statuses := make(map[string]*federation.StatusResponse, 8+hiddenPeerCount)
+		for i := range 8 {
+			chain := fmt.Sprintf("chain-%03d", i)
+			require.NoError(t, badger.SetCrossFed(chain, "https://redacted.invalid", []byte(chain), 2, 0, []string{"research"}, nil, "active"))
+			statuses[chain] = &federation.StatusResponse{ChainID: chain}
+		}
+		for i := range hiddenPeerCount {
+			chain := fmt.Sprintf("hidden-%03d", i)
+			require.NoError(t, badger.SetCrossFed(chain, "https://redacted.invalid", []byte(chain), 2, 0, []string{"secret"}, nil, "active"))
+			statuses[chain] = &federation.StatusResponse{ChainID: chain}
+		}
+		srv.SetFederation(&parallelStatusFederation{fakeFederation: &fakeFederation{}, statuses: statuses})
+		_, callerID := signedRequest(t, http.MethodGet, "/v1/federation/available", nil)
+		require.NoError(t, badger.RegisterAgent(callerID, "ordinary", "member", "", "test", "", 1))
+		require.NoError(t, badger.SetAgentPermission(callerID, 1, `[{"domain":"research","read":true}]`, "*", "", ""))
+		codes := make([]int, 4)
+		for i := range codes {
+			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/v1/federation/available?agent_name=miss-%d", i), nil)
+			req = req.WithContext(middleware.WithAgentID(req.Context(), callerID))
+			rr := httptest.NewRecorder()
+			srv.handleFederationAvailable(rr, req)
+			codes[i] = rr.Code
+		}
+		return codes
+	}
+	require.Equal(t, run(0), run(40), "429 cadence must be independent of unrelated hidden active-agreement count")
 }
 
 func TestFederationAvailableRunsTargetedLookupsInParallel(t *testing.T) {
@@ -659,6 +912,7 @@ func TestFederationAvailableIncludesOnlyValidatedCallerScopedLinkedContacts(t *t
 			linked: map[string]*federation.LinkedMessageDirectoryResult{
 				"chain-linked": {Contacts: []federation.PipeContact{contact}},
 			},
+			peerHints:    map[string]bool{"chain-linked": true},
 			linkedErrors: make(map[string]error),
 		}
 		srv.SetFederation(fed)
@@ -733,6 +987,80 @@ func TestFederationAvailableIncludesOnlyValidatedCallerScopedLinkedContacts(t *t
 	})
 }
 
+func TestFederationAvailableUsesLocalLinkedPeerHintWithoutDirectoryWalk(t *testing.T) {
+	newServer := func(t *testing.T, hint bool) (*Server, *store.BadgerStore, *linkedLookupFederation) {
+		t.Helper()
+		srv, _, _ := newTestServer(t, "")
+		badger, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = badger.CloseBadger() })
+		srv.badgerStore = badger
+		require.NoError(t, badger.SetCrossFed(
+			"chain-linked", "https://redacted.invalid", []byte("peer-pin"),
+			2, 0, []string{"secret"}, nil, "active",
+		))
+		remoteID := strings.Repeat("e", 64)
+		fed := &linkedLookupFederation{
+			parallelStatusFederation: &parallelStatusFederation{
+				fakeFederation: &fakeFederation{},
+				statuses: map[string]*federation.StatusResponse{
+					"chain-linked": {
+						ChainID: "chain-linked", NetworkName: "Linked SAGE",
+						PeerRBACGrant: &federation.PeerRBACGrant{},
+					},
+				},
+			},
+			peerHints: map[string]bool{"chain-linked": hint},
+			linked: map[string]*federation.LinkedMessageDirectoryResult{
+				"chain-linked": {Contacts: []federation.PipeContact{{
+					AgentID: remoteID, DisplayName: "Linked Only",
+					Address:           remoteID + "@chain-linked",
+					AuthorizationMode: federation.LinkedMessageAuthorizationMode,
+				}}},
+			},
+			linkedErrors: map[string]error{},
+		}
+		srv.SetFederation(fed)
+		return srv, badger, fed
+	}
+
+	for _, tc := range []struct {
+		name, query string
+		hint        bool
+		wantPeers   int
+		wantLookups int
+	}{
+		{name: "linked edge admits one bounded peer", query: "linked", hint: true, wantPeers: 1, wantLookups: 1},
+		{name: "absent edge probes no peer", query: "linked", hint: false, wantPeers: 0, wantLookups: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, badger, fed := newServer(t, tc.hint)
+			req, callerID := signedRequest(t, http.MethodGet,
+				"/v1/federation/available?agent_name="+tc.query, nil)
+			require.NoError(t, badger.RegisterAgent(
+				callerID, "ordinary", "member", "", "test", "", 1,
+			))
+			require.NoError(t, badger.SetAgentPermission(
+				callerID, 1, `[{"domain":"research","read":true}]`, "*", "", "",
+			))
+			rr := httptest.NewRecorder()
+			srv.Router().ServeHTTP(rr, req)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			var response struct {
+				Connections []availableFederationConnection `json:"connections"`
+			}
+			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+			require.Len(t, response.Connections, tc.wantPeers)
+			fed.mu.Lock()
+			defer fed.mu.Unlock()
+			require.Equal(t, 1, fed.hintCalls,
+				"one active peer costs one local authority check")
+			require.Equal(t, tc.wantLookups, fed.calls,
+				"the handler never loops over a remote directory")
+		})
+	}
+}
+
 func TestFederationAvailableEnumeratesOnlyCapabilityNegotiatedLinkedContacts(t *testing.T) {
 	newServer := func(t *testing.T, advertise bool) (*Server, *store.BadgerStore, *linkedLookupFederation) {
 		t.Helper()
@@ -770,6 +1098,7 @@ func TestFederationAvailableEnumeratesOnlyCapabilityNegotiatedLinkedContacts(t *
 					AuthorizationMode: federation.LinkedMessageAuthorizationMode,
 				}}},
 			},
+			peerHints:    map[string]bool{"chain-linked": true},
 			linkedErrors: map[string]error{},
 		}
 		srv.SetFederation(fed)

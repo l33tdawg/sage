@@ -2995,6 +2995,21 @@ func (app *SageApp) Info(_ context.Context, req *abcitypes.RequestInfo) (*abcity
 	}, nil
 }
 
+// AcquireSnapshotStateFence pins the committed application tuple and prevents
+// a subsequent Commit from publishing a newer tuple until release is called.
+// The updater holds this fence through candidate verification and executable
+// mutation; CometBFT provenance is verified independently from the captured
+// state/block stores before the candidate is published.
+func (app *SageApp) AcquireSnapshotStateFence() (height int64, appHash []byte, release func()) {
+	app.runtimeViewMu.RLock()
+	var once sync.Once
+	release = func() { once.Do(app.runtimeViewMu.RUnlock) }
+	if app.state == nil {
+		return 0, nil, release
+	}
+	return app.state.Height, append([]byte(nil), app.state.AppHash...), release
+}
+
 // InitChain initializes the chain with genesis validators.
 func (app *SageApp) InitChain(_ context.Context, req *abcitypes.RequestInitChain) (*abcitypes.ResponseInitChain, error) {
 	app.runtimeViewMu.Lock()
@@ -4299,6 +4314,12 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 				return nil, fmt.Errorf(
 					"sage: refuse app-v26 activation with invalid Access Group state: %w",
 					migrateErr,
+				)
+			}
+			if stateErr := app.badgerStore.ValidateAppV23State(); stateErr != nil {
+				return nil, fmt.Errorf(
+					"sage: refuse app-v26 activation after local RBAC repair: %w",
+					stateErr,
 				)
 			}
 		}

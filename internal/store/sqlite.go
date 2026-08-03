@@ -3920,12 +3920,16 @@ func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 // computing roster-wide derived memory counts. Canonical enrollment filtering
 // remains the REST layer's responsibility because SQL status is only a cache
 // after app-v23.
-func (s *SQLiteStore) ListAgentDirectory(ctx context.Context) ([]*AgentEntry, error) {
+func (s *SQLiteStore) ListAgentDirectory(ctx context.Context, limit int) ([]*AgentEntry, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT agent_id, name, COALESCE(registered_name,''), COALESCE(provider,''), status, removed_at
 		FROM network_agents
 		WHERE status != 'removed'
-		ORDER BY created_at ASC, agent_id`)
+		ORDER BY created_at ASC, agent_id
+		LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list agent directory: %w", err)
 	}
@@ -3960,19 +3964,21 @@ func (s *SQLiteStore) findPipeContactLookupCandidatePage(
 		FROM network_agents
 		WHERE status = 'active' AND removed_at IS NULL
 		  AND (
-		    LOWER(name) LIKE ? ESCAPE '\'
+		    LOWER(agent_id) LIKE ? ESCAPE '\'
+		    OR LOWER(name) LIKE ? ESCAPE '\'
 		    OR LOWER(COALESCE(registered_name,'')) LIKE ? ESCAPE '\'
 		    OR LOWER(COALESCE(provider,'')) LIKE ? ESCAPE '\'
 		  )
 			ORDER BY CASE
-			  WHEN LOWER(name) LIKE ? ESCAPE '\'
+			  WHEN LOWER(agent_id) LIKE ? ESCAPE '\'
+			    OR LOWER(name) LIKE ? ESCAPE '\'
 			    OR LOWER(COALESCE(registered_name,'')) LIKE ? ESCAPE '\'
 			    OR LOWER(COALESCE(provider,'')) LIKE ? ESCAPE '\' THEN 0
 			  ELSE 1
 			END, LOWER(name), agent_id
 			LIMIT ? OFFSET ?`,
-		pattern, pattern, pattern,
-		exact, exact, exact,
+		pattern, pattern, pattern, pattern,
+		exact, exact, exact, exact,
 		limit, offset,
 	)
 	if err != nil {
@@ -3988,7 +3994,20 @@ func (s *SQLiteStore) findPipeContactLookupCandidatePage(
 // metadata-only and capped; it never invokes ListAgents' roster-wide derived
 // memory-count query.
 func (s *SQLiteStore) FindAgentsByName(ctx context.Context, query string, limit int) ([]*AgentEntry, error) {
+	if limit > maxAgentNameLookupResults {
+		limit = maxAgentNameLookupResults
+	}
 	return s.FindAgentsByNamePage(ctx, query, limit, 0)
+}
+
+// FindAgentLookupCandidates returns one bounded metadata-only candidate batch
+// for the signed REST recipient lookup. Canonical enrollment authorization is
+// applied by the REST layer after this single SQL query.
+func (s *SQLiteStore) FindAgentLookupCandidates(ctx context.Context, query string, limit int) ([]*AgentEntry, error) {
+	if limit > maxAgentNameLookupCandidates {
+		limit = maxAgentNameLookupCandidates
+	}
+	return s.findPipeContactLookupCandidatePage(ctx, query, limit, 0)
 }
 
 // FindAgentsByNamePage exposes one stable, bounded SQL candidate page. The

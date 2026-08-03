@@ -62,6 +62,18 @@ type Server struct {
 	mempool                       *mempoolSampler // TTL-cached CometBFT mempool depth for backpressure signals
 	taskIdempotencyMu             sync.Mutex
 	taskIdempotencyLocks          map[string]*taskIdempotencyLock
+	// federationProbeSem is shared by every request served by this node. A
+	// request-local worker pool alone lets several agents multiply outbound
+	// status/directory probes; this process-wide budget keeps peer pressure
+	// bounded even across concurrent MCP clients.
+	federationProbeSem chan struct{}
+	// federationProbeBudget bounds total outbound discovery calls across
+	// distinct queries; the semaphore alone bounds only simultaneous calls.
+	federationProbeBudget *federationProbeRateBudget
+	// federationAvailability coalesces identical caller-scoped discovery calls
+	// and briefly reuses their already-filtered response. The key includes the
+	// signed caller and query, so authorization results never cross principals.
+	federationAvailability *federationAvailabilityCache
 
 	// nodeOperatorID is the hex-encoded ed25519 public key of the local
 	// node operator (~/.sage/agent.key). When a request's X-Agent-ID
@@ -228,6 +240,9 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 		validatorSigningKeyConfigured: signingKeyConfigured,
 		embedder:                      embedProvider,
 		mempool:                       newMempoolSampler(cometbftRPC, DefaultMempoolMaxTxs),
+		federationProbeSem:            make(chan struct{}, maxConcurrentFedAvailability),
+		federationProbeBudget:         newFederationProbeRateBudget(),
+		federationAvailability:        newFederationAvailabilityCache(),
 	}
 	s.router = s.setupRouter()
 	return s
@@ -754,6 +769,7 @@ func (s *Server) setupRouter() chi.Router {
 		// Agent endpoints
 		r.Get("/v1/agent/me", s.handleGetAgent)
 		r.Get("/v1/agent/me/domains", s.handleGetAgentReadableDomains)
+		r.Get("/v1/agent/me/domains/owned", s.handleGetAgentOwnedDomainsPage)
 
 		// On-chain agent identity endpoints
 		r.Post("/v1/agent/register", s.handleAgentRegister)
@@ -818,6 +834,7 @@ func (s *Server) setupRouter() chi.Router {
 			r.Post("/v1/messages/receive", s.handleMessagesReceive)
 			r.Post("/v1/messages/{message_id}/reply", s.handleMessageReply)
 			r.Put("/v1/messages/{message_id}/read", s.handleMessageRead)
+			r.Put("/v1/messages/read-batch", s.handleMessageReadBatch)
 			r.Get("/v1/messages/{message_id}/status", s.handleMessageStatus)
 			r.Post("/v1/pipe/resolve", s.handlePipeResolve)
 			r.Post("/v1/pipe/send", s.handlePipeSend)
@@ -828,6 +845,8 @@ func (s *Server) setupRouter() chi.Router {
 			r.Put("/v1/pipe/{pipe_id}/claim", s.handlePipeClaim)
 			r.Get("/v1/pipe/{pipe_id}/receipt/challenge/{kind}", s.handlePipeReceiptChallenge)
 			r.Put("/v1/pipe/{pipe_id}/receipt/{kind}", s.handlePipeReceiptRecord)
+			r.Post("/v1/pipe/receipts/challenge-batch", s.handlePipeReceiptChallengeBatch)
+			r.Put("/v1/pipe/receipts/batch", s.handlePipeReceiptRecordBatch)
 			r.Get("/v1/pipe/{pipe_id}/receipt", s.handlePipeReceiptStatus)
 			r.Put("/v1/pipe/{pipe_id}/result", s.handlePipeResult)
 			r.Put("/v1/pipe/{message_id}/read", s.handleMessageRead)

@@ -13,14 +13,20 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"syscall"
 	"testing"
 	"time"
 
+	cmtcrypto "github.com/cometbft/cometbft/crypto/ed25519"
+	"github.com/cometbft/cometbft/p2p"
+	"github.com/cometbft/cometbft/privval"
+	cmttypes "github.com/cometbft/cometbft/types"
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/klauspost/compress/zstd"
 	_ "modernc.org/sqlite"
 
 	"github.com/l33tdawg/sage/internal/consensuskeys"
+	"github.com/l33tdawg/sage/internal/vault"
 )
 
 // writeTarZstWithEntry creates a tar.zst archive at path containing a
@@ -141,12 +147,21 @@ func seedDataDir(t *testing.T, root string) (vaultPath string, appHash []byte) {
 	if err := os.MkdirAll(cometCfg, 0o700); err != nil {
 		t.Fatalf("mkdir config: %v", err)
 	}
-	for _, name := range []string{"genesis.json", "node_key.json", "priv_validator_key.json"} {
-		body := fmt.Sprintf(`{"name":"%s"}`, name)
-		if err := os.WriteFile(filepath.Join(cometCfg, name), []byte(body), 0o600); err != nil {
-			t.Fatalf("write %s: %v", name, err)
-		}
+	validatorPriv := cmtcrypto.GenPrivKey()
+	validatorPub := validatorPriv.PubKey()
+	genesis := &cmttypes.GenesisDoc{
+		GenesisTime: time.Unix(1, 0).UTC(), ChainID: "snapshot-test", InitialHeight: 1,
+		ConsensusParams: cmttypes.DefaultConsensusParams(),
+		Validators:      []cmttypes.GenesisValidator{{Address: validatorPub.Address(), PubKey: validatorPub, Power: 10}},
 	}
+	if err := genesis.SaveAs(filepath.Join(cometCfg, "genesis.json")); err != nil {
+		t.Fatalf("write genesis: %v", err)
+	}
+	if err := (&p2p.NodeKey{PrivKey: cmtcrypto.GenPrivKey()}).SaveAs(filepath.Join(cometCfg, "node_key.json")); err != nil {
+		t.Fatalf("write node key: %v", err)
+	}
+	pv := privval.NewFilePV(validatorPriv, filepath.Join(cometCfg, "priv_validator_key.json"), filepath.Join(cometData, "priv_validator_state.json"))
+	pv.Save()
 
 	// Vault key — lives in dataDir parent in production. The test
 	// places it alongside dataDir as a plain file.
@@ -154,11 +169,270 @@ func seedDataDir(t *testing.T, root string) (vaultPath string, appHash []byte) {
 	if err := os.MkdirAll(filepath.Dir(vaultPath), 0o700); err != nil {
 		t.Fatalf("mkdir vault parent: %v", err)
 	}
-	if err := os.WriteFile(vaultPath, []byte("test-vault-key-bytes\n"), 0o600); err != nil {
+	if err := vault.Init(vaultPath, "snapshot-test-passphrase"); err != nil {
 		t.Fatalf("write vault: %v", err)
 	}
 
 	return vaultPath, appHash
+}
+
+func TestCandidateRemainsInvisibleUntilPublished(t *testing.T) {
+	dataDir := t.TempDir()
+	vaultPath, appHash := seedDataDir(t, dataDir)
+	if _, err := Take(context.Background(), dataDir, 41, appHash, "prior-anchor", Options{
+		BinaryVersion: "v11.16.4-test", VaultKeyPath: vaultPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := TakeCandidate(context.Background(), dataDir, 42, appHash, "candidate", Options{
+		BinaryVersion: "v11.17.0-test", VaultKeyPath: vaultPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "42")); !os.IsNotExist(err) {
+		t.Fatalf("unaccepted candidate entered numeric namespace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(candidate.Dir(), OKSentinel)); !os.IsNotExist(err) {
+		t.Fatalf("unaccepted candidate has OK sentinel: %v", err)
+	}
+	if _, err := KeepLast(dataDir, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "41", OKSentinel)); err != nil {
+		t.Fatalf("retention removed prior anchor while candidate was pending: %v", err)
+	}
+	if err := candidate.Discard(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(candidate.Dir()); candidate.Dir() != "" || err == nil {
+		t.Fatalf("discard did not clear candidate path: dir=%q err=%v", candidate.Dir(), err)
+	}
+}
+
+func TestCandidatePublishDirectorySyncFailureNeverLeavesOKAnchor(t *testing.T) {
+	dataDir := t.TempDir()
+	vaultPath, appHash := seedDataDir(t, dataDir)
+	if _, err := Take(context.Background(), dataDir, 41, appHash, "prior-anchor", Options{
+		BinaryVersion: "v11.16.4-test", VaultKeyPath: vaultPath,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := TakeCandidate(context.Background(), dataDir, 42, appHash, "candidate", Options{
+		BinaryVersion: "v11.17.0-test", VaultKeyPath: vaultPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalSync := syncSnapshotDirectory
+	syncCalls := 0
+	syncSnapshotDirectory = func(string) error {
+		syncCalls++
+		if syncCalls == 1 {
+			return syscall.EIO
+		}
+		return nil
+	}
+	t.Cleanup(func() { syncSnapshotDirectory = originalSync })
+
+	if _, err := candidate.Publish(); err == nil {
+		t.Fatal("publication succeeded despite snapshots-root fsync failure")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "42", OKSentinel)); !os.IsNotExist(err) {
+		t.Fatalf("failed publication left a visible OK anchor: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "42")); !os.IsNotExist(err) {
+		t.Fatalf("failed publication left a numeric snapshot directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "snapshots", "41", OKSentinel)); err != nil {
+		t.Fatalf("failed publication disturbed the prior anchor: %v", err)
+	}
+}
+
+func TestVerifyRequiresCompleteRecoveryIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		removePath   func(string, string) string
+		requireVault bool
+	}{
+		{
+			name: "missing node identity",
+			removePath: func(dataDir, _ string) string {
+				return filepath.Join(dataDir, "cometbft", "config", "node_key.json")
+			},
+		},
+		{
+			name:         "missing vault key",
+			removePath:   func(_, vaultPath string) string { return vaultPath },
+			requireVault: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			vaultPath, appHash := seedDataDir(t, dataDir)
+			if err := os.Remove(tc.removePath(dataDir, vaultPath)); err != nil {
+				t.Fatal(err)
+			}
+			candidate, err := TakeCandidate(context.Background(), dataDir, 42, appHash, "verify-config", Options{
+				BinaryVersion: "v11.17.0-test", VaultKeyPath: vaultPath,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = candidate.Discard() }()
+			err = VerifyWithOptions(candidate.Dir(), VerifyOptions{
+				SkipAppHash: true, RequireRecoveryConfig: true, RequireVaultKey: tc.requireVault,
+			})
+			if err == nil {
+				t.Fatal("incomplete recovery identity was accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyRejectsUnbootableRecoveryIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		mutate       func(string, string)
+		requireVault bool
+	}{
+		{
+			name: "invalid genesis",
+			mutate: func(dataDir, _ string) {
+				if err := os.WriteFile(filepath.Join(dataDir, "cometbft", "config", "genesis.json"), []byte(`{}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "invalid node key",
+			mutate: func(dataDir, _ string) {
+				if err := os.WriteFile(filepath.Join(dataDir, "cometbft", "config", "node_key.json"), []byte(`{}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "validator identity fields mismatch",
+			mutate: func(dataDir, _ string) {
+				keyPath := filepath.Join(dataDir, "cometbft", "config", "priv_validator_key.json")
+				raw, err := os.ReadFile(keyPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var document map[string]any
+				if err := json.Unmarshal(raw, &document); err != nil {
+					t.Fatal(err)
+				}
+				document["address"] = "00"
+				raw, err = json.Marshal(document)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(keyPath, raw, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "invalid vault key",
+			mutate: func(_ string, vaultPath string) {
+				if err := os.WriteFile(vaultPath, []byte(`{}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			requireVault: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			vaultPath, appHash := seedDataDir(t, dataDir)
+			tc.mutate(dataDir, vaultPath)
+			candidate, err := TakeCandidate(context.Background(), dataDir, 42, appHash, "invalid-config", Options{
+				BinaryVersion: "v11.17.0-test", VaultKeyPath: vaultPath,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = candidate.Discard() }()
+			err = VerifyWithOptions(candidate.Dir(), VerifyOptions{
+				SkipAppHash: true, RequireRecoveryConfig: true, RequireVaultKey: tc.requireVault,
+				VaultPassphrase: "snapshot-test-passphrase",
+			})
+			if err == nil {
+				t.Fatal("unbootable recovery identity was accepted")
+			}
+		})
+	}
+}
+
+func TestVerifyAcceptsBootableValidatorKeyAbsentFromGenesis(t *testing.T) {
+	dataDir := t.TempDir()
+	vaultPath, appHash := seedDataDir(t, dataDir)
+	genesisPriv := cmtcrypto.GenPrivKey()
+	genesisPub := genesisPriv.PubKey()
+	genesis := &cmttypes.GenesisDoc{
+		GenesisTime: time.Unix(1, 0).UTC(), ChainID: "snapshot-dynamic-validator", InitialHeight: 1,
+		ConsensusParams: cmttypes.DefaultConsensusParams(),
+		Validators:      []cmttypes.GenesisValidator{{Address: genesisPub.Address(), PubKey: genesisPub, Power: 10}},
+	}
+	if err := genesis.SaveAs(filepath.Join(dataDir, "cometbft", "config", "genesis.json")); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := TakeCandidate(context.Background(), dataDir, 42, appHash, "dynamic-validator", Options{
+		BinaryVersion: "v11.17.0-test", VaultKeyPath: vaultPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = candidate.Discard() }()
+	if err := VerifyWithOptions(candidate.Dir(), VerifyOptions{SkipAppHash: true, RequireRecoveryConfig: true}); err != nil {
+		t.Fatalf("bootable non-genesis validator key was rejected: %v", err)
+	}
+}
+
+func TestCopySelfBinaryUsesPinnedInodeAfterPathReplacement(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sage-gui")
+	if err := os.WriteFile(path, []byte("running-binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = pinned.Close() }()
+	if renameErr := os.Rename(path, path+".running"); renameErr != nil {
+		t.Fatal(renameErr)
+	}
+	if writeErr := os.WriteFile(path, []byte("incoming-binary"), 0o700); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	copied, err := copySelfBinary(context.Background(), root, "11.16.4", pinned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "running-binary" {
+		t.Fatalf("snapshot copied replaced path instead of pinned inode: %q", got)
+	}
+}
+
+func TestTarZstdSubsetHonorsCanceledContext(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "state.db"), bytes.Repeat([]byte("x"), 1<<20), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := tarZstdSubset(ctx, root, []string{"state.db"}, filepath.Join(t.TempDir(), "comet.tar.zst"), Options{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("tar did not stop on canceled snapshot context: %v", err)
+	}
 }
 
 // snapshotsRoot is a tiny helper for tests that need the on-disk path

@@ -1658,8 +1658,11 @@ func TestGetEpoch(t *testing.T) {
 // --- Mock AgentStore for domain access tests ---------------------------------
 
 type mockAgentStore struct {
-	agents  map[string]*store.AgentEntry
-	domains map[string][]string
+	agents               map[string]*store.AgentEntry
+	domains              map[string][]string
+	lookupCandidateCalls int
+	directoryCalls       int
+	directoryLimit       int
 }
 
 func newMockAgentStore() *mockAgentStore {
@@ -1681,6 +1684,31 @@ func (m *mockAgentStore) ListAgents(_ context.Context) ([]*store.AgentEntry, err
 	out := make([]*store.AgentEntry, 0, len(m.agents))
 	for _, a := range m.agents {
 		out = append(out, a)
+	}
+	return out, nil
+}
+
+func (m *mockAgentStore) ListAgentDirectory(_ context.Context, limit int) ([]*store.AgentEntry, error) {
+	m.directoryCalls++
+	m.directoryLimit = limit
+	if limit <= 0 {
+		return nil, nil
+	}
+	out := make([]*store.AgentEntry, 0, min(limit, len(m.agents)))
+	ids := make([]string, 0, len(m.agents))
+	for id := range m.agents {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		agent := m.agents[id]
+		if agent == nil || agent.Status == "removed" || agent.RemovedAt != nil {
+			continue
+		}
+		out = append(out, agent)
+		if len(out) == limit {
+			break
+		}
 	}
 	return out, nil
 }
@@ -1748,7 +1776,7 @@ func (m *mockAgentStore) FindAgentsByName(_ context.Context, name string, limit 
 		if agent == nil || agent.Status != "active" || agent.RemovedAt != nil {
 			continue
 		}
-		fields := []string{agent.Name, agent.RegisteredName, agent.Provider}
+		fields := []string{agent.AgentID, agent.Name, agent.RegisteredName, agent.Provider}
 		matched, exactMatch := false, false
 		for _, field := range fields {
 			lower := strings.ToLower(field)
@@ -1772,6 +1800,11 @@ func (m *mockAgentStore) FindAgentsByName(_ context.Context, name string, limit 
 		results = results[:limit]
 	}
 	return results, nil
+}
+
+func (m *mockAgentStore) FindAgentLookupCandidates(ctx context.Context, name string, limit int) ([]*store.AgentEntry, error) {
+	m.lookupCandidateCalls++
+	return m.FindAgentsByName(ctx, name, limit)
 }
 func (m *mockAgentStore) ClearStaleRedeployLogs(_ context.Context) (int, error) {
 	return 0, nil

@@ -86,7 +86,7 @@ func (app *SageApp) refreshAppV23Fork() error {
 			!bytes.Equal(domain, decodedScope) {
 			return errors.New("app-v23 genesis activation governance domain is invalid")
 		}
-		if err := app.badgerStore.ValidateAppV23State(); err != nil {
+		if err := app.validateAppV23StateForCurrentUpgrade(); err != nil {
 			return fmt.Errorf("app-v23 genesis activation has invalid local RBAC state: %w", err)
 		}
 		app.appV23GenesisActive = true
@@ -111,6 +111,35 @@ func (app *SageApp) refreshAppV23Fork() error {
 		return fmt.Errorf("applied %s height %d is ahead of persisted app height %d", appV23UpgradeName, rec.AppliedHeight, app.state.Height)
 	}
 	app.appV23AppliedHeight = rec.AppliedHeight
+	return nil
+}
+
+// validateAppV23StateForCurrentUpgrade permits only the historical home-domain
+// defects produced by app-v25 batch continuity, and only while app-v25 is
+// applied and app-v26 is not. It performs no mutation; its sole purpose is to
+// let the node reach the deterministic app-v26 repair transaction.
+func (app *SageApp) validateAppV23StateForCurrentUpgrade() error {
+	strictErr := app.badgerStore.ValidateAppV23State()
+	if strictErr == nil {
+		return nil
+	}
+	v26, err := app.badgerStore.GetAppliedUpgrade(appV26UpgradeName)
+	if err != nil {
+		return err
+	}
+	if v26 != nil {
+		return strictErr
+	}
+	v25, err := app.badgerStore.GetAppliedUpgrade(appV25UpgradeName)
+	if err != nil || v25 == nil || v25.TargetAppVersion != 25 {
+		return strictErr
+	}
+	if err := app.badgerStore.ValidateAppV23StateForPreV26Recovery(); err != nil {
+		return strictErr
+	}
+	app.logger.Warn().Err(strictErr).Msg(
+		"pre-app-v26 local RBAC home defect will be repaired by app-v26 activation",
+	)
 	return nil
 }
 
@@ -156,7 +185,7 @@ func (app *SageApp) validateAppV23Prerequisite() error {
 	if migration == nil {
 		return fmt.Errorf("applied %s is missing migration state", appV23UpgradeName)
 	}
-	if err := app.badgerStore.ValidateAppV23State(); err != nil {
+	if err := app.validateAppV23StateForCurrentUpgrade(); err != nil {
 		return fmt.Errorf("applied %s has invalid local RBAC state: %w", appV23UpgradeName, err)
 	}
 	return nil
@@ -847,7 +876,7 @@ func (app *SageApp) processAccessGroupMutateV23(parsedTx *tx.ParsedTx, height in
 			if mutation.MemberAuthority != "" {
 				return appV23ControlDenied()
 			}
-		} else if err := store.ValidateAppV26GroupAuthority(mutation.MemberAuthority); err != nil {
+		} else if authorityErr := store.ValidateAppV26GroupAuthority(mutation.MemberAuthority); authorityErr != nil {
 			return appV23ControlDenied()
 		}
 	} else if mutation.MemberAuthority != "" {

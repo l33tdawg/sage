@@ -948,29 +948,6 @@ components:
           type: string
           description: Updated agent bio.
 
-    AgentSetPermissionRequest:
-      type: object
-      properties:
-        clearance:
-          type: integer
-          minimum: 0
-          maximum: 4
-          description: >-
-            Clearance tier (0=PUBLIC, 1=INTERNAL, 2=CONFIDENTIAL, 3=SECRET,
-            4=TOPSECRET). Preserved if omitted (PATCH semantics).
-        domain_access:
-          type: string
-          description: JSON-encoded domain access map.
-        visible_agents:
-          type: string
-          description: JSON array of agent IDs this agent can see, or "*" for all.
-        org_id:
-          type: string
-          description: Organization ID.
-        dept_id:
-          type: string
-          description: Department ID.
-
     RegisteredAgent:
       type: object
       properties:
@@ -3210,7 +3187,9 @@ paths:
         historical Root, pending, inactive, removed, retired, and canonically
         inconsistent identities are omitted. This endpoint provides no online,
         reachability, delivery, or read evidence and never returns RBAC or
-        memory-count fields.
+        memory-count fields. The database projection is capped at 100 returned
+        active recipients; truncated=true directs callers to the bounded name
+        lookup for recipients outside that picker window.
       tags: [Agent]
       responses:
         "200":
@@ -3219,7 +3198,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [agents, total]
+                required: [agents, total, truncated]
                 properties:
                   agents:
                     type: array
@@ -3228,6 +3207,8 @@ paths:
                   total:
                     type: integer
                     minimum: 0
+                  truncated:
+                    type: boolean
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
@@ -3356,13 +3337,28 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [domains, truncated, scope]
+                required: [domains, owned_domains, readable_domains, writable_domains, truncated, scope]
                 properties:
                   domains:
                     type: array
                     maxItems: 64
                     items:
                       type: string
+                  owned_domains:
+                    description: Bounded ownership sample. Use /v1/agent/me/domains/owned for the authoritative paged set.
+                    type: array
+                    maxItems: 64
+                    items: {type: string}
+                  readable_domains:
+                    description: Bounded current-policy sample suitable for choosing an exact recall scope.
+                    type: array
+                    maxItems: 64
+                    items: {type: string}
+                  writable_domains:
+                    description: Bounded current-policy sample suitable for choosing an exact write scope.
+                    type: array
+                    maxItems: 64
+                    items: {type: string}
                   truncated:
                     type: boolean
                   scope:
@@ -3374,6 +3370,48 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "503":
           $ref: "#/components/responses/InternalError"
+
+  /v1/agent/me/domains/owned:
+    get:
+      operationId: getAgentOwnedDomains
+      summary: Page through domains currently owned by the authenticated agent.
+      description: >-
+        Caller-only authoritative ownership projection backed by the
+        consensus-maintained app-v26 owner index. It does not scan memories or
+        enumerate a global domain roster. Pass next_cursor back as cursor until
+        has_more is false.
+      tags: [Agent]
+      parameters:
+        - in: query
+          name: cursor
+          required: false
+          schema: {type: string, maxLength: 512}
+        - in: query
+          name: limit
+          required: false
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+      responses:
+        "200":
+          description: One stable lexicographic page of currently owned domains.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [domains, has_more, scope]
+                properties:
+                  domains:
+                    type: array
+                    maxItems: 100
+                    items: {type: string}
+                  next_cursor: {type: string}
+                  has_more: {type: boolean}
+                  scope:
+                    type: string
+                    enum: [authoritative_current_owner]
+        "400": {description: Invalid cursor or limit.}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "503": {$ref: "#/components/responses/InternalError"}
 
   /v1/agent/register:
     post:
@@ -3469,51 +3507,6 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "404":
           $ref: "#/components/responses/NotFound"
-        "500":
-          $ref: "#/components/responses/InternalError"
-
-  /v1/agent/{id}/permission:
-    put:
-      operationId: setAgentPermission
-      summary: >-
-        Set an agent's clearance, domain access, and visibility. Self-set OR
-        global admin OR org admin in any org the target belongs to.
-      description: >-
-        PATCH semantics — omitted fields preserve their on-chain value.
-      tags:
-        - Agent
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: Target agent's hex-encoded Ed25519 public key.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/AgentSetPermissionRequest"
-      responses:
-        "200":
-          description: Permissions updated.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  agent_id:
-                    type: string
-                  status:
-                    type: string
-                    example: permissions_updated
-                  tx_hash:
-                    type: string
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
@@ -4966,6 +4959,57 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/messages/read-batch:
+    put:
+      operationId: messagesMarkReadBatch
+      summary: Persist exact-recipient read evidence for up to 20 fetched local messages.
+      description: >-
+        Transport aggregation for canonical read acknowledgements. The fresh
+        nonce-bound outer request is signed by the exact recipient; each item
+        is authorized independently and returns confirmed or a generic
+        per-item failure. One failure never rolls back or hides independent
+        successes. Repeating the exact batch is idempotent.
+      tags: [Messages]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message_ids]
+              properties:
+                message_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 20
+                  items: {type: string, minLength: 1}
+      responses:
+        "200":
+          description: Per-message acknowledgement outcomes in request order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count]
+                properties:
+                  count: {type: integer, minimum: 1, maximum: 20}
+                  items:
+                    type: array
+                    minItems: 1
+                    maxItems: 20
+                    items:
+                      type: object
+                      required: [message_id, read_status]
+                      properties:
+                        message_id: {type: string}
+                        read_status: {type: string, enum: [confirmed, not_confirmed]}
+                        idempotent_replay: {type: boolean}
+                        error: {type: string, enum: [invalid_message_id, duplicate_message_id, not_found]}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+
   /v1/messages/{message_id}/status:
     get:
       operationId: messageStatus
@@ -5265,6 +5309,62 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/pipe/receipts/challenge-batch:
+    post:
+      operationId: pipeReceiptChallengeBatch
+      summary: Fetch up to 40 exact receipt-v2 challenge bodies in one local request.
+      description: >-
+        Accepts at most 20 imported messages with claimed/read events. Every
+        challenge remains an independent immutable exact-event body and each
+        item returns ready or a generic rejection. This route does not claim,
+        read, or expose message content.
+      tags: [Pipeline]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 40
+                  items:
+                    type: object
+                    required: [pipe_id, kind]
+                    properties:
+                      pipe_id: {type: string, minLength: 1}
+                      kind: {type: string, enum: [claimed, read]}
+      responses:
+        "200":
+          description: Per-event challenge outcomes in request order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count]
+                properties:
+                  count: {type: integer, minimum: 1, maximum: 40}
+                  items:
+                    type: array
+                    minItems: 1
+                    maxItems: 40
+                    items:
+                      type: object
+                      required: [pipe_id, event_kind, status]
+                      properties:
+                        pipe_id: {type: string}
+                        event_kind: {type: string, enum: [claimed, read]}
+                        status: {type: string, enum: [ready, rejected]}
+                        challenge: {$ref: "#/components/schemas/FederatedPipeReceiptChallenge"}
+                        error: {type: string, enum: [invalid_receipt_event, duplicate_receipt_event, not_found]}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
+
   /v1/pipe/{pipe_id}/receipt/challenge/{kind}:
     get:
       operationId: pipeReceiptChallenge
@@ -5307,6 +5407,73 @@ paths:
           $ref: "#/components/responses/NotFound"
         "501":
           $ref: "#/components/responses/NotImplemented"
+
+  /v1/pipe/receipts/batch:
+    put:
+      operationId: pipeReceiptRecordBatch
+      summary: Record up to 40 independently signed exact receipt-v2 events.
+      description: >-
+        Transport aggregation only: every item carries its own nonce-bound
+        signature over the exact single-event receipt path and challenge body,
+        so peers verify the same proof as the non-batch route. Items are
+        processed in request order; a failed claimed event suppresses the
+        matching read event, while unrelated items retain independent partial
+        success. Exact replay is idempotent.
+      tags: [Pipeline]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [items]
+              properties:
+                items:
+                  type: array
+                  minItems: 1
+                  maxItems: 40
+                  items:
+                    type: object
+                    required: [pipe_id, kind, proof]
+                    properties:
+                      pipe_id: {type: string, minLength: 1}
+                      kind: {type: string, enum: [claimed, read]}
+                      proof:
+                        type: object
+                        required: [agent_id, signature, timestamp, nonce, canonical_request]
+                        properties:
+                          agent_id: {type: string}
+                          signature: {type: string, format: byte}
+                          timestamp: {type: integer, format: int64}
+                          nonce: {type: string, format: byte}
+                          canonical_request: {type: string, format: byte}
+      responses:
+        "200":
+          description: Per-event durable queue/rejection outcomes in request order.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, count]
+                properties:
+                  count: {type: integer, minimum: 1, maximum: 40}
+                  items:
+                    type: array
+                    minItems: 1
+                    maxItems: 40
+                    items:
+                      type: object
+                      required: [pipe_id, event_kind, receipt_status]
+                      properties:
+                        pipe_id: {type: string}
+                        event_kind: {type: string, enum: [claimed, read]}
+                        receipt_status: {type: string, enum: [queued, unconfirmed]}
+                        idempotent_replay: {type: boolean}
+                        error: {type: string, enum: [invalid_receipt_proof, duplicate_receipt_event, claim_not_confirmed, rejected]}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "501": {$ref: "#/components/responses/NotImplemented"}
 
   /v1/pipe/{pipe_id}/receipt/{kind}:
     put:
@@ -5618,6 +5785,101 @@ paths:
                     example: 0
         "400":
           $ref: "#/components/responses/BadRequest"
+
+  /v1/federation/available:
+    get:
+      operationId: getCallerFederationAvailability
+      summary: Discover bounded caller-authorized federation domains and recipients.
+      description: >-
+        Signed active-ordinary caller projection. Each call performs one
+        bounded caller-authorized page inside a public scan horizon. agent_name
+        performs targeted lookup with agent_limit 1-20. peer_cursor is the
+        short-lived signed-caller/query-bound continuation returned by an
+        incomplete page; it contains no peer ID or hidden agreement count.
+        Results are authorization metadata, not presence or delivery evidence.
+        Distinct lookups consume fixed per-caller and process-wide outbound-call
+        budgets; 429 includes Retry-After. Exact saved recipient addresses do
+        not require discovery, and clients must not auto-walk every page.
+      tags: [Federation]
+      parameters:
+        - in: query
+          name: agent_name
+          schema: {type: string, maxLength: 512}
+        - in: query
+          name: agent_limit
+          schema: {type: integer, minimum: 1, maximum: 20, default: 20}
+        - in: query
+          name: peer_cursor
+          description: Continuation returned by the preceding exact signed lookup.
+          schema: {type: string, maxLength: 128}
+      responses:
+        "200":
+          description: Bounded caller-filtered connections.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [connections, total, complete, message]
+                properties:
+                  connections: {type: array, maxItems: 24, items: {type: object}}
+                  total: {type: integer, minimum: 0, maximum: 24}
+                  complete: {type: boolean}
+                  next_peer_cursor: {type: string}
+                  message: {type: string}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "429":
+          description: Caller or process outbound discovery budget exhausted; retry after Retry-After.
+          content: {application/problem+json: {schema: {$ref: "#/components/schemas/ProblemDetails"}}}
+
+  /v1/federation/contacts/authorize:
+    post:
+      operationId: authorizeCachedFederatedContacts
+      summary: Revalidate cached federated contact scopes against current local policy.
+      description: >-
+        Local-only signed policy check used by MCP before reusing its short-lived
+        contact cache. It performs no peer request and returns only the subset
+        still authorized for this exact caller.
+      tags: [Federation]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [contacts]
+              properties:
+                contacts:
+                  type: array
+                  maxItems: 512
+                  items:
+                    type: object
+                    required: [remote_chain_id, domain]
+                    properties:
+                      remote_chain_id: {type: string}
+                      domain: {type: string, minLength: 1, maxLength: 256}
+      responses:
+        "200":
+          description: Currently authorized contact scopes.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [allowed_contacts]
+                properties:
+                  allowed_contacts:
+                    type: array
+                    maxItems: 512
+                    items:
+                      type: object
+                      required: [remote_chain_id, domain]
+                      properties:
+                        remote_chain_id: {type: string}
+                        domain: {type: string}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
 
   # -- Operational ---------------------------------------------------------
   /health:

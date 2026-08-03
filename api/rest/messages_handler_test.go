@@ -33,6 +33,7 @@ func messageRouterAs(s *Server, callerID string, exactProof bool) http.Handler {
 	r.Post("/v1/messages/receive", s.handleMessagesReceive)
 	r.Post("/v1/messages/{message_id}/reply", s.handleMessageReply)
 	r.Put("/v1/messages/{message_id}/read", s.handleMessageRead)
+	r.Put("/v1/messages/read-batch", s.handleMessageReadBatch)
 	r.Get("/v1/messages/{message_id}/status", s.handleMessageStatus)
 	return r
 }
@@ -153,6 +154,37 @@ func TestCanonicalMessageReadAndReplyRequireExactSignedFetchedRecipient(t *testi
 	conflict := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodPost, "/v1/messages/msg-exact/reply",
 		map[string]any{"result": "different"})
 	require.Equal(t, http.StatusConflict, conflict.Code)
+}
+
+func TestCanonicalMessageReadBatchPreservesPerItemFailure(t *testing.T) {
+	s, sqlite := newPipeServer(t)
+	addMessageAgent(t, sqlite, "alice")
+	addMessageAgent(t, sqlite, "bob")
+	for _, id := range []string{"msg-a", "msg-b"} {
+		_, _, err := sqlite.SendLocalMessage(t.Context(), "send-"+id, &store.PipelineMessage{
+			PipeID: id, FromAgent: "alice", ToAgent: "bob", Payload: "secret", Status: "pending",
+			CreatedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+		})
+		require.NoError(t, err)
+	}
+	received := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodPost, "/v1/messages/receive",
+		map[string]any{"receive_token": "receive-batch", "limit": 2})
+	require.Equal(t, http.StatusOK, received.Code)
+
+	read := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodPut, "/v1/messages/read-batch",
+		map[string]any{"message_ids": []string{"msg-a", "missing", "msg-b"}})
+	require.Equal(t, http.StatusOK, read.Code, read.Body.String())
+	var response struct {
+		Items []struct {
+			MessageID  string `json:"message_id"`
+			ReadStatus string `json:"read_status"`
+			Error      string `json:"error"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(read.Body.Bytes(), &response))
+	require.Equal(t, "confirmed", response.Items[0].ReadStatus)
+	require.Equal(t, "not_found", response.Items[1].Error)
+	require.Equal(t, "confirmed", response.Items[2].ReadStatus)
 }
 
 func TestCanonicalMessageInputBoundsAndNonEnumeratingStatus(t *testing.T) {

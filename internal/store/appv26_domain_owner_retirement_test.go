@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -83,6 +84,59 @@ func TestTransferDomainAppV26CASGivesNewOwnerImmediatePolicyAccessWithoutSelfGra
 		require.True(t, authorization.Allowed,
 			"new owner must immediately receive verb %d: %+v", verb, authorization)
 	}
+}
+
+func TestAppV26OwnedDomainIndexPaginatesAndTracksTransfers(t *testing.T) {
+	s, err := NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.CloseBadger()) })
+	_ = appV23Register(t, s, "index-root", AppV23RoleAdmin, 1, 0)
+	ownerID := appV23Register(t, s, "index-owner", AppV23RoleMember, 2, 0)
+	targetID := appV23Register(t, s, "index-target", AppV23RoleMember, 3, 0)
+	require.NoError(t, s.EnsureAppV23Root("index-scope", 4))
+	for i := 0; i < 205; i++ {
+		require.NoError(t, s.RegisterDomain(fmt.Sprintf("owned-%03d", i), ownerID, "", int64(10+i)))
+	}
+	require.NoError(t, s.update(func(txn *badger.Txn) error {
+		return s.rebuildAppV26DomainOwnerIndexTxn(txn)
+	}))
+
+	var all []string
+	cursor := ""
+	for {
+		page, more, pageErr := s.ListOwnedDomainsPage(ownerID, cursor, 64)
+		require.NoError(t, pageErr)
+		require.NotEmpty(t, page)
+		all = append(all, page...)
+		if !more {
+			break
+		}
+		cursor = page[len(page)-1]
+	}
+	require.Len(t, all, 206, "the active owner's required home domain is indexed too")
+	require.True(t, sort.StringsAreSorted(all))
+	require.Len(t, uniqueStrings(all), 206)
+
+	_, err = s.TransferDomainAppV26CAS(
+		"owned-120", targetID, "", ownerID, "proposal-index-transfer", 500, false, 256,
+	)
+	require.NoError(t, err)
+	targetDomains, more, err := s.ListOwnedDomainsPage(targetID, "", 10)
+	require.NoError(t, err)
+	require.False(t, more)
+	require.Contains(t, targetDomains, "owned-120")
+	ownerPage, _, err := s.ListOwnedDomainsPage(ownerID, "owned-119", 2)
+	require.NoError(t, err)
+	require.Equal(t, []string{"owned-121", "owned-122"}, ownerPage,
+		"the old owner's index entry must be removed atomically")
+}
+
+func uniqueStrings(in []string) map[string]struct{} {
+	out := make(map[string]struct{}, len(in))
+	for _, value := range in {
+		out[value] = struct{}{}
+	}
+	return out
 }
 
 func TestTransferDomainAppV26CASRejectsIneligibleAuthorityTargetsWithoutMutation(t *testing.T) {
@@ -298,14 +352,14 @@ func TestAppV26AgentDeactivationTransfersOwnedDomainsToRootWithoutRewritingHisto
 	for domain, createdHeight := range map[string]int64{
 		"retirement-home": 4, "retirement-shared": 5,
 	} {
-		owner, parent, retainedHeight, err := s.GetDomainOwnerAndMeta(domain)
-		require.NoError(t, err)
+		owner, parent, retainedHeight, ownerErr := s.GetDomainOwnerAndMeta(domain)
+		require.NoError(t, ownerErr)
 		require.Equal(t, root.PrincipalID, owner)
 		require.Empty(t, parent)
 		require.Equal(t, createdHeight, retainedHeight,
 			"ownership handover must not rewrite the domain creation height")
-		history, err := s.ListAppV26DomainOwnershipHistory(domain)
-		require.NoError(t, err)
+		history, historyErr := s.ListAppV26DomainOwnershipHistory(domain)
+		require.NoError(t, historyErr)
 		require.Equal(t, []AppV26DomainOwnershipHistory{{
 			Sequence: 1,
 			Domain:   domain, PreviousOwner: ownerID, NewOwner: root.PrincipalID,

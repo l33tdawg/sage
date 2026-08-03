@@ -10,10 +10,6 @@ on:
         description: Existing immutable release tag to resume
         required: true
         type: string
-      publication_approval:
-        description: Type TESTED_PRIVATE_DRAFT_ON_TWO_MACS to publish the verified private draft
-        required: false
-        type: string
 
 # The newest tag may be re-run to finish a failed publication step, but release
 # writers for different tags must never race each other for the mutable
@@ -32,8 +28,9 @@ concurrency:
 #      artifacts, then converge at `publication-gate`;
 #   2. stage and verify a private signed/notarized GitHub draft, then stop so the
 #      exact DMGs can be installed and exercised on two real Macs;
-#   3. after an explicit workflow_dispatch approval, publish each public channel
-#      serially from the immutable tag.
+#   3. pause at a protected GitHub Environment. The operator installs those
+#      exact private assets on two Macs, then approves that same workflow run
+#      before any public channel can mutate.
 # A failed public step can therefore be resumed without rebuilding or racing a
 # second publisher, and the GitHub release plus mutable Docker `latest` pointer
 # remain hidden until the immutable versioned channels have succeeded.
@@ -1362,19 +1359,30 @@ jobs:
     name: Confirm Two-Mac Private Draft Acceptance
     runs-on: ubuntu-latest
     needs: [stage-github-release, verify-staged-macos-release, release-metadata]
-    if: github.event_name == 'workflow_dispatch'
+    environment:
+      name: release-two-mac-acceptance
     permissions:
+      actions: read
       contents: read
+      deployments: read
     steps:
-      - name: Require explicit private-draft acceptance
+      - name: Fail closed unless the environment requires a reviewer
         env:
-          PUBLICATION_APPROVAL: ${{ inputs.publication_approval }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [ "${PUBLICATION_APPROVAL}" != "TESTED_PRIVATE_DRAFT_ON_TWO_MACS" ]; then
-            echo "::error::Install and test the exact private signed DMGs on both Macs before publication"
-            exit 1
-          fi
+          gh api "repos/${GH_REPO}/environments/release-two-mac-acceptance" \
+            > environment.json
+          jq -e '
+            [.protection_rules[]?
+              | select(.type == "required_reviewers")
+              | .reviewers[]?]
+            | length >= 1
+          ' environment.json > /dev/null
+
+      - name: Record protected two-Mac acceptance
+        run: echo "Protected reviewer approved the exact private draft from this workflow run"
 
   publish-docker-version:
     name: Publish Immutable Docker Version

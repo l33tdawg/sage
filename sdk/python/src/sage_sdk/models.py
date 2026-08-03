@@ -308,6 +308,17 @@ class AgentProfile(BaseModel):
     access_scope: str | None = None
 
 
+class AgentDomainAccessSample(BaseModel):
+    """Bounded caller-only policy sample; not a complete ownership inventory."""
+
+    domains: list[str]
+    owned_domains: list[str]
+    readable_domains: list[str]
+    writable_domains: list[str]
+    truncated: bool
+    scope: str
+
+
 class AgentRegistration(BaseModel):
     agent_id: str
     name: str
@@ -358,6 +369,7 @@ class AgentDirectoryEntry(BaseModel):
 class AgentDirectoryResponse(BaseModel):
     agents: list[AgentDirectoryEntry]
     total: int
+    truncated: bool = False
 
 
 class AgentLookupEntry(AgentDirectoryEntry):
@@ -367,6 +379,15 @@ class AgentLookupEntry(AgentDirectoryEntry):
 class AgentLookupResponse(BaseModel):
     agents: list[AgentLookupEntry]
     total: int
+
+
+class OwnedDomainPage(BaseModel):
+    """One authoritative page of domains currently owned by this caller."""
+
+    domains: list[str]
+    next_cursor: str | None = None
+    has_more: bool
+    scope: Literal["authoritative_current_owner"]
 
 
 # --- Pipeline Models ---

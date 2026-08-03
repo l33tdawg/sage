@@ -254,9 +254,14 @@ func runningBinaryDiskVersion(ctx context.Context) string {
 // diskBinaryVersion runs binPath with the "version" arg and parses the version
 // from its output. Returns "" on any failure — callers treat that as "unknown".
 func diskBinaryVersion(ctx context.Context, binPath string) string {
+	if _, err := requireUpdateBinaryFile(binPath, "version probe binary"); err != nil {
+		return ""
+	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, binPath, "version").Output() // #nosec G204 -- binPath is this process's own executable
+	// G702: the executable is intentionally selected by the updater and was
+	// just proven to be a non-symlink, bounded, executable regular file.
+	out, err := exec.CommandContext(ctx, binPath, "version").Output() //nolint:gosec
 	if err != nil {
 		return ""
 	}
@@ -493,6 +498,36 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 	}
 	h.sendUpdateProgress("verify", "done", "Checksum verified")
 
+	// A verified release archive is not enough to authorize mutation of the
+	// installed executable. First prove that the exact current chain state and
+	// running binary form a coherent, restorable rollback bundle. This runs
+	// before the vault backup and before either platform installer touches the
+	// app/binary. Missing production wiring fails closed.
+	h.sendUpdateProgress("snapshot", "active", "Creating and verifying a complete pre-update recovery snapshot...")
+	if h.PrepareVersionTransition == nil || h.PrepareRestartDrain == nil {
+		h.sendUpdateProgress("snapshot", "error", "Update safety snapshot is unavailable; the installed app was not changed")
+		return
+	}
+	drainCtx, cancelDrain := context.WithTimeout(ctx, 15*time.Second)
+	_, abortDrain, drainErr := h.PrepareRestartDrain(drainCtx)
+	cancelDrain()
+	if drainErr != nil {
+		h.sendUpdateProgress("snapshot", "error", "A current snapshot is still finishing; retry the update without interrupting SAGE: "+drainErr.Error())
+		return
+	}
+	defer abortDrain()
+	transitionRelease, snapshotErr := h.PrepareVersionTransition(ctx, expectedVersion)
+	if snapshotErr != nil {
+		h.sendUpdateProgress("snapshot", "error", "Could not verify the pre-update recovery snapshot; the installed app was not changed: "+snapshotErr.Error())
+		return
+	}
+	if transitionRelease == nil {
+		h.sendUpdateProgress("snapshot", "error", "Could not hold the verified recovery boundary; the installed app was not changed")
+		return
+	}
+	defer transitionRelease()
+	h.sendUpdateProgress("snapshot", "done", "Complete recovery snapshot verified")
+
 	// Protect the irreplaceable vault key before either the app-bundle or
 	// standalone-binary installer touches the current installation.
 	if h.VaultKeyPath != "" {
@@ -632,7 +667,8 @@ func installPendingBinary(execPath, extractedPath, version string) error {
 		return fmt.Errorf("preserve rollback binary: %w", err)
 	}
 	if backupVersion := diskBinaryVersion(context.Background(), backupPath); !sameReleaseVersion(backupVersion, rollbackVersion) {
-		cleanupErr := removeFileDurable(backupPath)
+		// G703: backupPath is a fixed sibling of the already validated executable.
+		cleanupErr := removeFileDurable(backupPath) //nolint:gosec
 		return errors.Join(
 			fmt.Errorf("preserved rollback binary reports %s, expected %s", backupVersion, rollbackVersion),
 			cleanupErr,
@@ -659,7 +695,9 @@ func installPendingBinary(execPath, extractedPath, version string) error {
 }
 
 func requireUpdateBinaryFile(path, label string) (os.FileInfo, error) {
-	info, err := os.Lstat(path)
+	// G703: callers constrain path to os.Executable-derived update paths or a
+	// private os.CreateTemp result; Lstat is also a non-mutating validation step.
+	info, err := os.Lstat(path) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("%s is unavailable: %w", label, err)
 	}
@@ -676,7 +714,7 @@ func requireUpdateBinaryFile(path, label string) (os.FileInfo, error) {
 }
 
 func copyUpdateBinaryContents(srcPath string, expectedInfo os.FileInfo, dst *os.File, mode os.FileMode) error {
-	src, err := os.Open(srcPath) //nolint:gosec -- Lstat-verified updater path
+	src, err := os.Open(srcPath) //nolint:gosec // G703: caller passes the path whose exact FileInfo was just Lstat-verified.
 	if err != nil {
 		return err
 	}
@@ -765,7 +803,7 @@ func ReconcilePreparedPendingBinaryUpdate(execPath string) (bool, error) {
 	if err != nil || !exists {
 		return false, err
 	}
-	data, err := os.ReadFile(markerPath) //nolint:gosec -- Lstat-verified executable sibling
+	data, err := os.ReadFile(markerPath) //nolint:gosec // Lstat-verified executable sibling.
 	if err != nil {
 		return false, fmt.Errorf("read pending update marker: %w", err)
 	}
@@ -902,7 +940,7 @@ func PendingUpdateVersion(execPath string) string {
 			info.Size() <= 0 || info.Size() > 4096 {
 			continue
 		}
-		data, readErr := os.ReadFile(path) //nolint:gosec -- Lstat-verified executable/app sibling
+		data, readErr := os.ReadFile(path) //nolint:gosec // Lstat-verified executable/app sibling.
 		if readErr == nil {
 			if version := decodePendingUpdateRecord(data).Version; version != "" {
 				return version
@@ -979,7 +1017,7 @@ func RollbackPendingUpdate(execPath string) (bool, error) {
 	if !markerExists {
 		return false, nil
 	}
-	markerData, err := os.ReadFile(markerPath) //nolint:gosec -- marker was Lstat-verified above
+	markerData, err := os.ReadFile(markerPath) //nolint:gosec // Marker was Lstat-verified above.
 	if err != nil {
 		return false, fmt.Errorf("read pending update marker before rollback: %w", err)
 	}
@@ -1070,10 +1108,71 @@ func (h *DashboardHandler) handleRestart(w http.ResponseWriter, r *http.Request)
 		})
 		return
 	}
-	if err := h.RequestRestart(); err != nil {
+	// Manual app replacement can change os.Executable()'s pathname while this
+	// process still runs the previous inode. Before crossing that version
+	// boundary, create a synchronous verified snapshot whose binary is pinned to
+	// the current process. Ordinary same-version setting restarts remain cheap.
+	diskVersion := ""
+	if h.ExecPath != "" {
+		diskVersion = diskBinaryVersion(r.Context(), h.ExecPath)
+	} else {
+		diskVersion = runningBinaryDiskVersion(r.Context())
+	}
+	if diskVersion == "" {
+		writeError(w, http.StatusServiceUnavailable, "SAGE could not verify the installed binary version; restart was not requested")
+		return
+	}
+	if h.PrepareRestartDrain == nil || h.RequestRestartPrepared == nil {
+		writeError(w, http.StatusServiceUnavailable, "SAGE cannot prepare a reversible restart drain; restart was not requested")
+		return
+	}
+	drainCtx, cancelDrain := context.WithTimeout(r.Context(), 15*time.Second)
+	commitDrain, abortDrain, drainErr := h.PrepareRestartDrain(drainCtx)
+	cancelDrain()
+	if drainErr != nil {
+		writeError(w, http.StatusServiceUnavailable, "A safety snapshot is still finishing; SAGE remains online. Retry restart: "+drainErr.Error())
+		return
+	}
+	preparedOwned := true
+	defer func() {
+		if preparedOwned {
+			abortDrain()
+		}
+	}()
+	if restartRequired(h.Version, diskVersion) {
+		if h.PrepareVersionTransition == nil {
+			writeError(w, http.StatusServiceUnavailable, "SAGE cannot verify a pre-update recovery snapshot; restart was not requested")
+			return
+		}
+		release, err := h.PrepareVersionTransition(r.Context(), diskVersion)
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, "SAGE could not verify a pre-update recovery snapshot; restart was not requested: "+err.Error())
+			return
+		}
+		if release == nil {
+			if release != nil {
+				release()
+			}
+			writeError(w, http.StatusServiceUnavailable, "SAGE cannot preserve the recovery boundary through restart; restart was not requested")
+			return
+		}
+		if err := h.RequestRestartPrepared(release, commitDrain, abortDrain); err != nil {
+			release()
+			writeError(w, http.StatusServiceUnavailable, "SAGE could not begin a clean restart: "+err.Error())
+			return
+		}
+		preparedOwned = false
+		writeJSONResp(w, http.StatusAccepted, map[string]any{
+			"ok": true, "status": "draining", "boot_id": h.BootID,
+			"message": "SAGE is closing cleanly, then restarting…",
+		})
+		return
+	}
+	if err := h.RequestRestartPrepared(nil, commitDrain, abortDrain); err != nil {
 		writeError(w, http.StatusServiceUnavailable, "SAGE could not begin a clean restart: "+err.Error())
 		return
 	}
+	preparedOwned = false
 	writeJSONResp(w, http.StatusAccepted, map[string]any{
 		"ok": true, "status": "draining", "boot_id": h.BootID,
 		"message": "SAGE is closing cleanly, then restarting…",
@@ -1118,19 +1217,19 @@ func releasePageURL(downloadURL string) string {
 }
 
 // findUpdateAssetName returns the release asset for a target platform.
-func findUpdateAssetName(version, goos, goarch string) string {
-	if goos == "darwin" {
-		archLabel := goarch
-		if goarch == "amd64" {
+func findUpdateAssetName(releaseVersion, targetOS, targetArch string) string {
+	switch targetOS {
+	case "darwin":
+		archLabel := targetArch
+		if targetArch == "amd64" {
 			archLabel = "x86_64"
 		}
-		return fmt.Sprintf("SAGE-v%s-macOS-%s.dmg", version, archLabel)
+		return fmt.Sprintf("SAGE-v%s-macOS-%s.dmg", releaseVersion, archLabel)
+	case "windows":
+		return fmt.Sprintf("sage-gui_%s_%s_%s.zip", releaseVersion, targetOS, targetArch)
+	default:
+		return fmt.Sprintf("sage-gui_%s_%s_%s.tar.gz", releaseVersion, targetOS, targetArch)
 	}
-	ext := "tar.gz"
-	if goos == "windows" {
-		ext = "zip"
-	}
-	return fmt.Sprintf("sage-gui_%s_%s_%s.%s", version, goos, goarch, ext)
 }
 
 // extractBinaryFromTarGz extracts a named binary from a .tar.gz stream to a temp file.
@@ -1161,13 +1260,15 @@ func extractBinaryFromTarGz(reader io.Reader, binaryName string) (string, error)
 			if err != nil {
 				return "", err
 			}
-			if _, err := io.CopyN(tmpFile, tr, header.Size); err != nil {
+			if _, copyErr := io.CopyN(tmpFile, tr, header.Size); copyErr != nil {
 				_ = tmpFile.Close()
 				_ = os.Remove(tmpFile.Name())
-				return "", err
+				return "", copyErr
 			}
-			if err := tmpFile.Chmod(0755); err == nil {
-				err = tmpFile.Sync()
+			if chmodErr := tmpFile.Chmod(0755); chmodErr != nil {
+				err = chmodErr
+			} else if syncErr := tmpFile.Sync(); syncErr != nil {
+				err = syncErr
 			}
 			closeErr := tmpFile.Close()
 			if err == nil {

@@ -70,8 +70,8 @@ class TestSageClientTLS:
         assert client._client is not None
         client._client.close()
 
-    def test_ca_cert_path_passed_to_httpx(self, agent_identity, ca_cert_file):
-        """ca_cert="/path/to/ca.crt" is forwarded as verify to httpx."""
+    def test_ca_cert_path_builds_ssl_context(self, agent_identity, ca_cert_file):
+        """ca_cert="/path/to/ca.crt" uses an explicit non-deprecated SSLContext."""
         from sage_sdk.client import SageClient
 
         client = SageClient(
@@ -79,9 +79,8 @@ class TestSageClientTLS:
             identity=agent_identity,
             ca_cert=ca_cert_file,
         )
-        # httpx accepts the CA file and creates a transport successfully.
-        transport = client._client._transport
-        assert transport is not None
+        context = client._client._transport._pool._ssl_context
+        assert isinstance(context, ssl.SSLContext)
         client._client.close()
 
     def test_ca_cert_false_disables_verification(self, agent_identity):
@@ -138,8 +137,8 @@ class TestAsyncSageClientTLS:
         client = AsyncSageClient(base_url=BASE_URL, identity=agent_identity)
         assert client._client is not None
 
-    def test_ca_cert_path_passed_to_httpx(self, agent_identity, ca_cert_file):
-        """ca_cert="/path/to/ca.crt" is forwarded as verify to httpx.AsyncClient."""
+    def test_ca_cert_path_builds_ssl_context(self, agent_identity, ca_cert_file):
+        """ca_cert="/path/to/ca.crt" uses an explicit non-deprecated SSLContext."""
         from sage_sdk.async_client import AsyncSageClient
 
         client = AsyncSageClient(
@@ -147,8 +146,8 @@ class TestAsyncSageClientTLS:
             identity=agent_identity,
             ca_cert=ca_cert_file,
         )
-        transport = client._client._transport
-        assert transport is not None
+        context = client._client._transport._pool._ssl_context
+        assert isinstance(context, ssl.SSLContext)
 
     def test_ca_cert_false_disables_verification(self, agent_identity):
         """ca_cert=False disables TLS certificate verification."""

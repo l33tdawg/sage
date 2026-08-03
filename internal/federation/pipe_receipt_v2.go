@@ -101,8 +101,8 @@ func (m *Manager) ImportedPipeReceiptChallenge(
 	if err != nil || binding.RecipientAgentID != recipientID {
 		return nil, store.ErrFederatedReceiptNotFound
 	}
-	if err := m.WithAuthorizedImportedPipe(ctx, msg, nil); err != nil {
-		return nil, err
+	if authErr := m.WithAuthorizedImportedPipe(ctx, msg, nil); authErr != nil {
+		return nil, authErr
 	}
 	body, err := json.Marshal(signedReceiptRequest(binding, kind))
 	return json.RawMessage(body), err

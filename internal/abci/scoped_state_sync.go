@@ -438,6 +438,13 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 		if groupErr := badgerStore.ValidateAppV26AccessGroupAuthorities(); groupErr != nil {
 			return 0, nil, fmt.Errorf("verify %s app-v26 Access Groups: %w", label, groupErr)
 		}
+		// app-v26 is the repair boundary for historical app-v25 home-domain
+		// defects. A completed app-v26 image must therefore be strict: accepting
+		// the pre-v26 compatibility validator here would let an invalid snapshot
+		// strand a receiver before any later transaction could repair it.
+		if rbacErr := badgerStore.ValidateAppV23State(); rbacErr != nil {
+			return 0, nil, fmt.Errorf("verify %s app-v26 repaired local RBAC: %w", label, rbacErr)
+		}
 	}
 	return uint64(state.Height), computed, nil // #nosec G115 -- positive int64 checked above
 }

@@ -7,6 +7,11 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -136,6 +141,23 @@ func TestHandleToolsList(t *testing.T) {
 			sageTask = tool
 		}
 	}
+	expected := []string{
+		"sage_backlog", "sage_corroborate", "sage_directory", "sage_domains",
+		"sage_federation", "sage_find_agent", "sage_forget", "sage_gov_propose",
+		"sage_gov_status", "sage_gov_vote", "sage_inbox", "sage_inception",
+		"sage_link", "sage_list", "sage_message_reply", "sage_message_send",
+		"sage_message_status", "sage_messages_receive", "sage_pipe",
+		"sage_pipe_history", "sage_pipe_receipt_status", "sage_pipe_result",
+		"sage_recall", "sage_reflect", "sage_register", "sage_reinstate",
+		"sage_remember", "sage_rename", "sage_scope_get", "sage_scope_list",
+		"sage_status", "sage_task", "sage_timeline", "sage_turn",
+	}
+	actual := make([]string, 0, len(names))
+	for name := range names {
+		actual = append(actual, name)
+	}
+	assert.ElementsMatch(t, expected, actual)
+	assert.False(t, names["sage_red_pill"], "deprecated aliases must not be advertised")
 	assert.True(t, names["sage_remember"])
 	assert.True(t, names["sage_recall"])
 	assert.True(t, names["sage_pipe_history"])
@@ -151,6 +173,8 @@ func TestHandleToolsList(t *testing.T) {
 	assert.True(t, names["sage_list"])
 	assert.True(t, names["sage_timeline"])
 	assert.True(t, names["sage_status"])
+	assert.True(t, names["sage_domains"])
+	assert.True(t, names["sage_pipe_receipt_status"])
 	assert.True(t, names["sage_gov_propose"])
 	assert.True(t, names["sage_gov_vote"])
 	assert.True(t, names["sage_gov_status"])
@@ -180,6 +204,63 @@ func TestHandleToolsList(t *testing.T) {
 	idempotencySchema := taskProperties["idempotency_key"].(map[string]any)
 	assert.Contains(t, idempotencySchema["description"], "permanent creation identity")
 	assert.Contains(t, idempotencySchema["description"], "every later identical call returns that existing task")
+}
+
+func TestDeprecatedRedPillAliasIsHiddenButDispatchesToInception(t *testing.T) {
+	s, _ := testServer(t)
+	inception, ok := s.tools["sage_inception"]
+	require.True(t, ok)
+	alias, ok := s.tools["sage_red_pill"]
+	require.True(t, ok)
+	require.True(t, alias.Hidden)
+	assert.Equal(t, reflect.ValueOf(inception.Handler).Pointer(), reflect.ValueOf(alias.Handler).Pointer())
+}
+
+func TestToolRegistrySchemasAreSelfContainedAndOnlyExpectedAliasIsHidden(t *testing.T) {
+	s, _ := testServer(t)
+	hidden := make([]string, 0, 1)
+	for key, tool := range s.tools {
+		require.Equal(t, key, tool.Name, "registry key and advertised tool name must match")
+		require.NotNil(t, tool.Handler, "%s must have a callable handler", key)
+		require.Equal(t, "object", tool.InputSchema["type"], "%s must expose an object schema", key)
+		properties, ok := tool.InputSchema["properties"].(map[string]any)
+		require.True(t, ok, "%s must define its complete argument properties", key)
+		if required, ok := tool.InputSchema["required"].([]string); ok {
+			for _, name := range required {
+				require.Contains(t, properties, name,
+					"%s requires %s but does not document it in the tool schema", key, name)
+			}
+		}
+		if tool.Hidden {
+			hidden = append(hidden, key)
+		}
+	}
+	require.Equal(t, []string{"sage_red_pill"}, hidden)
+}
+
+func TestAdvertisedToolsExactlyMatchReferenceHeadings(t *testing.T) {
+	s, _ := testServer(t)
+	advertised := make([]string, 0, len(s.tools))
+	for _, tool := range s.tools {
+		if !tool.Hidden {
+			advertised = append(advertised, tool.Name)
+		}
+	}
+	_, source, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	docPath := filepath.Join(filepath.Dir(source), "..", "..", "docs", "reference", "mcp-tools.md")
+	doc, err := os.ReadFile(docPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(doc), "SAGE exposes 34 MCP tools",
+		"the human-readable inventory count must match tools/list")
+	re := regexp.MustCompile(`(?m)^### (sage_[a-z_]+)$`)
+	matches := re.FindAllStringSubmatch(string(doc), -1)
+	documented := make([]string, 0, len(matches))
+	for _, match := range matches {
+		documented = append(documented, match[1])
+	}
+	assert.ElementsMatch(t, advertised, documented,
+		"every advertised MCP tool must have exactly one reference heading, and hidden aliases must not be advertised as current tools")
 }
 
 func TestHandleToolsCall_UnknownTool(t *testing.T) {

@@ -1113,6 +1113,11 @@ func TestFindAgentsByNameSupportsBoundedLocalSubstringLookup(t *testing.T) {
 	require.Len(t, provider, 1)
 	assert.Equal(t, voice.AgentID, provider[0].AgentID)
 
+	byID, err := s.FindAgentsByName(ctx, voice.AgentID, 20)
+	require.NoError(t, err)
+	require.Len(t, byID, 1)
+	assert.Equal(t, voice.AgentID, byID[0].AgentID)
+
 	literalWildcard, err := s.FindAgentsByName(ctx, "%", 20)
 	require.NoError(t, err)
 	assert.Empty(t, literalWildcard, "LIKE metacharacters in a human query must not widen the roster scan")
@@ -1156,6 +1161,11 @@ func TestFindAgentsByNamePageUsesStableBoundedOffset(t *testing.T) {
 	require.Len(t, second, 5)
 	assert.Equal(t, "agent-page-20", second[0].AgentID)
 	assert.Equal(t, "agent-page-24", second[4].AgentID)
+
+	candidates, err := s.FindAgentLookupCandidates(ctx, "claude", maxAgentNameLookupCandidates)
+	require.NoError(t, err)
+	require.Len(t, candidates, 25,
+		"the REST lookup candidate batch must be one query, not repeated public pages")
 }
 
 func TestUpdateAgent(t *testing.T) {

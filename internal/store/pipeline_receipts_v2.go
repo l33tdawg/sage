@@ -182,8 +182,8 @@ func (s *SQLiteStore) RecordImportedFederatedReceipt(
 				if !msg.ExpiresAt.After(time.Now().UTC()) {
 					return ErrFederatedReceiptConflict
 				}
-				if err := tx.ClaimPipeline(ctx, localPipeID, recipientID); err != nil {
-					return err
+				if claimErr := tx.ClaimPipeline(ctx, localPipeID, recipientID); claimErr != nil {
+					return claimErr
 				}
 			} else if msg.ClaimedBy != recipientID {
 				return ErrFederatedReceiptConflict
@@ -702,14 +702,14 @@ func (s *SQLiteStore) ApplyFederatedReceiptEvent(ctx context.Context, event *Fed
 			return err
 		}
 		var proofEvent string
-		if err := tx.conn.QueryRowContext(ctx,
-			`SELECT event_id FROM pipeline_receipt_v2_events WHERE proof_hash=?`, event.ProofHash).Scan(&proofEvent); err == nil {
+		if proofErr := tx.conn.QueryRowContext(ctx,
+			`SELECT event_id FROM pipeline_receipt_v2_events WHERE proof_hash=?`, event.ProofHash).Scan(&proofEvent); proofErr == nil {
 			return ErrFederatedReceiptConflict
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
+		} else if !errors.Is(proofErr, sql.ErrNoRows) {
+			return proofErr
 		}
-		if err := validateOutboundReceiptPipe(ctx, tx, event.FederatedReceiptBinding); err != nil {
-			return err
+		if validationErr := validateOutboundReceiptPipe(ctx, tx, event.FederatedReceiptBinding); validationErr != nil {
+			return validationErr
 		}
 		_, err = tx.writeExecContext(ctx, `INSERT INTO pipeline_receipt_v2_events
 			(event_id,message_id,local_pipe_id,sender_chain_id,recipient_chain_id,sender_agent_id,
@@ -850,8 +850,11 @@ func (s *SQLiteStore) GetFederatedReceiptForSender(ctx context.Context, senderID
 		&out.ContactRevision, &out.AuthorizationMode, &out.RelationDigest,
 		&deliveredAt, &out.DeliveryEvidence, &claimedAt, &readAt,
 		&out.TerminalKind, &terminalAt, &updatedAt)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrFederatedReceiptNotFound
+	}
+	if err != nil {
+		return nil, err
 	}
 	out.DeliveredAt = parseTimePtr(deliveredAt)
 	out.ClaimedAt = parseTimePtr(claimedAt)

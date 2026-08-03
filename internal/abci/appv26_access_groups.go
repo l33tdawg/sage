@@ -75,5 +75,8 @@ func (app *SageApp) validateAppV26Prerequisite() error {
 	if err := app.badgerStore.ValidateAppV26AccessGroupAuthorities(); err != nil {
 		return fmt.Errorf("applied %s has invalid Access Group state: %w", appV26UpgradeName, err)
 	}
+	if err := app.badgerStore.ValidateAppV23State(); err != nil {
+		return fmt.Errorf("applied %s has invalid repaired local RBAC state: %w", appV26UpgradeName, err)
+	}
 	return nil
 }
