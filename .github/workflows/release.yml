@@ -204,6 +204,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -213,8 +214,6 @@ jobs:
           go-version: '1.25'
           cache: true
       - run: go test ./... -count=1 -race -timeout 30m
-      - name: Test local CometBFT hardening
-        run: make test-cometbft-patch
       - name: Run natter tests
         run: |
           cd natter
@@ -222,7 +221,6 @@ jobs:
 
   v119-fault-gates:
     name: Consensus Fault Gates
-    needs: test
     uses: ./.github/workflows/v11.9-fault-gates.yml
     with:
       # These became permanent release invariants when app-v20/state-sync

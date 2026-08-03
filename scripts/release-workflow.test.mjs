@@ -9,6 +9,10 @@ const codeqlWorkflow = readFileSync(
   new URL('../.github/workflows/codeql.yml', import.meta.url),
   'utf8',
 );
+const nativeShellWorkflow = readFileSync(
+  new URL('../.github/workflows/native-shell.yml', import.meta.url),
+  'utf8',
+);
 const codeqlBaseline = JSON.parse(
   readFileSync(new URL('./codeql-cometbft-baseline.json', import.meta.url), 'utf8'),
 );
@@ -162,6 +166,22 @@ test('metadata, source, race, frontend, and fault checks converge before packagi
   ]) {
     assertNeeds(id, ['quality-gate', 'release-metadata']);
   }
+});
+
+test('superseded checks stop spending runner minutes without weakening the newest commit', () => {
+  const cancellable = /concurrency:\n  group: \$\{\{ github\.workflow \}\}-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}\n  cancel-in-progress: true/;
+  assert.match(ciWorkflow, cancellable);
+  assert.match(codeqlWorkflow, cancellable);
+  assert.match(nativeShellWorkflow, cancellable);
+});
+
+test('CI builds Docker once and keeps CometBFT hardening in the mandatory fault gate', () => {
+  assert.doesNotMatch(ciWorkflow, /^  docker:\n/m);
+  assert.match(ciJob('byzantine'), /docker compose -f deploy\/docker-compose\.yml up -d --build/);
+  assert.doesNotMatch(ciJob('test'), /make test-cometbft-patch/);
+  assert.doesNotMatch(job('test'), /make test-cometbft-patch/);
+  assert.match(faultWorkflow, /make test-cometbft-patch/);
+  assert.doesNotMatch(job('v119-fault-gates'), /needs: test/);
 });
 
 test('native shell evidence is version-locked, private, and cannot promote an unsigned standalone release', () => {
