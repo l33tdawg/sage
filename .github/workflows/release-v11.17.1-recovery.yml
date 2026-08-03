@@ -1,0 +1,905 @@
+name: Recover v11.17.1 Publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type recover-v11.17.1 to verify and publish the existing immutable draft
+        required: true
+        type: string
+      acceptance_evidence:
+        description: Immutable/local two-Mac acceptance evidence note or URL
+        required: true
+        type: string
+
+run-name: Recover immutable v11.17.1 publication
+
+# This one-shot workflow repairs an orchestration-only failure in the immutable
+# v11.17.1 release run. It never rebuilds, retags, or re-uploads product bytes:
+# every public input comes from the original run and the already-staged draft.
+concurrency:
+  group: sage-release-publication
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  RELEASE_TAG: v11.17.1
+  RELEASE_VERSION: 11.17.1
+  EXPECTED_TAG_COMMIT: 842ce1d8c3f03bc8d4ce95b1369874433cdd8991
+  SOURCE_RUN_ID: '30817068736'
+  DRAFT_RELEASE_ID: '364261618'
+
+jobs:
+  validate-recovery:
+    name: Validate Immutable Recovery Provenance
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      # GitHub intentionally hides drafts from contents:read tokens. This
+      # narrowly scoped GET-only job needs push-equivalent visibility to bind
+      # the exact private draft ID before any publication can begin.
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Download exact downstream publication inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-{image-docker,package-mcp,package-python}
+          path: publication-inputs
+          repository: ${{ github.repository }}
+          run-id: 30817068736
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bind recovery to protected main, the immutable tag, source run, and draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+          ACCEPTANCE_EVIDENCE: ${{ inputs.acceptance_evidence }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "${CONFIRMATION}" = recover-v11.17.1
+          test "${#ACCEPTANCE_EVIDENCE}" -le 500
+          case "${ACCEPTANCE_EVIDENCE}" in
+            ''|*$'\n'*|*$'\r'*)
+              echo "::error::Acceptance evidence must be one non-empty line"
+              exit 1
+              ;;
+          esac
+          test -n "$(printf '%s' "${ACCEPTANCE_EVIDENCE}" | tr -d '[:space:]')"
+          {
+            echo '### v11.17.1 recovery evidence'
+            printf '> %s\n' "${ACCEPTANCE_EVIDENCE}"
+            echo
+            echo "Source run: ${SOURCE_RUN_ID}; draft release: ${DRAFT_RELEASE_ID}."
+          } >> "${GITHUB_STEP_SUMMARY}"
+          test "${GITHUB_REF}" = refs/heads/main
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "${GITHUB_SHA}" = "$(git rev-parse refs/remotes/origin/main)"
+
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = tag
+          tag_commit=$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")
+          test "${tag_commit}" = "${EXPECTED_TAG_COMMIT}"
+          git merge-base --is-ancestor "${tag_commit}" refs/remotes/origin/main
+          newest_stable_tag=$(
+            git tag --merged refs/remotes/origin/main |
+              grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' |
+              sort -V |
+              tail -1
+          )
+          test "${newest_stable_tag}" = "${RELEASE_TAG}"
+          test "$(git show "refs/tags/${RELEASE_TAG}:server.json" | jq -er '.version')" = \
+            "${RELEASE_VERSION}"
+
+          gh api "repos/${GH_REPO}/actions/runs/${SOURCE_RUN_ID}" > source-run.json
+          jq -e \
+            --arg tag "${RELEASE_TAG}" \
+            --arg sha "${EXPECTED_TAG_COMMIT}" '
+              .path == ".github/workflows/release.yml" and
+              .event == "push" and
+              .head_branch == $tag and
+              .head_sha == $sha and
+              .status == "completed" and
+              .conclusion == "failure"
+            ' source-run.json > /dev/null
+
+          gh api "repos/${GH_REPO}/actions/runs/${SOURCE_RUN_ID}/jobs?per_page=100" \
+            > source-jobs.json
+          assert_job() {
+            local name=$1
+            local conclusion=$2
+            jq -e --arg name "${name}" --arg conclusion "${conclusion}" '
+              [.jobs[] | select(.name == $name and .conclusion == $conclusion)] | length == 1
+            ' source-jobs.json > /dev/null
+          }
+          assert_job 'Release Metadata Gate' success
+          assert_job 'Quality and Chaos Fan-In' success
+          assert_job 'Artifact and Package Publication Gate' success
+          assert_job 'Stage Private GitHub Draft' success
+          assert_job 'Verify Staged macOS Release Assets' failure
+          assert_job 'Publish Immutable Docker Version' skipped
+          assert_job 'Publish MCP Registry Version' skipped
+          assert_job 'Publish Python SDK to PyPI' skipped
+          assert_job 'Promote Docker Latest Pointer' skipped
+          assert_job 'Publish GitHub Release Last' skipped
+
+          gh api "repos/${GH_REPO}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100" \
+            > source-artifacts.json
+          for name in \
+            release-assets-goreleaser \
+            release-assets-linux-desktop \
+            release-assets-macos-arm64 \
+            release-assets-macos-x86_64 \
+            release-assets-windows \
+            release-image-docker \
+            release-package-mcp \
+            release-package-python; do
+            jq -e --arg name "${name}" '
+              [.artifacts[] |
+                select(.name == $name and .expired == false and .size_in_bytes > 0)] |
+              length == 1
+            ' source-artifacts.json > /dev/null
+          done
+
+          gh api "repos/${GH_REPO}/releases/${DRAFT_RELEASE_ID}" > draft.json
+          jq -e \
+            --argjson id "${DRAFT_RELEASE_ID}" \
+            --arg tag "${RELEASE_TAG}" \
+            --arg name "SAGE v${RELEASE_VERSION}" '
+              .id == $id and
+              .tag_name == $tag and
+              .name == $name and
+              .prerelease == false and
+              ((.draft == true and .published_at == null) or
+               (.draft == false and .published_at != null)) and
+              (.assets | length == 38) and
+              ([.assets[].name] | unique | length == 38) and
+              ([.assets[] |
+                select(
+                  .state == "uploaded" and
+                  .size > 0 and
+                  (.digest | test("^sha256:[0-9a-f]{64}$"))
+                )] | length == 38)
+            ' draft.json > /dev/null
+          if [ "$(jq -r '.draft' draft.json)" = false ]; then
+            while IFS= read -r source; do
+              sudo mv "${source}" "${source}.disabled"
+            done < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list.d || true)
+            sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+              apt-get -o Acquire::Retries=2 \
+                      -o Acquire::http::Timeout=20 \
+                      -o Acquire::https::Timeout=20 update
+            sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+              apt-get install -y --no-install-recommends skopeo
+            verify_public_terminal_state() {
+              skopeo inspect --raw \
+                oci-archive:publication-inputs/release-image-docker/sage-image.tar \
+                > expected-version-index.json
+              skopeo inspect --raw \
+                "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
+                > version-index.json
+              skopeo inspect --raw \
+                docker://ghcr.io/l33tdawg/sage:latest > latest-index.json
+              cmp expected-version-index.json version-index.json
+              cmp expected-version-index.json latest-index.json
+              jq -S '.' publication-inputs/release-package-mcp/server.json \
+                > expected-server-sorted.json
+              curl --fail --location --silent --show-error \
+                --output mcp-public.json \
+                "https://registry.modelcontextprotocol.io/v0.1/servers/io.github.l33tdawg%2Fsage/versions/${RELEASE_VERSION}"
+              jq -S '.server' mcp-public.json > mcp-public-server.json
+              diff -u expected-server-sorted.json mcp-public-server.json
+              curl --fail --location --silent --show-error \
+                --output pypi-public.json \
+                "https://pypi.org/pypi/sage-agent-sdk/${RELEASE_VERSION}/json"
+              test "$(find publication-inputs/release-package-python -maxdepth 1 -type f | wc -l)" -eq \
+                   "$(jq '.urls | length' pypi-public.json)"
+              for file in publication-inputs/release-package-python/*; do
+                filename=$(basename "${file}")
+                expected_digest=$(sha256sum "${file}" | cut -d' ' -f1)
+                public_digest=$(jq -er --arg filename "${filename}" \
+                  '.urls[] | select(.filename == $filename) | .digests.sha256' \
+                  pypi-public.json)
+                test "${expected_digest}" = "${public_digest}"
+              done
+            }
+            verify_public_terminal_state
+          fi
+
+  verify-staged-assets:
+    name: Verify Exact Existing Draft Assets
+    runs-on: macos-latest
+    needs: validate-recovery
+    outputs:
+      asset_manifest_sha256: ${{ steps.verify.outputs.asset_manifest_sha256 }}
+    permissions:
+      actions: read
+      # Draft asset downloads are hidden from contents:read tokens even when
+      # addressed by immutable database ID. No mutating GitHub API is used.
+      contents: write
+    steps:
+      - name: Download original public assets from the exact source run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-assets-*
+          path: source-assets
+          merge-multiple: true
+          repository: ${{ github.repository }}
+          run-id: 30817068736
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compare every draft asset and verify the staged signed applications
+        id: verify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir draft-assets
+
+          gh api "repos/${GH_REPO}/releases/${DRAFT_RELEASE_ID}" > draft-release.json
+          jq -e \
+            --argjson id "${DRAFT_RELEASE_ID}" \
+            --arg tag "${RELEASE_TAG}" '
+              .id == $id and .tag_name == $tag and .prerelease == false and
+              ((.draft == true and .published_at == null) or
+               (.draft == false and .published_at != null))
+            ' draft-release.json > /dev/null
+          jq '.assets' draft-release.json > draft-assets.json
+          test "$(jq 'length' draft-assets.json)" -eq 38
+
+          while IFS=$'\t' read -r asset_id asset_name; do
+            case "${asset_name}" in
+              ''|*/*|*\\*|.|..|*'..'*)
+                echo "::error::Unsafe draft asset name: ${asset_name}"
+                exit 1
+                ;;
+            esac
+            gh api -H 'Accept: application/octet-stream' \
+              "repos/${GH_REPO}/releases/assets/${asset_id}" \
+              > "draft-assets/${asset_name}"
+          done < <(jq -r '.[] | [.id, .name] | @tsv' draft-assets.json)
+
+          find source-assets -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort \
+            > source-assets.txt
+          find draft-assets -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort \
+            > draft-assets.txt
+          test "$(wc -l < source-assets.txt | tr -d ' ')" -eq 38
+          test "$(wc -l < draft-assets.txt | tr -d ' ')" -eq 38
+          diff -u source-assets.txt draft-assets.txt
+
+          while IFS= read -r name; do
+            source_hash=$(shasum -a 256 "source-assets/${name}" | awk '{print $1}')
+            draft_hash=$(shasum -a 256 "draft-assets/${name}" | awk '{print $1}')
+            api_digest=$(jq -er --arg name "${name}" \
+              '.[] | select(.name == $name) | .digest' draft-assets.json)
+            api_size=$(jq -er --arg name "${name}" \
+              '.[] | select(.name == $name) | .size' draft-assets.json)
+            test "${source_hash}" = "${draft_hash}"
+            test "sha256:${draft_hash}" = "${api_digest}"
+            test "$(stat -f '%z' "draft-assets/${name}")" = "${api_size}"
+          done < source-assets.txt
+          asset_manifest_sha256=$(
+            jq -cS '[.[] | {id, name, size, digest, state}] | sort_by(.name)' \
+              draft-assets.json |
+              shasum -a 256 |
+              awk '{print $1}'
+          )
+          echo "asset_manifest_sha256=${asset_manifest_sha256}" >> "${GITHUB_OUTPUT}"
+
+          bundle_byte_manifest() {
+            local bundle_root=$1
+            (
+              cd "${bundle_root}"
+              find . -type f -print | LC_ALL=C sort | while IFS= read -r rel; do
+                hash=$(shasum -a 256 "${rel}" | awk '{print $1}')
+                mode=$(stat -f '%Lp' "${rel}")
+                printf 'F %s %s %s\n' "${mode}" "${hash}" "${rel}"
+              done
+              find . -type l -print | LC_ALL=C sort | while IFS= read -r rel; do
+                mode=$(stat -f '%Lp' "${rel}")
+                printf 'L %s %s -> %s\n' "${mode}" "${rel}" "$(readlink "${rel}")"
+              done
+            )
+          }
+
+          for arch in arm64 x86_64; do
+            for dmg_name in \
+              "SAGE-${RELEASE_TAG}-macOS-${arch}.dmg" \
+              "SAGE-macOS-${arch}.dmg"; do
+              dmg="draft-assets/${dmg_name}"
+              checksum="${dmg}.sha256"
+              test -f "${dmg}" && test ! -L "${dmg}" && test -s "${dmg}"
+              test -f "${checksum}" && test ! -L "${checksum}" && test -s "${checksum}"
+              read -r published_hash published_name checksum_extra < "${checksum}"
+              test -z "${checksum_extra:-}"
+              test "${published_name}" = "$(basename "${dmg}")"
+              test "${published_hash}" = "$(shasum -a 256 "${dmg}" | awk '{print $1}')"
+
+              mount_point=$(mktemp -d)
+              cleanup_mount() {
+                hdiutil detach "${mount_point}" >/dev/null 2>&1 || true
+                rmdir "${mount_point}" >/dev/null 2>&1 || true
+              }
+              trap cleanup_mount EXIT
+              hdiutil attach -readonly -nobrowse -mountpoint "${mount_point}" "${dmg}"
+              codesign --verify --deep --strict --verbose=4 "${mount_point}/SAGE.app"
+              app_identity=$(codesign -dv --verbose=4 "${mount_point}/SAGE.app" 2>&1)
+              printf '%s\n' "${app_identity}" | grep -Fx 'Identifier=com.sage.brain'
+              printf '%s\n' "${app_identity}" | grep -Fx 'TeamIdentifier=2N7GKZ8D8Z'
+              for leaf_spec in \
+                "${mount_point}/SAGE.app/Contents/MacOS/sage-gui:sage-gui" \
+                "${mount_point}/SAGE.app/Contents/MacOS/sage-tray:com.sage.brain"; do
+                leaf=${leaf_spec%:*}
+                expected_identifier=${leaf_spec##*:}
+                test -f "${leaf}" && test ! -L "${leaf}" && test -x "${leaf}"
+                test "$(stat -f '%Lp' "${leaf}")" = 755
+                codesign --verify --strict --verbose=2 "${leaf}"
+                leaf_identity=$(codesign -dv --verbose=4 "${leaf}" 2>&1)
+                printf '%s\n' "${leaf_identity}" | grep -Fx "Identifier=${expected_identifier}"
+                printf '%s\n' "${leaf_identity}" | grep -Fx 'TeamIdentifier=2N7GKZ8D8Z'
+              done
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${mount_point}/SAGE.app/Contents/Info.plist")" = com.sage.brain
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${mount_point}/SAGE.app/Contents/Info.plist")" = sage-tray
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${mount_point}/SAGE.app/Contents/Info.plist")" = "${RELEASE_VERSION}"
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${mount_point}/SAGE.app/Contents/Info.plist")" = "${RELEASE_VERSION}"
+              spctl --assess --type execute --verbose=4 "${mount_point}/SAGE.app"
+
+              copy_verify_root=$(mktemp -d "${RUNNER_TEMP}/sage-recovery-copy.XXXXXX")
+              test -w "${copy_verify_root}"
+              copy_device=$(df "${copy_verify_root}" | awk 'END { print $1 }')
+              test -n "${copy_device}"
+              /usr/sbin/diskutil info "${copy_device}" | \
+                grep -Eq 'File System Personality:[[:space:]]+APFS'
+              trap 'rm -rf "${copy_verify_root}"; cleanup_mount' EXIT
+              copy_verify_app="${copy_verify_root}/SAGE.app"
+              /usr/bin/ditto "${mount_point}/SAGE.app" "${copy_verify_app}"
+              bundle_byte_manifest "${mount_point}/SAGE.app" > "${copy_verify_root}/mounted.manifest"
+              bundle_byte_manifest "${copy_verify_app}" > "${copy_verify_root}/copied.manifest"
+              diff -u "${copy_verify_root}/mounted.manifest" "${copy_verify_root}/copied.manifest"
+              codesign --verify --deep --strict --verbose=2 "${copy_verify_app}"
+              app_identity=$(codesign -dv --verbose=4 "${copy_verify_app}" 2>&1)
+              printf '%s\n' "${app_identity}" | grep -Fx 'Identifier=com.sage.brain'
+              printf '%s\n' "${app_identity}" | grep -Fx 'TeamIdentifier=2N7GKZ8D8Z'
+              for leaf_spec in \
+                "${copy_verify_app}/Contents/MacOS/sage-gui:sage-gui" \
+                "${copy_verify_app}/Contents/MacOS/sage-tray:com.sage.brain"; do
+                leaf=${leaf_spec%:*}
+                expected_identifier=${leaf_spec##*:}
+                test -f "${leaf}" && test ! -L "${leaf}" && test -x "${leaf}"
+                test "$(stat -f '%Lp' "${leaf}")" = 755
+                codesign --verify --strict --verbose=2 "${leaf}"
+                leaf_identity=$(codesign -dv --verbose=4 "${leaf}" 2>&1)
+                printf '%s\n' "${leaf_identity}" | grep -Fx "Identifier=${expected_identifier}"
+                printf '%s\n' "${leaf_identity}" | grep -Fx 'TeamIdentifier=2N7GKZ8D8Z'
+              done
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${copy_verify_app}/Contents/Info.plist")" = com.sage.brain
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${copy_verify_app}/Contents/Info.plist")" = sage-tray
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${copy_verify_app}/Contents/Info.plist")" = "${RELEASE_VERSION}"
+              test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${copy_verify_app}/Contents/Info.plist")" = "${RELEASE_VERSION}"
+              version_output=$("${copy_verify_app}/Contents/MacOS/sage-gui" version)
+              test "$(printf '%s\n' "${version_output}" | awk 'NR == 1 { print $1 }')" = sage-gui
+              test "$(printf '%s\n' "${version_output}" | awk 'NR == 1 { print $2 }')" = "${RELEASE_VERSION}"
+              spctl --assess --type execute --verbose=4 "${copy_verify_app}"
+              codesign --verify --deep --strict --verbose=2 "${copy_verify_app}"
+              codesign --verify --strict --verbose=2 "${copy_verify_app}/Contents/MacOS/sage-gui"
+              codesign --verify --strict --verbose=2 "${copy_verify_app}/Contents/MacOS/sage-tray"
+              rm -rf "${copy_verify_root}"
+              xcrun stapler validate "${dmg}"
+              cleanup_mount
+              trap - EXIT
+            done
+          done
+
+  manual-publication-approval:
+    name: Confirm Two-Mac Private Draft Acceptance
+    runs-on: ubuntu-latest
+    needs: [validate-recovery, verify-staged-assets]
+    environment:
+      name: release-two-mac-acceptance
+    # This repository intentionally has one operator/reviewer, so
+    # prevent_self_review=false is required. The environment still provides an
+    # explicit human gate; acceptance_evidence records what that operator saw.
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+    steps:
+      - name: Fail closed unless the environment requires a reviewer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GH_REPO}/environments/release-two-mac-acceptance" \
+            > environment.json
+          jq -e '
+            [.protection_rules[]?
+              | select(.type == "required_reviewers")
+              | .reviewers[]?]
+            | length >= 1
+          ' environment.json > /dev/null
+
+      - name: Record protected two-Mac acceptance
+        env:
+          ACCEPTANCE_EVIDENCE: ${{ inputs.acceptance_evidence }}
+        run: |
+          echo "Protected reviewer approved release ${DRAFT_RELEASE_ID} from source run ${SOURCE_RUN_ID}"
+          {
+            echo '### Single-operator two-Mac acceptance'
+            echo 'The configured reviewer is also the repository operator; self-review prevention is intentionally disabled.'
+            printf '> %s\n' "${ACCEPTANCE_EVIDENCE}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  revalidate-approved-draft:
+    name: Revalidate Approved Draft Before Publication
+    runs-on: ubuntu-latest
+    needs: [validate-recovery, verify-staged-assets, manual-publication-approval]
+    outputs:
+      release_is_public: ${{ steps.revalidate.outputs.release_is_public }}
+      docker_raw_sha256: ${{ steps.revalidate.outputs.docker_raw_sha256 }}
+      mcp_server_sha256: ${{ steps.revalidate.outputs.mcp_server_sha256 }}
+      pypi_manifest_sha256: ${{ steps.revalidate.outputs.pypi_manifest_sha256 }}
+    permissions:
+      actions: read
+      # Exact private draft reads require push visibility. This job performs
+      # only GETs and gates the later publishing jobs.
+      contents: write
+    steps:
+      - name: Download exact downstream publication inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-{image-docker,package-mcp,package-python}
+          path: publication-inputs
+          repository: ${{ github.repository }}
+          run-id: 30817068736
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Recheck immutable tag, retained packages, draft identity, and asset manifest
+        id: revalidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EXPECTED_ASSET_MANIFEST: ${{ needs.verify-staged-assets.outputs.asset_manifest_sha256 }}
+        run: |
+          set -euo pipefail
+          test "${EXPECTED_ASSET_MANIFEST}" != ""
+
+          gh api "repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}" > tag-ref.json
+          test "$(jq -er '.object.type' tag-ref.json)" = tag
+          tag_object=$(jq -er '.object.sha' tag-ref.json)
+          gh api "repos/${GH_REPO}/git/tags/${tag_object}" > tag-object.json
+          jq -e --arg sha "${EXPECTED_TAG_COMMIT}" '
+            .object.type == "commit" and .object.sha == $sha
+          ' tag-object.json > /dev/null
+
+          gh api "repos/${GH_REPO}/actions/runs/${SOURCE_RUN_ID}/artifacts?per_page=100" \
+            > source-artifacts.json
+          for name in release-image-docker release-package-mcp release-package-python; do
+            jq -e --arg name "${name}" '
+              [.artifacts[] |
+                select(.name == $name and .expired == false and .size_in_bytes > 0)] |
+              length == 1
+            ' source-artifacts.json > /dev/null
+          done
+
+          gh api "repos/${GH_REPO}/releases/${DRAFT_RELEASE_ID}" > draft.json
+          jq -e \
+            --argjson id "${DRAFT_RELEASE_ID}" \
+            --arg tag "${RELEASE_TAG}" '
+              .id == $id and .tag_name == $tag and .prerelease == false and
+              ((.draft == true and .published_at == null) or
+               (.draft == false and .published_at != null)) and
+              (.assets | length == 38)
+            ' draft.json > /dev/null
+          current_asset_manifest=$(
+            jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' draft.json |
+              sha256sum |
+              awk '{print $1}'
+          )
+          test "${current_asset_manifest}" = "${EXPECTED_ASSET_MANIFEST}"
+          release_is_public=$(jq -r '(.draft == false)' draft.json)
+          echo "release_is_public=${release_is_public}" >> "${GITHUB_OUTPUT}"
+
+          while IFS= read -r source; do
+            sudo mv "${source}" "${source}.disabled"
+          done < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list.d || true)
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get -o Acquire::Retries=2 \
+                    -o Acquire::http::Timeout=20 \
+                    -o Acquire::https::Timeout=20 update
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get install -y --no-install-recommends skopeo
+          skopeo inspect --raw \
+            oci-archive:publication-inputs/release-image-docker/sage-image.tar \
+            > expected-version-index.json
+          docker_raw_sha256=$(sha256sum expected-version-index.json | cut -d' ' -f1)
+          mcp_server_sha256=$(jq -cS '.' publication-inputs/release-package-mcp/server.json | sha256sum | cut -d' ' -f1)
+          pypi_manifest_sha256=$(
+            for file in publication-inputs/release-package-python/*; do
+              printf '%s\t%s\n' \
+                "$(sha256sum "${file}" | cut -d' ' -f1)" \
+                "$(basename "${file}")"
+            done |
+              LC_ALL=C sort |
+              sha256sum |
+              cut -d' ' -f1
+          )
+          echo "docker_raw_sha256=${docker_raw_sha256}" >> "${GITHUB_OUTPUT}"
+          echo "mcp_server_sha256=${mcp_server_sha256}" >> "${GITHUB_OUTPUT}"
+          echo "pypi_manifest_sha256=${pypi_manifest_sha256}" >> "${GITHUB_OUTPUT}"
+          if [ "$(jq -r '.draft' draft.json)" = false ]; then
+            verify_public_terminal_state() {
+              skopeo inspect --raw \
+                "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" > version-index.json
+              skopeo inspect --raw docker://ghcr.io/l33tdawg/sage:latest > latest-index.json
+              cmp expected-version-index.json version-index.json
+              cmp expected-version-index.json latest-index.json
+              curl --fail --location --silent --show-error \
+                --output mcp-public.json \
+                "https://registry.modelcontextprotocol.io/v0.1/servers/io.github.l33tdawg%2Fsage/versions/${RELEASE_VERSION}"
+              jq -S '.server' mcp-public.json > mcp-public-server.json
+              jq -S '.' publication-inputs/release-package-mcp/server.json > expected-server-sorted.json
+              diff -u expected-server-sorted.json mcp-public-server.json
+              curl --fail --location --silent --show-error \
+                --output pypi-public.json \
+                "https://pypi.org/pypi/sage-agent-sdk/${RELEASE_VERSION}/json"
+              test "$(find publication-inputs/release-package-python -maxdepth 1 -type f | wc -l)" -eq \
+                   "$(jq '.urls | length' pypi-public.json)"
+              for file in publication-inputs/release-package-python/*; do
+                filename=$(basename "${file}")
+                expected_digest=$(sha256sum "${file}" | cut -d' ' -f1)
+                public_digest=$(jq -er --arg filename "${filename}" \
+                  '.urls[] | select(.filename == $filename) | .digests.sha256' \
+                  pypi-public.json)
+                test "${expected_digest}" = "${public_digest}"
+              done
+            }
+            verify_public_terminal_state
+          fi
+
+  publish-docker-version:
+    name: Publish Immutable Docker Version
+    runs-on: ubuntu-latest
+    needs: [validate-recovery, revalidate-approved-draft]
+    if: ${{ needs.revalidate-approved-draft.outputs.release_is_public != 'true' }}
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    steps:
+      - name: Download the exact private OCI archive
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-image-docker
+          path: docker-image
+          repository: ${{ github.repository }}
+          run-id: 30817068736
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish and verify the versioned multi-architecture image
+        run: |
+          set -euo pipefail
+          while IFS= read -r source; do
+            sudo mv "${source}" "${source}.disabled"
+          done < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list.d || true)
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get -o Acquire::Retries=2 \
+                    -o Acquire::http::Timeout=20 \
+                    -o Acquire::https::Timeout=20 update
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get install -y --no-install-recommends skopeo
+          skopeo inspect --raw oci-archive:docker-image/sage-image.tar > /tmp/local-index.json
+          verify_existing_version() {
+            skopeo inspect --raw "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
+              > /tmp/existing-index.json
+            if ! cmp -s /tmp/local-index.json /tmp/existing-index.json; then
+              echo "::error::Docker version ${RELEASE_VERSION} already exists with a different manifest digest"
+              exit 1
+            fi
+          }
+          skopeo list-tags docker://ghcr.io/l33tdawg/sage > /tmp/remote-tags.json
+          jq -e '.Tags | type == "array"' /tmp/remote-tags.json > /dev/null
+          if jq -e --arg version "${RELEASE_VERSION}" \
+             '.Tags | index($version) != null' /tmp/remote-tags.json > /dev/null; then
+            verify_existing_version
+          else
+            # Narrow the list/copy race: another publisher may have created the
+            # immutable version after the first preflight. Recheck at the last
+            # safe point and accept only the exact expected manifest.
+            skopeo list-tags docker://ghcr.io/l33tdawg/sage > /tmp/pre-copy-tags.json
+            jq -e '.Tags | type == "array"' /tmp/pre-copy-tags.json > /dev/null
+            if jq -e --arg version "${RELEASE_VERSION}" \
+               '.Tags | index($version) != null' /tmp/pre-copy-tags.json > /dev/null; then
+              verify_existing_version
+            else
+              skopeo copy --all --preserve-digests \
+                oci-archive:docker-image/sage-image.tar \
+                "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}"
+            fi
+          fi
+          skopeo inspect --raw "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
+            > /tmp/remote-index.json
+          test "$(sha256sum /tmp/local-index.json | cut -d' ' -f1)" = \
+               "$(sha256sum /tmp/remote-index.json | cut -d' ' -f1)"
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64")] | length >= 1' \
+            /tmp/remote-index.json > /dev/null
+          jq -e '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64")] | length >= 1' \
+            /tmp/remote-index.json > /dev/null
+
+  publish-mcp:
+    name: Publish MCP Registry Version
+    runs-on: ubuntu-latest
+    needs: [validate-recovery, revalidate-approved-draft, publish-docker-version]
+    if: ${{ always() && needs.validate-recovery.result == 'success' && needs.revalidate-approved-draft.result == 'success' && needs.revalidate-approved-draft.outputs.release_is_public != 'true' && needs.publish-docker-version.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      packages: read
+    steps:
+      - name: Download the exact validated MCP inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-package-mcp
+          path: mcp-package
+          repository: ${{ github.repository }}
+          run-id: 30817068736
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the manifest that references the live versioned image
+        run: |
+          set -euo pipefail
+          cd mcp-package
+          chmod +x mcp-publisher
+          jq -e --arg version "${RELEASE_VERSION}" '.version == $version' server.json
+          jq -e --arg image "ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
+            '[.packages[] | select(.registryType == "oci" and .identifier == $image)] | length == 1' \
+            server.json
+          status=$(curl --location --silent --show-error \
+            --output /tmp/mcp-existing.json \
+            --write-out '%{http_code}' \
+            "https://registry.modelcontextprotocol.io/v0.1/servers/io.github.l33tdawg%2Fsage/versions/${RELEASE_VERSION}")
+          case "${status}" in
+            200)
+              jq -S '.server' /tmp/mcp-existing.json > /tmp/mcp-existing-server.json
+              jq -S '.' server.json > /tmp/mcp-staged-server.json
+              diff -u /tmp/mcp-existing-server.json /tmp/mcp-staged-server.json
+              ;;
+            404)
+              ./mcp-publisher login github-oidc
+              ./mcp-publisher publish
+              ;;
+            *)
+              echo "::error::MCP Registry preflight returned HTTP ${status}"
+              exit 1
+              ;;
+          esac
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 2 \
+            --output /tmp/mcp-published.json \
+            "https://registry.modelcontextprotocol.io/v0.1/servers/io.github.l33tdawg%2Fsage/versions/${RELEASE_VERSION}"
+          jq -S '.server' /tmp/mcp-published.json > /tmp/mcp-published-server.json
+          jq -S '.' server.json > /tmp/mcp-staged-server.json
+          diff -u /tmp/mcp-staged-server.json /tmp/mcp-published-server.json
+
+  publish-pypi:
+    name: Publish Python SDK to PyPI
+    runs-on: ubuntu-latest
+    needs: [validate-recovery, revalidate-approved-draft, publish-mcp]
+    if: ${{ always() && needs.validate-recovery.result == 'success' && needs.revalidate-approved-draft.result == 'success' && needs.revalidate-approved-draft.outputs.release_is_public != 'true' && needs.publish-mcp.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download the exact validated Python package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-package-python
+          path: python-dist
+          repository: ${{ github.repository }}
+          run-id: 30817068736
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish exact staged wheel and sdist
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: python-dist
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+
+      - name: Verify exact public PyPI digests
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --retry 5 --retry-all-errors --retry-delay 2 \
+            --output /tmp/pypi-release.json \
+            "https://pypi.org/pypi/sage-agent-sdk/${RELEASE_VERSION}/json"
+          test "$(find python-dist -maxdepth 1 -type f | wc -l)" -eq \
+               "$(jq '.urls | length' /tmp/pypi-release.json)"
+          for file in python-dist/*; do
+            filename=$(basename "${file}")
+            local_digest=$(sha256sum "${file}" | cut -d' ' -f1)
+            remote_digest=$(jq -er --arg filename "${filename}" \
+              '.urls[] | select(.filename == $filename) | .digests.sha256' \
+              /tmp/pypi-release.json)
+            test "${local_digest}" = "${remote_digest}"
+          done
+
+  publish-docker-latest:
+    name: Promote Docker Latest Pointer
+    runs-on: ubuntu-latest
+    needs: [validate-recovery, revalidate-approved-draft, publish-pypi]
+    if: ${{ always() && needs.validate-recovery.result == 'success' && needs.revalidate-approved-draft.result == 'success' && needs.revalidate-approved-draft.outputs.release_is_public != 'true' && needs.publish-pypi.result == 'success' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote and verify latest
+        run: |
+          set -euo pipefail
+          while IFS= read -r source; do
+            sudo mv "${source}" "${source}.disabled"
+          done < <(grep -rl 'packages.microsoft.com' /etc/apt/sources.list.d || true)
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get -o Acquire::Retries=2 \
+                    -o Acquire::http::Timeout=20 \
+                    -o Acquire::https::Timeout=20 update
+          sudo env DEBIAN_FRONTEND=noninteractive timeout --foreground 180 \
+            apt-get install -y --no-install-recommends skopeo
+          skopeo copy --all --preserve-digests \
+            "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
+            docker://ghcr.io/l33tdawg/sage:latest
+          skopeo inspect --raw "docker://ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" \
+            > /tmp/version-index.json
+          skopeo inspect --raw docker://ghcr.io/l33tdawg/sage:latest > /tmp/latest-index.json
+          test "$(sha256sum /tmp/version-index.json | cut -d' ' -f1)" = \
+               "$(sha256sum /tmp/latest-index.json | cut -d' ' -f1)"
+
+  publish-github-release:
+    name: Publish Exact GitHub Release Last
+    runs-on: ubuntu-latest
+    needs: [validate-recovery, verify-staged-assets, revalidate-approved-draft, publish-docker-version, publish-mcp, publish-pypi, publish-docker-latest]
+    if: ${{ always() && needs.validate-recovery.result == 'success' && needs.verify-staged-assets.result == 'success' && needs.revalidate-approved-draft.result == 'success' && ((needs.revalidate-approved-draft.outputs.release_is_public == 'true' && needs.publish-docker-version.result == 'skipped' && needs.publish-mcp.result == 'skipped' && needs.publish-pypi.result == 'skipped' && needs.publish-docker-latest.result == 'skipped') || (needs.revalidate-approved-draft.outputs.release_is_public != 'true' && needs.publish-docker-version.result == 'success' && needs.publish-mcp.result == 'success' && needs.publish-pypi.result == 'success' && needs.publish-docker-latest.result == 'success')) }}
+    permissions:
+      # This is the sole release mutation boundary. The same permission also
+      # permits an idempotent rerun to inspect the formerly private release.
+      contents: write
+    steps:
+      - name: Publish only the validated existing draft by database ID
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EXPECTED_ASSET_MANIFEST: ${{ needs.verify-staged-assets.outputs.asset_manifest_sha256 }}
+          EXPECTED_DOCKER_RAW_SHA256: ${{ needs.revalidate-approved-draft.outputs.docker_raw_sha256 }}
+          EXPECTED_MCP_SERVER_SHA256: ${{ needs.revalidate-approved-draft.outputs.mcp_server_sha256 }}
+          EXPECTED_PYPI_MANIFEST_SHA256: ${{ needs.revalidate-approved-draft.outputs.pypi_manifest_sha256 }}
+          EXPECTED_RELEASE_IS_PUBLIC: ${{ needs.revalidate-approved-draft.outputs.release_is_public }}
+          ACCEPTANCE_EVIDENCE: ${{ inputs.acceptance_evidence }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GH_REPO}/git/ref/tags/${RELEASE_TAG}" > tag-ref.json
+          test "$(jq -er '.object.type' tag-ref.json)" = tag
+          tag_object=$(jq -er '.object.sha' tag-ref.json)
+          gh api "repos/${GH_REPO}/git/tags/${tag_object}" > tag-object.json
+          jq -e --arg sha "${EXPECTED_TAG_COMMIT}" '
+            .object.type == "commit" and .object.sha == $sha
+          ' tag-object.json > /dev/null
+
+          gh api "repos/${GH_REPO}/releases/${DRAFT_RELEASE_ID}" > before.json
+          jq -e \
+            --argjson id "${DRAFT_RELEASE_ID}" \
+            --arg tag "${RELEASE_TAG}" '
+              .id == $id and .tag_name == $tag and .prerelease == false and
+              ((.draft == true and .published_at == null) or
+               (.draft == false and .published_at != null))
+            ' before.json > /dev/null
+          case "${EXPECTED_RELEASE_IS_PUBLIC}" in
+            true)
+              test "$(jq -r '.draft' before.json)" = false
+              ;;
+            false)
+              # Preserve GitHub-last: fail if anything published the release
+              # between protected revalidation and this sole mutation boundary.
+              test "$(jq -r '.draft' before.json)" = true
+              ;;
+            *)
+              echo "::error::Missing immutable release-state snapshot"
+              exit 1
+              ;;
+          esac
+          current_asset_manifest=$(
+            jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' before.json |
+              sha256sum |
+              awk '{print $1}'
+          )
+          test "${current_asset_manifest}" = "${EXPECTED_ASSET_MANIFEST}"
+
+          if [ "$(jq -r '.draft' before.json)" = true ]; then
+            jq -n '{draft: false, prerelease: false, make_latest: "true"}' > publish.json
+            gh api --method PATCH \
+              "repos/${GH_REPO}/releases/${DRAFT_RELEASE_ID}" \
+              --input publish.json > published.json
+          else
+            cp before.json published.json
+          fi
+          jq -e \
+            --argjson id "${DRAFT_RELEASE_ID}" \
+            --arg tag "${RELEASE_TAG}" '
+              .id == $id and .tag_name == $tag and .draft == false and
+              .prerelease == false and .published_at != null
+            ' published.json > /dev/null
+          gh api "repos/${GH_REPO}/releases/${DRAFT_RELEASE_ID}" > after.json
+          jq -e \
+            --argjson id "${DRAFT_RELEASE_ID}" \
+            --arg tag "${RELEASE_TAG}" '
+              .id == $id and .tag_name == $tag and .draft == false and
+              .prerelease == false and .published_at != null
+            ' after.json > /dev/null
+          after_asset_manifest=$(
+            jq -cS '[.assets[] | {id, name, size, digest, state}] | sort_by(.name)' after.json |
+              sha256sum |
+              awk '{print $1}'
+          )
+          test "${after_asset_manifest}" = "${EXPECTED_ASSET_MANIFEST}"
+          test "$(gh api "repos/${GH_REPO}/releases/latest" --jq '.id')" = \
+            "${DRAFT_RELEASE_ID}"
+          test "$(gh api "repos/${GH_REPO}/releases/latest" --jq '.tag_name')" = \
+            "${RELEASE_TAG}"
+
+          verify_public_terminal_state() {
+            docker buildx imagetools inspect --raw \
+              "ghcr.io/l33tdawg/sage:${RELEASE_VERSION}" > version-index.json
+            docker buildx imagetools inspect --raw \
+              ghcr.io/l33tdawg/sage:latest > latest-index.json
+            test "$(sha256sum version-index.json | cut -d' ' -f1)" = "${EXPECTED_DOCKER_RAW_SHA256}"
+            test "$(sha256sum latest-index.json | cut -d' ' -f1)" = "${EXPECTED_DOCKER_RAW_SHA256}"
+            curl --fail --location --silent --show-error \
+              --output mcp-public.json \
+              "https://registry.modelcontextprotocol.io/v0.1/servers/io.github.l33tdawg%2Fsage/versions/${RELEASE_VERSION}"
+            test "$(jq -cS '.server' mcp-public.json | sha256sum | cut -d' ' -f1)" = \
+                 "${EXPECTED_MCP_SERVER_SHA256}"
+            curl --fail --location --silent --show-error \
+              --output pypi-public.json \
+              "https://pypi.org/pypi/sage-agent-sdk/${RELEASE_VERSION}/json"
+            pypi_manifest_sha256=$(
+              jq -r '.urls[] | [.digests.sha256, .filename] | @tsv' pypi-public.json |
+                LC_ALL=C sort |
+                sha256sum |
+                cut -d' ' -f1
+            )
+            test "${pypi_manifest_sha256}" = "${EXPECTED_PYPI_MANIFEST_SHA256}"
+          }
+          verify_public_terminal_state
+          {
+            echo '### v11.17.1 publication recovered'
+            printf '> %s\n' "${ACCEPTANCE_EVIDENCE}"
+            echo
+            echo "Exact release ${DRAFT_RELEASE_ID} and all downstream registries are verified."
+          } >> "${GITHUB_STEP_SUMMARY}"
