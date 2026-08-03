@@ -131,6 +131,7 @@ func TestHandleToolsList(t *testing.T) {
 	names := make(map[string]bool)
 	var findAgent map[string]any
 	var sageTask map[string]any
+	var sageTimeline map[string]any
 	for _, tool := range tools {
 		names[tool["name"].(string)] = true
 		if tool["name"] == "sage_find_agent" {
@@ -138,6 +139,9 @@ func TestHandleToolsList(t *testing.T) {
 		}
 		if tool["name"] == "sage_task" {
 			sageTask = tool
+		}
+		if tool["name"] == "sage_timeline" {
+			sageTimeline = tool
 		}
 	}
 	expected := []string{
@@ -203,6 +207,15 @@ func TestHandleToolsList(t *testing.T) {
 	idempotencySchema := taskProperties["idempotency_key"].(map[string]any)
 	assert.Contains(t, idempotencySchema["description"], "permanent creation identity")
 	assert.Contains(t, idempotencySchema["description"], "every later identical call returns that existing task")
+
+	require.NotNil(t, sageTimeline)
+	timelineSchema := sageTimeline["inputSchema"].(map[string]any)
+	timelineProperties := timelineSchema["properties"].(map[string]any)
+	for _, name := range []string{"from", "to"} {
+		bound := timelineProperties[name].(map[string]any)
+		assert.Equal(t, "date-time", bound["format"])
+		assert.Contains(t, bound["description"], "RFC3339")
+	}
 }
 
 func TestToolRegistrySchemasAreSelfContained(t *testing.T) {

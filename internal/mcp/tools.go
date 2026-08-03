@@ -164,8 +164,8 @@ func (s *Server) registerTools() map[string]Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"from":   map[string]any{"type": "string", "description": "Start date (ISO 8601, e.g. 2024-01-01)"},
-					"to":     map[string]any{"type": "string", "description": "End date (ISO 8601, e.g. 2024-12-31)"},
+					"from":   map[string]any{"type": "string", "format": "date-time", "description": "Start instant (RFC3339, e.g. 2024-01-01T00:00:00Z)"},
+					"to":     map[string]any{"type": "string", "format": "date-time", "description": "End instant (RFC3339, e.g. 2024-12-31T23:59:59Z)"},
 					"domain": map[string]any{"type": "string", "description": "Filter by domain tag"},
 				},
 			},

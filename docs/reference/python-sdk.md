@@ -1705,10 +1705,10 @@ except SageAPIError as e:
 
 ## Method Count Summary
 
-**`SageClient`**: 77 public methods
-**`AsyncSageClient`**: 78 public methods (`close` is async-only)
+**`SageClient`**: 84 public methods
+**`AsyncSageClient`**: 85 public methods (`close` is async-only)
 
 Groups: Health (2), Memory (8), Embeddings (1), Tasks (2), Voting/Validation
 (5), Agents (8), Validator (2), Pipeline (10), canonical Messages (5), Access Control (4), Domains (4), Organizations (7), Departments (6),
 Federation (5), Governance and scope visibility (8), and async lifecycle (1) =
-78 distinct methods across both clients (counting the 77 shared methods once).
+85 distinct methods across both clients (counting the 84 shared methods once).
