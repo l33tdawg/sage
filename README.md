@@ -51,7 +51,12 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
-## What's New in v11.17.6
+## What's New in v11.17.7
+
+**Releases no longer pause for a manual two-Mac approval.** Publication still
+requires the exact staged macOS applications and DMGs to pass writable-copy,
+launch, signature, Team ID, notarization, and stapling verification, then
+continues automatically through immutable package and GitHub publication.
 
 **Federation now recovers across LAN changes, internet relays, restarts, and
 roaming addresses.** Signed route snapshots retain the stable peer identity,
@@ -73,7 +78,7 @@ path.** It exercises same-LAN links, relay-only isolated networks, both-sided IP
 churn, relay outage and recovery, expired route snapshots, v11.17.4 migration,
 offline queueing, recipient inbox/read/reply, and final sender confirmation.
 
-Container: `ghcr.io/l33tdawg/sage:11.17.6`. SDK 11.17.6.
+Container: `ghcr.io/l33tdawg/sage:11.17.7`. SDK 11.17.7.
 
 ## What's New in v11.17.5
 
@@ -1211,7 +1216,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.6`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.7`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
