@@ -1397,42 +1397,13 @@ jobs:
             done
           done
 
-  manual-publication-approval:
-    name: Confirm Two-Mac Private Draft Acceptance
-    runs-on: ubuntu-latest
-    needs: [stage-github-release, verify-staged-macos-release, release-metadata]
-    environment:
-      name: release-two-mac-acceptance
-    permissions:
-      actions: read
-      contents: read
-      deployments: read
-    steps:
-      - name: Fail closed unless the environment requires a reviewer
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh api "repos/${GH_REPO}/environments/release-two-mac-acceptance" \
-            > environment.json
-          jq -e '
-            [.protection_rules[]?
-              | select(.type == "required_reviewers")
-              | .reviewers[]?]
-            | length >= 1
-          ' environment.json > /dev/null
-
-      - name: Record protected two-Mac acceptance
-        run: echo "Protected reviewer approved the exact private draft from this workflow run"
-
   publish-docker-version:
     name: Publish Immutable Docker Version
     runs-on: ubuntu-latest
     # PyPI and MCP versions are immutable. Do not begin any public publication
     # until the exact DMGs uploaded to the private draft have passed the final
     # writable-copy, launch, signature, Team ID, and notarization checks.
-    needs: [manual-publication-approval, release-metadata]
+    needs: [verify-staged-macos-release, release-metadata]
     permissions:
       contents: read
       packages: write

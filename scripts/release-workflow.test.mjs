@@ -703,14 +703,9 @@ test('the exact GoReleaser Linux archive crosses extraction and atomic updater s
 });
 
 test('public package publication waits for the exact staged macOS assets', () => {
-  const approval = job('manual-publication-approval');
-  assert.match(
-    approval,
-    /needs:\s*\[stage-github-release, verify-staged-macos-release, release-metadata\]/,
-  );
   assert.match(
     job('publish-docker-version'),
-    /needs:\s*\[manual-publication-approval, release-metadata\]/,
+    /needs:\s*\[verify-staged-macos-release, release-metadata\]/,
   );
 });
 
@@ -1037,24 +1032,9 @@ test('public mutations are serial, resumable, and downstream of the gate', () =>
   );
   assert.doesNotMatch(job('verify-staged-macos-release'), /gh release download/);
 
-  assertNeeds('manual-publication-approval', [
-    'stage-github-release',
-    'verify-staged-macos-release',
-    'release-metadata',
-  ]);
-  assert.match(
-    job('manual-publication-approval'),
-    /environment:\s*\n\s+name: release-two-mac-acceptance/,
-  );
-  assert.doesNotMatch(job('manual-publication-approval'), /workflow_dispatch|inputs\./);
-  assert.match(job('manual-publication-approval'), /actions: read/);
-  assert.match(job('manual-publication-approval'), /deployments: read/);
-  assert.match(
-    job('manual-publication-approval'),
-    /environments\/release-two-mac-acceptance/,
-  );
-  assert.match(job('manual-publication-approval'), /required_reviewers/);
-  assertNeeds('publish-docker-version', ['manual-publication-approval', 'release-metadata']);
+  assert.doesNotMatch(workflow, /^  manual-publication-approval:$/m);
+  assert.doesNotMatch(workflow, /release-two-mac-acceptance/);
+  assertNeeds('publish-docker-version', ['verify-staged-macos-release', 'release-metadata']);
   assertNeeds('publish-mcp', ['publish-docker-version', 'release-metadata']);
   assertNeeds('publish-pypi', ['publish-mcp', 'release-metadata']);
   assertNeeds('publish-docker-latest', ['publish-pypi', 'release-metadata']);
