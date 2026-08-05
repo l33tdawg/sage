@@ -164,6 +164,21 @@ function Read-ReadyStatus([string]$PipeName, [string]$ExpectedOrigin, [string]$E
     throw "timed out waiting for renderable verified SSCP status: $lastError"
 }
 
+function Get-ReadyStatusResult([string]$PipeName, [string]$ExpectedOrigin, [string]$ExpectedDaemon, [bool]$RequireStartupProof = $true, [int]$TimeoutSeconds = 60) {
+    # PowerShell may surface incidental pipeline output from native/.NET calls
+    # made while probing a named pipe. Treat only the deliberately shaped
+    # Status/ServerPid record as the function result. This keeps StrictMode from
+    # trying `.ServerPid` on an Object[] while retaining exact-count evidence if
+    # the probe ever emits zero or multiple valid result records.
+    $candidates = @(Read-ReadyStatus $PipeName $ExpectedOrigin $ExpectedDaemon $RequireStartupProof $TimeoutSeconds)
+    $results = @($candidates | Where-Object {
+        $null -ne $_ -and
+        $null -ne $_.PSObject.Properties['Status'] -and
+        $null -ne $_.PSObject.Properties['ServerPid']
+    })
+    return Get-One $results 'verified SSCP status result'
+}
+
 function Get-ExecutablePath([int]$ProcessId) {
     $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId"
     if (-not $process -or -not $process.ExecutablePath) { throw "cannot resolve executable path for PID $ProcessId" }
@@ -351,7 +366,7 @@ try {
 
     $first = Start-Shell $shellExe.FullName $nodeDataRoot $ports
     $shellProcesses.Add($first)
-    $firstResult = Read-ReadyStatus $pipeName $origin $ExpectedVersion
+    $firstResult = Get-ReadyStatusResult $pipeName $origin $ExpectedVersion
     Assert-True (-not $first.HasExited) 'installed native shell exited before attachment evidence'
     Assert-ServerPath $firstResult $daemonPath
     $firstDaemon = Get-ExactProcessHandle $firstResult.ServerPid $daemonPath 'installed bundled daemon'
@@ -370,7 +385,7 @@ try {
     )
     $profileBDaemon = Start-Daemon $daemonPath $profileBHome $profileBPorts
     $daemonProcesses.Add($profileBDaemon)
-    $profileBResult = Read-ReadyStatus $profileBPipe $profileBOrigin $ExpectedVersion $false
+    $profileBResult = Get-ReadyStatusResult $profileBPipe $profileBOrigin $ExpectedVersion $false
     Assert-True ($profileBResult.ServerPid -eq $profileBDaemon.Id) 'profile-B SSCP server PID did not match the directly launched daemon'
     Assert-ServerPath $profileBResult $daemonPath
     Assert-True ($profileBResult.Status.instance_generation -cne $firstGeneration) 'distinct profiles reused one daemon generation'
@@ -380,14 +395,14 @@ try {
     $shellProcesses.Add($second)
     Assert-True ($second.WaitForExit(10000)) 'second native-shell launch did not hand off to the existing instance'
     Assert-True ($second.ExitCode -eq 0) "second native-shell launch exited with status $($second.ExitCode)"
-    $secondResult = Read-ReadyStatus $pipeName $origin $ExpectedVersion
+    $secondResult = Get-ReadyStatusResult $pipeName $origin $ExpectedVersion
     Assert-True ($secondResult.Status.instance_generation -ceq $firstGeneration) 'second launch changed the daemon generation'
     Assert-True ($secondResult.ServerPid -eq $firstResult.ServerPid) 'second launch changed the daemon PID'
     Assert-True (-not $first.HasExited) 'primary native shell exited during second-instance handoff'
 
     Assert-True ($first.CloseMainWindow()) 'installed shell did not expose a closeable main window'
     Assert-True ($first.WaitForExit(10000)) 'installed shell did not exit after normal window close'
-    $daemonOnly = Read-ReadyStatus $pipeName $origin $ExpectedVersion
+    $daemonOnly = Get-ReadyStatusResult $pipeName $origin $ExpectedVersion
     Assert-True ($daemonOnly.Status.instance_generation -ceq $firstGeneration) 'window close changed the daemon generation'
     Assert-True ($daemonOnly.ServerPid -eq $firstResult.ServerPid) 'window close changed the daemon PID'
     Assert-ServerPath $daemonOnly $daemonPath
@@ -424,7 +439,7 @@ try {
     $daemonPath = (Get-One (Get-ChildItem -LiteralPath $installRoot -Recurse -File -Filter 'sage-gui.exe' | Where-Object FullName -Match '(?i)[\\/]binaries[\\/]sage-gui\.exe$') 'reinstalled bundled daemon').FullName
     $reinstalled = Start-Shell $shellExe.FullName $nodeDataRoot $ports
     $shellProcesses.Add($reinstalled)
-    $reinstallResult = Read-ReadyStatus $pipeName $origin $ExpectedVersion
+    $reinstallResult = Get-ReadyStatusResult $pipeName $origin $ExpectedVersion
     Assert-True (-not $reinstalled.HasExited) 'reinstalled native shell exited before attachment evidence'
     Assert-ServerPath $reinstallResult $daemonPath
     $reinstallDaemon = Get-ExactProcessHandle $reinstallResult.ServerPid $daemonPath 'reinstalled bundled daemon'

@@ -58,6 +58,10 @@ upgraded to their patched releases in both the SAGE and Natter modules. Recall
 result slices no longer use caller-derived allocation hints, app-v23 migration
 keys avoid length-arithmetic preallocation, and the CEREBRUM inline-script
 contract recognizes HTML tag case without a fragile sanitizer-style regexp.
+The roadmap, architecture, federation guide, onboarding guide, and Python SDK
+docs are reconciled to the canonical Messages API, 24-hour default TTL,
+deprecated hidden `sage_pipe*` aliases, app-v26 authority names, signed macOS
+in-place updater, and the remaining physical acceptance boundaries.
 
 Container: `ghcr.io/l33tdawg/sage:11.17.8`. SDK 11.17.8.
 

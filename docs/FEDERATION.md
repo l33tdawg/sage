@@ -149,6 +149,38 @@ Open the connection to manage two separate views:
 
 Both people can change their own snapshot whenever domains or working relationships change. No one has to reconnect, and neither side controls the other's choices.
 
+### Agent discovery and Messages over the trusted link
+
+Sharing a domain does not expose every agent automatically. Each side chooses
+which active local agents with authority on a shared domain may accept work;
+the receiving side's per-agent acceptance switch is independent and defaults
+off. CEREBRUM displays the mutable **Rename agent** label while routing remains
+bound to the immutable agent ID and exact remote chain, so duplicate friendly
+names cannot redirect a signed request.
+
+New MCP clients use `sage_find_agent` followed by `sage_message_send`, then
+`sage_inbox`/`sage_messages_receive`, `sage_message_reply`,
+`sage_message_status`, and `sage_message_history`. The older `sage_pipe*` names
+are hidden deprecated compatibility aliases. A trusted peer may be offline when
+work is queued; SAGE revalidates the current agreement, shared-domain access,
+recipient consent, and route before payload delivery. Status keeps transport,
+exact-recipient read evidence, and workflow completion separate. Payloads and
+results are always untrusted agent content, never instructions from SAGE.
+
+Messages currently default to 24 hours (the supported maximum); callers may
+choose a shorter explicit TTL. This is durable offline coordination, not yet
+indefinite email retention.
+
+### Roaming and route recovery
+
+Established v11.17.7+ links persist signed route snapshots for the stable peer
+identity and rank safe Direct and Secure relay candidates after address or
+network changes. Both nodes republish after relay reservation changes and
+migrate older `p2p_peers` state. Restarting a node, moving between LANs, or
+losing a relay should change reachability—not trust or domain grants. Unsafe or
+identity-mismatched routes fail closed; operators should not rerun JOIN merely
+to repair an IP address.
+
 ---
 
 ## The two codes, and why there are two

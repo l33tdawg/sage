@@ -4,6 +4,40 @@
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
+## v11.17.x completion ledger
+
+The 11.17 line has shipped the app-v23 through app-v26 governed upgrade path,
+historical-memory recovery controls, responsive Access Controls, authenticated
+Consensus loading, mutable agent display names, canonical Messages, deprecated
+hidden `sage_pipe*` compatibility aliases, 24-hour default message TTL, signed
+in-place macOS update support, roaming Direct/relay federation routes, and a
+Docker lane covering LAN, isolated-network/relay, address churn, restart, and
+offline inbox recovery. v11.17.8 additionally clears the tracked DTLS/STUN and
+CodeQL security backlog without dismissing genuine alerts.
+
+The following acceptance and follow-up boundaries remain open after the 11.17.8
+code merge; they are not implied complete by Docker or CI evidence:
+
+- [#137](https://github.com/l33tdawg/sage/issues/137): repeat the complete MBP ↔
+  Mac Mini matrix on the official signed build—same-LAN Direct, forced
+  relay/internet, address change, one/both-node restart, retained trust and
+  grants, bidirectional renamed-agent discovery, shared-domain reads, durable
+  inbox/reply/receipt history, and the updater path.
+- [#135](https://github.com/l33tdawg/sage/issues/135): capture deterministic
+  signed-browser evidence for Home, Tasks reload, and Access Controls.
+- [#134](https://github.com/l33tdawg/sage/issues/134): close native-shell
+  packaging retry/cache and Windows normal-close lifecycle evidence.
+- [#117](https://github.com/l33tdawg/sage/issues/117): benchmark and improve the
+  CPU-only embedding path.
+- Complete product acceptance for the signed macOS in-place updater, make
+  unread/unclaimed Messages email-like rather than expiry-bound, add a bounded
+  or metadata-only `sage_turn` inbox mode for small models, verify unscoped
+  `sage_list`/bounded-domain projection semantics, and reproduce or close the
+  historical broad authorization-scan budget report.
+
+These are separate acceptance boundaries. A published patch, green CI, or a
+Docker pass must not silently close physical-machine or signed-artifact work.
+
 ---
 
 ## v11 - shipped (the sovereign-UX + federation release)
@@ -36,7 +70,7 @@ v11 is the "zero-terminal, sovereign" release. It takes SAGE from "works if you 
 - **Reading panel** collapses to the domain lobes by default (newest 30, most-recently-active first) with an expandable "how to read".
 - **Live task board** with agent-vs-human authorship and atomic claim/ownership; the agent message bus merged in as a Messages tab.
 - **Real search** (FTS with keyword fallback), bulk curation, status and tag filters, and corroboration counts on list + detail.
-- **Settings reorganized** into focused tabs (Overview, Connection, Recall, Security, Maintenance, Updates), with verified update discovery and node restart. Linux supports in-place replacement; macOS downloads the signed DMG until a recovery helper can live safely outside the replaceable app bundle.
+- **Settings reorganized** into focused tabs (Overview, Connection, Recall, Security, Maintenance, Updates), with verified update discovery and node restart. Linux supports verified in-place replacement. On macOS, CEREBRUM downloads and verifies the architecture-specific signed DMG, stages the replacement, hands activation to a helper outside the replaceable bundle, restarts into the new app, and rolls back on bounded readiness failure; manual DMG installation remains the explicit fallback.
 
 ---
 

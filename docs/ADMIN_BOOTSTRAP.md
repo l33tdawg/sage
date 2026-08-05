@@ -1,6 +1,6 @@
 # CEREBRUM Root and agent approval
 
-<!-- Reconciled through SAGE v11.17.1/app-v26. -->
+<!-- Reconciled through SAGE v11.17.8/app-v26. -->
 
 This guide covers the current governed bootstrap and recovery workflow. The
 pre-app-v23 self-promotion and per-field permission APIs are retired and must
@@ -36,7 +36,7 @@ The full consensus rules are in
 5. In **Access Controls**, select the exact signer, choose role, operating mode,
    clearance, and a non-shared home domain, then approve the atomic policy.
 6. Put local agents into Access Groups to share governed domain access. Group
-   authority is explicit (`read`, `read-write`, or `manage`) and removing an
+   authority is explicit (`read`, `read_write`, or `read_write_modify`) and removing an
    agent removes only group-derived access; its own home domain remains intact.
 
 The agent can inspect its own standing and bounded domain samples with

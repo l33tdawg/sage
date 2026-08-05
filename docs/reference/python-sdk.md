@@ -709,7 +709,13 @@ Returns `EpochInfo(epoch_num, block_height, scores: list[ValidatorScore])`. Each
 
 ---
 
-### Pipeline (Agent-to-Agent Messaging)
+### Compatibility pipeline (agent-to-agent transport)
+
+The `pipe_*` methods remain public for older integrations and for the internal
+federated transport/receipt surface. New same-node integrations should prefer
+the canonical `message_*` / `messages_*` methods below. New MCP integrations
+should use the canonical `sage_message_*` workflow; deprecated `sage_pipe*`
+tool names are hidden from MCP discovery.
 
 #### `pipe_resolve()`
 

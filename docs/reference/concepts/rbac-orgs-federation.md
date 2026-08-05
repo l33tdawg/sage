@@ -2,7 +2,7 @@
 
 # RBAC, Organizations, and Federation
 
-Verified against SAGE v11.16.2. Legacy organization/federation sections retain
+Verified against SAGE v11.17.8. Legacy organization/federation sections retain
 their historical context; app-v23 roles, Root, Access Groups, and app-v25
 historical writer continuity are the current local-control model.
 

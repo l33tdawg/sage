@@ -45,6 +45,7 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/reference/rest-api.md', `Reconciled through SAGE v${version}`],
     ['docs/reference/concepts/rbac-orgs-federation.md', `reconciled through SAGE v${version}`],
     ['docs/reference/app-v23-access-control-design.md', `SAGE v${version}`],
+    ['docs/ADMIN_BOOTSTRAP.md', `Reconciled through SAGE v${version}/app-v26`],
     ['docs/reference/app-v23-access-control-design.md', '## App-v24 readiness and memory-write barrier'],
     ['docs/reference/mcp-tools.md', 'A level-2 grant is never a remedy for a hard'],
     ['docs/reference/mcp-tools.md', 'never be substituted for this caller-scoped projection'],
@@ -59,6 +60,22 @@ test('release-facing version metadata stays aligned', () => {
   for (const [path, marker] of exact) {
     assert.ok(read(path).includes(marker), `${path} is missing current version marker: ${marker}`);
   }
+});
+
+test('v11.17.8 user and SDK guides keep canonical Messages contracts aligned', () => {
+  const architecture = read('docs/ARCHITECTURE.md');
+  const roadmap = read('docs/ROADMAP.md');
+  const gettingStarted = read('docs/GETTING_STARTED.md');
+  const sdkReadme = read('sdk/python/README.md');
+
+  assert.match(architecture, /Default TTL:\*\* 1440 minutes \(24 hours\)/);
+  assert.doesNotMatch(architecture, /Default TTL:\*\* 60 minutes/);
+  assert.match(architecture, /sage_message_send/);
+  assert.match(roadmap, /v11\.17\.x completion ledger/);
+  assert.match(roadmap, /helper outside the replaceable bundle/);
+  assert.match(gettingStarted, /advertises 31 MCP tools/);
+  assert.match(gettingStarted, /Deprecated `sage_pipe\*`\s+compatibility/);
+  assert.match(sdkReadme, /Compatibility pipeline/);
 });
 
 test('v11.17 app-v23 through app-v26 public contract markers stay release-visible', () => {

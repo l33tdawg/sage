@@ -334,9 +334,15 @@ epoch = client.get_epoch()
 # Returns: EpochInfo(epoch_num, block_height, scores=[{validator_id, current_weight, ...}])
 ```
 
-### Pipeline (Agent-to-Agent Messaging)
+### Compatibility pipeline (agent-to-agent transport)
 
-The pipeline enables direct messaging between agents. Messages are routed by agent ID or provider name, with automatic expiry and journaling.
+The `pipe_*` SDK methods remain for existing integrations and federated
+transport/receipt compatibility. New same-node SDK integrations should use the
+canonical `message_*` / `messages_*` methods below. New MCP clients should use
+the canonical `sage_message_*` workflow; `sage_pipe*` MCP names are deprecated
+and hidden from tool discovery. Legacy local pipe completion may journal a
+summary, while foreign work and canonical Messages are never silently promoted
+into governed memory.
 
 ```python
 # Send a message to another agent

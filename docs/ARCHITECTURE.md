@@ -758,13 +758,22 @@ This is an atomic operation — if any step fails, the entire rotation is rolled
 
 ---
 
-## Pipeline Architecture (Agent-to-Agent Messaging)
+## Messages Architecture (Agent-to-Agent Messaging)
 
-Introduced in v5.0.1, the pipeline is a direct messaging system between agents. Unlike shared memories (which are broadcast knowledge), pipeline messages are routed point-to-point — one agent sends a message to a specific agent (by ID) or to any agent matching a provider (e.g., `"claude-code"`).
+SAGE v11.17 exposes one canonical Messages/Inbox workflow. Unlike shared
+memories, a message is point-to-point work addressed to one exact active local
+or caller-authorized federated agent. The older pipeline rows and federation
+wire protocol remain the storage/transport substrate; `sage_pipe*` MCP names
+are hidden deprecated compatibility aliases and are not advertised to new
+clients.
 
 ### How It Works
 
-The pipeline provides structured, asynchronous communication between agents without polluting the shared memory pool. Messages default to a 24-hour TTL so an offline agent has a full day to collect inbox work; callers may choose a shorter lifetime. They are designed for coordination, not permanent knowledge storage.
+Messages provide structured asynchronous coordination without polluting the
+shared memory pool. New sends default to the maximum supported 24-hour TTL;
+callers may explicitly choose 1–1440 minutes. The current expiry-bound inbox is
+not permanent email storage. Pending/claimed rows also have a 48-hour stale-row
+backstop, and terminal rows are retained for 24 hours before cleanup.
 
 ### Message Lifecycle
 
@@ -773,37 +782,43 @@ send → pending → claimed → completed
                     ↘ expired (TTL exceeded)
 ```
 
-1. **Send** — Agent A posts a message via `POST /v1/pipe/send`, targeting a specific `agent_id` or `provider`. The message enters `pending` status.
-2. **Pending** — The message sits in the recipient's inbox. Recipients poll via `GET /v1/pipe/inbox` to discover new messages.
-3. **Claimed** — The recipient claims the message via `PUT /v1/pipe/{id}/claim`, signaling that work has begun. This prevents other agents from claiming the same message.
-4. **Completed** — The recipient posts a result via `PUT /v1/pipe/{id}/result`. The sender can retrieve results via `GET /v1/pipe/results`.
-5. **Expired** — If the TTL elapses before the message is claimed or completed, it transitions to `expired` and is no longer actionable.
+1. **Send** — `POST /v1/messages` requires an exact recipient and a caller-scoped idempotency key. Exact retries return the original message; key reuse with different content conflicts.
+2. **Pending** — The durable row waits in the exact recipient's inbox. A federated send may remain safely queued while the trusted peer is offline.
+3. **Claimed/read** — `POST /v1/messages/receive` claims one ordered batch using a replayable receive token. Exact-recipient read acknowledgement is separate evidence and never means comprehension.
+4. **Completed** — The exact recipient replies through `POST /v1/messages/{id}/reply`. The sender reads payload-free transport, read, and workflow dimensions from the status projection.
+5. **Expired** — If the explicit TTL elapses first, the row is no longer actionable. Expiry is independent of delivery/read evidence.
 
-### Auto-Journaling
-
-When a pipeline message reaches `completed` status, SAGE automatically creates a memory entry (memory_type `journal`) capturing the exchange. This means significant inter-agent coordination is preserved in the knowledge base without agents needing to manually record it.
+Legacy local `pipe_result` completion can create a summary journal. Canonical
+Messages and foreign work do not silently turn untrusted message content into
+governed memory; an agent must remember durable knowledge explicitly.
 
 ### TTL and Expiry
 
-- **Default TTL:** 60 minutes
+- **Default TTL:** 1440 minutes (24 hours)
 - **Maximum TTL:** 1440 minutes (24 hours)
-- Senders can set a custom TTL per message within these bounds
-- Expired messages are soft-deleted — they remain queryable by ID but are excluded from inbox results
+- Senders can explicitly choose 1–1440 minutes
+- Receive-token replay metadata is retained for 48 hours and capped per agent
+- Expired rows leave the actionable inbox; retained history remains bounded by cleanup policy
 
 ### REST Endpoints
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/pipe/send` | Send a message to a target agent or provider |
-| `GET` | `/v1/pipe/inbox` | List pending messages for the authenticated agent |
-| `PUT` | `/v1/pipe/{id}/claim` | Claim a pending message (marks it in-progress) |
-| `PUT` | `/v1/pipe/{id}/result` | Post a result for a claimed message |
-| `GET` | `/v1/pipe/{id}` | Get a specific message by ID (any status) |
-| `GET` | `/v1/pipe/results` | List completed messages with results for the sender |
+| `POST` | `/v1/messages` | Idempotently send to one exact local agent |
+| `POST` | `/v1/messages/receive` | Claim/replay one exact ordered recipient batch |
+| `POST` | `/v1/messages/{id}/reply` | Exact-recipient idempotent reply |
+| `PUT` | `/v1/messages/{id}/read` | Exact-recipient read acknowledgement |
+| `PUT` | `/v1/messages/read-batch` | Independently acknowledge up to 20 fetched messages |
+| `GET` | `/v1/messages/{id}/status` | Exact-sender payload-free transport/read/workflow state |
+
+The `/v1/pipe/*` routes remain the compatibility and federated transport
+surface. MCP clients should use `sage_find_agent`, `sage_message_send`,
+`sage_inbox`/`sage_messages_receive`, `sage_message_reply`,
+`sage_message_status`, and `sage_message_history`.
 
 ### Use Cases
 
-- **Cross-provider coordination** — A Claude Code agent delegates a subtask to a Cursor agent by sending a pipeline message targeted at provider `"cursor"`. The Cursor agent picks it up, completes it, and posts the result.
+- **Cross-provider coordination** — A Claude Code agent discovers the intended Cursor agent by human display name, sends to its exact identity, and receives an idempotent reply.
 - **Task delegation** — An admin agent breaks a large task into subtasks and sends each to a specialized agent via the pipeline.
 - **Inter-agent review** — Agent A submits work, then pipes a review request to Agent B. Agent B claims it, reviews, and posts feedback as the result.
 

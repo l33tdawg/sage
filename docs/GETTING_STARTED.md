@@ -27,7 +27,7 @@ sudo mv sage-gui /usr/local/bin/  # or add to your PATH
 
 ```bash
 sage-gui version
-# sage-gui v11.7.1
+# sage-gui v11.17.8
 ```
 
 ---
@@ -197,7 +197,7 @@ sage-gui setup
 
 ### 3. Start using it
 
-Just chat normally. Claude now has 13 memory tools:
+Just chat normally. SAGE v11.17.8 advertises 31 MCP tools. The core workflow is:
 
 | Tool | What it does |
 |------|-------------|
@@ -209,10 +209,22 @@ Just chat normally. Claude now has 13 memory tools:
 | `sage_list` | Browse memories with filters |
 | `sage_timeline` | View memories in a time range |
 | `sage_status` | Check memory store health and stats |
+| `sage_domains` | Page the caller's currently readable and owned domains |
 | `sage_turn` | Per-turn memory cycle — recalls context and stores observations atomically |
 | `sage_register` | Register an agent on-chain (auto-called on first connection) |
 | `sage_task` | Create and manage persistent task items |
 | `sage_backlog` | View and prioritize your task backlog |
+| `sage_find_agent` | Resolve a local or authorized federated agent by human name |
+| `sage_message_send` | Idempotently send work to one exact agent |
+| `sage_messages_receive` / `sage_inbox` | Receive bounded untrusted inbox work |
+| `sage_message_reply` | Reply to one received message |
+| `sage_message_status` / `sage_message_history` | Inspect sender-only lifecycle state and retained history |
+
+Governance, quorum-scope, directory, federation, rename, reinstate, and
+corroboration tools complete the advertised set. See the authoritative
+[`reference/mcp-tools.md`](reference/mcp-tools.md). Deprecated `sage_pipe*`
+compatibility aliases remain callable for older clients but are intentionally
+absent from tool discovery.
 
 ### First Time: Inception
 
@@ -220,7 +232,7 @@ The very first time your AI connects to SAGE, tell it:
 
 > **You:** Call sage_inception to initialize your memory.
 
-This seeds your AI's brain with foundational memories about how to use its memory system. From then on, the MCP server's initialization instructions tell the AI to automatically:
+This seeds your AI's brain with foundational memories about how to use its memory system. From then on, the MCP server's initialization instructions adapt the recommended lifecycle to the configured memory mode:
 1. **Recall** relevant context at the start of every task
 2. **Remember** important learnings during work
 3. **Reflect** on what went right and wrong after tasks complete
@@ -247,7 +259,11 @@ Both make the AI better. The `sage_reflect` tool captures this at the end of eac
 
 ### Upgrading from an older version?
 
-If you installed SAGE before v4.5 and your AI isn't calling `sage_turn` every turn or `sage_inception` on startup, you're likely missing the **Claude Code hooks** that were added in later versions. These hooks enforce the memory lifecycle automatically — no manual prompting needed.
+If you installed SAGE before v4.5 and your AI is not receiving the current
+`sage_inception` boot guidance, you may be missing the **Claude Code hooks**
+added in later versions. The hooks preserve session context and expose the
+configured full, bookend, or on-demand memory mode; the server does not block
+unrelated work merely because `sage_turn` was not called.
 
 Re-run the installer in each project directory where you use SAGE:
 
@@ -260,7 +276,7 @@ This is safe to run on existing installs — it won't overwrite your `.mcp.json`
 
 **What the hooks do:**
 - **Boot hook** (`SessionStart`) — tells the AI to call `sage_inception` at the start of every session
-- **Turn hook** (`PreCompact`, `Stop`, `PostToolUse`) — reminds the AI to call `sage_turn` so memories are flushed before context loss
+- **Turn hooks** (`PreCompact`, `Stop`, `PostToolUse`) — preserve useful bookend context before compaction/session end when the configured memory mode calls for it
 - **Permissions** — auto-allows all SAGE MCP tools so the AI doesn't need to ask permission each time
 
 ---
@@ -302,12 +318,12 @@ Once you have SAGE running for yourself, you can add more agents — other machi
 
 ### Adding an agent via the CEREBRUM dashboard
 
-Open `http://localhost:8080/ui/` and go to the Network tab. The wizard walks you through four steps:
+Open `http://localhost:8080/ui/` and go to **Access Controls**. The governed flow is:
 
-1. **Name & Role** — Give the agent a name (e.g., "Work Laptop") and pick a role: Admin, Validator, Writer, Reader, or Observer
-2. **Clearance Level** — Set the clearance tier (Guest through Top Secret) to control how much the agent can see and do
-3. **Domain Access** — Use the visual matrix to toggle read/write access per knowledge domain (e.g., "security" read+write, "personal" read-only)
-4. **Confirm** — Review the config and click Create. The agent gets its own Ed25519 identity automatically
+1. **Register the real client identity** — connect the tool so it self-registers its own Ed25519 signer; do not create or share a generic identity for several clients.
+2. **Approve policy** — In **Access Controls**, choose Member, Manager, or Admin, then Standard, Companion, or Read-only operating mode and clearance 0–4.
+3. **Approve a home domain** — Each ordinary local agent owns one non-shared home domain. The immutable agent ID and registered name stay fixed; **Rename agent** changes only its display label.
+4. **Add Access Groups when needed** — Choose exact members, domains, and one explicit authority: Read, Read + write, or Read + write + modify. Ownership never moves merely because a group changes.
 
 ### LAN pairing quick setup
 
@@ -320,19 +336,23 @@ The fastest way to connect a new machine:
 
 No port forwarding, no config files to copy, no keys to email around. Everything happens over your local network.
 
-### Domain access configuration
+### Access Group configuration
 
-Domains are the knowledge categories your agents work with (e.g., "security", "finance", "personal", "code"). For each agent, you control:
+Domains are the knowledge categories your agents work with (e.g., "security", "finance", "personal", "code"). An agent always retains ownership of its home domain. Cross-agent access is additive and comes from exact Access Group membership:
 
-- **Read access** — Can the agent query memories in this domain?
-- **Write access** — Can the agent propose new memories to this domain?
+- **Read** — Members can query the selected group domains.
+- **Read + write** — Members can also propose memories without changing ownership.
+- **Read + write + modify** — Members can also use governed modify/deprecate workflows.
 
-Set these per-domain from the Access Control tab on any agent's card in the dashboard. Changes take effect immediately — no restart needed.
+Set these in **Access Controls**. Removing a member revokes only group-derived
+authority and does not move or erase its home domain. Federated linked readers
+remain a separate read-only principal kind and can never become local group
+members through federation.
 
 A few practical examples:
-- Your personal laptop: full read+write on everything
-- A shared family machine: read+write on "household", read-only on "work"
-- A guest device: read-only on "public", no access to anything else
+- Your personal agent: owns and fully controls its home domain.
+- A household group: Read + write on the exact `household` domains selected by their owners.
+- A guest agent: Read-only profile plus group Read on an exact public domain.
 
 ### On-Chain Agent Identity (v3.5)
 
@@ -340,7 +360,7 @@ Starting in v3.5, agent identity is a first-class on-chain concept. When you add
 
 **What this means for you:**
 - Every agent registration is cryptographically signed and committed to the chain
-- Identity changes (name, bio, permissions) are auditable on-chain
+- Display-name, bio, and governed policy changes are auditable on-chain; immutable registration name and agent ID do not change
 - Agents auto-register on their first MCP connection — no manual setup required
 - Agents self-register through `POST /v1/agent/register`; the local human then
   approves or changes role, operating mode, clearance, home domain, and Access
@@ -348,7 +368,9 @@ Starting in v3.5, agent identity is a first-class on-chain concept. When you add
   permission mutation route is retired on governed nodes.
 - Existing agents from pre-v3.5 are automatically migrated to on-chain identity on first boot
 
-**Visible Agents:** You can restrict which agents' memories are visible to a given agent. Set this in the agent's Access Control tab on the Network page. By default, all agents can see all memories (open model). Set specific agent IDs to restrict visibility.
+Caller-visible memory is derived from current ownership, exact Access Groups,
+legacy direct grants where still supported, clearance/classification, and hard
+profile restrictions. There is no current “all agents see everything” default.
 
 ### Using Custom Identity Paths (Multiple Agents on the same machine)
 
@@ -422,21 +444,18 @@ generate a different key if this file is missing or corrupt.
 
 ### Backup
 
-```bash
-# Backup your memories
-cp ~/.sage/data/sage.db ~/sage-backup-$(date +%Y%m%d).db
+Use **Settings > Maintenance > Export backup** for a portable memory export.
+For disaster recovery of the entire node, stop SAGE and copy the complete
+`~/.sage` directory—including Badger, CometBFT history, SQLite projections,
+keys, certificates, and configuration—as one consistent backup. Copying only a
+live `sage.db` file is not a chain backup.
 
-# Backup everything
-tar czf ~/sage-backup-$(date +%Y%m%d).tar.gz ~/.sage/
-```
+### Start over safely
 
-### Reset
-
-```bash
-# Remove all data and start fresh
-rm -rf ~/.sage/data/
-sage-gui serve  # Reinitializes automatically
-```
+Do not delete `~/.sage/data` on a lived-in node: that discards consensus history
+and is not an upgrade or repair procedure. Export first. If you intentionally
+want an unrelated fresh SAGE, create it under a new empty `SAGE_HOME`; restore
+the complete stopped-node backup when you intend to recover the existing SAGE.
 
 ---
 
@@ -445,15 +464,18 @@ sage-gui serve  # Reinitializes automatically
 Under the hood, SAGE Personal runs a real BFT consensus engine (CometBFT) with a per-node memory auto-voter that signs votes with the node's own consensus key. Every memory goes through the full governance pipeline:
 
 1. **Propose** — memory submitted via MCP or REST API
-2. **Pre-Validate** — 4 application validators vote independently:
-   - **Sentinel** — baseline accept (ensures liveness)
-   - **Dedup** — rejects duplicate content by SHA-256 hash
-   - **Quality** — rejects noise (greeting observations, short content, empty headers)
-   - **Consistency** — enforces confidence thresholds and required fields
-3. **BFT Quorum** — 3 of 4 validators must accept (meets 2/3 BFT threshold)
-4. **Commit** — each validator signs a vote transaction broadcast through CometBFT, memory written to SQLite with on-chain hash in BadgerDB
+2. **Pre-Validate** — deterministic application checks reject malformed,
+   duplicate, low-quality, or policy-invalid content before voting.
+3. **Vote** — each SAGE node's memory auto-voter casts one signed validator
+   vote. A personal node is one node/one vote; adding consensus validators adds
+   independent voting power under the governed validator set.
+4. **BFT quorum and commit** — CometBFT orders the signed transactions; SAGE
+   reaches its weighted threshold, commits canonical state to BadgerDB, and
+   updates SQLite/PostgreSQL serving projections.
 
-This means your personal SAGE instance uses the exact same consensus protocol as a multi-validator production deployment, with real quality gates preventing noise from accumulating. If you later want to upgrade to a team setup with additional validators, your data and tooling are already compatible.
+This means a personal SAGE uses the same consensus application and transaction
+path as a multi-validator deployment without pretending that four in-process
+checks are four independent nodes.
 
 ### Upgrading from v3.x
 
@@ -467,13 +489,11 @@ history-preserving migration or restoration of a complete stopped-node backup.
 
 ## Migrating to Full SAGE
 
-When you outgrow personal mode and need multi-agent BFT consensus:
-
-1. Export your memories: they're in standard SQLite
-2. Set up the full 4-node deployment: `make init && make up`
-3. Import memories into the PostgreSQL-backed production cluster
-
-See the main [README](../README.md) for the full multi-node deployment guide.
+When you outgrow personal mode, use the authenticated same-chain node-join and
+governed validator-management flows. Do not export SQLite and initialize an
+unrelated four-node chain as an “upgrade”; existing chains advance in place and
+retain their canonical history. See the main [README](../README.md) and
+[`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ---
 
