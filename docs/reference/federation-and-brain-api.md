@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.17.9 code (2026-08-05). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.17.10 code (2026-08-05). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
@@ -706,7 +706,7 @@ Every route 501s when the transport is not wired (`fedReady`,
 | `GET /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsGet` (`web/federation_pipe_contacts.go:20-63`) | Return this node's active shared-domain RBAC contacts and the peer's authenticated read-only contact snapshot. `?live=0` skips the peer probe so saved local acceptance controls render immediately and reports `remote_known:false`. |
 | `PUT /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsPut` (`web/federation_pipe_contacts.go:66-107`) | Toggle one exact active local shared-domain recipient's default-off inbound work acceptance using its current contact ID. |
 | `POST /v1/dashboard/federation/connections/{chain_id}/revoke` | `handleFedRevoke` (`web/federation_join.go`) | Commit local tx-34, best-effort notify the peer with the retained exact old credentials, purge locally, and return notification status. |
-| `GET /v1/dashboard/federation/connections/{chain_id}/status` | `handleFedPeerStatus` (`web/federation_join.go:778`) | Peer reachability preflight |
+| `GET /v1/dashboard/federation/connections/{chain_id}/status` | `handleFedPeerStatus` (`web/federation_join.go`) | The panel's single authenticated peer reachability preflight. On success it preserves the peer-scoped `peer_rbac_grant`, legacy `sharing_grant`, and `pipe_contacts` projections from `/fed/v1/status`, while omitting the agreement-binding digest and transport internals. |
 | `POST /v1/dashboard/federation/groups/refresh` | `handleFedGroupRefresh` (`web/federation_join.go`) | Prompt one bounded group-journal anti-entropy pass and wait for it to finish before CEREBRUM reloads the local group projection. Ordinary group-list polling remains a local SQLite read. |
 | `GET /v1/dashboard/federation/join/routes` | `handleFedJoinRoutes` (`web/federation_join.go`) | Return locally prepared Direct/Secure relay candidates. `ready` means prepared locally, not proven reachable and not currently selected. |
 | `POST /v1/dashboard/federation/join/host/create` | `handleFedHostCreate` (`web/federation_join.go`) | Host H1; current CEREBRUM sends `transport:"auto"`. `lan` and `internet` remain compatibility inputs for older clients. |

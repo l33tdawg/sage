@@ -62,7 +62,7 @@ test('release-facing version metadata stays aligned', () => {
   }
 });
 
-test('v11.17.9 user and SDK guides keep canonical Messages contracts aligned', () => {
+test('v11.17.10 user and SDK guides keep canonical Messages contracts aligned', () => {
   const architecture = read('docs/ARCHITECTURE.md');
   const roadmap = read('docs/ROADMAP.md');
   const gettingStarted = read('docs/GETTING_STARTED.md');

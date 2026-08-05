@@ -51,6 +51,22 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.17.10
+
+**Federation visibility is symmetric again.** CEREBRUM's single authenticated
+peer-status probe now preserves the peer-scoped domain permission and agent
+contact projections that the remote SAGE returned. A reachable connection can
+no longer show an agent from the other SAGE while claiming that its domains
+were never reported, and the reverse side receives the same shared-agent view.
+Transport binding internals remain hidden from the dashboard response.
+
+This patch changes no consensus rule, AppHash input, transaction type, key
+encoding, fork target, or application version. Existing v11.17 chains upgrade
+in place without rewriting trust, domain grants, agent acceptance, memories, or
+history.
+
+Container: `ghcr.io/l33tdawg/sage:11.17.10`. SDK 11.17.10.
+
 ## What's New in v11.17.9
 
 **CEREBRUM's agent and recovery surfaces now reflect the operator's model.**
@@ -1260,7 +1276,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.9`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.10`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
