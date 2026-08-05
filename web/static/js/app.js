@@ -16137,6 +16137,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
     const [syncKnown, setSyncKnown] = useState(false);
     const [syncStatus, setSyncStatus] = useState(null);
     const [filter, setFilter] = useState('');
+    const [directionView, setDirectionView] = useState('outgoing');
     const [localRowLimit, setLocalRowLimit] = useState(fedPermissionRenderBatch);
     const [remoteRowLimit, setRemoteRowLimit] = useState(fedPermissionRenderBatch);
     const [busy, setBusy] = useState(false);
@@ -16224,6 +16225,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 
     useEffect(() => { setLocalRowLimit(fedPermissionRenderBatch); }, [chain]);
     useEffect(() => { setRemoteRowLimit(fedPermissionRenderBatch); }, [chain]);
+    useEffect(() => { setDirectionView('outgoing'); }, [chain]);
 
     // The parent runs the one live reachability probe for this connection.
     // Consume that authenticated response here so opening the panel never
@@ -16826,7 +16828,18 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 			${pipeContactErr && html`<div class="fed-err fed-perm-error" role="alert">${pipeContactErr}</div>`}
 		</section>`}
 
-        ${showOutgoing ? html`<section class="fed-perm-section">
+		<div class="fed-direction-tabs" role="tablist" aria-label=${`Domain sharing direction for ${peerName}`}>
+			<button type="button" role="tab"
+				class=${directionView === 'outgoing' ? 'active' : ''}
+				aria-selected=${directionView === 'outgoing'}
+				onClick=${() => setDirectionView('outgoing')}>This SAGE → ${peerName}</button>
+			<button type="button" role="tab"
+				class=${directionView === 'incoming' ? 'active' : ''}
+				aria-selected=${directionView === 'incoming'}
+				onClick=${() => setDirectionView('incoming')}>This SAGE ← ${peerName}</button>
+		</div>
+
+        ${directionView === 'outgoing' && (showOutgoing ? html`<section class="fed-perm-section">
             <div class="fed-perm-section-head">
                 <div>
                     <h4>This SAGE → ${peerName}</h4>
@@ -16876,9 +16889,9 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
         </section>` : html`<section class="fed-perm-section fed-guest-share-back">
             <h4>Sharing controls unavailable for this older pairing</h4>
             <p class="muted">Pair again to restore the signed relationship role before sharing domains from this SAGE.</p>
-        </section>`}
+        </section>`)}
 
-        <section class="fed-perm-section fed-perm-remote">
+        ${directionView === 'incoming' && html`<section class="fed-perm-section fed-perm-remote">
             <div class="fed-perm-section-head">
                 <div>
                     <h4>${peerName} → this SAGE</h4>
@@ -16934,7 +16947,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
                 </div>
                 ${syncSaveErr && html`<div class="fed-err fed-perm-error" role="alert">${syncSaveErr}</div>`}
             </div>`}
-        </section>
+        </section>`}
 
         <section class="fed-perm-danger">
             <div>

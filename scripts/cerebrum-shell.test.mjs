@@ -964,6 +964,13 @@ test('federation separates trust from directional per-domain RBAC', () => {
         'the remote permission table must also remain render-bounded');
     assert.match(panel, /setLocalRowLimit\(limit => limit \+ fedPermissionRenderBatch\)/);
     assert.match(panel, /setRemoteRowLimit\(limit => limit \+ fedPermissionRenderBatch\)/);
+    assert.match(panel, /role="tablist" aria-label=\$\{`Domain sharing direction for \$\{peerName\}`\}/,
+        'directional sharing must use an explicit accessible two-tab switch');
+    assert.match(panel, /directionView === 'outgoing' && \(showOutgoing/,
+        'the large local matrix must only be mounted on the outgoing tab');
+    assert.match(panel, /directionView === 'incoming' && html`<section class="fed-perm-section fed-perm-remote">/,
+        'the remote matrix must only be mounted on the incoming tab');
+    assert.match(panel, /This SAGE ← \$\{peerName\}/);
     assert.match(panel, /visibleRows\.forEach/,
         'render windowing must not narrow filtered bulk-action semantics');
     assert.match(appSource, /function fedCatalogMapsEqual\(a, b\)/);

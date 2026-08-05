@@ -57,7 +57,9 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 Friendly renamed-agent labels are used consistently, the Access Controls agent
 rail is wider, and the Agents directory is searchable by name or ID and sortable
 by recent presence, recent committed memory, or name. The busy agent directory
-now appears before the low-traffic governance controls.
+now appears before the low-traffic governance controls. Federation permissions
+use separate outgoing and incoming tabs, so a large local domain catalog no
+longer buries the peer's shared-back view below an endless matrix.
 
 **Domain transfer recovery is ownership-safe and retry-safe.** The dashboard
 distinguishes immutable memory authorship from canonical domain ownership,

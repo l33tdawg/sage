@@ -73,6 +73,8 @@ test('v11.17.9 user and SDK guides keep canonical Messages contracts aligned', (
   assert.match(architecture, /sage_message_send/);
   assert.match(read('docs/reference/mcp-tools.md'), /message_inbox_unread/);
   assert.match(read('docs/reference/mcp-tools.md'), /call `sage_messages_receive`/);
+  assert.match(read('internal/mcp/tools.go'), /Canonical Messages remain durable and queryable/);
+  assert.doesNotMatch(read('internal/mcp/tools.go'), /History is retained only for the normal transient message window/);
   assert.match(roadmap, /v11\.17\.x completion ledger/);
   assert.match(roadmap, /helper outside the replaceable bundle/);
   assert.match(gettingStarted, /advertises 31 MCP tools/);

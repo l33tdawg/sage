@@ -18,7 +18,9 @@ CodeQL security backlog without dismissing genuine alerts.
 v11.17.9 completes the agent-directory UX pass (friendly names, wider Access
 Controls rail, search and activity/name sorting, and agent-first page order) and
 hardens recovery transfers against stale authorship hints, already-completed
-retries, and host-versus-consensus clock skew.
+retries, and host-versus-consensus clock skew. The Federation page also splits
+outgoing and incoming domain permissions into direction tabs so only one large
+matrix is mounted and scrolled at a time.
 
 The following acceptance and follow-up boundaries remain open after the 11.17.9
 code merge; they are not implied complete by Docker or CI evidence:

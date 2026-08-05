@@ -5174,6 +5174,36 @@ input[type="range"]::-moz-range-thumb {
 .fed-perm-section .fed-perm-pause-note { margin-top: 12px; }
 .fed-perm-section { padding: 14px; background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .fed-perm-section + .fed-perm-section { margin-top: 12px; }
+.fed-direction-tabs {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 6px;
+    margin: 12px 0;
+    padding: 4px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-surface);
+}
+.fed-direction-tabs button {
+    min-width: 0;
+    padding: 9px 12px;
+    border: 1px solid transparent;
+    border-radius: calc(var(--radius) - 2px);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+.fed-direction-tabs button:hover { color: var(--text); background: rgba(127,127,127,0.08); }
+.fed-direction-tabs button.active {
+    border-color: rgba(34,211,238,0.55);
+    background: rgba(34,211,238,0.12);
+    color: var(--accent-bright, #22d3ee);
+}
+.fed-direction-tabs button:focus-visible { outline: 2px solid var(--accent-bright, #22d3ee); outline-offset: 2px; }
 .fed-perm-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
 .fed-perm-section-head > .btn { flex: none; }
 .fed-perm-section h4 { margin: 0 0 4px; font-size: 14px; }

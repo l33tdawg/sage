@@ -170,6 +170,7 @@ func newVerifiedSnapshotScheduler(t *testing.T, dataDir string, db *badger.DB) *
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler")
+		return nil
 	}
 	return sched
 }
@@ -380,6 +381,7 @@ func TestSnapshotScheduler_RetentionPrunesAfterTake(t *testing.T) {
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
+		return
 	}
 
 	// Fire a real snapshot at height 100. lastHeight=0, interval=5 → fires.
@@ -500,6 +502,7 @@ func TestSnapshotScheduler_IdleFlushFires(t *testing.T) {
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
+		return
 	}
 	defer sched.Close()
 	sched.idleCheckEvery = 50 * time.Millisecond // before the first Tick — the loop starts lazily there
@@ -549,6 +552,7 @@ func TestSnapshotScheduler_IdleFlushNotArmedWithoutTimeInterval(t *testing.T) {
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
+		return
 	}
 	defer sched.Close()
 	sched.idleCheckEvery = 20 * time.Millisecond
@@ -583,6 +587,7 @@ func TestSnapshotScheduler_CloseStopsIdleFlush(t *testing.T) {
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
+		return
 	}
 	sched.idleCheckEvery = 30 * time.Millisecond
 
@@ -612,6 +617,7 @@ func TestSnapshotScheduler_TriggerForceFires(t *testing.T) {
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
+		return
 	}
 
 	sched.Trigger(42, []byte{0x42}, "pre-upgrade-test")
@@ -634,6 +640,7 @@ func TestSnapshotSchedulerTakeVerifiedBindsStateAndRunningBinary(t *testing.T) {
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler")
+		return
 	}
 	manifest, err := sched.TakeVerified(context.Background(), 77, appHash[:], "pre-upgrade-v11.17.0", nil)
 	if err != nil {
