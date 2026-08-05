@@ -846,6 +846,11 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		return fmt.Errorf("migrate canonical messages: %w", err)
 	}
 	s.migratePipelineTransport(ctx)
+	if _, err := s.writeExecContext(ctx, `UPDATE pipeline_transport_outbox
+		SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ',created_at,'+100 years')
+		WHERE pipe_id LIKE 'msg-%' AND state='pending'`); err != nil {
+		return fmt.Errorf("extend canonical message transport retention: %w", err)
+	}
 	if err := s.migratePipelineV23SecurityColumns(ctx); err != nil {
 		return fmt.Errorf("migrate pipeline v23 authorization columns: %w", err)
 	}
@@ -3884,6 +3889,7 @@ func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 			a.first_seen, a.last_seen, a.created_at, a.removed_at,
 			COALESCE(a.on_chain_height, 0), COALESCE(a.visible_agents, ''), COALESCE(a.capabilities, 0), COALESCE(a.provider, ''),
 			COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0),
+			(SELECT MAX(COALESCE(committed_at, created_at)) FROM memories WHERE submitting_agent = a.agent_id AND status = 'committed'),
 			COALESCE(a.claim_token, ''), a.claim_expires_at
 		FROM network_agents a
 		WHERE a.status != 'removed'
@@ -3896,12 +3902,12 @@ func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 	var agents []*AgentEntry
 	for rows.Next() {
 		a := &AgentEntry{}
-		var firstSeen, lastSeen, createdAt, removedAt, claimExpiry *string
+		var firstSeen, lastSeen, createdAt, removedAt, lastCommittedAt, claimExpiry *string
 		if scanErr := rows.Scan(&a.AgentID, &a.Name, &a.RegisteredName, &a.Role, &a.Avatar, &a.BootBio,
 			&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
 			&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
 			&firstSeen, &lastSeen, &createdAt, &removedAt,
-			&a.OnChainHeight, &a.VisibleAgents, &a.Capabilities, &a.Provider, &a.MemoryCount,
+			&a.OnChainHeight, &a.VisibleAgents, &a.Capabilities, &a.Provider, &a.MemoryCount, &lastCommittedAt,
 			&a.ClaimToken, &claimExpiry); scanErr != nil {
 			return nil, fmt.Errorf("scan agent: %w", scanErr)
 		}
@@ -3911,6 +3917,7 @@ func (s *SQLiteStore) ListAgents(ctx context.Context) ([]*AgentEntry, error) {
 			a.CreatedAt = parseTime(*createdAt)
 		}
 		a.RemovedAt = parseTimePtr(removedAt)
+		a.LastCommittedMemoryAt = parseTimePtr(lastCommittedAt)
 		a.ClaimExpiresAt = parseTimePtr(claimExpiry)
 		if a.RegisteredName == "" {
 			a.RegisteredName = a.Name // backfill for pre-existing agents
@@ -4147,7 +4154,7 @@ func scanPipeContactLookupAgents(rows *sql.Rows) ([]*AgentEntry, error) {
 
 func (s *SQLiteStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry, error) {
 	a := &AgentEntry{}
-	var firstSeen, lastSeen, createdAt, removedAt, claimExpiry *string
+	var firstSeen, lastSeen, createdAt, removedAt, lastCommittedAt, claimExpiry *string
 	err := s.conn.QueryRowContext(ctx, `
 		SELECT a.agent_id, a.name, COALESCE(a.registered_name,''), a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
 			COALESCE(a.validator_pubkey,''), COALESCE(a.node_id,''), COALESCE(a.p2p_address,''),
@@ -4156,13 +4163,14 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry
 			a.first_seen, a.last_seen, a.created_at, a.removed_at,
 			COALESCE(a.on_chain_height, 0), COALESCE(a.visible_agents, ''), COALESCE(a.capabilities, 0), COALESCE(a.provider, ''),
 			COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0),
+			(SELECT MAX(COALESCE(committed_at, created_at)) FROM memories WHERE submitting_agent = a.agent_id AND status = 'committed'),
 			COALESCE(a.claim_token, ''), a.claim_expires_at
 		FROM network_agents a WHERE a.agent_id = ?`, agentID).Scan(
 		&a.AgentID, &a.Name, &a.RegisteredName, &a.Role, &a.Avatar, &a.BootBio,
 		&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
 		&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
 		&firstSeen, &lastSeen, &createdAt, &removedAt,
-		&a.OnChainHeight, &a.VisibleAgents, &a.Capabilities, &a.Provider, &a.MemoryCount,
+		&a.OnChainHeight, &a.VisibleAgents, &a.Capabilities, &a.Provider, &a.MemoryCount, &lastCommittedAt,
 		&a.ClaimToken, &claimExpiry)
 	if err != nil {
 		return nil, fmt.Errorf("get agent: %w", err)
@@ -4173,6 +4181,7 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry
 		a.CreatedAt = parseTime(*createdAt)
 	}
 	a.RemovedAt = parseTimePtr(removedAt)
+	a.LastCommittedMemoryAt = parseTimePtr(lastCommittedAt)
 	a.ClaimExpiresAt = parseTimePtr(claimExpiry)
 	if a.RegisteredName == "" {
 		a.RegisteredName = a.Name // backfill for pre-existing agents
@@ -4182,7 +4191,7 @@ func (s *SQLiteStore) GetAgent(ctx context.Context, agentID string) (*AgentEntry
 
 func (s *SQLiteStore) GetAgentByName(ctx context.Context, name string) (*AgentEntry, error) {
 	a := &AgentEntry{}
-	var firstSeen, lastSeen, createdAt, removedAt, claimExpiry *string
+	var firstSeen, lastSeen, createdAt, removedAt, lastCommittedAt, claimExpiry *string
 	err := s.conn.QueryRowContext(ctx, `
 		SELECT a.agent_id, a.name, COALESCE(a.registered_name,''), a.role, COALESCE(a.avatar,''), COALESCE(a.boot_bio,''),
 			COALESCE(a.validator_pubkey,''), COALESCE(a.node_id,''), COALESCE(a.p2p_address,''),
@@ -4191,13 +4200,14 @@ func (s *SQLiteStore) GetAgentByName(ctx context.Context, name string) (*AgentEn
 			a.first_seen, a.last_seen, a.created_at, a.removed_at,
 			COALESCE(a.on_chain_height, 0), COALESCE(a.visible_agents, ''), COALESCE(a.capabilities, 0), COALESCE(a.provider, ''),
 			COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0),
+			(SELECT MAX(COALESCE(committed_at, created_at)) FROM memories WHERE submitting_agent = a.agent_id AND status = 'committed'),
 			COALESCE(a.claim_token, ''), a.claim_expires_at
 		FROM network_agents a WHERE a.name = ? AND a.status != 'removed'`, name).Scan(
 		&a.AgentID, &a.Name, &a.RegisteredName, &a.Role, &a.Avatar, &a.BootBio,
 		&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
 		&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
 		&firstSeen, &lastSeen, &createdAt, &removedAt,
-		&a.OnChainHeight, &a.VisibleAgents, &a.Capabilities, &a.Provider, &a.MemoryCount,
+		&a.OnChainHeight, &a.VisibleAgents, &a.Capabilities, &a.Provider, &a.MemoryCount, &lastCommittedAt,
 		&a.ClaimToken, &claimExpiry)
 	if err != nil {
 		return nil, nil // not found — return nil, nil per interface contract
@@ -4208,6 +4218,7 @@ func (s *SQLiteStore) GetAgentByName(ctx context.Context, name string) (*AgentEn
 		a.CreatedAt = parseTime(*createdAt)
 	}
 	a.RemovedAt = parseTimePtr(removedAt)
+	a.LastCommittedMemoryAt = parseTimePtr(lastCommittedAt)
 	a.ClaimExpiresAt = parseTimePtr(claimExpiry)
 	if a.RegisteredName == "" {
 		a.RegisteredName = a.Name // backfill for pre-existing agents
@@ -6407,6 +6418,19 @@ func (s *SQLiteStore) GetInboxHistory(ctx context.Context, agentID, provider str
 	return items, rows.Err()
 }
 
+// CountPendingInbox returns only the number of currently actionable rows for
+// one exact local recipient/provider. It intentionally performs no claim or
+// content decryption, making it safe for the lightweight sage_turn flag.
+func (s *SQLiteStore) CountPendingInbox(ctx context.Context, agentID, provider string) (int, error) {
+	var count int
+	err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pipeline_messages
+		WHERE destination_chain_id = '' AND status = 'pending'
+		  AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+		  AND (to_agent = ? OR (to_agent = '' AND to_provider = ?))`,
+		agentID, provider).Scan(&count)
+	return count, err
+}
+
 // GetOutbox returns retained messages sent by one local agent. The source-chain
 // guard prevents an imported row from appearing in a coincidentally-named local
 // sender's history.
@@ -6603,16 +6627,14 @@ func (s *SQLiteStore) ExpirePipelines(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
-// ExpireStalePipelines flips pending/claimed rows whose created_at predates
-// olderThan to 'expired', independent of their expires_at. This is a hard
-// backstop on lifetime: a never-claimed (or abandoned-after-claim) pipe carrying
-// an oversized TTL still ages out, so the subsequent PurgePipelines sweep can
-// reclaim its row. The staleness window is set well beyond the max legitimate
-// TTL, so an actively-running pipe is never touched.
+// ExpireStalePipelines is the legacy pipeline anti-DoS backstop. Canonical
+// msg-* inbox rows are deliberately email-like and remain until an agent reads,
+// claims, or explicitly completes them; their open-row quota is the bound.
 func (s *SQLiteStore) ExpireStalePipelines(ctx context.Context, olderThan time.Time) (int, error) {
 	res, err := s.writeExecContext(ctx,
 		`UPDATE pipeline_messages SET status = 'expired'
 		 WHERE status IN ('pending', 'claimed')
+		   AND pipe_id NOT LIKE 'msg-%'
 		   AND created_at < ?`, formatTime(olderThan))
 	if err != nil {
 		return 0, err
@@ -6628,6 +6650,7 @@ func (s *SQLiteStore) PurgePipelines(ctx context.Context, olderThan time.Time) (
 		if _, err := tx.writeExecContext(ctx, `DELETE FROM pipeline_transport_outbox
 			WHERE pipe_id IN (SELECT p.pipe_id FROM pipeline_messages p
 				WHERE p.status IN ('completed','expired','failed')
+				AND p.pipe_id NOT LIKE 'msg-%'
 				AND COALESCE(p.terminal_at,p.completed_at,p.created_at) < ?
 				AND NOT EXISTS (SELECT 1 FROM message_read_receipts receipt
 					WHERE receipt.message_id=p.pipe_id AND receipt.read_at >= ?)
@@ -6642,6 +6665,7 @@ func (s *SQLiteStore) PurgePipelines(ctx context.Context, olderThan time.Time) (
 		}
 		res, err := tx.writeExecContext(ctx, `DELETE FROM pipeline_messages
 			WHERE status IN ('completed', 'expired', 'failed')
+			AND pipe_id NOT LIKE 'msg-%'
 			AND COALESCE(terminal_at,completed_at,created_at) < ?
 			AND NOT EXISTS (SELECT 1 FROM message_read_receipts receipt
 				WHERE receipt.message_id=pipeline_messages.pipe_id AND receipt.read_at >= ?)

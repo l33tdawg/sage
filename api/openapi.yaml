@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 11.17.8
+  version: 11.17.9
   description: |-
     (Sovereign) Agent Governed Experience — network REST API for memory
     submission, validation, and query.
@@ -1820,13 +1820,14 @@ components:
           description: Optional human-readable purpose, subject to the pipeline intent-size limit.
         ttl_minutes:
           type: integer
-          minimum: 1
+          minimum: 0
           maximum: 1440
-          default: 1440
+          default: 0
+          description: Omitted/0 keeps the message durable until handled; 1-1440 requests explicit expiry.
 
     MessageSendResponse:
       type: object
-      required: [message_id, status, expires_at, idempotent_replay]
+      required: [message_id, status, idempotent_replay]
       properties:
         message_id:
           type: string
@@ -1836,6 +1837,10 @@ components:
         expires_at:
           type: string
           format: date-time
+          description: Present only when the sender requested an explicit TTL.
+        retention:
+          type: string
+          enum: [durable_until_handled]
         idempotent_replay:
           type: boolean
 

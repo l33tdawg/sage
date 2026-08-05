@@ -278,7 +278,7 @@ func (h *DashboardHandler) handleDashboardGovPropose(w http.ResponseWriter, r *h
 		if appV23Actor != nil {
 			operatorKey = appV23Actor.Key
 		}
-		if err = embedDashboardGovernanceProof(proposeTx, operatorKey, r.Method, r.URL.RequestURI(), proofBody); err != nil {
+		if err = h.embedConsensusTimedGovernanceProof(proposeTx, operatorKey, r.Method, r.URL.RequestURI(), proofBody); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to authorize transaction")
 			return
 		}
@@ -481,7 +481,7 @@ func (h *DashboardHandler) handleDashboardGovVote(w http.ResponseWriter, r *http
 			writeError(w, http.StatusInternalServerError, "failed to encode governance authorization")
 			return
 		}
-		if err = embedDashboardGovernanceProof(voteTx, operatorKey, r.Method, r.URL.RequestURI(), proofBody); err != nil {
+		if err = h.embedConsensusTimedGovernanceProof(voteTx, operatorKey, r.Method, r.URL.RequestURI(), proofBody); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to authorize transaction")
 			return
 		}
@@ -602,6 +602,10 @@ func readDashboardGovernanceBody(w http.ResponseWriter, r *http.Request) ([]byte
 // mirrors the signed REST gateway envelope and gives consensus exact
 // method/path/body, freshness, and single-use nonce evidence.
 func embedDashboardGovernanceProof(ptx *tx.ParsedTx, operatorKey ed25519.PrivateKey, method, path string, body []byte) error {
+	return embedDashboardGovernanceProofAt(ptx, operatorKey, method, path, body, time.Now())
+}
+
+func embedDashboardGovernanceProofAt(ptx *tx.ParsedTx, operatorKey ed25519.PrivateKey, method, path string, body []byte, proofTime time.Time) error {
 	if len(operatorKey) != ed25519.PrivateKeySize {
 		return fmt.Errorf("operator key has length %d", len(operatorKey))
 	}
@@ -609,7 +613,7 @@ func embedDashboardGovernanceProof(ptx *tx.ParsedTx, operatorKey ed25519.Private
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("generate governance proof nonce: %w", err)
 	}
-	timestamp := time.Now().Unix()
+	timestamp := proofTime.Unix()
 	canonical := append([]byte(method+" "+path+"\n"), body...)
 	bodyHash := sha256.Sum256(canonical)
 	pub, ok := operatorKey.Public().(ed25519.PublicKey)

@@ -1169,7 +1169,7 @@ func TestAppV23AccessStateSeparatesRootAndLinkedReaders(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
 	for _, agent := range []*store.AgentEntry{
 		{AgentID: fixture.rootID, Name: "CEREBRUM", Role: "admin", Status: "active", Clearance: 4},
-		{AgentID: fixture.agentID, Name: "Mynah", Role: "member", Status: "active", Clearance: 1},
+		{AgentID: fixture.agentID, Name: "Mynah", RegisteredName: "agent/sage-voice-bridge", Role: "member", Status: "active", Clearance: 1},
 	} {
 		require.NoError(t, sqlStore.CreateAgent(context.Background(), agent))
 	}
@@ -1198,8 +1198,8 @@ func TestAppV23AccessStateSeparatesRootAndLinkedReaders(t *testing.T) {
 	assert.Equal(t, fixture.agentID, response.Agents[0].AgentID)
 	assert.Equal(t, "Mynah", response.Agents[0].Name,
 		"existing local display metadata remains visible until a governed rename commits")
-	assert.Equal(t, "Mynah", response.Agents[0].RegisteredName,
-		"legacy empty registered names use the projection's immutable registration fallback")
+	assert.Equal(t, "agent/sage-voice-bridge", response.Agents[0].RegisteredName,
+		"the immutable registration identity remains separate from the friendly display name")
 	require.Len(t, response.Groups, 2)
 	var emptyGroup *store.AppV23AccessGroup
 	for i := range response.Groups {

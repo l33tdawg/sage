@@ -53,7 +53,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.17.8';
+const SAGE_VERSION = 'v11.17.9';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -3991,7 +3991,7 @@ function SearchPage() {
     async function loadSourceDomains(agentId) {
         if (!agentId) return;
         const src = agents.find(a => a.agent_id === agentId);
-        const sourceName = src ? (src.name || agentId.slice(0, 16)) : agentId.slice(0, 16);
+        const sourceName = src ? agentDisplayName(src) : agentId.slice(0, 16);
         try {
             const data = await fetchAgentDomains(agentId);
             setDomXfer({
@@ -4239,7 +4239,7 @@ function SearchPage() {
                                 <p style="color:var(--text-dim);margin-bottom:8px;">
                                     ${domXfer.fromSelection
                                         ? html`Pick which domain to transfer. These are the domains your <strong>${domXfer.sourceName}</strong> live in.`
-                                        : html`Pick a domain to hand from <strong>${domXfer.sourceName}</strong> to another agent.`}
+                                        : html`Pick a domain where <strong>${domXfer.sourceName}</strong> authored memories. Current ownership is shown separately.`}
                                 </p>
                                 <p style="color:var(--text-muted);font-size:12px;line-height:1.5;margin-bottom:16px;">
                                     This moves the <strong>entire domain</strong> - every memory in it, including any not shown in the current results${domXfer.fromSelection ? html` and any you did not select` : ''} - not just labels. Authorship (the submitting agent recorded on each memory) is left unchanged; only on-chain RBAC ownership and read/write access move to the new owner. The source agent loses access to the domain.
@@ -4252,7 +4252,7 @@ function SearchPage() {
                                             <button class="merge-target-btn" onClick=${() => setDomXfer(prev => ({ ...prev, step: 'target', selectedDomain: d }))}>
                                                 <span style="display:flex;align-items:center;gap:8px;">
                                                     <span class="domain-badge" style="margin:0;background:${getDomainColor(d.domain)}20;color:${getDomainColor(d.domain)};">${d.domain}</span>
-                                                    ${d.is_owner === false ? html`<span style="color:var(--text-muted);font-size:11px;">(not current owner)</span>` : ''}
+                                                    ${d.owner_agent_id ? html`<span style="color:var(--text-muted);font-size:11px;">Current owner: ${agentDisplayName(agents.find(a => a.agent_id === d.owner_agent_id) || { agent_id: d.owner_agent_id })}</span>` : ''}
                                                 </span>
                                             </button>
                                         `)}
@@ -4276,7 +4276,7 @@ function SearchPage() {
                                     </p>
                                 </div>
                                 ${(() => {
-                                    const excludeId = domXfer.sourceAgentId || '';
+                                    const excludeId = domXfer.selectedDomain?.owner_agent_id || '';
                                     const targets = agents.filter(a => a.status !== 'removed' && a.agent_id !== excludeId);
                                     return targets.length === 0 ? html`
                                         <p style="color:var(--text-muted);font-size:13px;font-style:italic;">No other agents are available to receive this domain. Register another agent first.</p>
@@ -4285,7 +4285,7 @@ function SearchPage() {
                                             ${targets.map(a => html`
                                                 <button class="merge-target-btn" onClick=${() => handleDomainOwnershipTransfer(a.agent_id)} disabled=${xferring}>
                                                     <span>${a.avatar || '\u{1F916}'}</span>
-                                                    <span>${a.name}</span>
+                                                    <span>${agentDisplayName(a)}</span>
                                                     ${a.role ? html`<span class="agent-role-badge ${a.role}" style="margin-left:auto;">${a.role}</span>` : ''}
                                                 </button>
                                             `)}
@@ -8532,6 +8532,19 @@ function removeFromAllGroups(model, agentId) {
     return { ...model, groups };
 }
 
+// Dashboard agent responses historically used `name`; newer directory and
+// federation projections may call the same mutable human label `display_name`.
+// Keep every CEREBRUM surface on one preference order and reserve the immutable
+// registration name for fallback/diagnostic context.
+function agentDisplayName(agent) {
+    const friendly = String(agent?.display_name || agent?.name || '').trim();
+    if (friendly) return friendly;
+    const registered = String(agent?.registered_name || '').trim();
+    if (registered) return registered;
+    const id = String(agent?.agent_id || '').trim();
+    return id ? `Agent ${id.slice(0, 8)}` : 'Unnamed agent';
+}
+
 const APPV23_ROLE_OPTIONS = [
     {
         key: 'member',
@@ -9546,7 +9559,7 @@ function AppV23AccessControl() {
         const previewText = preview.map(({ group, included, dropped }) => {
             const members = included.map(id => {
                 const agent = agentByID.get(id);
-                return `${agent?.name || id.slice(0, 8)} (${agent?.role || 'member'})`;
+                return `${agentDisplayName(agent) || id.slice(0, 8)} (${agent?.role || 'member'})`;
             }).join(', ') || 'no eligible members';
             return `${group.name}: ${members}${dropped.length ? `; ${dropped.length} unavailable member${dropped.length === 1 ? '' : 's'} will be skipped` : ''}`;
         }).join('\n');
@@ -9927,7 +9940,7 @@ function AppV23AccessControl() {
                         <div class="v23-policy-title">
                             <div>
                                 <div class="v23-eyebrow">Signer ${selected.agent_id.slice(0, 12)}…</div>
-                                <h3>${selected.name || 'Local agent'}</h3>
+                                <h3>${agentDisplayName(selected)}</h3>
                             </div>
                             ${selected.needs_reauthorization
                                 ? html`<span class="v23-review-badge">Admin suspended</span>`
@@ -10231,7 +10244,7 @@ function AppV23AccessControl() {
                                         <option value="">Choose an approved agent…</option>
                                         ${localAgents
                                             .filter(agent => agent.enrollment_active && !group.members.includes(agent.agent_id))
-                                            .map(agent => html`<option value=${agent.agent_id}>${agent.name || agent.agent_id.slice(0, 8)}</option>`)}
+                                            .map(agent => html`<option value=${agent.agent_id}>${agentDisplayName(agent)}</option>`)}
                                     </select>
                                 </label>
                             </div>
@@ -10479,7 +10492,7 @@ function AppV23AccessControl() {
                                 <span class="v23-message-dot"></span>
                                 <div>
                                     <small>Local receiver</small>
-                                    <strong>${messageLocal?.name || 'Choose a local teammate'}</strong>
+                                    <strong>${messageLocal ? agentDisplayName(messageLocal) : 'Choose a local teammate'}</strong>
                                     ${messageLocal && html`<code>${messageLocal.agent_id.slice(0, 12)}</code>`}
                                 </div>
                             </div>
@@ -10511,7 +10524,7 @@ function AppV23AccessControl() {
                                     ${messageLocalCandidates.length === 0 && html`<option value="">No eligible local receivers</option>`}
                                     ${messageLocalCandidates.map(agent => html`
                                         <option value=${agent.agent_id}>
-                                            ${agent.name || agent.agent_id.slice(0, 8)} · ${agent.role}
+                                            ${agentDisplayName(agent)} · ${agent.role}
                                         </option>
                                     `)}
                                 </select>
@@ -10569,7 +10582,7 @@ function AppV23AccessControl() {
                             </div>
                         </div>
                         <div class="v23-message-footnote">
-                            To let ${messageLocal?.name || 'the local agent'} message ${selectedMessageRemote?.label || 'the remote agent'}, the operator on ${selectedMessageRemote?.remote_chain_id || 'the remote node'} must separately allow the reverse receiver-local pair there. Directory visibility is never used as authority.
+                            To let ${messageLocal ? agentDisplayName(messageLocal) : 'the local agent'} message ${selectedMessageRemote?.label || 'the remote agent'}, the operator on ${selectedMessageRemote?.remote_chain_id || 'the remote node'} must separately allow the reverse receiver-local pair there. Directory visibility is never used as authority.
                         </div>
                     </div>
                 `}
@@ -10585,6 +10598,8 @@ function NetworkPage({ sse, accessMode = false }) {
     const recoveryDomain = routeQuery.get('recovery') === '1' ? (routeQuery.get('domain') || '') : '';
     const [agents, setAgents] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [agentQuery, setAgentQuery] = useState('');
+    const [agentSort, setAgentSort] = useState('last_seen');
     const [showWizard, setShowWizard] = useState(false);
     const [expandedId, setExpandedId] = useState(null);
     const [expandedTab, setExpandedTab] = useState(accessMode ? 'access' : 'overview');
@@ -10861,7 +10876,7 @@ function NetworkPage({ sse, accessMode = false }) {
             setExpandedId(agent.agent_id);
             setExpandedTab(accessMode ? 'access' : 'overview');
             setEditing(false);
-            setEditName(agent.name);
+            setEditName(agentDisplayName(agent));
             setEditBio(agent.boot_bio || '');
             setEditRole(agent.role);
             setEditClearance(agent.clearance);
@@ -11012,13 +11027,13 @@ function NetworkPage({ sse, accessMode = false }) {
         if (eligible.length === 0) return;
         const ownership = eligible.map(f => {
             const owner = agents.find(a => a.agent_id === f.owner_id);
-            const ownerLabel = owner?.name || 'Unknown agent';
+            const ownerLabel = owner ? agentDisplayName(owner) : 'Unknown agent';
             const levelLabel = f.level === 3 ? 'Read + write + modify' : f.level === 2 ? 'Read + write' : f.level === 1 ? 'Read' : 'Remove access';
             const ancestor = f.owned_domain && f.owned_domain !== f.domain ? ` (owned through ${f.owned_domain})` : '';
             return `${f.domain} — ${levelLabel}\nOriginal owner: ${ownerLabel} (${f.owner_id})${ancestor}`;
         }).join('\n');
         const confirmed = await showConfirmation(
-            `Give ${agent.name} the selected access as genesis admin?\n\n${ownership}\n\nThis changes access only. Original ownership and memory authorship stay unchanged.`,
+            `Give ${agentDisplayName(agent)} the selected access as genesis admin?\n\n${ownership}\n\nThis changes access only. Original ownership and memory authorship stay unchanged.`,
             { title: 'Admin access override', confirmLabel: 'Override & assign' }
         );
         if (confirmed) await handleAccessSave(agent.agent_id, true);
@@ -11230,12 +11245,35 @@ function NetworkPage({ sse, accessMode = false }) {
     const resolveAgentName = (agentId) => {
         if (!agentId) return 'Unknown';
         const a = agents.find(a => a.agent_id === agentId);
-        return a ? a.name : agentId.slice(0, 16) + '...';
+        return a ? agentDisplayName(a) : agentId.slice(0, 16) + '...';
     };
     const govStatusBadge = (status) => {
         return html`<span class="gov-status-badge gov-status-${status}">${status.charAt(0).toUpperCase() + status.slice(1)}</span>`;
     };
     const pastProposals = govProposals.filter(p => p.status !== 'voting');
+
+    const normalizedAgentQuery = agentQuery.trim().toLowerCase();
+    const agentTimestamp = (agent, field) => {
+        const value = Date.parse(agent?.[field] || '');
+        return Number.isFinite(value) ? value : 0;
+    };
+    const visibleAgents = agents
+        .filter(agent => {
+            if (!normalizedAgentQuery) return true;
+            return [agentDisplayName(agent), agent?.registered_name, agent?.agent_id, agent?.provider]
+                .some(value => String(value || '').toLowerCase().includes(normalizedAgentQuery));
+        })
+        .slice()
+        .sort((left, right) => {
+            if (agentSort === 'name') {
+                return agentDisplayName(left).localeCompare(agentDisplayName(right), undefined, { sensitivity: 'base' })
+                    || String(left.agent_id || '').localeCompare(String(right.agent_id || ''));
+            }
+            const field = agentSort === 'last_committed' ? 'last_committed_memory_at' : 'last_seen';
+            return agentTimestamp(right, field) - agentTimestamp(left, field)
+                || agentDisplayName(left).localeCompare(agentDisplayName(right), undefined, { sensitivity: 'base' })
+                || String(left.agent_id || '').localeCompare(String(right.agent_id || ''));
+        });
     const canonicalValidatorPubkeyID = (raw) => {
         const value = String(raw || '').trim();
         if (/^[0-9a-fA-F]{64}$/.test(value)) return value.toLowerCase();
@@ -11254,7 +11292,7 @@ function NetworkPage({ sse, accessMode = false }) {
         );
         return {
             validatorID,
-            name: agent?.name || validatorID.slice(0, 16) + '...',
+            name: agent ? agentDisplayName(agent) : validatorID.slice(0, 16) + '...',
             role: agent?.role || 'validator',
             votingPower: validator.voting_power,
         };
@@ -11302,7 +11340,24 @@ function NetworkPage({ sse, accessMode = false }) {
             <div class="network-header">
                 ${accessMode
                     ? html`<div><h2>Access Controls <${HelpTip} text="Review and change each local agent's domain permissions, clearance, and visibility. Access grants are enforced on-chain." /><${PageHelp} section="network" label="Access controls guide" /></h2><div class="network-header-sub">Select an agent to manage its access · ${agents.length} agent${agents.length !== 1 ? 's' : ''} on this node</div></div>`
-                    : html`<div><h2>Agents <${HelpTip} text="Manage the agents on your own SAGE node. Each agent is a separate participant in BFT consensus with its own permissions. Click any agent to expand its details and access. (To connect your whole node to ANOTHER SAGE, use Federation.)" /><${PageHelp} section="network" label="Agents guide" /></h2><div class="network-header-sub">${agents.length} agent${agents.length !== 1 ? 's' : ''} on this node</div></div>`}
+                    : html`<div><h2>Agents <${HelpTip} text="Manage the agents on your own SAGE node. Each agent is a separate participant in BFT consensus with its own permissions. Click any agent to expand its details and access. (To connect your whole node to ANOTHER SAGE, use Federation.)" /><${PageHelp} section="network" label="Agents guide" /></h2><div class="network-header-sub">${visibleAgents.length === agents.length ? agents.length : `${visibleAgents.length} of ${agents.length}`} agent${agents.length !== 1 ? 's' : ''} on this node</div></div>`}
+            </div>
+
+            <div class="agent-directory-toolbar" role="search" aria-label="Find and sort agents">
+                <label class="agent-directory-search">
+                    <span class="sr-only">Search agents by name or ID</span>
+                    <input type="search" value=${agentQuery} placeholder="Search agents by name or ID"
+                        onInput=${event => setAgentQuery(event.target.value)} />
+                </label>
+                <label class="agent-directory-sort">
+                    <span>Sort by</span>
+                    <select value=${agentSort} onChange=${event => setAgentSort(event.target.value)}>
+                        <option value="last_seen">Recently seen</option>
+                        <option value="last_committed">Recent committed memory</option>
+                        <option value="name">Name A–Z</option>
+                    </select>
+                </label>
+                <span class="agent-directory-count">${visibleAgents.length} shown</span>
             </div>
 
             ${accessMode && html`<${AppV23AccessControl} />`}
@@ -11511,7 +11566,7 @@ function NetworkPage({ sse, accessMode = false }) {
                                     <select class="wizard-select" value=${govNewTarget} onChange=${e => setGovNewTarget(e.target.value)}>
                                         <option value="">Select agent...</option>
                                         ${agents.filter(a => a.status !== 'removed').map(a => html`
-                                            <option value=${a.agent_id}>${a.name} (${a.role})</option>
+                                            <option value=${a.agent_id}>${agentDisplayName(a)} (${a.role})</option>
                                         `)}
                                     </select>
                                 </div>
@@ -11600,7 +11655,7 @@ function NetworkPage({ sse, accessMode = false }) {
                     // Access Controls page. Historical localStorage groups stay
                     // only as explicit migration drafts and never shape this list.
                     const grouped = [];
-                    const ungrouped = agents;
+                    const ungrouped = visibleAgents;
                     const renderAgentRow = (agent) => {
                     const isExpanded = expandedId === agent.agent_id;
                     const isLastAdmin = agent.role === 'admin' && agents.filter(a => a.role === 'admin' && a.status !== 'removed').length <= 1;
@@ -11615,7 +11670,8 @@ function NetworkPage({ sse, accessMode = false }) {
                                 <div class="agent-row-identity">
                                     <div class="agent-avatar">${agent.avatar || '\u{1F916}'}</div>
                                     <div>
-                                        <div class="agent-name">${agent.name}</div>
+                                        <div class="agent-name" title=${agent.registered_name && agent.registered_name !== agentDisplayName(agent)
+                                            ? `Registered as ${agent.registered_name}` : agentDisplayName(agent)}>${agentDisplayName(agent)}</div>
                                         <div class="agent-id-short" title=${agent.agent_id}>ID ${String(agent.agent_id || '').slice(0, 8)}</div>
                                         <span class="agent-role-badge ${agent.role}">${agent.role}</span>
                                     </div>
@@ -11629,7 +11685,8 @@ function NetworkPage({ sse, accessMode = false }) {
                                     ${agent.on_chain_height > 0 ? html`<span class="on-chain-badge" title="Registered on-chain at block ${agent.on_chain_height}">On-Chain</span>` : ''}
                                     <span>${agent.memory_count || 0} memories</span>
                                     <span>Clearance: ${CLEARANCE_LABELS[agent.clearance] || 'Internal'}</span>
-                                    ${agent.last_seen ? html`<span>${timeAgo(agent.last_seen)}</span>` : ''}
+                                    ${agent.last_seen ? html`<span title=${`Last seen ${new Date(agent.last_seen).toLocaleString()}`}>Seen ${timeAgo(agent.last_seen)}</span>` : ''}
+                                    ${agent.last_committed_memory_at ? html`<span title=${`Last committed memory ${new Date(agent.last_committed_memory_at).toLocaleString()}`}>Memory ${timeAgo(agent.last_committed_memory_at)}</span>` : ''}
                                 </div>
                                 <svg class="agent-row-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                             </div>
@@ -11656,9 +11713,9 @@ function NetworkPage({ sse, accessMode = false }) {
                                             <div class="agent-info-block">
                                                 <span class="agent-info-label">Name</span>
                                                 ${editing ? html`<input class="wizard-input" value=${editName} onInput=${e => setEditName(e.target.value)} onClick=${e => e.stopPropagation()} />`
-                                                    : html`<span class="agent-info-value">${agent.name}</span>`}
+                                                    : html`<span class="agent-info-value">${agentDisplayName(agent)}</span>`}
                                             </div>
-                                            ${agent.registered_name && agent.registered_name !== agent.name ? html`<div class="agent-info-block">
+                                            ${agent.registered_name && agent.registered_name !== agentDisplayName(agent) ? html`<div class="agent-info-block">
                                                 <span class="agent-info-label">Registered As</span>
                                                 <span class="agent-info-value" style="color:var(--text-dim);font-style:italic;" title="Immutable on-chain identity from initial registration">${agent.registered_name}</span>
                                             </div>` : ''}
@@ -11779,7 +11836,7 @@ function NetworkPage({ sse, accessMode = false }) {
                                                     <div style="font-weight:700;color:var(--text);margin-bottom:7px;">Some access changes need attention</div>
                                                     ${accessFailures.map(f => {
                                                         const owner = agents.find(a => a.agent_id === f.owner_id);
-                                                        const ownerName = owner?.name || 'Unknown agent';
+                                                        const ownerName = owner ? agentDisplayName(owner) : 'Unknown agent';
                                                         const levelLabel = f.level === 3 ? 'Read + write + modify' : f.level === 2 ? 'Read + write' : f.level === 1 ? 'Read' : 'Remove access';
                                                         const reason = f.code === 'owner_key_unavailable' ? 'The owner key is not available here.'
                                                             : f.code === 'owner_access' ? 'This agent owns the domain; transfer ownership before removing its access.'
@@ -11897,6 +11954,9 @@ function NetworkPage({ sse, accessMode = false }) {
                             </div>
                         ` : ''}
                         ${ungrouped.map(renderAgentRow)}
+                        ${ungrouped.length === 0 && normalizedAgentQuery && html`
+                            <div class="agent-directory-empty">No agents match “${agentQuery.trim()}”. Try a friendly name, registered name, or agent ID.</div>
+                        `}
                     `;
                 })()}
 
@@ -11950,7 +12010,7 @@ function NetworkPage({ sse, accessMode = false }) {
                                     ${agents.filter(a => a.status !== 'removed').map(a => html`
                                         <button class="merge-target-btn" onClick=${() => handleMerge(mergeTarget.source, a.agent_id)} disabled=${merging}>
                                             <span>${a.avatar || '\u{1F916}'}</span>
-                                            <span>${a.name}</span>
+                                            <span>${agentDisplayName(a)}</span>
                                             <span class="agent-role-badge ${a.role}" style="margin-left:auto;">${a.role}</span>
                                         </button>
                                     `)}

@@ -16,6 +16,55 @@ import (
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
+type cometStatusTimeResult struct {
+	Result struct {
+		SyncInfo struct {
+			LatestBlockTime time.Time `json:"latest_block_time"`
+		} `json:"sync_info"`
+	} `json:"result"`
+}
+
+// latestConsensusTimeWeb reads the chain's most recently committed time. The
+// dashboard's app-v20 governance proof is checked against deterministic block
+// time, not the host wall clock; on a recovering or CPU-starved personal node
+// those clocks can differ by more than the strict five-minute proof window.
+func latestConsensusTimeWeb(cometRPC string) (time.Time, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(cometRPC, "/")+"/status", nil) // #nosec G107 -- internal CometBFT RPC
+	if err != nil {
+		return time.Time{}, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return time.Time{}, fmt.Errorf("comet status returned %s", resp.Status)
+	}
+	var result cometStatusTimeResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return time.Time{}, fmt.Errorf("decode comet status: %w", err)
+	}
+	if result.Result.SyncInfo.LatestBlockTime.IsZero() {
+		return time.Time{}, fmt.Errorf("comet status omitted latest block time")
+	}
+	return result.Result.SyncInfo.LatestBlockTime, nil
+}
+
+func (h *DashboardHandler) embedConsensusTimedGovernanceProof(ptx *tx.ParsedTx, operatorKey ed25519.PrivateKey, method, path string, body []byte) error {
+	proofTime := time.Now()
+	if h.ConsensusGovernanceClock {
+		consensusTime, err := latestConsensusTimeWeb(h.CometBFTRPC)
+		if err != nil {
+			return fmt.Errorf("read committed consensus time: %w", err)
+		}
+		proofTime = consensusTime
+	}
+	return embedDashboardGovernanceProofAt(ptx, operatorKey, method, path, body, proofTime)
+}
+
 // This file is the commit-confirmed signing/broadcast plumbing for the v11.3
 // RBAC reassign + access-control flow. The existing dashboard broadcast path
 // (broadcastTxSync) is fire-and-forget: it cannot confirm a tx executed or

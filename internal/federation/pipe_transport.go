@@ -169,8 +169,11 @@ func decodeStrictPipeJSON(body []byte, dst any) error {
 }
 
 func normalizedPipeTTL(minutes int) time.Duration {
-	if minutes <= 0 {
-		minutes = 60
+	if minutes == 0 {
+		return store.CanonicalMessageLifetime
+	}
+	if minutes < 0 {
+		minutes = 1440
 	}
 	if minutes > 1440 {
 		minutes = 1440

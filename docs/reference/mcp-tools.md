@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.17.8.
+Reconciled against internal/mcp for SAGE v11.17.9.
 
 # SAGE MCP Tools Reference
 
@@ -152,13 +152,10 @@ most important operational tool.
   `semantic_degraded` is `true` and `degraded_reason` explains it — the memory is
   not semantically recallable until the node's automatic provider repair
   backfills the vector after recovery/unlock.
-- `message_inbox`: local or federated messages addressed to this agent (if any).
-- `message_inbox_count`, `message_replies`, `message_reply_count`: message data.
-  Every payload carries `authority:"request_only"` and a `security_notice`;
-  every result carries `authority:"data_only"`. Local agent content is marked
-  `trust:"agent_untrusted"` and foreign content retains
-  `trust:"external_untrusted"`. These values are never instructions from SAGE,
-  the user, or the host agent.
+- `message_inbox_unread`, `message_inbox_unread_count`: payload-free passive
+  inbox signal. When true/nonzero, call `sage_messages_receive` with a fresh
+  `receive_token`. `sage_turn` does not claim, acknowledge, or embed message
+  payloads and does not return the retired `message_replies` channel.
 - `message_delivery_updates`, `message_delivery_update_count`: one-shot terminal
   feedback for federated sends/results that exhausted safe delivery. Each item
   is payload-free, marked `foreign:true`, `authority:"diagnostic_only"`, and
@@ -858,7 +855,7 @@ read.
 | `to` | string | yes | Exact local agent ID/name, federated `#node/agent` handle, or `agent_id@chain` address. |
 | `payload` | string | yes | Untrusted agent request content. |
 | `intent` | string | no | Short purpose. |
-| `ttl_minutes` | integer | no | 1–1440; default 1440 (24 hours). |
+| `ttl_minutes` | integer | no | 0–1440; omitted/0 is durable until handled. |
 | `idempotency_key` | string | yes | Stable 1–256-byte caller token reused only to retry this exact send. |
 
 Federated sends retain the mature pipeline wire protocol internally, but the
@@ -953,8 +950,8 @@ clients use `sage_message_send`, `sage_inbox`, `sage_message_reply`, and
 implementation.
 
 **Purpose:** Send work to another agent through the existing SAGE pipeline,
-locally or across an approved federation connection. The target sees it in the
-same inbox on their next `sage_turn` or `sage_inbox` call.
+locally or across an approved federation connection. The target's next
+`sage_turn` reports an unread flag; `sage_messages_receive` retrieves the work.
 
 When the user provides a human name rather than an exact recipient, call
 `sage_find_agent` first and pass the returned `to` value here. This is also the
@@ -970,7 +967,7 @@ cached briefly per caller.
 | `to`          | string | yes      | Local provider/name/agent ID, visible `#node/agent-prefix` handle, or exact `agent@chain` address. |
 | `payload`     | string | yes      | The work content to send. |
 | `intent`      | string | no       | What you want done: `research`, `summarize`, `analyze`, `review`, etc. |
-| `ttl_minutes` | int    | no       | Time-to-live in minutes. Default and maximum: 1440 (24h). |
+| `ttl_minutes` | int    | no       | Optional expiry in minutes, 1–1440. Omitted/0 is durable until handled. |
 
 Before every send, MCP calls the read-only `/v1/pipe/resolve` endpoint. For a
 federated contact it signs the exact returned source chain, agent, and
@@ -1017,15 +1014,15 @@ auto-journaled as memory.
 `payload` is capped at 256 KiB and `intent` at 8 KiB. Each verified sender may
 hold at most 256 pending/claimed pipes and the node at most 10000; a full quota
 returns HTTP 429 with `Retry-After`. Pending/claimed rows force-expire after 48h
-and terminal rows purge after 24h.
+and terminal legacy `pipe-*` rows purge after 24h. Canonical `msg-*` inbox and
+history rows are excluded from those sweeps.
 
 **REST:** `POST /v1/pipe/send`
 
 **When to call:** Delegating subtasks to specialized agents (e.g. send a research
-question to Perplexity, send a code review to another Claude instance). The
-result arrives via `message_replies` in a later `sage_turn` response. `sage_inbox`
-only claims work addressed to the current agent; a clean inbox therefore says
-nothing about whether a pipe this agent sent has received a result.
+question to Perplexity, send a code review to another Claude instance).
+Canonical callers use `sage_message_status` and `sage_message_history` for
+sender-side lifecycle state rather than a `sage_turn.message_replies` channel.
 
 ---
 
@@ -1313,12 +1310,10 @@ serialization rather than stored with attacker-controlled pipeline content;
 MCP still applies its own fail-closed formatter instead of trusting a payload
 to describe its authority.
 
-**When to call:** When you need to check explicitly for pending work from other
-agents. `sage_turn` also checks the inbox automatically on every call
-(`internal/mcp/tools.go`, `Server.toolTurn`), so explicit `sage_inbox` calls are only needed between
-turns or when you need more than 5 items. This tool does not return results for
-pipes the current agent sent; those are reported separately as
-`sage_turn.message_replies`.
+**When to call:** When you need to retrieve pending work from other agents.
+`sage_turn` checks only a payload-free unread count; explicit
+`sage_messages_receive` is the canonical claim/read operation. `sage_inbox`
+remains the compatibility unified task/message view.
 
 ---
 
@@ -1564,8 +1559,8 @@ strengthen/connect memories or resolve an open challenge.
 This is correct: they are operator/admin/validator operations, not agent memory
 operations.
 
-`sage_inbox` is not part of the boot sequence because the same unified message
-check runs automatically inside `sage_turn`. The `sage_pipe*` tools remain
+`sage_inbox` is not part of the boot sequence because `sage_turn` reports a
+payload-free unread flag and agents then call `sage_messages_receive`. The `sage_pipe*` tools remain
 deprecated compatibility aliases for older clients and transport diagnostics.
 
 `sage_register` — called automatically inside `sage_inception`

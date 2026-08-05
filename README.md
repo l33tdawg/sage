@@ -51,6 +51,33 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.17.9
+
+**CEREBRUM's agent and recovery surfaces now reflect the operator's model.**
+Friendly renamed-agent labels are used consistently, the Access Controls agent
+rail is wider, and the Agents directory is searchable by name or ID and sortable
+by recent presence, recent committed memory, or name. The busy agent directory
+now appears before the low-traffic governance controls.
+
+**Domain transfer recovery is ownership-safe and retry-safe.** The dashboard
+distinguishes immutable memory authorship from canonical domain ownership,
+excludes the actual current owner from transfer targets, and treats a replay of
+an already-committed transfer as success. Governance proof timestamps are bound
+to the latest committed CometBFT time, preventing false five-minute-ahead
+rejections on recovering or CPU-starved nodes.
+
+**Messages now behave like an inbox, not a short-lived pipe.** Omitted/zero TTL
+keeps local and federated work durable until handled, v11.17.8 unread rows are
+extended during upgrade, and canonical inbox/outbox history is no longer swept
+by the legacy 24/48-hour pipeline retention jobs. Callers can still request an
+explicit 1–1440 minute expiry.
+
+`sage_turn` now reports only `message_inbox_unread` and its count; it never
+claims or injects message payloads. Agents call `sage_messages_receive` to read
+the inbox and use status/history for replies and lifecycle evidence.
+
+Container: `ghcr.io/l33tdawg/sage:11.17.9`. SDK 11.17.9.
+
 ## What's New in v11.17.8
 
 **The v11.17 security backlog is cleared in code.** Pion DTLS and STUN are
@@ -59,7 +86,8 @@ result slices no longer use caller-derived allocation hints, app-v23 migration
 keys avoid length-arithmetic preallocation, and the CEREBRUM inline-script
 contract recognizes HTML tag case without a fragile sanitizer-style regexp.
 The roadmap, architecture, federation guide, onboarding guide, and Python SDK
-docs are reconciled to the canonical Messages API, 24-hour default TTL,
+docs were reconciled to the then-current canonical Messages API and 24-hour
+default TTL (superseded by v11.17.9 durable-until-handled delivery),
 deprecated hidden `sage_pipe*` aliases, app-v26 authority names, signed macOS
 in-place updater, and the remaining physical acceptance boundaries.
 
@@ -1230,7 +1258,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.8`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.9`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:

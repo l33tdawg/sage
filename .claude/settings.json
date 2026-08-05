@@ -91,7 +91,6 @@
   "permissions": {
     "allow": [
       "mcp__sage__sage_inception",
-      "mcp__sage__sage_red_pill",
       "mcp__sage__sage_turn",
       "mcp__sage__sage_remember",
       "mcp__sage__sage_recall",
@@ -102,7 +101,10 @@
       "mcp__sage__sage_task",
       "mcp__sage__sage_backlog",
       "mcp__sage__sage_register",
-      "mcp__sage__sage_timeline"
+      "mcp__sage__sage_timeline",
+      "mcp__sage__sage_reinstate",
+      "mcp__sage__sage_rename",
+      "mcp__sage__sage_red_pill"
     ]
   }
 }

@@ -770,10 +770,10 @@ clients.
 ### How It Works
 
 Messages provide structured asynchronous coordination without polluting the
-shared memory pool. New sends default to the maximum supported 24-hour TTL;
-callers may explicitly choose 1–1440 minutes. The current expiry-bound inbox is
-not permanent email storage. Pending/claimed rows also have a 48-hour stale-row
-backstop, and terminal rows are retained for 24 hours before cleanup.
+shared memory pool. New sends remain durable until handled by default; callers
+may explicitly choose 1–1440 minutes when they want expiry. Canonical `msg-*`
+history remains queryable, while deprecated `pipe-*` compatibility rows retain
+the 48-hour stale-row and 24-hour terminal cleanup policy.
 
 ### Message Lifecycle
 
@@ -794,11 +794,11 @@ governed memory; an agent must remember durable knowledge explicitly.
 
 ### TTL and Expiry
 
-- **Default TTL:** 1440 minutes (24 hours)
+- **Default TTL:** none; unread/unclaimed Messages remain durable until handled
 - **Maximum TTL:** 1440 minutes (24 hours)
-- Senders can explicitly choose 1–1440 minutes
+- Senders can explicitly choose 1–1440 minutes; `0`/omitted means durable
 - Receive-token replay metadata is retained for 48 hours and capped per agent
-- Expired rows leave the actionable inbox; retained history remains bounded by cleanup policy
+- Explicitly expired rows leave the actionable inbox; canonical history remains queryable
 
 ### REST Endpoints
 

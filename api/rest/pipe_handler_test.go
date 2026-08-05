@@ -708,6 +708,11 @@ func TestHandlePipeResult_ForeignWorkNeverAutoJournals(t *testing.T) {
 		FederationContactID: strings.Repeat("bb", 32), FederationContactRevision: strings.Repeat("cc", 32),
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}))
+
+	countBefore := httptest.NewRecorder()
+	pipeRouterAs(s, recipient).ServeHTTP(countBefore, httptest.NewRequest(http.MethodGet, "/v1/pipe/history/inbox?count_only=1", nil))
+	require.Equal(t, http.StatusOK, countBefore.Code, countBefore.Body.String())
+	require.JSONEq(t, `{"count":1,"unread":true}`, countBefore.Body.String())
 	require.NoError(t, memStore.ClaimPipeline(ctx, "pipe-imported", recipient))
 	s.SetFederation(&remotePipeResolver{fakeFederation: &fakeFederation{}})
 
@@ -990,6 +995,10 @@ func TestPipeHistoryKeepsClaimedAndCompletedMessagesVisibleToBothParties(t *test
 	claimRR := httptest.NewRecorder()
 	pipeRouterAs(s, recipient).ServeHTTP(claimRR, httptest.NewRequest(http.MethodGet, "/v1/pipe/inbox", nil))
 	require.Equal(t, http.StatusOK, claimRR.Code, claimRR.Body.String())
+	countAfter := httptest.NewRecorder()
+	pipeRouterAs(s, recipient).ServeHTTP(countAfter, httptest.NewRequest(http.MethodGet, "/v1/pipe/history/inbox?count_only=1", nil))
+	require.Equal(t, http.StatusOK, countAfter.Code, countAfter.Body.String())
+	require.JSONEq(t, `{"count":0,"unread":false}`, countAfter.Body.String())
 
 	historyAfterClaim := httptest.NewRecorder()
 	pipeRouterAs(s, recipient).ServeHTTP(historyAfterClaim, httptest.NewRequest(http.MethodGet, "/v1/pipe/history/inbox", nil))

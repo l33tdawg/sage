@@ -19,6 +19,11 @@ const (
 	MaxMessageTokenBytes             = 256
 	maxMessageReceiveBatchesPerAgent = 4096
 	messageReceiveBatchRetention     = 48 * time.Hour
+	// CanonicalMessageLifetime is a storage/transport sentinel for the public
+	// email-like default: unread and unclaimed Messages do not age out. Keeping
+	// a concrete far-future time preserves the existing signed wire shape and
+	// mixed-version database schema without treating zero time as already due.
+	CanonicalMessageLifetime = 100 * 365 * 24 * time.Hour
 )
 
 func (s *SQLiteStore) migrateMessages(ctx context.Context) error {
@@ -103,6 +108,14 @@ func (s *SQLiteStore) migrateMessages(ctx context.Context) error {
 	if _, err := s.writeExecContext(ctx, `INSERT OR IGNORE INTO message_fetch_receipts(message_id,receiver_agent_id)
 		SELECT message_id,receiver_agent_id FROM message_receive_batch_items`); err != nil {
 		return fmt.Errorf("backfill canonical message fetch evidence: %w", err)
+	}
+	// v11.17.8 stamped the old 24-hour pipeline TTL onto canonical msg-* rows.
+	// Extend still-live inbox/outbox items during upgrade so a recipient that
+	// was offline through the release does not lose unread work.
+	if _, err := s.writeExecContext(ctx, `UPDATE pipeline_messages
+		SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ',created_at,'+100 years')
+		WHERE pipe_id LIKE 'msg-%' AND status IN ('pending','claimed')`); err != nil {
+		return fmt.Errorf("extend canonical message inbox retention: %w", err)
 	}
 	return nil
 }

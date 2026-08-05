@@ -353,6 +353,42 @@ func TestReassignDomainOwnershipRejectsUnauthenticatedRequest(t *testing.T) {
 	assert.Zero(t, broadcasts.Load())
 }
 
+func TestReassignDomainOwnershipAlreadyOwnedIsIdempotent(t *testing.T) {
+	h, agentStore := newTestHandler(t)
+	badgerStore := newGrantTestBadger(t)
+	_, adminKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	_, validatorKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	_, targetKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	targetID := agentIDForKey(targetKey)
+	require.NoError(t, badgerStore.RegisterDomain("sage-development", targetID, "", 1))
+	require.NoError(t, agentStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: targetID, Name: "codex/sage", Role: "member", Status: "active",
+	}))
+	var broadcasts atomic.Int32
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		broadcasts.Add(1)
+		http.Error(w, "must not broadcast", http.StatusInternalServerError)
+	}))
+	t.Cleanup(rpc.Close)
+	h.BadgerStore = badgerStore
+	h.CometBFTRPC = rpc.URL
+	h.AdminSigningKey = adminKey
+	h.SigningKey = validatorKey
+
+	body := []byte(fmt.Sprintf(`{"source_agent_id":"historical-author","target_agent_id":%q,"domain":"sage-development"}`, targetID))
+	req := httptest.NewRequest(http.MethodPost, "/v1/dashboard/network/reassign-domain-ownership", bytes.NewReader(body))
+	markLocalDashboardRequest(h, req)
+	rec := httptest.NewRecorder()
+	h.handleReassignDomainOwnership(agentStore)(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"already_owned":true`)
+	assert.Zero(t, broadcasts.Load())
+}
+
 func TestReassignDomainOwnershipPostAppV20UsesChainBoundOperatorProof(t *testing.T) {
 	h, agentStore := newTestHandler(t)
 	badgerStore := newGrantTestBadger(t)

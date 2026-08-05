@@ -2,7 +2,7 @@
 
 Python client for the SAGE (Sovereign Agent Governed Experience) protocol -- a governed, verifiable institutional memory layer for multi-agent systems.
 
-**Requires Python 3.10+** | **SAGE v11.17.8 SDK** | **TLS, app-v26 explicit Access Group authority, app-v24 memory integrity, app-v25 immutable envelopes and historical continuity recovery, canonical local and federated Messages with read receipts, read-only federation, scoped governance, and per-record `classification` supported**
+**Requires Python 3.10+** | **SAGE v11.17.9 SDK** | **TLS, app-v26 explicit Access Group authority, app-v24 memory integrity, app-v25 immutable envelopes and historical continuity recovery, canonical local and federated Messages with read receipts, read-only federation, scoped governance, and per-record `classification` supported**
 
 ## Installation
 
@@ -351,7 +351,7 @@ msg = client.pipe_send(
     to_agent="target-agent-id",  # Route by agent ID
     # OR: to_provider="chatgpt",  # Route by provider name
     intent="analysis",           # Optional: message intent
-    ttl_minutes=1440,            # Optional: expiry (default/max: 1440 = 24h)
+    ttl_minutes=1440,            # Explicit legacy expiry (maximum: 1440 = 24h)
 )
 # Returns: PipeSendResponse(pipe_id, status, expires_at)
 
@@ -392,6 +392,8 @@ sent = client.message_send(
     intent="review",
     idempotency_key="incident-42-review-v1",
 )
+# Omitted/None ttl_minutes keeps the message durable until handled. Pass an
+# explicit value from 1 to 1440 only when the message should expire.
 
 # The token makes a lost HTTP response safe: an exact retry returns the same
 # ordered claimed batch rather than consuming later messages.
@@ -407,8 +409,9 @@ receipt = client.message_status(sent.message_id)
 print(receipt.transport_status, receipt.read_status, receipt.workflow_status)
 ```
 
-`idempotency_key` and `receive_token` are 1–256 bytes. `ttl_minutes` is strictly
-1–1440 (default 1440 / 24 hours). Receive-token replay metadata is retained for 48 hours and
+`idempotency_key` and `receive_token` are 1–256 bytes. Omitted/`None`/`0`
+`ttl_minutes` is durable until handled; explicit expiry is 1–1440 minutes.
+Receive-token replay metadata is retained for 48 hours and
 bounded to 4096 tokens per agent; a purged/incomplete exact batch fails instead
 of claiming newer messages.
 

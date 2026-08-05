@@ -56,21 +56,22 @@ func (h *DashboardHandler) handleAgentDomains(agentStore store.AgentStore) http.
 			return
 		}
 		type domainInfo struct {
-			Domain  string `json:"domain"`
-			IsOwner bool   `json:"is_owner"`
+			Domain       string `json:"domain"`
+			IsOwner      bool   `json:"is_owner"`
+			OwnerAgentID string `json:"owner_agent_id,omitempty"`
 		}
 		out := make([]domainInfo, 0, len(domains))
 		for _, d := range domains {
 			if isCerebrumInternalMemoryDomain(d) {
 				continue
 			}
-			isOwner := false
+			ownerID := ""
 			if h.BadgerStore != nil {
-				if owner, oErr := h.BadgerStore.GetDomainOwner(d); oErr == nil && owner == id {
-					isOwner = true
+				if owner, oErr := h.BadgerStore.GetDomainOwner(d); oErr == nil {
+					ownerID = owner
 				}
 			}
-			out = append(out, domainInfo{Domain: d, IsOwner: isOwner})
+			out = append(out, domainInfo{Domain: d, IsOwner: ownerID == id, OwnerAgentID: ownerID})
 		}
 		writeJSONResp(w, http.StatusOK, map[string]any{"agent_id": id, "domains": out})
 	}
@@ -552,7 +553,7 @@ func (h *DashboardHandler) cancelActiveProposalWithActor(
 			ProposalID:       proposalID,
 		})
 		if err != nil ||
-			embedDashboardGovernanceProof(cancelTx, operatorKey, http.MethodPost, "/v1/governance/cancel", proofBody) != nil {
+			h.embedConsensusTimedGovernanceProof(cancelTx, operatorKey, http.MethodPost, "/v1/governance/cancel", proofBody) != nil {
 			return
 		}
 	}
@@ -661,6 +662,24 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 				writeError(w, http.StatusBadRequest, "domain not found on-chain: "+req.Domain)
 				return
 			}
+			// A retry after a committed transfer is success. SourceAgentID can be
+			// stale UI state (or immutable authorship), so it is never allowed to
+			// turn an already-completed handover into a misleading failure.
+			if owner == req.TargetAgentID {
+				if req.SourceAgentID != "" && req.SourceAgentID != req.TargetAgentID {
+					h.mirrorDomainAccessSet(r.Context(), agentStore, req.SourceAgentID, req.Domain, false)
+				}
+				h.mirrorDomainAccessSet(r.Context(), agentStore, req.TargetAgentID, req.Domain, true)
+				writeJSONResp(w, http.StatusOK, map[string]any{
+					"status":        "ok",
+					"already_owned": true,
+					"source":        owner,
+					"target":        req.TargetAgentID,
+					"domain":        req.Domain,
+					"message":       fmt.Sprintf("Domain %q is already owned by %s.", req.Domain, shortID(req.TargetAgentID)),
+				})
+				return
+			}
 			if req.SourceAgentID != "" && req.SourceAgentID != owner {
 				writeAppV23AccessError(w, http.StatusConflict, "owner_changed",
 					"domain ownership changed after this screen loaded; refresh and review the current owner before transferring")
@@ -750,7 +769,7 @@ func (h *DashboardHandler) handleReassignDomainOwnership(agentStore store.AgentS
 				fail(http.StatusInternalServerError, "propose", "encode governance authorization: "+proofBodyErr.Error())
 				return
 			}
-			if proofErr := embedDashboardGovernanceProof(
+			if proofErr := h.embedConsensusTimedGovernanceProof(
 				proposeTx,
 				adminKey,
 				http.MethodPost,

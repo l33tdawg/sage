@@ -3080,9 +3080,8 @@ func (s *PostgresStore) RunInAgentContactTx(ctx context.Context, fn func(tx Offc
 // --- AgentStore (mirrors SQLiteStore against the agents table) ---
 
 // agentColumns is the SELECT projection shared by ListAgents / GetAgent /
-// GetAgentByName. memory_count is derived live from the memories table (cast to
-// int4 to scan into AgentEntry.MemoryCount). Keep the order in lockstep with
-// scanAgent.
+// GetAgentByName. Memory activity is derived live from the memories table.
+// Keep the order in lockstep with scanAgent.
 const agentColumns = `
 	a.agent_id, a.name, a.registered_name, a.role, a.avatar, a.boot_bio,
 	a.validator_pubkey, a.node_id, a.p2p_address, a.status, a.clearance,
@@ -3090,6 +3089,7 @@ const agentColumns = `
 	a.first_seen, a.last_seen, a.created_at, a.removed_at,
 	a.on_chain_height, a.visible_agents, a.capabilities, a.provider,
 	COALESCE((SELECT COUNT(*) FROM memories WHERE submitting_agent = a.agent_id), 0)::int,
+	(SELECT MAX(COALESCE(committed_at, created_at)) FROM memories WHERE submitting_agent = a.agent_id AND status = 'committed'),
 	a.claim_token, a.claim_expires_at`
 
 const postgresFindAgentsByNameSQL = `
@@ -3122,7 +3122,7 @@ func scanAgent(row interface{ Scan(...any) error }) (*AgentEntry, error) {
 		&a.ValidatorPubkey, &a.NodeID, &a.P2PAddress, &a.Status, &a.Clearance,
 		&a.OrgID, &a.DeptID, &a.DomainAccess, &a.BundlePath,
 		&a.FirstSeen, &a.LastSeen, &a.CreatedAt, &a.RemovedAt,
-		&a.OnChainHeight, &a.VisibleAgents, &capabilities, &a.Provider, &a.MemoryCount,
+		&a.OnChainHeight, &a.VisibleAgents, &capabilities, &a.Provider, &a.MemoryCount, &a.LastCommittedMemoryAt,
 		&a.ClaimToken, &a.ClaimExpiresAt,
 	); err != nil {
 		return nil, err

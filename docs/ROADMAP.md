@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-08):** **v11.17.8 is the current release line.** Governed app-v26 adds explicit per-group `read`, `read_write`, and `read_write_modify` authority without weakening owner control or federated read-only isolation. App-v24 binds exact memory hashes; app-v25 preserves immutable envelopes and repairs historical continuity; CEREBRUM Root can now inspect and resolve the remaining safe-to-assign or deprecate-only historical records. Canonical Messages add idempotent local and federated delivery, exact receive replay, receiver-local linked consent, recipient read evidence, sender status, reply/history persistence, and metadata-only HTTP SSE wake-up hints. CEREBRUM Root remains the hidden singleton ultimate authority, while linked agents remain read-only guests and never become local group members. Existing chains upgrade in place without rewriting memories, historical authors, domains, or prior blocks. The complete CI/security/fault matrix remains a mandatory publication invariant, including app-v23 through app-v26 replay and state-sync checks, and the native-shell productization bridge now spans v11.11–v11.17.
+**Status (2026-08):** **v11.17.9 is the current release line.** Governed app-v26 adds explicit per-group `read`, `read_write`, and `read_write_modify` authority without weakening owner control or federated read-only isolation. App-v24 binds exact memory hashes; app-v25 preserves immutable envelopes and repairs historical continuity; CEREBRUM Root can now inspect and resolve the remaining safe-to-assign or deprecate-only historical records. Canonical Messages add idempotent local and federated delivery, exact receive replay, receiver-local linked consent, recipient read evidence, sender status, reply/history persistence, and metadata-only HTTP SSE wake-up hints. CEREBRUM Root remains the hidden singleton ultimate authority, while linked agents remain read-only guests and never become local group members. Existing chains upgrade in place without rewriting memories, historical authors, domains, or prior blocks. The complete CI/security/fault matrix remains a mandatory publication invariant, including app-v23 through app-v26 replay and state-sync checks, and the native-shell productization bridge now spans v11.11–v11.17.
 
 **Hard constraint driving the whole plan:** no chain reset, no operator-typed commands. Existing chains must upgrade in place across all future releases.
 
@@ -9,13 +9,18 @@
 The 11.17 line has shipped the app-v23 through app-v26 governed upgrade path,
 historical-memory recovery controls, responsive Access Controls, authenticated
 Consensus loading, mutable agent display names, canonical Messages, deprecated
-hidden `sage_pipe*` compatibility aliases, 24-hour default message TTL, signed
+hidden `sage_pipe*` compatibility aliases, durable-until-handled message retention, signed
 in-place macOS update support, roaming Direct/relay federation routes, and a
 Docker lane covering LAN, isolated-network/relay, address churn, restart, and
 offline inbox recovery. v11.17.8 additionally clears the tracked DTLS/STUN and
 CodeQL security backlog without dismissing genuine alerts.
 
-The following acceptance and follow-up boundaries remain open after the 11.17.8
+v11.17.9 completes the agent-directory UX pass (friendly names, wider Access
+Controls rail, search and activity/name sorting, and agent-first page order) and
+hardens recovery transfers against stale authorship hints, already-completed
+retries, and host-versus-consensus clock skew.
+
+The following acceptance and follow-up boundaries remain open after the 11.17.9
 code merge; they are not implied complete by Docker or CI evidence:
 
 - [#137](https://github.com/l33tdawg/sage/issues/137): repeat the complete MBP ↔
@@ -29,9 +34,7 @@ code merge; they are not implied complete by Docker or CI evidence:
   packaging retry/cache and Windows normal-close lifecycle evidence.
 - [#117](https://github.com/l33tdawg/sage/issues/117): benchmark and improve the
   CPU-only embedding path.
-- Complete product acceptance for the signed macOS in-place updater, make
-  unread/unclaimed Messages email-like rather than expiry-bound, add a bounded
-  or metadata-only `sage_turn` inbox mode for small models, verify unscoped
+- Complete product acceptance for the signed macOS in-place updater, verify unscoped
   `sage_list`/bounded-domain projection semantics, and reproduce or close the
   historical broad authorization-scan budget report.
 
@@ -80,7 +83,7 @@ v11.5 is the anti-DoS and memory-integrity release. Two workstreams landed: pipe
 
 ### Pipe anti-DoS hardening
 
-The agent-to-agent pipe tables now carry anti-DoS guards on every write path (REST, MCP over REST, and the dashboard operator send that hits the store directly). **Size caps** at the store chokepoint: 256 KiB payload/result, 8 KiB intent, with matching fast-fail **413** checks in the handlers (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:513-515`). **Quotas**: 256 open pipes per verified agent identity, 10000 node-wide, an index-backed COUNT before insert, rejected as **429 with `Retry-After`** (mirrors the mempool-full recipe) and keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`, `store.go:518-521`). **Retention backstop**: pending or claimed rows older than 48h are force-expired regardless of stamped TTL, wired into the existing 5-minute sweep plus a boot one-shot; terminal rows still purge 24h after creation, and the dashboard TTL input is clamped to 24h.
+The agent-to-agent pipe tables now carry anti-DoS guards on every write path (REST, MCP over REST, and the dashboard operator send that hits the store directly). **Size caps** at the store chokepoint: 256 KiB payload/result, 8 KiB intent, with matching fast-fail **413** checks in the handlers (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:513-515`). **Quotas**: 256 open pipes per verified agent identity, 10000 node-wide, an index-backed COUNT before insert, rejected as **429 with `Retry-After`** (mirrors the mempool-full recipe) and keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`, `store.go:518-521`). **Retention backstop:** deprecated `pipe-*` rows still force-expire after 48h and purge terminal state after 24h; v11.17.9 excludes canonical `msg-*` inbox/history rows so omitted/zero TTL is durable until handled.
 
 ### Reinstate verb + quorum-scaled deprecation
 

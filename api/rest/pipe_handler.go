@@ -588,7 +588,12 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ttl := req.TTLMinutes
-	if ttl <= 0 {
+	canonicalMessage := req.IdempotencyKey != ""
+	if ttl < 0 {
+		writeProblem(w, http.StatusBadRequest, "Invalid message lifetime", "ttl_minutes must be 0 (durable) or between 1 and 1440")
+		return
+	}
+	if ttl == 0 && !canonicalMessage {
 		ttl = 1440
 	}
 	if ttl > 1440 {
@@ -628,6 +633,10 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 		}
 		now = time.Unix(proof.Timestamp, 0).UTC()
 	}
+	lifetime := time.Duration(ttl) * time.Minute
+	if canonicalMessage && ttl == 0 {
+		lifetime = store.CanonicalMessageLifetime
+	}
 	msg := &store.PipelineMessage{
 		PipeID:       generatePipeID(),
 		FromAgent:    agentID,
@@ -638,7 +647,7 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 		Payload:      req.Payload,
 		Status:       "pending",
 		CreatedAt:    now,
-		ExpiresAt:    now.Add(time.Duration(ttl) * time.Minute),
+		ExpiresAt:    now.Add(lifetime),
 	}
 	if remoteTarget != nil {
 		msg.DestinationChainID = remoteTarget.ChainID
@@ -880,6 +889,20 @@ func (s *Server) handlePipeInboxHistory(w http.ResponseWriter, r *http.Request) 
 	pipeStore, ok := s.store.(store.PipelineStore)
 	if !ok {
 		writeProblem(w, http.StatusInternalServerError, "Pipeline not available", "store does not support pipeline operations")
+		return
+	}
+	if r.URL.Query().Get("count_only") == "1" {
+		counter, counterOK := s.store.(store.PipelineInboxCounter)
+		if !counterOK {
+			writeProblem(w, http.StatusNotImplemented, "Inbox count unavailable", "store does not support passive inbox counts")
+			return
+		}
+		count, countErr := counter.CountPendingInbox(r.Context(), agentID, provider)
+		if countErr != nil {
+			writeProblem(w, http.StatusInternalServerError, "Inbox count failed", countErr.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"count": count, "unread": count > 0})
 		return
 	}
 	items, err := pipeStore.GetInboxHistory(r.Context(), agentID, provider, pipeHistoryLimit(r))

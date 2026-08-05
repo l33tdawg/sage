@@ -95,22 +95,25 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 	if sender, senderErr := s.agentStore.GetAgent(r.Context(), senderID); senderErr == nil && sender != nil {
 		fromProvider = sender.Provider
 	}
-	// Agent messages are asynchronous inbox work, so the default must tolerate
-	// recipients that are offline for part of a day. Callers can still request
-	// a shorter bounded lifetime explicitly.
-	ttl := 1440
+	// Canonical Messages are email-like by default: an offline recipient does
+	// not lose unread work. A caller may still opt into a bounded TTL.
+	ttl := 0
 	if req.TTLMinutes != nil {
 		ttl = *req.TTLMinutes
 	}
-	if ttl < 1 || ttl > 1440 {
-		writeProblem(w, http.StatusBadRequest, "Invalid message TTL", "ttl_minutes must be between 1 and 1440")
+	if ttl < 0 || ttl > 1440 {
+		writeProblem(w, http.StatusBadRequest, "Invalid message TTL", "ttl_minutes must be 0 (durable) or between 1 and 1440")
 		return
 	}
 	now := time.Now().UTC()
+	lifetime := store.CanonicalMessageLifetime
+	if ttl > 0 {
+		lifetime = time.Duration(ttl) * time.Minute
+	}
 	msg, replayed, err := messageStore.SendLocalMessage(r.Context(), req.IdempotencyKey, &store.PipelineMessage{
 		PipeID: generatePipeID(), FromAgent: senderID, FromProvider: fromProvider,
 		ToAgent: req.ToAgent, Intent: req.Intent, Payload: req.Payload,
-		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Duration(ttl) * time.Minute),
+		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(lifetime),
 	})
 	if err != nil {
 		switch {
@@ -140,10 +143,15 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 			})
 		}()
 	}
-	writeJSON(w, code, map[string]any{
+	response := map[string]any{
 		"message_id": msg.PipeID, "status": msg.Status,
-		"expires_at": msg.ExpiresAt.Format(time.RFC3339), "idempotent_replay": replayed,
-	})
+		"retention": "durable_until_handled", "idempotent_replay": replayed,
+	}
+	if ttl > 0 {
+		response["expires_at"] = msg.ExpiresAt.Format(time.RFC3339)
+		delete(response, "retention")
+	}
+	writeJSON(w, code, response)
 }
 
 func (s *Server) handleMessagesReceive(w http.ResponseWriter, r *http.Request) {

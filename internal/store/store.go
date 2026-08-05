@@ -613,32 +613,33 @@ type DeptMemberEntry struct {
 
 // AgentEntry represents a network agent (validator/peer node).
 type AgentEntry struct {
-	AgentID         string            `json:"agent_id"`
-	Name            string            `json:"name"`
-	RegisteredName  string            `json:"registered_name,omitempty"` // Immutable name from initial registration
-	Role            string            `json:"role"`
-	Avatar          string            `json:"avatar,omitempty"`
-	BootBio         string            `json:"boot_bio,omitempty"`
-	ValidatorPubkey string            `json:"validator_pubkey,omitempty"`
-	NodeID          string            `json:"node_id,omitempty"`
-	P2PAddress      string            `json:"p2p_address,omitempty"`
-	Status          string            `json:"status"`
-	Clearance       int               `json:"clearance"`
-	OrgID           string            `json:"org_id,omitempty"`
-	DeptID          string            `json:"dept_id,omitempty"`
-	DomainAccess    string            `json:"domain_access,omitempty"`
-	BundlePath      string            `json:"bundle_path,omitempty"`
-	FirstSeen       *time.Time        `json:"first_seen,omitempty"`
-	LastSeen        *time.Time        `json:"last_seen,omitempty"`
-	CreatedAt       time.Time         `json:"created_at"`
-	RemovedAt       *time.Time        `json:"removed_at,omitempty"`
-	OnChainHeight   int64             `json:"on_chain_height,omitempty"` // Block height where registered (0 = legacy)
-	VisibleAgents   string            `json:"visible_agents,omitempty"`  // JSON array of agent IDs ("*" = all)
-	Capabilities    AgentCapabilities `json:"capabilities,omitempty"`    // On-chain app-v22 capability mask
-	Provider        string            `json:"provider,omitempty"`        // "claude-code", "chatgpt", etc.
-	MemoryCount     int               `json:"memory_count,omitempty"`
-	ClaimToken      string            `json:"claim_token,omitempty"`      // One-time token for CLI agent install
-	ClaimExpiresAt  *time.Time        `json:"claim_expires_at,omitempty"` // When the claim token expires
+	AgentID               string            `json:"agent_id"`
+	Name                  string            `json:"name"`
+	RegisteredName        string            `json:"registered_name,omitempty"` // Immutable name from initial registration
+	Role                  string            `json:"role"`
+	Avatar                string            `json:"avatar,omitempty"`
+	BootBio               string            `json:"boot_bio,omitempty"`
+	ValidatorPubkey       string            `json:"validator_pubkey,omitempty"`
+	NodeID                string            `json:"node_id,omitempty"`
+	P2PAddress            string            `json:"p2p_address,omitempty"`
+	Status                string            `json:"status"`
+	Clearance             int               `json:"clearance"`
+	OrgID                 string            `json:"org_id,omitempty"`
+	DeptID                string            `json:"dept_id,omitempty"`
+	DomainAccess          string            `json:"domain_access,omitempty"`
+	BundlePath            string            `json:"bundle_path,omitempty"`
+	FirstSeen             *time.Time        `json:"first_seen,omitempty"`
+	LastSeen              *time.Time        `json:"last_seen,omitempty"`
+	CreatedAt             time.Time         `json:"created_at"`
+	RemovedAt             *time.Time        `json:"removed_at,omitempty"`
+	OnChainHeight         int64             `json:"on_chain_height,omitempty"` // Block height where registered (0 = legacy)
+	VisibleAgents         string            `json:"visible_agents,omitempty"`  // JSON array of agent IDs ("*" = all)
+	Capabilities          AgentCapabilities `json:"capabilities,omitempty"`    // On-chain app-v22 capability mask
+	Provider              string            `json:"provider,omitempty"`        // "claude-code", "chatgpt", etc.
+	MemoryCount           int               `json:"memory_count,omitempty"`
+	LastCommittedMemoryAt *time.Time        `json:"last_committed_memory_at,omitempty"`
+	ClaimToken            string            `json:"claim_token,omitempty"`      // One-time token for CLI agent install
+	ClaimExpiresAt        *time.Time        `json:"claim_expires_at,omitempty"` // When the claim token expires
 }
 
 const (
@@ -850,6 +851,12 @@ type PipelineStore interface {
 	// never-claimed pipe even if it carried an oversized expires_at.
 	ExpireStalePipelines(ctx context.Context, olderThan time.Time) (int, error)
 	PurgePipelines(ctx context.Context, olderThan time.Time) (int, error)
+}
+
+// PipelineInboxCounter is the passive, payload-free probe used by sage_turn.
+// It does not claim, acknowledge, decrypt, or return message content.
+type PipelineInboxCounter interface {
+	CountPendingInbox(ctx context.Context, agentID, provider string) (int, error)
 }
 
 // MessageStatus is the payload-free sender-only projection used by the

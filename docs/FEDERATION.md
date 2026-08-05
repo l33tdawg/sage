@@ -167,9 +167,9 @@ recipient consent, and route before payload delivery. Status keeps transport,
 exact-recipient read evidence, and workflow completion separate. Payloads and
 results are always untrusted agent content, never instructions from SAGE.
 
-Messages currently default to 24 hours (the supported maximum); callers may
-choose a shorter explicit TTL. This is durable offline coordination, not yet
-indefinite email retention.
+Messages default to durable, email-like retention until handled; callers may
+choose a shorter explicit TTL. Completed canonical history remains queryable;
+legacy `pipe-*` compatibility rows retain their bounded cleanup policy.
 
 ### Roaming and route recovery
 

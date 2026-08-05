@@ -535,9 +535,39 @@ func TestMessageTerminalAndReadTransitionsOwnTheirRetentionWindows(t *testing.T)
 	require.NoError(t, err)
 	purged, err = s.PurgePipelines(ctx, cutoff)
 	require.NoError(t, err)
-	require.Equal(t, 1, purged)
+	require.Zero(t, purged, "canonical message history is durable")
 	_, err = s.GetMessageStatusForSender(ctx, "alice", "msg-retention")
-	require.ErrorIs(t, err, ErrMessageNotFound)
+	require.NoError(t, err)
+}
+
+func TestCanonicalMessageUpgradeExtendsUnreadAndSkipsLegacyExpirySweep(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "messages-upgrade.db")
+	now := time.Now().UTC().Truncate(time.Millisecond)
+
+	before, err := NewSQLiteStore(ctx, path)
+	require.NoError(t, err)
+	msg := testLocalMessage("msg-v11178-unread", "alice", "bob", "survive the upgrade")
+	msg.CreatedAt = now.Add(-24 * time.Hour)
+	msg.ExpiresAt = now.Add(time.Hour)
+	_, _, err = before.SendLocalMessage(ctx, "upgrade-send", msg)
+	require.NoError(t, err)
+	require.NoError(t, before.Close())
+
+	after, err := NewSQLiteStore(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, after.Close()) })
+	upgraded, err := after.GetPipeline(ctx, "msg-v11178-unread")
+	require.NoError(t, err)
+	require.True(t, upgraded.ExpiresAt.After(now.Add(99*365*24*time.Hour)),
+		"an unread v11.17.8 canonical message must become durable on upgrade")
+
+	expired, err := after.ExpireStalePipelines(ctx, now.Add(48*time.Hour))
+	require.NoError(t, err)
+	require.Zero(t, expired, "legacy expiry sweeps must not expire canonical Messages")
+	stillPending, err := after.GetPipeline(ctx, "msg-v11178-unread")
+	require.NoError(t, err)
+	require.Equal(t, "pending", stillPending.Status)
 }
 
 func TestMessageReplyAndReadRaceConvergesOnOneReceipt(t *testing.T) {

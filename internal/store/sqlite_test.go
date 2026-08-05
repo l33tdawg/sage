@@ -1010,6 +1010,41 @@ func TestListAgents(t *testing.T) {
 	assert.NotNil(t, removed.RemovedAt)
 }
 
+func TestAgentReadsExposeLatestCommittedMemoryActivity(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	agent := testAgent("agent-activity", "Activity Agent", "member")
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	older := "2026-08-03T10:00:00Z"
+	latest := "2026-08-05T11:30:00Z"
+	for _, row := range []struct {
+		id, status, createdAt, committedAt string
+	}{
+		{id: "committed-old", status: "committed", createdAt: older, committedAt: older},
+		{id: "committed-latest", status: "committed", createdAt: older, committedAt: latest},
+		{id: "proposed-newer", status: "proposed", createdAt: "2026-08-05T12:00:00Z"},
+	} {
+		_, err := s.conn.ExecContext(ctx, `
+			INSERT INTO memories (memory_id, submitting_agent, content, content_hash, memory_type, domain_tag,
+				confidence_score, status, created_at, committed_at)
+			VALUES (?, ?, ?, ?, 'fact', 'agent-activity', 1, ?, ?, NULLIF(?, ''))`,
+			row.id, agent.AgentID, row.id, []byte(row.id), row.status, row.createdAt, row.committedAt)
+		require.NoError(t, err)
+	}
+
+	got, err := s.GetAgent(ctx, agent.AgentID)
+	require.NoError(t, err)
+	require.NotNil(t, got.LastCommittedMemoryAt)
+	assert.Equal(t, latest, got.LastCommittedMemoryAt.UTC().Format(time.RFC3339))
+
+	agents, err := s.ListAgents(ctx)
+	require.NoError(t, err)
+	require.Len(t, agents, 1)
+	require.NotNil(t, agents[0].LastCommittedMemoryAt)
+	assert.Equal(t, latest, agents[0].LastCommittedMemoryAt.UTC().Format(time.RFC3339))
+}
+
 func TestSQLiteAgentCapabilitiesRoundTripCreateGetListAndUpdate(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

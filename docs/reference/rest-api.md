@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.17.8. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.17.9. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -1212,7 +1212,7 @@ Execute a domain ownership transfer that was authorized by an accepted governanc
 
 **Error behavior:** Unlike other endpoints, FinalizeBlock rejection messages are surfaced verbatim (not sanitized) so operators can diagnose `proposal not found`, `body mismatch`, `already consumed`, etc. (`domain_reassign_handler.go:162-195`)
 
-**CEREBRUM orchestration (v11.3; app-v26 CAS):** The dashboard drives this whole agent-to-agent transfer from the Search page via `POST /v1/dashboard/network/reassign-domain-ownership`, commit-confirmed in strict order: `gov_propose(domain_reassign)` -> the sole validator's accept vote drives the proposal to `Executed` in-band -> this `DomainReassign` atomically flips the owner, records ownership history, purges unrelated grants, applies any shared marker, and consumes the proposal. The new owner's access follows directly from canonical ownership, so no target-key lookup or self-grant is required. At app-v26 the dashboard reads the canonical current owner, includes it as `expected_owner_id` in both the approved proposal payload and execution transaction, and consensus compares it immediately before transfer. A concurrent handover therefore fails instead of applying a stale operator confirmation. The optional trailing wire field is admitted only from H+1; activation height H retains the historical encoding. It requires a single-validator node; a multi-validator chain returns HTTP 409 because the other validators must vote on the proposal. This is off-consensus orchestration only - each underlying step is the same on-chain tx documented here, and memory authorship (`submitting_agent`) is never rewritten (`web/reassign_handler.go`; `internal/abci/app.go`).
+**CEREBRUM orchestration (v11.3; app-v26 CAS; v11.17.9 safe retry):** The dashboard drives this whole agent-to-agent transfer from the Search page via `POST /v1/dashboard/network/reassign-domain-ownership`, commit-confirmed in strict order: `gov_propose(domain_reassign)` -> the sole validator's accept vote drives the proposal to `Executed` in-band -> this `DomainReassign` atomically flips the owner, records ownership history, purges unrelated grants, applies any shared marker, and consumes the proposal. The new owner's access follows directly from canonical ownership, so no target-key lookup or self-grant is required. At app-v26 the dashboard reads the canonical current owner, includes it as `expected_owner_id` in both the approved proposal payload and execution transaction, and consensus compares it immediately before transfer. A concurrent handover therefore fails instead of applying a stale operator confirmation. In v11.17.9 the dashboard distinguishes immutable memory authorship from canonical ownership, resolves current ownership from BadgerDB, and returns `{status:"ok", already_owned:true}` when a retry targets the owner that already controls the domain. Internally generated app-v20 governance proofs use the latest committed CometBFT time rather than host wall time, avoiding false five-minute-ahead rejections during recovery. The optional trailing wire field is admitted only from H+1; activation height H retains the historical encoding. It requires a single-validator node; a multi-validator chain returns HTTP 409 because the other validators must vote on the proposal. This is off-consensus orchestration only - each underlying step is the same on-chain tx documented here, and memory authorship (`submitting_agent`) is never rewritten (`web/reassign_handler.go`; `web/rbac_signing.go`; `internal/abci/app.go`).
 
 ---
 
@@ -2013,7 +2013,7 @@ principal.
 
 | Route | Contract |
 |---|---|
-| `POST /v1/messages` | Exact-local-agent send. Requires `to_agent`, `payload`, and a 1–256-byte caller-scoped `idempotency_key`; optional `intent` and strict `ttl_minutes` 1–1440 (default 1440 / 24 hours). Exact retry returns the original `message_id`; same key/different request is HTTP 409. |
+| `POST /v1/messages` | Exact-local-agent send. Requires `to_agent`, `payload`, and a 1–256-byte caller-scoped `idempotency_key`; optional `intent` and `ttl_minutes` 0–1440. Omitted/0 is durable until handled; 1–1440 requests explicit expiry. Exact retry returns the original `message_id`; same key/different request is HTTP 409. |
 | `POST /v1/messages/receive` | Requires a 1–256-byte `receive_token`; optional limit 1–20. Claims and persists one exact ordered batch. Same caller/token/limit replays that batch after a lost response; a different limit is HTTP 409. Replay metadata is retained for 48 hours and capped at 4096 tokens per agent: capacity returns HTTP 429, while a purged/incomplete exact batch returns HTTP 410 instead of claiming later work. |
 | `POST /v1/messages/{message_id}/reply` | Exact fetched recipient only. Same result is idempotent; different second result is HTTP 409. Reply and local exact-read evidence commit atomically. |
 | `PUT /v1/messages/{message_id}/read` | Fresh nonce-bound exact-recipient signature. The message must already have been returned to that caller by canonical receive. Same acknowledgement is idempotent. |
@@ -2089,7 +2089,7 @@ Send a pipeline message to another agent or provider.
 | `destination_chain_id` | string | no | For a federated send, the exact chain returned by `/v1/pipe/resolve`; requires exact `to_agent` and empty `to_provider` |
 | `intent` | string | no | Human description of the work |
 | `payload` | string | yes | Arbitrary content |
-| `ttl_minutes` | int | no | 1–1440; defaults to 1440 (24 hours) |
+| `ttl_minutes` | int | no | 0–1440; omitted/0 is durable until handled; 1–1440 requests explicit expiry |
 
 For a local send, the target must be registered here. For a federated send,
 call `/v1/pipe/resolve` first and sign its exact `source_chain_id`, `to_agent`,
@@ -2117,7 +2117,7 @@ Federated admission additionally caps one authenticated source chain at 1024
 open imported rows (`MaxOpenPipesPerPeer`, `internal/store/store.go:539-541`;
 `internal/store/sqlite.go:4798-4821`).
 
-Stale pipes are reaped independently: pending or claimed rows older than 48h are force-expired regardless of their stamped TTL (`ExpireStalePipelines`, wired into the 5-minute sweep plus a boot one-shot), and terminal rows purge 24h after creation.
+Deprecated `pipe-*` rows are reaped independently: pending or claimed rows older than 48h are force-expired regardless of their stamped TTL (`ExpireStalePipelines`, wired into the 5-minute sweep plus a boot one-shot), and terminal rows purge 24h after creation. Canonical `msg-*` rows are excluded: omitted/zero TTL remains actionable until handled and canonical history stays queryable.
 
 ---
 

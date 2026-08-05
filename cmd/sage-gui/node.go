@@ -1426,6 +1426,7 @@ func runServe(startupProof string) (rerr error) {
 	// Wire CometBFT consensus for dashboard agent operations (Step 7).
 	// Agent create/update will be broadcast on-chain in addition to direct SQLite writes.
 	dashboard.CometBFTRPC = cometRPC
+	dashboard.ConsensusGovernanceClock = true
 	dashboard.RESTAddr = cfg.RESTAddr // surfaced read-only in Settings > Connection
 	// JOIN codes are signed over the exact advertised endpoints. Surface the
 	// same effective address used by the listener so a custom port cannot be

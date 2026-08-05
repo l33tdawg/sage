@@ -196,6 +196,11 @@ type DashboardHandler struct {
 	// broadcast as on-chain transactions through CometBFT consensus.
 	CometBFTRPC string
 	SigningKey  ed25519.PrivateKey
+	// ConsensusGovernanceClock makes internally generated app-v20 governance
+	// proofs use the latest committed block time rather than the host wall clock.
+	// Serving nodes enable it after CometBFT RPC is configured; isolated handler
+	// tests and lightweight embeds leave it false.
+	ConsensusGovernanceClock bool
 
 	// AdminSigningKey is the operator/admin key (~/.sage/agent.key), the
 	// on-chain genesis admin. SigningKey above is the CometBFT validator key,

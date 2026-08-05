@@ -62,15 +62,17 @@ test('release-facing version metadata stays aligned', () => {
   }
 });
 
-test('v11.17.8 user and SDK guides keep canonical Messages contracts aligned', () => {
+test('v11.17.9 user and SDK guides keep canonical Messages contracts aligned', () => {
   const architecture = read('docs/ARCHITECTURE.md');
   const roadmap = read('docs/ROADMAP.md');
   const gettingStarted = read('docs/GETTING_STARTED.md');
   const sdkReadme = read('sdk/python/README.md');
 
-  assert.match(architecture, /Default TTL:\*\* 1440 minutes \(24 hours\)/);
+  assert.match(architecture, /Default TTL:\*\* none; unread\/unclaimed Messages remain durable until handled/);
   assert.doesNotMatch(architecture, /Default TTL:\*\* 60 minutes/);
   assert.match(architecture, /sage_message_send/);
+  assert.match(read('docs/reference/mcp-tools.md'), /message_inbox_unread/);
+  assert.match(read('docs/reference/mcp-tools.md'), /call `sage_messages_receive`/);
   assert.match(roadmap, /v11\.17\.x completion ledger/);
   assert.match(roadmap, /helper outside the replaceable bundle/);
   assert.match(gettingStarted, /advertises 31 MCP tools/);

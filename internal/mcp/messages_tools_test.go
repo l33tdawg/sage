@@ -31,10 +31,10 @@ func TestCanonicalMessageToolsSendReceiveReplyAndStatus(t *testing.T) {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		require.Equal(t, "stable-send", body["idempotency_key"])
 		require.Equal(t, "agent-bob", body["to_agent"])
-		require.EqualValues(t, 1440, body["ttl_minutes"])
+		require.EqualValues(t, 0, body["ttl_minutes"])
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"message_id": "msg-1", "status": "pending", "expires_at": "2026-08-02T10:00:00Z",
+			"message_id": "msg-1", "status": "pending", "retention": "durable_until_handled",
 		})
 	})
 	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, r *http.Request) {
@@ -391,6 +391,10 @@ func TestUnifiedInboxKeepsFederatedWorkVisibleWhenCanonicalMessagesExist(t *test
 	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
 	})
+	mux.HandleFunc("/v1/pipe/history/inbox", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "1", r.URL.Query().Get("count_only"))
+		_ = json.NewEncoder(w).Encode(map[string]any{"count": 2, "unread": true})
+	})
 	mux.HandleFunc("/v1/pipe/results", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
 	})
@@ -415,13 +419,13 @@ func TestUnifiedInboxKeepsFederatedWorkVisibleWhenCanonicalMessagesExist(t *test
 	require.Equal(t, true, items[1]["foreign"])
 
 	turn := s.checkPipelineInbox(context.Background())
-	turnItems := turn["message_inbox"].([]map[string]any)
-	require.Len(t, turnItems, 2)
-	require.Equal(t, "foreign-message", turnItems[1]["message_id"])
-	require.NotContains(t, turnItems[1], "pipe_id")
+	require.Equal(t, true, turn["message_inbox_unread"])
+	require.Equal(t, 2, turn["message_inbox_unread_count"])
+	require.Contains(t, turn["message_inbox_action"], "sage_messages_receive")
+	require.NotContains(t, turn, "message_inbox")
 	mu.Lock()
-	require.Equal(t, []string{"2", "4"}, legacyLimits,
-		"canonical-local work must consume capacity before legacy/federated claim")
+	require.Equal(t, []string{"2"}, legacyLimits,
+		"sage_turn must not claim legacy or canonical inbox work")
 	mu.Unlock()
 }
 

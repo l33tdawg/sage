@@ -81,10 +81,9 @@ func TestCanonicalLocalMessagesEndToEndAndAntiEnumeration(t *testing.T) {
 	messageID := sendResponse["message_id"].(string)
 	require.NotEmpty(t, messageID)
 	require.True(t, strings.HasPrefix(messageID, "msg-"), messageID)
-	expiresAt, err := time.Parse(time.RFC3339, sendResponse["expires_at"].(string))
-	require.NoError(t, err)
-	require.WithinDuration(t, time.Now().UTC().Add(24*time.Hour), expiresAt, 5*time.Second,
-		"omitted message TTL must keep inbox work for the 24-hour default")
+	require.Equal(t, "durable_until_handled", sendResponse["retention"])
+	require.NotContains(t, sendResponse, "expires_at",
+		"omitted message TTL must keep inbox work until the recipient handles it")
 	require.Len(t, notifications, 1)
 	require.Equal(t, "bob", notifications[0].RecipientAgentID)
 	require.Equal(t, "alice", notifications[0].FromAgent)
@@ -260,9 +259,6 @@ func TestCanonicalMessageInputBoundsAndNonEnumeratingStatus(t *testing.T) {
 		}},
 		{name: "negative ttl", method: http.MethodPost, path: "/v1/messages", body: map[string]any{
 			"to_agent": "bob", "payload": "work", "idempotency_key": "ttl-neg", "ttl_minutes": -1,
-		}},
-		{name: "zero ttl", method: http.MethodPost, path: "/v1/messages", body: map[string]any{
-			"to_agent": "bob", "payload": "work", "idempotency_key": "ttl-zero", "ttl_minutes": 0,
 		}},
 		{name: "oversize ttl", method: http.MethodPost, path: "/v1/messages", body: map[string]any{
 			"to_agent": "bob", "payload": "work", "idempotency_key": "ttl-large", "ttl_minutes": 1441,

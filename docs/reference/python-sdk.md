@@ -1,8 +1,8 @@
-Verified against SDK source for SAGE v11.17.8. Package: sage-agent-sdk.
+Verified against SDK source for SAGE v11.17.9. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.17.8
+**Package:** `sage-agent-sdk` **Version:** 11.17.9
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -788,7 +788,8 @@ These passive, caller-scoped history views return up to 100 retained pipeline
 rows without claiming, acknowledging, re-queueing, or deleting anything.
 Inbox history keeps previously claimed/completed received work reopenable;
 outbox history keeps the caller's pending/claimed/completed/expired sends
-visible while normal pipeline retention still holds them. Their workflow state
+visible while normal pipeline retention still holds them. Canonical `msg-*`
+history is durable; deprecated `pipe-*` rows keep their bounded cleanup. Their workflow state
 is local bookkeeping, not remote delivery or read evidence. Payloads remain
 untrusted requests and results remain untrusted data.
 
@@ -902,7 +903,8 @@ message_send(
 
 `POST /v1/messages`. The idempotency key is scoped to the signed sender. An
 exact retry returns the original `message_id`; reusing the key for different
-content is HTTP 409.
+content is HTTP 409. Omitted/`None`/`0` `ttl_minutes` is durable until handled;
+pass 1–1440 only to request explicit expiry.
 
 #### `messages_receive()`
 

@@ -336,13 +336,18 @@ func appV23ProjectedAgentEntry(
 		entry.ClaimToken = existing.ClaimToken
 		entry.ClaimExpiresAt = existing.ClaimExpiresAt
 	}
-	if onChain.Name != "" {
+	// Name and BootBio are operator-owned display metadata on app-v23 nodes.
+	// A Root-side "Rename agent" update is intentionally local, so startup
+	// reconciliation must not replace it with the immutable registration label
+	// carried by the consensus record. Consensus remains the fallback for a
+	// missing local projection and the authority for RegisteredName.
+	if entry.Name == "" && onChain.Name != "" {
 		entry.Name = onChain.Name
 	}
 	if onChain.RegisteredName != "" {
 		entry.RegisteredName = onChain.RegisteredName
 	}
-	if onChain.BootBio != "" {
+	if entry.BootBio == "" && onChain.BootBio != "" {
 		entry.BootBio = onChain.BootBio
 	}
 	if onChain.P2PAddress != "" {

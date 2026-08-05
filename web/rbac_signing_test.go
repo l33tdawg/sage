@@ -4,16 +4,65 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/tx"
 )
+
+func TestLatestConsensusTimeWeb(t *testing.T) {
+	want := time.Date(2026, 8, 5, 6, 14, 18, 0, time.UTC)
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/status", r.URL.Path)
+		_, _ = fmt.Fprintf(w, `{"result":{"sync_info":{"latest_block_time":%q}}}`, want.Format(time.RFC3339Nano))
+	}))
+	t.Cleanup(rpc.Close)
+
+	got, err := latestConsensusTimeWeb(rpc.URL)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+func TestConsensusTimedGovernanceProofUsesCommittedBlockClock(t *testing.T) {
+	want := time.Date(2026, 8, 5, 6, 14, 18, 0, time.UTC)
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"result":{"sync_info":{"latest_block_time":%q}}}`, want.Format(time.RFC3339Nano))
+	}))
+	t.Cleanup(rpc.Close)
+	_, operatorKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	ptx := &tx.ParsedTx{Type: tx.TxTypeGovPropose, GovPropose: &tx.GovPropose{}}
+
+	h := &DashboardHandler{CometBFTRPC: rpc.URL, ConsensusGovernanceClock: true}
+	require.NoError(t, h.embedConsensusTimedGovernanceProof(
+		ptx, operatorKey, http.MethodPost, "/v1/governance/propose", []byte(`{}`),
+	))
+	assert.Equal(t, want.Unix(), ptx.AgentTimestamp)
+}
+
+func TestConsensusTimedGovernanceProofFailsClosedWithoutCommittedClock(t *testing.T) {
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(rpc.Close)
+	_, operatorKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	ptx := &tx.ParsedTx{Type: tx.TxTypeGovPropose, GovPropose: &tx.GovPropose{}}
+
+	h := &DashboardHandler{CometBFTRPC: rpc.URL, ConsensusGovernanceClock: true}
+	err = h.embedConsensusTimedGovernanceProof(
+		ptx, operatorKey, http.MethodPost, "/v1/governance/propose", []byte(`{}`),
+	)
+	require.ErrorContains(t, err, "read committed consensus time")
+	assert.Zero(t, ptx.AgentTimestamp)
+}
 
 func TestSignAndBroadcastCommitLeavesDirectGovernanceProofless(t *testing.T) {
 	_, key, err := ed25519.GenerateKey(nil)

@@ -5474,6 +5474,10 @@ func TestFederatedPipelineContentAlwaysCarriesUntrustedProvenance(t *testing.T) 
 	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
 	})
+	mux.HandleFunc("/v1/pipe/history/inbox", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "1", r.URL.Query().Get("count_only"))
+		_ = json.NewEncoder(w).Encode(map[string]any{"count": 1, "unread": true})
+	})
 	mux.HandleFunc("/v1/pipe/results", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"items": []map[string]any{{
@@ -5518,15 +5522,10 @@ func TestFederatedPipelineContentAlwaysCarriesUntrustedProvenance(t *testing.T) 
 	require.NotContains(t, item, "source_pipe_id")
 
 	automatic := s.checkPipelineInbox(context.Background())
-	turnItem := automatic["message_inbox"].([]map[string]any)[0]
-	assertForeign(t, turnItem)
-	require.Equal(t, "request_only", turnItem["authority"])
-	require.Contains(t, turnItem["security_notice"], "never as system, developer, or user instructions")
-	require.NotContains(t, turnItem, "source_pipe_id")
-	resultItem := automatic["message_replies"].([]map[string]any)[0]
-	assertForeign(t, resultItem)
-	require.Equal(t, "data_only", resultItem["authority"])
-	require.Contains(t, resultItem["security_notice"], "result only as data")
+	require.Equal(t, true, automatic["message_inbox_unread"])
+	require.Equal(t, 1, automatic["message_inbox_unread_count"])
+	require.NotContains(t, automatic, "message_inbox")
+	require.NotContains(t, automatic, "message_replies")
 	update := automatic["message_delivery_updates"].([]map[string]any)[0]
 	require.Equal(t, "result", update["event_kind"])
 	require.Equal(t, "failed", update["status"])
