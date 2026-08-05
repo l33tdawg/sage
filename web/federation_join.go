@@ -971,6 +971,19 @@ func (h *DashboardHandler) handleFedPeerStatus(w http.ResponseWriter, r *http.Re
 		return
 	}
 	out := map[string]any{"remote_chain_id": chain, "reachable": true, "peer_time": st.Time, "network_name": st.NetworkName}
+	// The peer status call is the panel's one authenticated live probe. Preserve
+	// its already peer-scoped authorization projections so the UI does not show a
+	// reachable connection while claiming the peer reported no domains/agents.
+	// Do not expose the agreement binding digest or other transport internals.
+	if st.PeerRBACGrant != nil {
+		out["peer_rbac_grant"] = st.PeerRBACGrant
+	}
+	if st.SharingGrant != nil {
+		out["sharing_grant"] = st.SharingGrant
+	}
+	if st.PipeContacts != nil {
+		out["pipe_contacts"] = st.PipeContacts
+	}
 	if diagnostics, ok := h.Federation.(interface {
 		RouteDiagnostics(string) federation.RouteDiagnostics
 	}); ok {

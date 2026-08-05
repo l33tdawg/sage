@@ -48,7 +48,19 @@ func (d *groupRefreshTestDriver) NudgeJournalReconcileAndWait(context.Context) e
 }
 
 func (peerStatusTestDriver) PeerStatus(context.Context, string) (*federation.StatusResponse, error) {
-	return &federation.StatusResponse{NetworkName: "DKAN-TII", Time: 123}, nil
+	return &federation.StatusResponse{
+		NetworkName: "DKAN-TII", Time: 123,
+		PeerRBACGrant: &federation.PeerRBACGrant{
+			PolicyVersion: federation.SyncPolicyVersionPeerRBAC,
+			Domains:       []federation.PeerRBACDomainGrant{{Domain: "shared.research", Read: true}},
+		},
+		SharingGrant: &federation.SharingGrant{AllowedDomains: []string{}},
+		PipeContacts: &federation.PipeContactGrant{
+			Version:  federation.PipeContactVersion,
+			Contacts: []federation.PipeContact{{AgentID: strings.Repeat("ab", 32), Accepting: true}},
+		},
+		QueryAgreementBindingDigest: strings.Repeat("cd", 32),
+	}, nil
 }
 
 func (d peerFailureStatusTestDriver) PeerStatus(context.Context, string) (*federation.StatusResponse, error) {
@@ -69,8 +81,12 @@ func TestFederationPeerStatusReturnsFriendlyNetworkName(t *testing.T) {
 		t.Fatalf("peer status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	var got struct {
-		Reachable   bool   `json:"reachable"`
-		NetworkName string `json:"network_name"`
+		Reachable     bool                         `json:"reachable"`
+		NetworkName   string                       `json:"network_name"`
+		PeerRBACGrant *federation.PeerRBACGrant    `json:"peer_rbac_grant"`
+		SharingGrant  *federation.SharingGrant     `json:"sharing_grant"`
+		PipeContacts  *federation.PipeContactGrant `json:"pipe_contacts"`
+		BindingDigest string                       `json:"query_agreement_binding_digest"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
@@ -78,6 +94,12 @@ func TestFederationPeerStatusReturnsFriendlyNetworkName(t *testing.T) {
 	if !got.Reachable || got.NetworkName != "DKAN-TII" {
 		t.Fatalf("status must retain the authenticated friendly name: %+v", got)
 	}
+	require.NotNil(t, got.PeerRBACGrant)
+	require.Equal(t, "shared.research", got.PeerRBACGrant.Domains[0].Domain)
+	require.NotNil(t, got.SharingGrant)
+	require.NotNil(t, got.PipeContacts)
+	require.True(t, got.PipeContacts.Contacts[0].Accepting)
+	require.Empty(t, got.BindingDigest, "dashboard projection must not expose transport binding internals")
 }
 
 func TestFederationPeerStatusTypesFailureAheadOfHistoricalRoute(t *testing.T) {
