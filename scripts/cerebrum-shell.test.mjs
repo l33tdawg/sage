@@ -22,7 +22,7 @@ const { normalizeFedPipeContactGrant, mergeFedPipeContactGrant } = new Function(
 )();
 
 test('CEREBRUM has a dependency-free bootstrap shell and sanitized failure state', () => {
-    const inlineScripts = [...indexSource.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)]
+    const inlineScripts = [...indexSource.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
         .map((match) => match[1])
         .filter((source) => source.trim() !== '');
     assert.ok(inlineScripts.length >= 3, 'theme, bootstrap, and HTM inline scripts must be present');

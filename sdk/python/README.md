@@ -2,7 +2,7 @@
 
 Python client for the SAGE (Sovereign Agent Governed Experience) protocol -- a governed, verifiable institutional memory layer for multi-agent systems.
 
-**Requires Python 3.10+** | **SAGE v11.17.7 SDK** | **TLS, app-v26 explicit Access Group authority, app-v24 memory integrity, app-v25 immutable envelopes and historical continuity recovery, canonical local and federated Messages with read receipts, read-only federation, scoped governance, and per-record `classification` supported**
+**Requires Python 3.10+** | **SAGE v11.17.8 SDK** | **TLS, app-v26 explicit Access Group authority, app-v24 memory integrity, app-v25 immutable envelopes and historical continuity recovery, canonical local and federated Messages with read receipts, read-only federation, scoped governance, and per-record `classification` supported**
 
 ## Installation
 

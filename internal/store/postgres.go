@@ -889,9 +889,11 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		query += " AND EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.memory_id AND mt.tag IN (" + strings.Join(placeholders, ",") + "))"
 	}
 
-	scanRows := func(rows pgx.Rows, capacity int) ([]*memory.MemoryRecord, error) {
+	scanRows := func(rows pgx.Rows, _ int) ([]*memory.MemoryRecord, error) {
 		defer rows.Close()
-		results := make([]*memory.MemoryRecord, 0, capacity)
+		// SQL LIMIT bounds the result set. Avoid carrying a caller-derived value
+		// into make even as a capacity hint; grow only for rows actually returned.
+		results := make([]*memory.MemoryRecord, 0)
 		for rows.Next() {
 			var r memory.MemoryRecord
 			var mt, st, taskStatus string
@@ -965,7 +967,7 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 	// total candidate walk so a sparse authorized tail cannot amplify one
 	// authenticated request into unbounded DB + live-policy work.
 	const candidatePageSize = 128
-	results := make([]*memory.MemoryRecord, 0, opts.TopK)
+	results := make([]*memory.MemoryRecord, 0)
 	for offset := 0; len(results) < opts.TopK; offset += candidatePageSize {
 		if offset >= CandidateFilterScanBudget {
 			return nil, ErrCandidateFilterScanBudgetExceeded

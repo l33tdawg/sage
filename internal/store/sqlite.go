@@ -2131,7 +2131,9 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 		}
 		defer func() { _ = rows.Close() }()
 
-		page := make([]*memory.MemoryRecord, 0, limit)
+		// Do not use a caller-derived SQL limit as an allocation hint. The query
+		// remains bounded by its LIMIT while append grows only for rows returned.
+		page := make([]*memory.MemoryRecord, 0)
 		for rows.Next() {
 			var r memory.MemoryRecord
 			var mt, st, createdAt, taskStatus string
@@ -2207,7 +2209,7 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 	// walk are bounded. A sparse authorized tail must not let one authenticated
 	// request force unbounded SQL + live-policy work.
 	const candidatePageSize = 128
-	results := make([]*memory.MemoryRecord, 0, opts.TopK)
+	results := make([]*memory.MemoryRecord, 0)
 	for offset := 0; len(results) < opts.TopK; offset += candidatePageSize {
 		if offset >= CandidateFilterScanBudget {
 			return nil, ErrCandidateFilterScanBudgetExceeded

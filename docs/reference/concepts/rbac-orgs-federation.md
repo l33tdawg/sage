@@ -1,4 +1,4 @@
-<!-- Core document reconciled through SAGE v11.17.7/app-v26, including consensus-backed Access Group authority, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
+<!-- Core document reconciled through SAGE v11.17.8/app-v26, including consensus-backed Access Group authority, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
 
 # RBAC, Organizations, and Federation
 

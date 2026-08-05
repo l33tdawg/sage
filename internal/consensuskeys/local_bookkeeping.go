@@ -30,8 +30,9 @@ func IsAppV23MigrationStageKey(key []byte) bool {
 }
 
 func AppV23MigrationStageKey(target []byte) []byte {
-	key := make([]byte, 0, len(AppV23MigrationStagePrefix)+len(target))
-	key = append(key, AppV23MigrationStagePrefix...)
+	// Avoid arithmetic preallocation from an external key length. Appending to
+	// the fixed prefix grows safely or panics before any wrapped allocation size.
+	key := bytes.Clone(AppV23MigrationStagePrefix)
 	return append(key, target...)
 }
 

@@ -51,6 +51,16 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.17.8
+
+**The v11.17 security backlog is cleared in code.** Pion DTLS and STUN are
+upgraded to their patched releases in both the SAGE and Natter modules. Recall
+result slices no longer use caller-derived allocation hints, app-v23 migration
+keys avoid length-arithmetic preallocation, and the CEREBRUM inline-script
+contract recognizes HTML tag case without a fragile sanitizer-style regexp.
+
+Container: `ghcr.io/l33tdawg/sage:11.17.8`. SDK 11.17.8.
+
 ## What's New in v11.17.7
 
 **Releases no longer pause for a manual two-Mac approval.** Publication still
@@ -1216,7 +1226,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.7`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.17.8`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
