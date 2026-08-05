@@ -241,6 +241,7 @@ func TestSnapshotScheduler_HeightTriggerFires(t *testing.T) {
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
+		return
 	}
 
 	// Ticks below the interval should NOT fire — but the first tick
@@ -273,6 +274,7 @@ func TestSnapshotScheduler_ConcurrentTicksCoalesce(t *testing.T) {
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
+		return
 	}
 
 	var wg sync.WaitGroup
@@ -327,6 +329,7 @@ func TestSnapshotScheduler_KeepLastDefaults(t *testing.T) {
 	}, zerolog.Nop())
 	if sched == nil {
 		t.Fatal("expected scheduler, got nil")
+		return
 	}
 	if sched.cfg.KeepLast != defaultSnapshotKeepLast {
 		t.Fatalf("KeepLast default: got %d want %d", sched.cfg.KeepLast, defaultSnapshotKeepLast)

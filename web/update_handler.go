@@ -542,7 +542,7 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 	if runtime.GOOS == "darwin" {
 		_ = archiveTmp.Close()
 		h.sendUpdateProgress("extract", "active", "Opening signed SAGE app update...")
-		stagedVersion, installErr := installDarwinAppUpdate(ctx, archiveTmp.Name(), execPath, expectedVersion)
+		stagedVersion, installErr := installDarwinAppUpdate(ctx, archiveTmp.Name(), execPath, expectedVersion) //nolint:staticcheck // !darwin stub is unreachable behind runtime.GOOS
 		if installErr != nil { //nolint:staticcheck // the !darwin build-tag stub always errors, but this runtime branch is Darwin-only
 			h.sendUpdateProgress("install", "error", installErrorMessage("Failed to install signed app update", installErr, downloadURL))
 			return
