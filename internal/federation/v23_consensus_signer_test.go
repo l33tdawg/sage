@@ -74,6 +74,7 @@ func assertFederationConsensusSigner(t *testing.T, parsed *tx.ParsedTx, want str
 	t.Helper()
 	if parsed == nil {
 		t.Fatal("missing captured transaction")
+		return
 	}
 	if got := hex.EncodeToString(parsed.PublicKey); got != want {
 		t.Fatalf("outer signer = %s, want %s", got, want)

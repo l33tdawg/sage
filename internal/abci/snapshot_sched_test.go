@@ -997,6 +997,7 @@ func TestTakeVerifiedRejectsCometBlockIdentityMismatch(t *testing.T) {
 				commit := store.LoadSeenCommit(77)
 				if commit == nil {
 					t.Fatal("missing seeded seen commit")
+					return
 				}
 				commit.BlockID.Hash[0] ^= 0xff
 				if err := store.SaveSeenCommit(77, commit); err != nil {
