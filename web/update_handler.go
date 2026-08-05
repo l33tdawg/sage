@@ -543,7 +543,7 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 		_ = archiveTmp.Close()
 		h.sendUpdateProgress("extract", "active", "Opening signed SAGE app update...")
 		stagedVersion, installErr := installDarwinAppUpdate(ctx, archiveTmp.Name(), execPath, expectedVersion)
-		if installErr != nil {
+		if installErr != nil { //nolint:staticcheck // the !darwin build-tag stub always errors, but this runtime branch is Darwin-only
 			h.sendUpdateProgress("install", "error", installErrorMessage("Failed to install signed app update", installErr, downloadURL))
 			return
 		}

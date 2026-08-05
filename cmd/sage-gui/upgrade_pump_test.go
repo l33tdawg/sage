@@ -88,6 +88,7 @@ func TestPendingPlanPump_PumpsQuiescentChainToActivation(t *testing.T) {
 	txHexPtr := rpc.lastTxHex.Load()
 	if txHexPtr == nil {
 		t.Fatal("no tx recorded despite height advancing")
+		return
 	}
 	raw, err := hex.DecodeString(*txHexPtr)
 	if err != nil {
@@ -175,6 +176,7 @@ func TestPendingPlanPump_UsesDynamicRootResolver(t *testing.T) {
 	txHexPtr := rpc.lastTxHex.Load()
 	if txHexPtr == nil {
 		t.Fatal("resolver-only pump did not broadcast a heartbeat")
+		return
 	}
 	raw, err := hex.DecodeString(*txHexPtr)
 	if err != nil {

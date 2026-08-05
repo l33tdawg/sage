@@ -126,6 +126,7 @@ func TestMaybeProposeUpgrade_BuildsValidProposal(t *testing.T) {
 	txHexPtr := rpc.lastTxHex.Load()
 	if txHexPtr == nil {
 		t.Fatal("watchdog didn't broadcast a tx")
+		return
 	}
 	raw, err := hex.DecodeString(*txHexPtr)
 	if err != nil {
