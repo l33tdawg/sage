@@ -13,6 +13,26 @@ const mriPageSource = await readFile(new URL('../web/static/mri.html', import.me
 const federationRouteSource = await readFile(new URL('../web/static/js/federation-route-state.js', import.meta.url), 'utf8');
 const traySource = await readFile(new URL('../cmd/sage-tray/main.swift', import.meta.url), 'utf8');
 const { MRI_LAYOUT, mriBrainstemBias, mriDepthForAge, mriVerticalPosition } = await import('../web/static/js/mri-layout.js');
+
+function inlineScriptBodies(source) {
+    const lower = source.toLowerCase();
+    const bodies = [];
+    let cursor = 0;
+    while (cursor < source.length) {
+        const openStart = lower.indexOf('<script', cursor);
+        if (openStart === -1) break;
+        const openEnd = lower.indexOf('>', openStart + '<script'.length);
+        if (openEnd === -1) break;
+        const closeStart = lower.indexOf('</script', openEnd + 1);
+        if (closeStart === -1) break;
+        const closeEnd = lower.indexOf('>', closeStart + '</script'.length);
+        if (closeEnd === -1) break;
+        bodies.push(source.slice(openEnd + 1, closeStart));
+        cursor = closeEnd + 1;
+    }
+    return bodies;
+}
+
 const fedPipeHelperSource = appSource.slice(
     appSource.indexOf('function normalizeFedPipeContactGrant('),
     appSource.indexOf('function fedFriendlyLocalAgentLabel(')
@@ -22,8 +42,7 @@ const { normalizeFedPipeContactGrant, mergeFedPipeContactGrant } = new Function(
 )();
 
 test('CEREBRUM has a dependency-free bootstrap shell and sanitized failure state', () => {
-    const inlineScripts = [...indexSource.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
-        .map((match) => match[1])
+    const inlineScripts = inlineScriptBodies(indexSource)
         .filter((source) => source.trim() !== '');
     assert.ok(inlineScripts.length >= 3, 'theme, bootstrap, and HTM inline scripts must be present');
     for (const source of inlineScripts) {
@@ -57,6 +76,13 @@ test('CEREBRUM has a dependency-free bootstrap shell and sanitized failure state
     assert.match(appSource, /\.catch\(\(\) => setAuthState\('error'\)\)/,
         'authentication preflight failures must not be treated as an unencrypted ready session');
     assert.doesNotMatch(appSource, /if auth check fails, assume no auth/);
+});
+
+test('inline script inspection follows case-insensitive HTML end-tag parsing', () => {
+    assert.deepEqual(
+        inlineScriptBodies('<SCRIPT>one()</script ><script type="module">two()</SCRIPT data-x>'),
+        ['one()', 'two()'],
+    );
 });
 
 test('task status mutations reject HTTP failures before optimistic board state can settle', () => {
