@@ -26,11 +26,10 @@ concurrency:
 # Publication is deliberately three-phase:
 #   1. validate, build, package, and checksum everything into private Actions
 #      artifacts, then converge at `publication-gate`;
-#   2. stage and verify a private signed/notarized GitHub draft, then stop so the
-#      exact DMGs can be installed and exercised on two real Macs;
-#   3. pause at a protected GitHub Environment. The operator installs those
-#      exact private assets on two Macs, then approves that same workflow run
-#      before any public channel can mutate.
+#   2. stage and automatically verify the exact signed/notarized GitHub draft,
+#      including writable-copy, launch, Team ID, and stapling checks;
+#   3. publish immutable package versions, promote mutable latest pointers, and
+#      publish the already-verified GitHub draft without a human approval gate.
 # A failed public step can therefore be resumed without rebuilding or racing a
 # second publisher, and the GitHub release plus mutable Docker `latest` pointer
 # remain hidden until the immutable versioned channels have succeeded.
