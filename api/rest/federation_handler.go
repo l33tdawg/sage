@@ -232,9 +232,7 @@ func (s *Server) handleCrossFedSet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	setTx := &tx.ParsedTx{
-		Type:      tx.TxTypeCrossFedSet,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeCrossFedSet,
 		CrossFedTerms: &tx.CrossFedTerms{
 			RemoteChainID:  req.RemoteChainID,
 			Endpoint:       req.Endpoint,
@@ -247,23 +245,21 @@ func (s *Server) handleCrossFedSet(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	s.embedAgentAuth(r.Context(), setTx)
-	if signErr := s.signTx(setTx); signErr != nil {
-		rollbackCA()
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(setTx)
+	var hash string
+	stage, err := s.submitConsensusTx(r.Context(), setTx, func(encoded []byte) error {
+		var submitErr error
+		hash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
 		rollbackCA()
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	hash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		rollbackCA() // authz/consensus rejected — leave any existing live CA untouched
-		s.logger.Error().Err(err).Str("remote", req.RemoteChainID).Msg("cross_fed set rejected")
-		status, msg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Agreement rejected", msg)
+		if stage == consensusTxSubmit {
+			s.logger.Error().Err(err).Str("remote", req.RemoteChainID).Msg("cross_fed set rejected")
+			status, msg := broadcastErrorPublic(err)
+			writeProblem(w, status, "Agreement rejected", msg)
+		} else {
+			s.writeConsensusTxError(w, stage, "cross-federation set", err)
+		}
 		return
 	}
 	if err := commitCA(); err != nil {
@@ -366,29 +362,27 @@ func (s *Server) handleCrossFedRevoke(w http.ResponseWriter, r *http.Request) {
 	defer agreementUnlock()
 
 	revokeTx := &tx.ParsedTx{
-		Type:      tx.TxTypeCrossFedRevoke,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeCrossFedRevoke,
 		CrossFedRevoke: &tx.CrossFedRevoke{
 			RemoteChainID: remoteChainID,
 			Reason:        req.Reason,
 		},
 	}
 	s.embedAgentAuth(r.Context(), revokeTx)
-	if err := s.signTx(revokeTx); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(revokeTx)
+	var hash string
+	stage, err := s.submitConsensusTx(r.Context(), revokeTx, func(encoded []byte) error {
+		var submitErr error
+		hash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	hash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Str("remote", remoteChainID).Msg("cross_fed revoke rejected")
-		status, msg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Revoke rejected", msg)
+		if stage == consensusTxSubmit {
+			s.logger.Error().Err(err).Str("remote", remoteChainID).Msg("cross_fed revoke rejected")
+			status, msg := broadcastErrorPublic(err)
+			writeProblem(w, status, "Revoke rejected", msg)
+		} else {
+			s.writeConsensusTxError(w, stage, "cross-federation revoke", err)
+		}
 		return
 	}
 	// Off-consensus sync purge: consent + queued deliveries die with the

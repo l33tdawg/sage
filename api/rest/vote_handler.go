@@ -171,9 +171,7 @@ func (s *Server) handleVoteMemory(w http.ResponseWriter, r *http.Request) {
 
 	// Build vote transaction.
 	voteTx := &tx.ParsedTx{
-		Type:      tx.TxTypeMemoryVote,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeMemoryVote,
 		MemoryVote: &tx.MemoryVote{
 			MemoryID:  memoryID,
 			Decision:  decision,
@@ -186,24 +184,14 @@ func (s *Server) handleVoteMemory(w http.ResponseWriter, r *http.Request) {
 	// the on-chain voter and make a promoted app-v23 Admin inject a local
 	// elevation proof into a transaction consensus intentionally requires to
 	// remain validator-only.
-	if err = s.signTx(voteTx); err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign vote tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(voteTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), voteTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode vote tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast vote tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "vote", err)
 		return
 	}
 
@@ -248,9 +236,7 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	challengeTx := &tx.ParsedTx{
-		Type:      tx.TxTypeMemoryChallenge,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeMemoryChallenge,
 		MemoryChallenge: &tx.MemoryChallenge{
 			MemoryID: memoryID,
 			Reason:   req.Reason,
@@ -262,24 +248,14 @@ func (s *Server) handleChallengeMemory(w http.ResponseWriter, r *http.Request) {
 	s.embedAgentAuth(r.Context(), challengeTx)
 
 	// Sign the transaction with the node's signing key.
-	if err = s.signTx(challengeTx); err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign challenge tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(challengeTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), challengeTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode challenge tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast challenge tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "challenge", err)
 		return
 	}
 
@@ -331,9 +307,7 @@ func (s *Server) handleForgetMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	challengeTx := &tx.ParsedTx{
-		Type:      tx.TxTypeMemoryChallenge,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeMemoryChallenge,
 		MemoryChallenge: &tx.MemoryChallenge{
 			MemoryID: memoryID,
 			Reason:   reason,
@@ -342,24 +316,14 @@ func (s *Server) handleForgetMemory(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), challengeTx)
 
-	if err = s.signTx(challengeTx); err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign forget tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(challengeTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), challengeTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode forget tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast forget tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "forget", err)
 		return
 	}
 
@@ -439,9 +403,7 @@ func (s *Server) handleReinstateMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	reinstateTx := &tx.ParsedTx{
-		Type:      tx.TxTypeMemoryReinstate,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeMemoryReinstate,
 		MemoryReinstate: &tx.MemoryReinstate{
 			MemoryID: memoryID,
 			Reason:   req.Reason,
@@ -449,23 +411,14 @@ func (s *Server) handleReinstateMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	s.embedAgentAuth(r.Context(), reinstateTx)
 
-	if err := s.signTx(reinstateTx); err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign reinstate tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(reinstateTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), reinstateTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode reinstate tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast reinstate tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "reinstate", err)
 		return
 	}
 
@@ -505,9 +458,7 @@ func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request)
 	}
 
 	corrTx := &tx.ParsedTx{
-		Type:      tx.TxTypeMemoryCorroborate,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeMemoryCorroborate,
 		MemoryCorroborate: &tx.MemoryCorroborate{
 			MemoryID: memoryID,
 			Evidence: req.Evidence,
@@ -518,24 +469,14 @@ func (s *Server) handleCorroborateMemory(w http.ResponseWriter, r *http.Request)
 	s.embedAgentAuth(r.Context(), corrTx)
 
 	// Sign the transaction with the node's signing key.
-	if err = s.signTx(corrTx); err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign corroborate tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(corrTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), corrTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode corroborate tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast corroborate tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "corroborate", err)
 		return
 	}
 

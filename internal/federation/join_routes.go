@@ -1740,36 +1740,43 @@ func (m *Manager) broadcastCrossFedSetLockedAs(
 	if err != nil {
 		return "", fmt.Errorf("resolve cross_fed set authority: %w", err)
 	}
-	body := []byte("cross_fed:" + terms.RemoteChainID)
-	bodyHash := sha256.Sum256(body)
-	ts := time.Now().Unix()
-	tsBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(tsBytes, uint64(ts)) // #nosec G115 -- ts non-negative
-	agentSig := ed25519.Sign(signingKey, append(append([]byte{}, bodyHash[:]...), tsBytes...))
+	var hash string
+	leaseCtx, cancelLease := context.WithTimeout(context.Background(), broadcastTimeout())
+	defer cancelLease()
+	err = tx.WithNonceLease(leaseCtx, signingKey, func(nonce uint64) error {
+		body := []byte("cross_fed:" + terms.RemoteChainID)
+		bodyHash := sha256.Sum256(body)
+		ts := time.Now().Unix()
+		tsBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(tsBytes, uint64(ts)) // #nosec G115 -- ts non-negative
+		agentSig := ed25519.Sign(signingKey, append(append([]byte{}, bodyHash[:]...), tsBytes...))
 
-	ptx := &tx.ParsedTx{
-		Type:           tx.TxTypeCrossFedSet,
-		Nonce:          tx.MonotonicNonce(signingKey),
-		Timestamp:      time.Unix(ts, 0),
-		CrossFedTerms:  terms,
-		AgentPubKey:    signingPub,
-		AgentSig:       agentSig,
-		AgentBodyHash:  bodyHash[:],
-		AgentTimestamp: ts,
-	}
-	if elevationErr := m.attachConsensusControlElevation(
-		ptx, effectiveActorID, root, rootKey,
-	); elevationErr != nil {
-		return "", fmt.Errorf("attach cross_fed set elevation: %w", elevationErr)
-	}
-	if signErr := tx.SignTx(ptx, signingKey); signErr != nil {
-		return "", fmt.Errorf("sign cross_fed set tx: %w", signErr)
-	}
-	encoded, err := tx.EncodeTx(ptx)
-	if err != nil {
-		return "", fmt.Errorf("encode cross_fed set tx: %w", err)
-	}
-	hash, _, err := m.broadcast(encoded)
+		ptx := &tx.ParsedTx{
+			Type:           tx.TxTypeCrossFedSet,
+			Nonce:          nonce,
+			Timestamp:      time.Unix(ts, 0),
+			CrossFedTerms:  terms,
+			AgentPubKey:    signingPub,
+			AgentSig:       agentSig,
+			AgentBodyHash:  bodyHash[:],
+			AgentTimestamp: ts,
+		}
+		if elevationErr := m.attachConsensusControlElevation(
+			ptx, effectiveActorID, root, rootKey,
+		); elevationErr != nil {
+			return fmt.Errorf("attach cross_fed set elevation: %w", elevationErr)
+		}
+		if signErr := tx.SignTx(ptx, signingKey); signErr != nil {
+			return fmt.Errorf("sign cross_fed set tx: %w", signErr)
+		}
+		encoded, encodeErr := tx.EncodeTx(ptx)
+		if encodeErr != nil {
+			return fmt.Errorf("encode cross_fed set tx: %w", encodeErr)
+		}
+		var broadcastErr error
+		hash, _, broadcastErr = m.broadcastContext(leaseCtx, encoded)
+		return broadcastErr
+	})
 	return hash, err
 }
 
@@ -1833,43 +1840,47 @@ func (m *Manager) broadcastRevokeAgreementLockedReasonAs(
 	if err != nil {
 		return "", fmt.Errorf("resolve cross_fed revoke authority: %w", err)
 	}
-	body := []byte("cross_fed_revoke:" + remoteChainID)
-	bodyHash := sha256.Sum256(body)
-	ts := time.Now().Unix()
-	tsBytes := make([]byte, 8)
-	binary.BigEndian.PutUint64(tsBytes, uint64(ts)) // #nosec G115 -- ts non-negative
-	agentSig := ed25519.Sign(signingKey, append(append([]byte{}, bodyHash[:]...), tsBytes...))
+	var hash string
+	leaseCtx, cancelLease := context.WithTimeout(context.Background(), broadcastTimeout())
+	defer cancelLease()
+	err = tx.WithNonceLease(leaseCtx, signingKey, func(nonce uint64) error {
+		body := []byte("cross_fed_revoke:" + remoteChainID)
+		bodyHash := sha256.Sum256(body)
+		ts := time.Now().Unix()
+		tsBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(tsBytes, uint64(ts)) // #nosec G115 -- ts non-negative
+		agentSig := ed25519.Sign(signingKey, append(append([]byte{}, bodyHash[:]...), tsBytes...))
 
-	ptx := &tx.ParsedTx{
-		Type:      tx.TxTypeCrossFedRevoke,
-		Nonce:     tx.MonotonicNonce(signingKey),
-		Timestamp: time.Unix(ts, 0),
-		CrossFedRevoke: &tx.CrossFedRevoke{
-			RemoteChainID: remoteChainID,
-			Reason:        reason,
-		},
-		AgentPubKey:    signingPub,
-		AgentSig:       agentSig,
-		AgentBodyHash:  bodyHash[:],
-		AgentTimestamp: ts,
-	}
-	if elevationErr := m.attachConsensusControlElevation(
-		ptx, effectiveActorID, root, rootKey,
-	); elevationErr != nil {
-		return "", fmt.Errorf("attach cross_fed revoke elevation: %w", elevationErr)
-	}
-	if signErr := tx.SignTx(ptx, signingKey); signErr != nil {
-		return "", fmt.Errorf("sign cross_fed revoke tx: %w", signErr)
-	}
-	encoded, err := tx.EncodeTx(ptx)
-	if err != nil {
-		return "", fmt.Errorf("encode cross_fed revoke tx: %w", err)
-	}
-	hash, _, err := m.broadcast(encoded)
-	if err != nil {
-		return "", err
-	}
-	return hash, nil
+		ptx := &tx.ParsedTx{
+			Type:      tx.TxTypeCrossFedRevoke,
+			Nonce:     nonce,
+			Timestamp: time.Unix(ts, 0),
+			CrossFedRevoke: &tx.CrossFedRevoke{
+				RemoteChainID: remoteChainID,
+				Reason:        reason,
+			},
+			AgentPubKey:    signingPub,
+			AgentSig:       agentSig,
+			AgentBodyHash:  bodyHash[:],
+			AgentTimestamp: ts,
+		}
+		if elevationErr := m.attachConsensusControlElevation(
+			ptx, effectiveActorID, root, rootKey,
+		); elevationErr != nil {
+			return fmt.Errorf("attach cross_fed revoke elevation: %w", elevationErr)
+		}
+		if signErr := tx.SignTx(ptx, signingKey); signErr != nil {
+			return fmt.Errorf("sign cross_fed revoke tx: %w", signErr)
+		}
+		encoded, encodeErr := tx.EncodeTx(ptx)
+		if encodeErr != nil {
+			return fmt.Errorf("encode cross_fed revoke tx: %w", encodeErr)
+		}
+		var broadcastErr error
+		hash, _, broadcastErr = m.broadcastContext(leaseCtx, encoded)
+		return broadcastErr
+	})
+	return hash, err
 }
 
 // PurgeLocalFederationState removes every node-local capability associated

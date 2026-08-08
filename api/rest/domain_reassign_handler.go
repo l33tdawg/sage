@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -95,9 +94,7 @@ func (s *Server) handleDomainReassign(w http.ResponseWriter, r *http.Request) {
 	// layer to attest the submitter's role.
 
 	reassignTx := &tx.ParsedTx{
-		Type:      tx.TxTypeDomainReassign,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeDomainReassign,
 		DomainReassign: &tx.DomainReassign{
 			Domain:          req.Domain,
 			NewOwnerID:      req.NewOwnerID,
@@ -110,25 +107,20 @@ func (s *Server) handleDomainReassign(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), reassignTx)
 
-	err = s.signTx(reassignTx)
+	var txHash, txLog string
+	stage, err := s.submitConsensusTx(r.Context(), reassignTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, txLog, submitErr = s.broadcastTxCommitWithLog(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign domain reassign tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(reassignTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode domain reassign tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, txLog, err := s.broadcastTxCommitWithLog(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Str("domain", req.Domain).Msg("failed to broadcast domain reassign tx")
-		status, publicMsg := domainReassignErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		if stage == consensusTxSubmit {
+			s.logger.Error().Err(err).Str("domain", req.Domain).Msg("failed to broadcast domain reassign tx")
+			status, publicMsg := domainReassignErrorPublic(err)
+			writeProblem(w, status, "Broadcast error", publicMsg)
+		} else {
+			s.writeConsensusTxError(w, stage, "domain reassign", err)
+		}
 		return
 	}
 

@@ -825,53 +825,82 @@ func (m *Manager) admitSyncItem(r *http.Request, ss *store.SQLiteStore, peer *pe
 // with a freshly-encoded tx (never re-broadcast stored bytes: post-v15
 // canonical encoding + nonce monotonicity both reject).
 func (m *Manager) broadcastSyncSubmit(localID string, item *SyncItem) (string, string) {
-	// Bound concurrent blocking broadcasts (shared with receipt pushes).
-	m.broadcastSem <- struct{}{}
-	defer func() { <-m.broadcastSem }()
-
-	for attempt := 0; attempt < 2; attempt++ {
-		encoded, err := m.buildSyncSubmitTx(localID, item)
-		if err != nil {
-			m.logger.Error().Err(err).Str("local", localID).Msg("sync: build submit tx failed")
-			return SyncOutcomeRetry, ""
-		}
-		hash, _, err := m.broadcastTxCommit(encoded)
-		outcome := classifySyncBroadcast(err)
-		if outcome == syncBcastNonceRace && attempt == 0 {
-			continue // fresh nonce on the rebuild
-		}
-		switch outcome {
-		case syncBcastOK:
-			return SyncOutcomeAccepted, hash
-		case syncBcastDuplicate:
-			return SyncOutcomeDuplicate, ""
-		case syncBcastScopeReject:
-			// FinalizeBlock rejected the submit tx for lack of RBAC write access
-			// on the receiver — a per-attempt consensus cost, so a distinct
-			// outcome the sender attempts-caps (NOT the cheap gate-scope reject).
-			return SyncOutcomeRejectedWriteAccess, ""
-		default:
-			if err != nil {
-				m.logger.Warn().Err(err).Str("local", localID).Msg("sync: submit broadcast failed")
-			}
-			return SyncOutcomeRetry, ""
-		}
+	signingKey, signingPub, err := m.localConsensusSigningKey()
+	if err != nil {
+		m.logger.Error().Err(err).Str("local", localID).Msg("sync: resolve submit authority failed")
+		return SyncOutcomeRetry, ""
 	}
-	return SyncOutcomeRetry, ""
+
+	result, resultHash := SyncOutcomeRetry, ""
+	leaseCtx, cancelLease := context.WithTimeout(context.Background(), broadcastTimeout())
+	defer cancelLease()
+	err = tx.WithNonceLease(leaseCtx, signingKey, func(nonce uint64) error {
+		// Preserve distinct-key concurrency: same-key lease waiters must not fill
+		// the shared broadcast pool while another signer could make progress.
+		select {
+		case m.broadcastSem <- struct{}{}:
+			defer func() { <-m.broadcastSem }()
+		case <-leaseCtx.Done():
+			return leaseCtx.Err()
+		}
+		for attempt := 0; attempt < 2; attempt++ {
+			if attempt > 0 {
+				// The lease remains held across the retry, so this fresh allocation
+				// cannot be overtaken by another compliant producer using this key.
+				nonce = tx.MonotonicNonce(signingKey)
+			}
+			encoded, buildErr := m.buildSyncSubmitTxWithSigner(
+				localID, item, signingKey, signingPub, nonce,
+			)
+			if buildErr != nil {
+				return fmt.Errorf("build sync submit tx: %w", buildErr)
+			}
+			hash, _, broadcastErr := m.broadcastTxCommitContext(leaseCtx, encoded)
+			outcome := classifySyncBroadcast(broadcastErr)
+			if outcome == syncBcastNonceRace && attempt == 0 {
+				continue
+			}
+			switch outcome {
+			case syncBcastOK:
+				result, resultHash = SyncOutcomeAccepted, hash
+			case syncBcastDuplicate:
+				result = SyncOutcomeDuplicate
+			case syncBcastScopeReject:
+				// FinalizeBlock rejected the submit tx for lack of RBAC write access
+				// on the receiver — a per-attempt consensus cost, so a distinct
+				// outcome the sender attempts-caps (NOT the cheap gate-scope reject).
+				result = SyncOutcomeRejectedWriteAccess
+			default:
+				if broadcastErr != nil {
+					m.logger.Warn().Err(broadcastErr).Str("local", localID).Msg("sync: submit broadcast failed")
+				}
+			}
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		m.logger.Error().Err(err).Str("local", localID).Msg("sync: leased submit broadcast failed")
+		return SyncOutcomeRetry, ""
+	}
+	return result, resultHash
 }
 
-// buildSyncSubmitTx constructs the locally-authorized MemorySubmit for a
-// synced copy. The remote transport identity remains recorded in SyncItem
-// provenance; after app-v23 the new local write is signed by current CEREBRUM
-// Root, never by a retired JOIN-frozen transport credential.
-func (m *Manager) buildSyncSubmitTx(localID string, item *SyncItem) ([]byte, error) {
+// buildSyncSubmitTxWithSigner constructs the locally-authorized MemorySubmit
+// using the exact signer and nonce already reserved by broadcastSyncSubmit's
+// lease. The remote transport identity remains recorded in SyncItem provenance;
+// after app-v23 the new local write is signed by current CEREBRUM Root, never by
+// a retired JOIN-frozen transport credential.
+func (m *Manager) buildSyncSubmitTxWithSigner(
+	localID string,
+	item *SyncItem,
+	signingKey ed25519.PrivateKey,
+	signingPub ed25519.PublicKey,
+	nonce uint64,
+) ([]byte, error) {
 	contentHash, err := hex.DecodeString(item.ContentHash)
 	if err != nil {
 		return nil, fmt.Errorf("decode content hash: %w", err)
-	}
-	signingKey, signingPub, err := m.localConsensusSigningKey()
-	if err != nil {
-		return nil, fmt.Errorf("resolve sync submit authority: %w", err)
 	}
 	body := []byte("sync_admit:" + localID)
 	bodyHash := sha256.Sum256(body)
@@ -887,7 +916,7 @@ func (m *Manager) buildSyncSubmitTx(localID string, item *SyncItem) ([]byte, err
 	}
 	ptx := &tx.ParsedTx{
 		Type:      tx.TxTypeMemorySubmit,
-		Nonce:     tx.MonotonicNonce(signingKey),
+		Nonce:     nonce,
 		Timestamp: time.Now(),
 		MemorySubmit: &tx.MemorySubmit{
 			MemoryID:        localID,

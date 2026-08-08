@@ -164,9 +164,7 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	registerTx := &tx.ParsedTx{
-		Type:      tx.TxTypeAgentRegister,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeAgentRegister,
 		AgentRegister: &tx.AgentRegister{
 			AgentID:    agentID,
 			Name:       req.Name,
@@ -179,17 +177,6 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), registerTx)
 
-	if err := s.signTx(registerTx); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(registerTx)
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
 	// broadcast_tx_commit (not _sync) so the response includes the block
 	// height. Clients use on_chain_height as a trivial "did this actually
 	// land on-chain?" check — surfacing it on first registration means
@@ -197,11 +184,15 @@ func (s *Server) handleAgentRegister(w http.ResponseWriter, r *http.Request) {
 	// (prior behaviour) and then height=<N> only on the idempotent
 	// re-registration path. SDK callers were reading the height=None as
 	// a version-drift signal; with the fix both code paths surface it.
-	txHash, height, err := s.broadcastTxCommitWithHeight(encoded)
+	var txHash string
+	var height int64
+	stage, err := s.submitConsensusTx(r.Context(), registerTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, height, submitErr = s.broadcastTxCommitWithHeight(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast agent register tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "agent register", err)
 		return
 	}
 
@@ -300,9 +291,7 @@ func (s *Server) registerMintedAgentIdentity(ctx context.Context, tokenPub ed255
 	sig := auth.SignRequestWithNonce(tokenPriv, method, path, body, timestamp, nonce)
 
 	registerTx := &tx.ParsedTx{
-		Type:      tx.TxTypeAgentRegister,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeAgentRegister,
 		AgentRegister: &tx.AgentRegister{
 			AgentID:  agentID,
 			Name:     name,
@@ -320,14 +309,24 @@ func (s *Server) registerMintedAgentIdentity(ctx context.Context, tokenPub ed255
 	if s.isPostV17ForNextTx() {
 		registerTx.AgentRequest = append([]byte(nil), canonical...)
 	}
-	if signErr := s.signTx(registerTx); signErr != nil {
-		return "", 0, fmt.Errorf("sign register tx: %w", signErr)
-	}
-	encoded, err := tx.EncodeTx(registerTx)
+	var txHash string
+	var height int64
+	stage, err := s.submitConsensusTx(ctx, registerTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, height, submitErr = s.broadcastTxCommitWithHeightContext(ctx, encoded)
+		return submitErr
+	})
 	if err != nil {
-		return "", 0, fmt.Errorf("encode register tx: %w", err)
+		switch stage {
+		case consensusTxSign:
+			return "", 0, fmt.Errorf("sign register tx: %w", err)
+		case consensusTxEncode:
+			return "", 0, fmt.Errorf("encode register tx: %w", err)
+		default:
+			return "", 0, err
+		}
 	}
-	return s.broadcastTxCommitWithHeightContext(ctx, encoded)
+	return txHash, height, nil
 }
 
 // handleAgentUpdate handles PUT /v1/agent/update.
@@ -385,9 +384,7 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	updateTx := &tx.ParsedTx{
-		Type:      tx.TxTypeAgentUpdate,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeAgentUpdate,
 		AgentUpdateTx: &tx.AgentUpdate{
 			AgentID: agentID,
 			Name:    name,
@@ -397,22 +394,14 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), updateTx)
 
-	if err := s.signTx(updateTx); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(updateTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), updateTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast agent update tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "agent update", err)
 		return
 	}
 
@@ -429,26 +418,20 @@ func (s *Server) handleAgentUpdate(w http.ResponseWriter, r *http.Request) {
 // updated SQLite but the CometBFT broadcast silently failed.
 func (s *Server) reconcileAgentName(agentID, name, bio string) {
 	updateTx := &tx.ParsedTx{
-		Type:      tx.TxTypeAgentUpdate,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeAgentUpdate,
 		AgentUpdateTx: &tx.AgentUpdate{
 			AgentID: agentID,
 			Name:    name,
 			BootBio: bio,
 		},
 	}
-	if err := s.signTx(updateTx); err != nil {
-		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("reconcile: failed to sign agent name update")
-		return
-	}
-	encoded, err := tx.EncodeTx(updateTx)
+	stage, err := s.submitConsensusTx(context.Background(), updateTx, func(encoded []byte) error {
+		_, submitErr := s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("reconcile: failed to encode agent name update")
-		return
-	}
-	if _, err := s.broadcastTxCommit(encoded); err != nil {
-		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("reconcile: failed to broadcast agent name update")
+		s.logger.Warn().Err(err).Str("agent_id", agentID).
+			Str("stage", string(stage)).Msg("reconcile: failed to submit agent name update")
 		return
 	}
 	s.logger.Info().Str("agent_id", agentID).Str("name", name).Msg("reconciled agent name: on-chain updated to match display name")
@@ -626,9 +609,7 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 	}
 
 	permTx := &tx.ParsedTx{
-		Type:      tx.TxTypeAgentSetPermission,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeAgentSetPermission,
 		AgentSetPermission: &tx.AgentSetPermission{
 			AgentID:             targetID,
 			Clearance:           clearance,
@@ -643,27 +624,19 @@ func (s *Server) handleAgentSetPermission(w http.ResponseWriter, r *http.Request
 
 	s.embedAgentAuth(r.Context(), permTx)
 
-	if err := s.signTx(permTx); err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(permTx)
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
 	// Use broadcast_tx_commit (NOT _sync) so a FinalizeBlock rejection is
 	// surfaced as an error to the REST caller. Sync only inspects CheckTx
 	// (signature/nonce) and would happily return a tx_hash for a tx that
 	// the consensus handler later rejects — the v6.6.8-and-prior silent
 	// failure mode.
-	txHash, err := s.broadcastTxCommit(encoded)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), permTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast agent set permission tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "agent set permission", err)
 		return
 	}
 

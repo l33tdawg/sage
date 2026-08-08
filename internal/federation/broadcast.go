@@ -43,10 +43,17 @@ func broadcastTimeout() time.Duration {
 // block finalization, returning (txHash, height). CheckTx and FinalizeBlock
 // rejections surface as errors.
 func (m *Manager) broadcastTxCommit(txBytes []byte) (string, int64, error) {
-	url := fmt.Sprintf("%s/broadcast_tx_commit?tx=0x%s", m.cometRPC, hex.EncodeToString(txBytes))
-
 	ctx, cancel := context.WithTimeout(context.Background(), broadcastTimeout())
 	defer cancel()
+	return m.broadcastTxCommitContext(ctx, txBytes)
+}
+
+// broadcastTxCommitContext is the context-aware form used by nonce-lease
+// holders. Sharing one deadline across lease acquisition and Comet admission
+// prevents a timed-out waiter from retaining the per-key lease for an
+// additional detached broadcast timeout.
+func (m *Manager) broadcastTxCommitContext(ctx context.Context, txBytes []byte) (string, int64, error) {
+	url := fmt.Sprintf("%s/broadcast_tx_commit?tx=0x%s", m.cometRPC, hex.EncodeToString(txBytes))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) // #nosec G107 -- internal CometBFT RPC
 	if err != nil {

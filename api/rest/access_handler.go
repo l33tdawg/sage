@@ -3,7 +3,6 @@ package rest
 import (
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -66,9 +65,7 @@ func (s *Server) handleAccessRequest(w http.ResponseWriter, r *http.Request) {
 	agentID := middleware.ContextAgentID(r.Context())
 
 	accessTx := &tx.ParsedTx{
-		Type:      tx.TxTypeAccessRequest,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeAccessRequest,
 		AccessRequest: &tx.AccessRequest{
 			RequesterID:    agentID,
 			TargetDomain:   req.TargetDomain,
@@ -79,25 +76,14 @@ func (s *Server) handleAccessRequest(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), accessTx)
 
-	err = s.signTx(accessTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), accessTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign access request tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(accessTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode access request tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast access request tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "access request", err)
 		return
 	}
 
@@ -131,9 +117,7 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 	agentID := middleware.ContextAgentID(r.Context())
 
 	grantTx := &tx.ParsedTx{
-		Type:      tx.TxTypeAccessGrant,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeAccessGrant,
 		AccessGrant: &tx.AccessGrant{
 			GranterID: agentID,
 			GranteeID: req.GranteeID,
@@ -146,25 +130,14 @@ func (s *Server) handleAccessGrant(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), grantTx)
 
-	err = s.signTx(grantTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), grantTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign access grant tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(grantTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode access grant tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast access grant tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "access grant", err)
 		return
 	}
 
@@ -195,9 +168,7 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 	agentID := middleware.ContextAgentID(r.Context())
 
 	revokeTx := &tx.ParsedTx{
-		Type:      tx.TxTypeAccessRevoke,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeAccessRevoke,
 		AccessRevoke: &tx.AccessRevoke{
 			RevokerID: agentID,
 			GranteeID: req.GranteeID,
@@ -208,25 +179,14 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), revokeTx)
 
-	err = s.signTx(revokeTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), revokeTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign access revoke tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(revokeTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode access revoke tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast access revoke tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "access revoke", err)
 		return
 	}
 
@@ -329,9 +289,7 @@ func (s *Server) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
 	agentID := middleware.ContextAgentID(r.Context())
 
 	domainTx := &tx.ParsedTx{
-		Type:      tx.TxTypeDomainRegister,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeDomainRegister,
 		DomainRegister: &tx.DomainRegister{
 			DomainName:   req.Name,
 			OwnerAgentID: agentID,
@@ -342,25 +300,14 @@ func (s *Server) handleDomainRegister(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), domainTx)
 
-	err = s.signTx(domainTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), domainTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign domain register tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(domainTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode domain register tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast domain register tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "domain register", err)
 		return
 	}
 

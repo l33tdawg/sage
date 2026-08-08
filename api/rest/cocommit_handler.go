@@ -219,25 +219,24 @@ func (s *Server) handleCoCommitSubmit(w http.ResponseWriter, r *http.Request) {
 
 	submitTx := &tx.ParsedTx{
 		Type:           tx.TxTypeCoCommitSubmit,
-		Nonce:          tx.MonotonicNonce(s.signingKey),
-		Timestamp:      time.Now(),
 		CoCommitSubmit: env,
 	}
 	s.embedAgentAuth(r.Context(), submitTx)
-	if signErr := s.signTx(submitTx); signErr != nil {
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(submitTx)
+	var hash string
+	var height int64
+	stage, err := s.submitConsensusTx(r.Context(), submitTx, func(encoded []byte) error {
+		var submitErr error
+		hash, height, submitErr = s.broadcastTxCommitWithHeight(encoded)
+		return submitErr
+	})
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	hash, height, err := s.broadcastTxCommitWithHeight(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Str("shared_id", env.SharedID).Msg("co-commit submit rejected")
-		status, msg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Co-commit rejected", msg)
+		if stage == consensusTxSubmit {
+			s.logger.Error().Err(err).Str("shared_id", env.SharedID).Msg("co-commit submit rejected")
+			status, msg := broadcastErrorPublic(err)
+			writeProblem(w, status, "Co-commit rejected", msg)
+		} else {
+			s.writeConsensusTxError(w, stage, "co-commit submit", err)
+		}
 		return
 	}
 

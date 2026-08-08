@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"time"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/auth"
@@ -177,9 +176,7 @@ func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proposeTx := &tx.ParsedTx{
-		Type:      tx.TxTypeGovPropose,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeGovPropose,
 		GovPropose: &tx.GovPropose{
 			Operation:    op,
 			TargetID:     req.TargetID,
@@ -195,24 +192,15 @@ func (s *Server) handleGovPropose(w http.ResponseWriter, r *http.Request) {
 	s.embedAgentAuth(r.Context(), proposeTx)
 
 	// Sign the transaction with the node's signing key.
-	if err = s.signTx(proposeTx); err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign gov propose tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(proposeTx)
+	var txHash string
+	var committedHeight int64
+	stage, err := s.submitConsensusTx(r.Context(), proposeTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, committedHeight, submitErr = s.broadcastTxCommitWithHeight(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode gov propose tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, committedHeight, err := s.broadcastTxCommitWithHeight(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast gov propose tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "gov propose", err)
 		return
 	}
 	validatorID := auth.PublicKeyToAgentID(ed25519.PublicKey(proposeTx.PublicKey))
@@ -314,9 +302,7 @@ func (s *Server) handleGovVote(w http.ResponseWriter, r *http.Request) {
 	}
 
 	voteTx := &tx.ParsedTx{
-		Type:      tx.TxTypeGovVote,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeGovVote,
 		GovVote: &tx.GovVote{
 			ProposalID: req.ProposalID,
 			Decision:   decision,
@@ -327,24 +313,14 @@ func (s *Server) handleGovVote(w http.ResponseWriter, r *http.Request) {
 	s.embedAgentAuth(r.Context(), voteTx)
 
 	// Sign the transaction with the node's signing key.
-	if err = s.signTx(voteTx); err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign gov vote tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(voteTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), voteTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode gov vote tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast gov vote tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "gov vote", err)
 		return
 	}
 
@@ -383,9 +359,7 @@ func (s *Server) handleGovCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cancelTx := &tx.ParsedTx{
-		Type:      tx.TxTypeGovCancel,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeGovCancel,
 		GovCancel: &tx.GovCancel{
 			ProposalID: req.ProposalID,
 		},
@@ -395,24 +369,14 @@ func (s *Server) handleGovCancel(w http.ResponseWriter, r *http.Request) {
 	s.embedAgentAuth(r.Context(), cancelTx)
 
 	// Sign the transaction with the node's signing key.
-	if err := s.signTx(cancelTx); err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign gov cancel tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(cancelTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), cancelTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode gov cancel tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast gov cancel tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "gov cancel", err)
 		return
 	}
 

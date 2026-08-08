@@ -1248,9 +1248,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	submitTx := &tx.ParsedTx{
-		Type:      tx.TxTypeMemorySubmit,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeMemorySubmit,
 		MemorySubmit: &tx.MemorySubmit{
 			MemoryID:        memoryID,
 			ContentHash:     contentHash[:],
@@ -1305,20 +1303,6 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	// Embed agent's cryptographic proof for on-chain identity verification.
 	s.embedAgentAuth(r.Context(), submitTx)
 
-	// Sign the transaction with the node's signing key.
-	if err = s.signTx(submitTx); err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign submit tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-
-	encoded, err := tx.EncodeTx(submitTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode submit tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-
 	// Stage supplementary off-chain data (embedding vector, provider, triples)
 	// in the process-local cache. The ABCI app reads this during FinalizeBlock
 	// and includes it in the pending write that Commit flushes to the store.
@@ -1354,8 +1338,23 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	// Broadcast via CometBFT RPC and wait for block finalization.
 	// broadcast_tx_commit blocks until the block containing this tx is committed,
 	// meaning ABCI Commit has already flushed the memory to the offchain store.
-	txHash, committedHeight, err := s.broadcastTxCommitWithHeight(encoded)
+	var txHash string
+	var committedHeight int64
+	// A memory submit deliberately survives client disconnect through commit and
+	// post-commit tag finalisation (see TestSubmitMemory_TagCtxSurvivesClientDisconnect).
+	// Keep nonce-lease ownership on that same detached lifecycle; using
+	// r.Context() here would turn an already-authorized durable write into a 503
+	// before it reaches the historical background commit path.
+	stage, err := s.submitConsensusTx(context.Background(), submitTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, committedHeight, submitErr = s.broadcastTxCommitWithHeight(encoded)
+		return submitErr
+	})
 	if err != nil {
+		if stage != consensusTxSubmit {
+			s.writeConsensusTxError(w, stage, "submit", err)
+			return
+		}
 		s.logger.Error().Err(err).Msg("failed to broadcast submit tx")
 		if req.IdempotencyKey != "" && s.isPostV23ForNextTx() &&
 			s.writeTaskIdempotencyReplayIfCommitted(

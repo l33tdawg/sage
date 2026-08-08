@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
@@ -204,6 +206,102 @@ func TestMaybeProposeUpgrade_ChainAheadStops(t *testing.T) {
 	}
 	if rpc.broadcasts.Load() != 0 {
 		t.Errorf("watchdog should NOT broadcast when chain is ahead; got %d broadcasts", rpc.broadcasts.Load())
+	}
+}
+
+// TestUpgradeWatchdogSameKeyProducersSerializeThroughRPC proves that the
+// heartbeat and proposal paths share the process-wide signer lease. The first
+// RPC is held open after its nonce is encoded; the second producer must not
+// allocate and submit a higher nonce until that response completes.
+func TestUpgradeWatchdogSameKeyProducersSerializeThroughRPC(t *testing.T) {
+	_, signingKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate signing key: %v", err)
+	}
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondEntered := make(chan struct{})
+	var calls atomic.Int32
+	var noncesMu sync.Mutex
+	nonces := make([]uint64, 0, 2)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/abci_info", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"result":{"response":{"app_version":"0","last_block_height":"1"}}}`))
+	})
+	mux.HandleFunc("/broadcast_tx_sync", func(w http.ResponseWriter, r *http.Request) {
+		raw, decodeErr := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("tx"), "0x"))
+		if decodeErr != nil {
+			http.Error(w, decodeErr.Error(), http.StatusBadRequest)
+			return
+		}
+		parsed, decodeErr := tx.DecodeTx(raw)
+		if decodeErr != nil {
+			http.Error(w, decodeErr.Error(), http.StatusBadRequest)
+			return
+		}
+		noncesMu.Lock()
+		nonces = append(nonces, parsed.Nonce)
+		noncesMu.Unlock()
+
+		switch calls.Add(1) {
+		case 1:
+			close(firstEntered)
+			<-releaseFirst
+		case 2:
+			close(secondEntered)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": map[string]any{"code": 0, "hash": "AB", "log": ""},
+		})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	cfg := upgradeWatchdogConfig{
+		BinaryVersion: "test",
+		AgentKey:      signingKey,
+		CometRPC:      server.URL,
+		Logger:        zerolog.Nop(),
+	}
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		sendHeartbeatTx(context.Background(), cfg)
+	}()
+	select {
+	case <-firstEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("heartbeat did not reach the RPC")
+	}
+
+	proposalDone := make(chan bool, 1)
+	go func() { proposalDone <- maybeProposeUpgrade(context.Background(), cfg) }()
+	select {
+	case <-secondEntered:
+		close(releaseFirst)
+		t.Fatal("same-key proposal reached RPC before heartbeat response completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseFirst)
+	select {
+	case <-secondEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("proposal did not reach RPC after heartbeat released its lease")
+	}
+	if ok := <-proposalDone; !ok {
+		t.Fatal("proposal failed after acquiring the released nonce lease")
+	}
+	<-heartbeatDone
+
+	noncesMu.Lock()
+	defer noncesMu.Unlock()
+	if len(nonces) != 2 {
+		t.Fatalf("recorded %d nonces, want 2", len(nonces))
+	}
+	if nonces[0] >= nonces[1] {
+		t.Fatalf("submission nonces out of order: first=%d second=%d", nonces[0], nonces[1])
 	}
 }
 

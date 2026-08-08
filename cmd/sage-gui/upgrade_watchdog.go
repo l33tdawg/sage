@@ -350,17 +350,24 @@ const (
 // (admin gate, already-pending) surface at block execution, which the
 // fire-and-forget sync broadcast never sees.
 func proposeForAutoAdvance(ctx context.Context, cfg upgradeWatchdogConfig, target uint64) autoAdvanceOutcome {
-	ptx, err := buildUpgradeProposeTx(cfg, target)
+	signingKey, err := resolveUpgradeSigningKey(cfg)
 	if err != nil {
-		cfg.Logger.Error().Err(err).Msg("auto-advance: build propose tx failed")
+		cfg.Logger.Error().Err(err).Msg("auto-advance: resolve signing key failed")
 		return autoAdvanceTransient
 	}
-	encoded, err := tx.EncodeTx(ptx)
-	if err != nil {
-		cfg.Logger.Error().Err(err).Msg("auto-advance: encode propose tx failed")
-		return autoAdvanceTransient
-	}
-	res, err := broadcastTxCommit(ctx, cfg.CometRPC, encoded)
+	var res *broadcastCommitResp
+	err = tx.WithNonceLease(ctx, signingKey, func(nonce uint64) error {
+		ptx, buildErr := buildUpgradeProposeTxWithNonce(cfg, target, signingKey, nonce)
+		if buildErr != nil {
+			return fmt.Errorf("build propose tx: %w", buildErr)
+		}
+		encoded, encodeErr := tx.EncodeTx(ptx)
+		if encodeErr != nil {
+			return fmt.Errorf("encode propose tx: %w", encodeErr)
+		}
+		res, buildErr = broadcastTxCommit(ctx, cfg.CometRPC, encoded)
+		return buildErr
+	})
 	if err != nil {
 		// The tx may still have landed (commit-timeout 500s are common right
 		// after a restart) — the pending-wait probe sorts it out next tick.
@@ -449,12 +456,20 @@ func readPendingPlan(cfg upgradeWatchdogConfig) *store.UpgradePlanRecord {
 // Best-effort — a failure here surfaces later as the admin-gate rejection,
 // which carries the operator guidance.
 func ensureOperatorAdminRegistered(ctx context.Context, cfg upgradeWatchdogConfig) {
-	encoded, err := buildOperatorRegisterTx(cfg)
+	signingKey, err := resolveUpgradeSigningKey(cfg)
 	if err != nil {
-		cfg.Logger.Warn().Err(err).Msg("auto-advance: build admin register tx failed")
+		cfg.Logger.Warn().Err(err).Msg("auto-advance: resolve admin register signing key failed")
 		return
 	}
-	res, err := broadcastTxCommit(ctx, cfg.CometRPC, encoded)
+	var res *broadcastCommitResp
+	err = tx.WithNonceLease(ctx, signingKey, func(nonce uint64) error {
+		encoded, buildErr := buildOperatorRegisterTxWithNonce(signingKey, nonce)
+		if buildErr != nil {
+			return fmt.Errorf("build admin register tx: %w", buildErr)
+		}
+		res, buildErr = broadcastTxCommit(ctx, cfg.CometRPC, encoded)
+		return buildErr
+	})
 	if err != nil {
 		cfg.Logger.Warn().Err(err).Msg("auto-advance: admin register broadcast failed")
 		return
@@ -466,11 +481,18 @@ func ensureOperatorAdminRegistered(ctx context.Context, cfg upgradeWatchdogConfi
 // sendHeartbeatTx fire-and-forgets an idempotent operator re-registration to
 // advance a quiescent chain toward a pending plan's activation height.
 func sendHeartbeatTx(ctx context.Context, cfg upgradeWatchdogConfig) {
-	encoded, err := buildOperatorRegisterTx(cfg)
+	signingKey, err := resolveUpgradeSigningKey(cfg)
 	if err != nil {
 		return
 	}
-	_, _ = broadcastTxSync(ctx, cfg.CometRPC, encoded)
+	_ = tx.WithNonceLease(ctx, signingKey, func(nonce uint64) error {
+		encoded, buildErr := buildOperatorRegisterTxWithNonce(signingKey, nonce)
+		if buildErr != nil {
+			return buildErr
+		}
+		_, buildErr = broadcastTxSync(ctx, cfg.CometRPC, encoded)
+		return buildErr
+	})
 }
 
 // buildOperatorRegisterTx builds the signed AgentRegister used both for the
@@ -481,6 +503,20 @@ func buildOperatorRegisterTx(cfg upgradeWatchdogConfig) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	var encoded []byte
+	err = tx.WithNonceLease(context.Background(), signingKey, func(nonce uint64) error {
+		var buildErr error
+		encoded, buildErr = buildOperatorRegisterTxWithNonce(signingKey, nonce)
+		return buildErr
+	})
+	return encoded, err
+}
+
+// buildOperatorRegisterTxWithNonce is the pure encoder used once the caller
+// owns signingKey's nonce lease. Production callers keep that lease through the
+// corresponding CometBFT response; keeping lease ownership out of this helper
+// prevents accidental same-key reentrancy.
+func buildOperatorRegisterTxWithNonce(signingKey ed25519.PrivateKey, nonce uint64) ([]byte, error) {
 	pub, ok := signingKey.Public().(ed25519.PublicKey)
 	if !ok {
 		return nil, fmt.Errorf("agent key public type assertion failed")
@@ -495,7 +531,7 @@ func buildOperatorRegisterTx(cfg upgradeWatchdogConfig) ([]byte, error) {
 
 	ptx := &tx.ParsedTx{
 		Type:      tx.TxTypeAgentRegister,
-		Nonce:     tx.MonotonicNonce(signingKey),
+		Nonce:     nonce,
 		Timestamp: time.Unix(ts, 0),
 		AgentRegister: &tx.AgentRegister{
 			AgentID: hex.EncodeToString(pub),
@@ -574,18 +610,26 @@ func maybeProposeUpgrade(ctx context.Context, cfg upgradeWatchdogConfig) bool {
 		return true
 	}
 
-	parsedTx, err := buildUpgradeProposeTx(cfg, upgradeTargetAppVersion)
+	signingKey, err := resolveUpgradeSigningKey(cfg)
 	if err != nil {
-		cfg.Logger.Error().Err(err).Msg("upgrade watchdog: build propose tx failed")
+		cfg.Logger.Error().Err(err).Msg("upgrade watchdog: resolve signing key failed")
 		return false
 	}
-	encoded, err := tx.EncodeTx(parsedTx)
-	if err != nil {
-		cfg.Logger.Error().Err(err).Msg("upgrade watchdog: encode propose tx failed")
-		return false
-	}
-
-	res, err := broadcastTxSync(ctx, cfg.CometRPC, encoded)
+	var res *broadcastSyncResp
+	err = tx.WithNonceLease(ctx, signingKey, func(nonce uint64) error {
+		parsedTx, buildErr := buildUpgradeProposeTxWithNonce(
+			cfg, upgradeTargetAppVersion, signingKey, nonce,
+		)
+		if buildErr != nil {
+			return fmt.Errorf("build propose tx: %w", buildErr)
+		}
+		encoded, encodeErr := tx.EncodeTx(parsedTx)
+		if encodeErr != nil {
+			return fmt.Errorf("encode propose tx: %w", encodeErr)
+		}
+		res, buildErr = broadcastTxSync(ctx, cfg.CometRPC, encoded)
+		return buildErr
+	})
 	if err != nil {
 		cfg.Logger.Warn().Err(err).Msg("upgrade watchdog: broadcast failed")
 		return false
@@ -615,15 +659,34 @@ func maybeProposeUpgrade(ctx context.Context, cfg upgradeWatchdogConfig) bool {
 // target app version using the operator's agent key. Mirrors signAgentProof's
 // canonical message format so verifyAgentIdentity accepts the embedded proof.
 //
-// target is a parameter (not the upgradeTargetAppVersion const) so two callers
-// share one signing path: the watchdog passes the frozen const, while the
-// operator `upgrade propose` subcommand passes a validated, strictly-sequential
-// target to reach the governance-gated app-v7…app-v10 forks. See issue #32.
+// target is a parameter (not the upgradeTargetAppVersion const) so inspection
+// tests can use the same canonical builder as production. Actual broadcast
+// callers use buildUpgradeProposeTxWithNonce while retaining the lease through
+// the RPC response. See issue #32.
 func buildUpgradeProposeTx(cfg upgradeWatchdogConfig, target uint64) (*tx.ParsedTx, error) {
 	signingKey, err := resolveUpgradeSigningKey(cfg)
 	if err != nil {
 		return nil, err
 	}
+	var ptx *tx.ParsedTx
+	err = tx.WithNonceLease(context.Background(), signingKey, func(nonce uint64) error {
+		var buildErr error
+		ptx, buildErr = buildUpgradeProposeTxWithNonce(cfg, target, signingKey, nonce)
+		return buildErr
+	})
+	return ptx, err
+}
+
+// buildUpgradeProposeTxWithNonce constructs and signs a proposal while its
+// caller owns signingKey's nonce lease. It never resolves or leases the key
+// itself, so a production build+encode+broadcast operation acquires exactly
+// once and cannot deadlock through same-key reentrancy.
+func buildUpgradeProposeTxWithNonce(
+	cfg upgradeWatchdogConfig,
+	target uint64,
+	signingKey ed25519.PrivateKey,
+	nonce uint64,
+) (*tx.ParsedTx, error) {
 	pub, ok := signingKey.Public().(ed25519.PublicKey)
 	if !ok {
 		return nil, fmt.Errorf("agent key public type assertion failed")
@@ -660,7 +723,7 @@ func buildUpgradeProposeTx(cfg upgradeWatchdogConfig, target uint64) (*tx.Parsed
 
 	ptx := &tx.ParsedTx{
 		Type:           tx.TxTypeUpgradePropose,
-		Nonce:          tx.MonotonicNonce(signingKey), // strictly increasing per signing key (app-v9 consensus nonce gate)
+		Nonce:          nonce, // allocated while the caller holds the per-key submission lease
 		Timestamp:      time.Unix(ts, 0),
 		AgentPubKey:    pub,
 		AgentSig:       sig,

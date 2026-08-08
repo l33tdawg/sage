@@ -103,9 +103,7 @@ func (s *Server) handleOrgRegister(w http.ResponseWriter, r *http.Request) {
 	orgID := hex.EncodeToString(orgIDHash[:16])
 
 	orgTx := &tx.ParsedTx{
-		Type:      tx.TxTypeOrgRegister,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeOrgRegister,
 		OrgRegister: &tx.OrgRegister{
 			OrgID:       orgID,
 			Name:        req.Name,
@@ -116,23 +114,14 @@ func (s *Server) handleOrgRegister(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), orgTx)
 
-	err = s.signTx(orgTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), orgTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign org register tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(orgTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode org register tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast org register tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "org register", err)
 		return
 	}
 
@@ -331,9 +320,7 @@ func (s *Server) handleOrgAddMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	addTx := &tx.ParsedTx{
-		Type:      tx.TxTypeOrgAddMember,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeOrgAddMember,
 		OrgAddMember: &tx.OrgAddMember{
 			OrgID:     orgID,
 			AgentID:   req.AgentID,
@@ -344,23 +331,14 @@ func (s *Server) handleOrgAddMember(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), addTx)
 
-	err = s.signTx(addTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), addTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign org add member tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(addTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode org add member tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast org add member tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "org add member", err)
 		return
 	}
 
@@ -387,9 +365,7 @@ func (s *Server) handleOrgRemoveMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	removeTx := &tx.ParsedTx{
-		Type:      tx.TxTypeOrgRemoveMember,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeOrgRemoveMember,
 		OrgRemoveMember: &tx.OrgRemoveMember{
 			OrgID:   orgID,
 			AgentID: agentToRemove,
@@ -398,23 +374,14 @@ func (s *Server) handleOrgRemoveMember(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), removeTx)
 
-	err := s.signTx(removeTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), removeTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign org remove member tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(removeTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode org remove member tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast org remove member tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "org remove member", err)
 		return
 	}
 
@@ -451,9 +418,7 @@ func (s *Server) handleOrgSetClearance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clearanceTx := &tx.ParsedTx{
-		Type:      tx.TxTypeOrgSetClearance,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeOrgSetClearance,
 		OrgSetClearance: &tx.OrgSetClearance{
 			OrgID:     orgID,
 			AgentID:   req.AgentID,
@@ -463,23 +428,14 @@ func (s *Server) handleOrgSetClearance(w http.ResponseWriter, r *http.Request) {
 
 	s.embedAgentAuth(r.Context(), clearanceTx)
 
-	err = s.signTx(clearanceTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), clearanceTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign org set clearance tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(clearanceTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode org set clearance tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast org set clearance tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "org set clearance", err)
 		return
 	}
 
@@ -565,9 +521,7 @@ func (s *Server) handleFederationPropose(w http.ResponseWriter, r *http.Request)
 	}
 
 	proposeTx := &tx.ParsedTx{
-		Type:      tx.TxTypeFederationPropose,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeFederationPropose,
 		FederationPropose: &tx.FederationPropose{
 			ProposerOrgID:    proposerOrg,
 			TargetOrgID:      req.TargetOrgID,
@@ -581,23 +535,14 @@ func (s *Server) handleFederationPropose(w http.ResponseWriter, r *http.Request)
 
 	s.embedAgentAuth(r.Context(), proposeTx)
 
-	err = s.signTx(proposeTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), proposeTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign federation propose tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(proposeTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode federation propose tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast federation propose tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "federation propose", err)
 		return
 	}
 
@@ -655,9 +600,7 @@ func (s *Server) handleFederationApprove(w http.ResponseWriter, r *http.Request)
 	}
 
 	approveTx := &tx.ParsedTx{
-		Type:      tx.TxTypeFederationApprove,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeFederationApprove,
 		FederationApprove: &tx.FederationApprove{
 			FederationID:  fedID,
 			ApproverOrgID: approverOrg,
@@ -666,23 +609,14 @@ func (s *Server) handleFederationApprove(w http.ResponseWriter, r *http.Request)
 
 	s.embedAgentAuth(r.Context(), approveTx)
 
-	err = s.signTx(approveTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), approveTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign federation approve tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(approveTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode federation approve tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast federation approve tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "federation approve", err)
 		return
 	}
 
@@ -749,9 +683,7 @@ func (s *Server) handleFederationRevoke(w http.ResponseWriter, r *http.Request) 
 	_ = decodeJSON(r, &req)
 
 	revokeTx := &tx.ParsedTx{
-		Type:      tx.TxTypeFederationRevoke,
-		Nonce:     tx.MonotonicNonce(s.signingKey),
-		Timestamp: time.Now(),
+		Type: tx.TxTypeFederationRevoke,
 		FederationRevoke: &tx.FederationRevoke{
 			FederationID: fedID,
 			RevokerOrgID: revokerOrg,
@@ -761,23 +693,14 @@ func (s *Server) handleFederationRevoke(w http.ResponseWriter, r *http.Request) 
 
 	s.embedAgentAuth(r.Context(), revokeTx)
 
-	err = s.signTx(revokeTx)
+	var txHash string
+	stage, err := s.submitConsensusTx(r.Context(), revokeTx, func(encoded []byte) error {
+		var submitErr error
+		txHash, submitErr = s.broadcastTxCommit(encoded)
+		return submitErr
+	})
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to sign federation revoke tx")
-		writeProblem(w, http.StatusInternalServerError, "Signing error", "Failed to sign transaction.")
-		return
-	}
-	encoded, err := tx.EncodeTx(revokeTx)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to encode federation revoke tx")
-		writeProblem(w, http.StatusInternalServerError, "Encoding error", "Failed to encode transaction.")
-		return
-	}
-	txHash, err := s.broadcastTxCommit(encoded)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to broadcast federation revoke tx")
-		status, publicMsg := broadcastErrorPublic(err)
-		writeProblem(w, status, "Broadcast error", publicMsg)
+		s.writeConsensusTxError(w, stage, "federation revoke", err)
 		return
 	}
 

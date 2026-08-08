@@ -350,26 +350,36 @@ func voteOnPendingMemoriesResult(
 				decStr = "accept"
 			}
 
-			voteTx := &tx.ParsedTx{
-				Type:      tx.TxTypeMemoryVote,
-				Nonce:     tx.MonotonicNonce(cfg.Key), // strictly increasing per key (app-v9 nonce gate)
-				Timestamp: time.Now(),
-				MemoryVote: &tx.MemoryVote{
-					MemoryID:  mem.MemoryID,
-					Decision:  voteDecisionFromString(decStr),
-					Rationale: decision.Reason,
-				},
-			}
-			if err := tx.SignTx(voteTx, cfg.Key); err != nil {
-				logger.Debug().Err(err).Msg("failed to sign vote tx")
-				continue
-			}
-			encoded, err := tx.EncodeTx(voteTx)
+			var result voteBroadcastResult
+			err = tx.WithNonceLease(ctx, cfg.Key, func(nonce uint64) error {
+				voteTx := &tx.ParsedTx{
+					Type:      tx.TxTypeMemoryVote,
+					Nonce:     nonce,
+					Timestamp: time.Now(),
+					MemoryVote: &tx.MemoryVote{
+						MemoryID:  mem.MemoryID,
+						Decision:  voteDecisionFromString(decStr),
+						Rationale: decision.Reason,
+					},
+				}
+				if signErr := tx.SignTx(voteTx, cfg.Key); signErr != nil {
+					return signErr
+				}
+				encoded, encodeErr := tx.EncodeTx(voteTx)
+				if encodeErr != nil {
+					return encodeErr
+				}
+				result = broadcastVoteTx(ctx, cfg.CometRPC, encoded, logger)
+				return nil
+			})
 			if err != nil {
-				logger.Debug().Err(err).Msg("failed to encode vote tx")
+				logger.Debug().Err(err).Msg("failed to build or broadcast vote tx under nonce lease")
+				if ctx.Err() != nil {
+					*scanOffset = 0
+					return cast, true
+				}
 				continue
 			}
-			result := broadcastVoteTx(ctx, cfg.CometRPC, encoded, logger)
 			if result.unavailable {
 				*scanOffset = 0
 				return cast, true
@@ -420,27 +430,34 @@ func voteOnUpgradeProposalResult(ctx context.Context, app App, cfg Config, selfI
 		return false // already recorded on-chain — don't re-broadcast
 	}
 
-	voteTx := &tx.ParsedTx{
-		Type:      tx.TxTypeGovVote,
-		Nonce:     tx.MonotonicNonce(cfg.Key),
-		Timestamp: time.Now(),
-		GovVote: &tx.GovVote{
-			ProposalID: proposalID,
-			Decision:   tx.VoteDecisionAccept,
-		},
-	}
-	if err := tx.SignTx(voteTx, cfg.Key); err != nil {
-		logger.Debug().Err(err).Msg("failed to sign gov vote tx")
-		return false
-	}
-	encoded, err := tx.EncodeTx(voteTx)
-	if err != nil {
-		logger.Debug().Err(err).Msg("failed to encode gov vote tx")
-		return false
-	}
 	logger.Info().
 		Str("proposal_id", proposalID).
 		Uint64("target_app_version", target).
 		Msg("auto-voting ACCEPT on supported upgrade proposal")
-	return broadcastVoteTx(ctx, cfg.CometRPC, encoded, logger).unavailable
+	var result voteBroadcastResult
+	err := tx.WithNonceLease(ctx, cfg.Key, func(nonce uint64) error {
+		voteTx := &tx.ParsedTx{
+			Type:      tx.TxTypeGovVote,
+			Nonce:     nonce,
+			Timestamp: time.Now(),
+			GovVote: &tx.GovVote{
+				ProposalID: proposalID,
+				Decision:   tx.VoteDecisionAccept,
+			},
+		}
+		if signErr := tx.SignTx(voteTx, cfg.Key); signErr != nil {
+			return signErr
+		}
+		encoded, encodeErr := tx.EncodeTx(voteTx)
+		if encodeErr != nil {
+			return encodeErr
+		}
+		result = broadcastVoteTx(ctx, cfg.CometRPC, encoded, logger)
+		return nil
+	})
+	if err != nil {
+		logger.Debug().Err(err).Msg("failed to build or broadcast gov vote tx under nonce lease")
+		return ctx.Err() != nil
+	}
+	return result.unavailable
 }

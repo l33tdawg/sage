@@ -714,6 +714,15 @@ func (m *Manager) broadcast(txBytes []byte) (string, int64, error) {
 	return m.broadcastTxCommit(txBytes)
 }
 
+// broadcastContext dispatches through the production context-aware path while
+// preserving the existing context-free test injection seam.
+func (m *Manager) broadcastContext(ctx context.Context, txBytes []byte) (string, int64, error) {
+	if m.broadcastFn != nil {
+		return m.broadcastFn(txBytes)
+	}
+	return m.broadcastTxCommitContext(ctx, txBytes)
+}
+
 // JoinStore returns the host-side join session registry.
 func (m *Manager) JoinStore() *JoinStore { return m.joins }
 
@@ -1067,40 +1076,60 @@ func (m *Manager) handleIncomingReceiptValidated(peerChainID string, push *Recei
 		return &ReceiptPushResponse{Status: "already_anchored", SharedID: receipt.SharedID}, nil
 	}
 
-	// Bound concurrent blocking broadcasts (each occupies a goroutine up to the
-	// commit timeout).
-	m.broadcastSem <- struct{}{}
-	defer func() { <-m.broadcastSem }()
-	// Re-check under the semaphore: a racing push for the same pair may have
-	// anchored while we waited.
-	if existing, aErr := m.badger.GetCoCommitAnchor(receipt.SharedID, peerChainID); aErr == nil && len(existing) > 0 {
+	var hash string
+	var height int64
+	alreadyAnchored := false
+	leaseCtx, cancelLease := context.WithTimeout(context.Background(), broadcastTimeout())
+	defer cancelLease()
+	err = tx.WithNonceLease(leaseCtx, m.agentKey, func(nonce uint64) error {
+		// Take the shared capacity bound only after this signer owns its lease.
+		// Same-key waiters therefore cannot occupy all slots and starve a
+		// different signing identity that is safe to broadcast concurrently.
+		select {
+		case m.broadcastSem <- struct{}{}:
+			defer func() { <-m.broadcastSem }()
+		case <-leaseCtx.Done():
+			return leaseCtx.Err()
+		}
+		// Re-check at the final pre-broadcast boundary: a racing push may have
+		// anchored while this request waited for the signer/capacity leases.
+		if existing, anchorErr := m.badger.GetCoCommitAnchor(receipt.SharedID, peerChainID); anchorErr == nil && len(existing) > 0 {
+			alreadyAnchored = true
+			return nil
+		}
+		attest := &tx.ParsedTx{
+			Type:      tx.TxTypeCoCommitAttest,
+			Nonce:     nonce,
+			Timestamp: time.Now(),
+			CoCommitAttest: &tx.CoCommitAttest{
+				SharedID:    receipt.SharedID,
+				PeerChainID: receipt.ChainID,
+				PeerPubKey:  signer,
+				Receipt:     push.Receipt,
+				PeerSig:     push.ValSig,
+				CommitTime:  receipt.CommitTime, // DATA only, never a branch input
+				CoreHash:    receipt.CoreHash,
+			},
+		}
+		if signErr := tx.SignTx(attest, m.agentKey); signErr != nil {
+			return fmt.Errorf("sign attest tx: %w", signErr)
+		}
+		encoded, encodeErr := tx.EncodeTx(attest)
+		if encodeErr != nil {
+			return fmt.Errorf("encode attest tx: %w", encodeErr)
+		}
+		var broadcastErr error
+		hash, height, broadcastErr = m.broadcastTxCommitContext(leaseCtx, encoded)
+		if broadcastErr != nil {
+			return fmt.Errorf("broadcast attest: %w", broadcastErr)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if alreadyAnchored {
 		return &ReceiptPushResponse{Status: "already_anchored", SharedID: receipt.SharedID}, nil
-	}
-
-	attest := &tx.ParsedTx{
-		Type:      tx.TxTypeCoCommitAttest,
-		Nonce:     tx.MonotonicNonce(m.agentKey),
-		Timestamp: time.Now(),
-		CoCommitAttest: &tx.CoCommitAttest{
-			SharedID:    receipt.SharedID,
-			PeerChainID: receipt.ChainID,
-			PeerPubKey:  signer,
-			Receipt:     push.Receipt,
-			PeerSig:     push.ValSig,
-			CommitTime:  receipt.CommitTime, // DATA only, never a branch input
-			CoreHash:    receipt.CoreHash,
-		},
-	}
-	if signErr := tx.SignTx(attest, m.agentKey); signErr != nil {
-		return nil, fmt.Errorf("sign attest tx: %w", signErr)
-	}
-	encoded, err := tx.EncodeTx(attest)
-	if err != nil {
-		return nil, fmt.Errorf("encode attest tx: %w", err)
-	}
-	hash, height, err := m.broadcastTxCommit(encoded)
-	if err != nil {
-		return nil, fmt.Errorf("broadcast attest: %w", err)
 	}
 	m.logger.Info().Str("shared_id", receipt.SharedID).Str("peer", peerChainID).Str("tx", hash).Msg("peer receipt anchored")
 	return &ReceiptPushResponse{Status: "anchored", SharedID: receipt.SharedID, TxHash: hash, Height: height}, nil

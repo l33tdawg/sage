@@ -13,7 +13,7 @@
 // are unreachable on a deployed chain.
 //
 // The command reuses the watchdog's exact signing/broadcast path
-// (buildUpgradeProposeTx → EncodeTx → broadcastTxSync, signed with the legacy
+// (buildUpgradeProposeTxWithNonce → EncodeTx → broadcast, signed with the legacy
 // operator key before app-v23 and the current CEREBRUM Root thereafter) and
 // adds the guards an operator action needs:
 // strictly-sequential targets (current+1 only) and a canonical plan name.
@@ -282,20 +282,6 @@ func runUpgradePropose(args []string) error {
 		CometRPC:      *rpc,
 		Logger:        logger,
 	}
-	ptx, err := buildUpgradeProposeTx(cfg, *target)
-	if err != nil {
-		return fmt.Errorf("build upgrade propose tx: %w", err)
-	}
-	if lineageRepair != "" {
-		ptx.UpgradePropose.LineageRepair = lineageRepair
-		if signErr := tx.SignTx(ptx, key); signErr != nil {
-			return fmt.Errorf("sign lineage-bound upgrade proposal: %w", signErr)
-		}
-	}
-	encoded, err := tx.EncodeTx(ptx)
-	if err != nil {
-		return fmt.Errorf("encode upgrade propose tx: %w", err)
-	}
 	// Commit, not the watchdog's fire-and-forget sync: the meaningful
 	// UpgradePropose rejections — a non-admin proposer key, an already-pending
 	// plan — are produced in processUpgradePropose under FinalizeBlock, so they
@@ -305,23 +291,44 @@ func runUpgradePropose(args []string) error {
 	// slow operator at the prompt above can't eat the broadcast's deadline.
 	bcastCtx, cancelBcast := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelBcast()
-	res, err := broadcastTxCommit(bcastCtx, *rpc, encoded)
+	var res *broadcastCommitResp
 	landedDespiteError := false
-	if err != nil {
+	err = tx.WithNonceLease(bcastCtx, key, func(nonce uint64) error {
+		ptx, buildErr := buildUpgradeProposeTxWithNonce(cfg, *target, key, nonce)
+		if buildErr != nil {
+			return fmt.Errorf("build upgrade propose tx: %w", buildErr)
+		}
+		if lineageRepair != "" {
+			ptx.UpgradePropose.LineageRepair = lineageRepair
+			if signErr := tx.SignTx(ptx, key); signErr != nil {
+				return fmt.Errorf("sign lineage-bound upgrade proposal: %w", signErr)
+			}
+		}
+		encoded, encodeErr := tx.EncodeTx(ptx)
+		if encodeErr != nil {
+			return fmt.Errorf("encode upgrade propose tx: %w", encodeErr)
+		}
+		res, buildErr = broadcastTxCommit(bcastCtx, *rpc, encoded)
+		if buildErr == nil {
+			return nil
+		}
 		// A broadcast-side failure (HTTP 500, RPC error, dropped connection) is
 		// NOT proof the proposal failed: /broadcast_tx_commit blocks across
 		// CheckTx → consensus → FinalizeBlock, so the tx is often already
 		// committed when the RPC plumbing errors out — hit live: a 500 whose
 		// proposal had landed, leaving the operator to retry into "already
-		// pending". Disambiguate by re-broadcasting the identical tx once after
-		// a short pause; retryProposeAfterBroadcastError explains the three
-		// outcomes. Inconclusive → surface the ORIGINAL error unchanged.
-		logger.Warn().Err(err).Msg("broadcast errored — probing whether the proposal landed anyway")
+		// pending". Disambiguate by re-broadcasting the identical tx once while
+		// still holding the nonce lease. Inconclusive returns the original error.
+		logger.Warn().Err(buildErr).Msg("broadcast errored — probing whether the proposal landed anyway")
 		retryRes, landed := retryProposeAfterBroadcastError(*rpc, encoded)
 		if retryRes == nil && !landed {
-			return fmt.Errorf("broadcast: %w\n(if the commit timed out the proposal may still land — re-check with: sage-gui upgrade status)", err)
+			return fmt.Errorf("broadcast: %w\n(if the commit timed out the proposal may still land — re-check with: sage-gui upgrade status)", buildErr)
 		}
 		res, landedDespiteError = retryRes, landed
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	if landedDespiteError {
 		// The original broadcast committed the plan (the retry's "already
