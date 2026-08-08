@@ -771,13 +771,20 @@ const (
 // Pipeline guard errors. Callers distinguish these with errors.Is and map them
 // to HTTP 413 (too large) and 429 (quota).
 var (
-	ErrPipePayloadTooLarge        = errors.New("pipeline payload exceeds maximum size")
-	ErrPipeResultTooLarge         = errors.New("pipeline result exceeds maximum size")
-	ErrPipeIntentTooLarge         = errors.New("pipeline intent exceeds maximum size")
-	ErrPipeQuotaPerAgent          = errors.New("too many open pipelines for this requester")
-	ErrPipeQuotaPerPeer           = errors.New("too many open pipelines from this federation peer")
-	ErrPipeQuotaGlobal            = errors.New("too many open pipelines on this node")
-	ErrPipeContentUnavailable     = errors.New("pipeline content is unavailable while the vault is locked")
+	ErrPipePayloadTooLarge    = errors.New("pipeline payload exceeds maximum size")
+	ErrPipeResultTooLarge     = errors.New("pipeline result exceeds maximum size")
+	ErrPipeIntentTooLarge     = errors.New("pipeline intent exceeds maximum size")
+	ErrPipeQuotaPerAgent      = errors.New("too many open pipelines for this requester")
+	ErrPipeQuotaPerPeer       = errors.New("too many open pipelines from this federation peer")
+	ErrPipeQuotaGlobal        = errors.New("too many open pipelines on this node")
+	ErrPipeContentUnavailable = errors.New("pipeline content is unavailable while the vault is locked")
+	// ErrPipelineUnsupported marks a pipeline capability the active store
+	// backend does not implement at all (PostgresStore stubs the whole
+	// pipeline surface today). Callers must distinguish it with errors.Is and
+	// surface it as a capability gap: rendering it as an empty result would
+	// tell a sender "you have no replies" when the truth is "this node cannot
+	// answer that question".
+	ErrPipelineUnsupported        = errors.New("pipeline capability is not supported by this store backend")
 	ErrMessageIdempotencyConflict = errors.New("message idempotency key was already used for different content")
 	ErrMessageReceiveConflict     = errors.New("message receive token was already used with different parameters")
 	ErrMessageReceiveQuota        = errors.New("too many retained message receive tokens for this agent")
@@ -857,6 +864,62 @@ type PipelineStore interface {
 // It does not claim, acknowledge, decrypt, or return message content.
 type PipelineInboxCounter interface {
 	CountPendingInbox(ctx context.Context, agentID, provider string) (int, error)
+}
+
+// PipelineReplySummary is the payload-free scalar answer behind
+// GET /v1/pipe/results?count_only=1. It carries no reply body, no intent, and
+// no message identifier.
+//
+// Count is deliberately the CURRENT RETAINED TOTAL, not an unread counter: no
+// read state exists anywhere on this path, which is what keeps the probe
+// passive and safe to repeat on every sage_inbox call. Canonical msg-* replies
+// are durable, while deprecated pipe-* compatibility rows may age out, so a
+// caller must neither treat this as monotonic nor present it as pending work.
+//
+// NewestCompletedAt is the high-water mark that makes the retained total
+// actionable without server-held read state: a caller remembers the value it
+// saw on an EARLIER probe and passes that earlier value back as the reply
+// read's `since`. The filter is inclusive at the boundary so a reply that lands
+// later in the same SQLite millisecond cannot be hidden; callers may therefore
+// see boundary rows again and should deduplicate by message_id. It is nil when
+// no reply is retained.
+type PipelineReplySummary struct {
+	Count             int
+	NewestCompletedAt *time.Time
+}
+
+// PipelineResultCounter is the passive, payload-free sender-side probe behind
+// GET /v1/pipe/results?count_only=1 and the sage_inbox reply pointer. It must
+// answer with EXACTLY the scope of PipelineStore.GetCompletedForSender, so the
+// inbox can never advertise replies an agent cannot read (or hide replies it
+// can). It is deliberately optional: a backend that cannot answer it makes the
+// route report a capability gap rather than a silent zero.
+type PipelineResultCounter interface {
+	SummarizeCompletedForSender(ctx context.Context, agentID string) (PipelineReplySummary, error)
+}
+
+// PipelineReplyPager is the backward pager for the sender-side reply
+// projection. Without it the reachable reply set is exactly the newest page,
+// and every older reply is permanently unreadable through the canonical tool
+// while the inbox pointer keeps counting it.
+//
+// The cursor is COMPOSITE — (before, beforeID) — and must stay that way.
+// `completed_at` is stored at millisecond resolution and is not unique, so a
+// bound on the timestamp alone cannot separate the rows a page already returned
+// from the rows it did not; every reply sharing the boundary millisecond would
+// be skipped forever while the count probe kept advertising it. Implementations
+// must order by (completed_at DESC, pipe_id DESC) and resume strictly after the
+// composite cursor. An empty beforeID means "strictly older than this instant",
+// a coarse time filter rather than a pager cursor.
+//
+// Paging stays stateless, passive, and replay-safe: the client carries the
+// cursor, the server holds nothing, and repeating a call with the same bound
+// returns the same rows. Scope is identical to GetCompletedForSender — exact
+// original sender only.
+type PipelineReplyPager interface {
+	GetCompletedForSenderBefore(
+		ctx context.Context, agentID string, before time.Time, beforeID string, limit int,
+	) ([]*PipelineMessage, error)
 }
 
 // MessageStatus is the payload-free sender-only projection used by the

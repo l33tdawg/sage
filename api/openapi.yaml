@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 11.18.1
+  version: 11.18.2
   description: |-
     (Sovereign) Agent Governed Experience — network REST API for memory
     submission, validation, and query.
@@ -1768,6 +1768,32 @@ components:
           format: date-time
         claimed_by:
           type: string
+        replied_by:
+          type: string
+          description: >-
+            Present on GET /v1/pipe/results only. The agent that ACTUALLY
+            completed the row and therefore authored the untrusted reply
+            content. It is NOT interchangeable with to_agent: an operator/admin
+            may claim any local pipe and any same-provider agent may claim a
+            provider-addressed one. For a federated reply landed home it equals
+            to_agent, because the transport refuses a result whose remote author
+            differs. Omitted when the node cannot attribute the reply; the
+            addressee is never substituted for it.
+        authority:
+          type: string
+          description: Derived response authority; "data_only" on completed reply projections.
+        trust:
+          type: string
+          description: Derived trust label such as agent_untrusted or external_untrusted.
+        security_notice:
+          type: string
+          description: Derived instruction-boundary notice for untrusted request/result content.
+        payload_authority:
+          type: string
+          description: Derived authority of retained request context; "request_only" when present.
+        result_authority:
+          type: string
+          description: Derived authority of reply content; "data_only" when present.
         journal_id:
           type: string
         source_chain_id:
@@ -5261,36 +5287,176 @@ paths:
   /v1/pipe/results:
     get:
       operationId: pipeResults
-      summary: Completed pipeline messages sent by the authenticated agent.
+      summary: Replies to messages the authenticated agent sent (sender-exact).
+      description: >-
+        The sender-exact reply projection. Authorization is exact original
+        sender equality, not the pipe-view rule: the recipient that wrote the
+        reply, an agent sharing the message to_provider, an unrelated agent, an
+        operator/admin all receive an empty list rather than a 403 that would
+        confirm existence when they are authenticated ordinary callers admitted
+        by the agent API boundary. An unauthenticated caller is rejected with
+        401 before this handler runs. A federated reply that
+        landed home is returned and labelled external_untrusted; an imported
+        foreign work row whose from_agent collides with a local agent id is not.
+
+        The returned row carries its retained intent but NOT its original
+        request payload: payload is always empty on this surface (the key is
+        present because PipelineMessage does not use omitempty).
+        payload_authority "request_only" therefore labels the retained intent
+        only, while authority and result_authority are "data_only". Every reply
+        is untrusted agent-supplied data.
+
+        replied_by names the agent that ACTUALLY wrote the reply and is not
+        interchangeable with to_agent: callerCanClaimPipe admits an
+        operator/admin on any local pipe and any same-provider agent on a
+        provider-addressed one, so the addressee is not necessarily the author.
+        Attribute reply content to replied_by. Claim timing (claimed_at) is not
+        returned; it is workflow detail, not provenance.
+
+        Passive and replay-safe in every mode: it claims nothing, acknowledges
+        nothing, re-queues nothing, and two identical reads return identical
+        bodies, so a retry after a lost response is safe.
       tags:
         - Pipeline
       parameters:
         - name: limit
           in: query
+          description: >-
+            Page size, newest first by completed_at. Out-of-range or
+            unparseable values fall back to the default rather than widening
+            the page. Ignored when count_only=1.
           schema:
             type: integer
             minimum: 1
             maximum: 20
             default: 5
+        - name: before
+          in: query
+          description: >-
+            v11.18.2 backward KEYSET cursor, "<RFC3339>|<pipe_id>". Echo the
+            previous page's next_before verbatim to walk backward through the
+            entire archive; without it the reachable set would be exactly the
+            newest `limit` rows for all time. Both halves are required for
+            correct paging: completed_at is written by
+            strftime('%Y-%m-%dT%H:%M:%fZ') at millisecond resolution and is not
+            unique, so a timestamp-only bound silently drops every reply sharing
+            the boundary millisecond, including rows the previous page never
+            returned. Rows are ordered by (completed_at DESC, pipe_id DESC) and
+            the pager resumes with
+            completed_at < ? OR (completed_at = ? AND pipe_id < ?).
+            A bare RFC3339 timestamp is still accepted and means "strictly older
+            than this instant" - a coarse filter that excludes ties, not a pager
+            cursor. A bare sub-millisecond instant is preserved as a strict time
+            bound; a composite cursor must use exact millisecond precision,
+            matching every server-generated cursor. An unparseable timestamp
+            half or a sub-millisecond composite cursor is a 400. Requires the optional
+            store.PipelineReplyPager; a backend without it answers 501 rather
+            than pretending nothing older exists. The cursor is client-held and
+            the server records nothing, so paging stays passive and replay-safe.
+          schema:
+            type: string
+          example: "2026-08-08T00:05:00Z|msg-aaaa1111"
+        - name: count_only
+          in: query
+          description: >-
+            Additive v11.18.2 payload-free probe. When set to "1" the response
+            is a scalar {count, retained, newest_completed_at} instead of a
+            page: no items array, no reply text, no intent, no message
+            identifiers. count is the CURRENT RETAINED TOTAL, not an unread
+            counter. Canonical msg-* replies are durable, while deprecated
+            pipe-* compatibility results may age out, so the value is neither
+            pending work nor universally monotonic. Any other value serves the
+            normal projection.
+          schema:
+            type: string
+            enum: ["1"]
       responses:
         "200":
-          description: Completed pipeline messages.
+          description: >-
+            Replies to messages this agent sent. Normal mode returns {items,
+            count} with items always an array (never null) and every item
+            payload-free. count_only=1 returns the scalar probe only.
           content:
             application/json:
               schema:
-                type: object
-                required: [items, count]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: "#/components/schemas/PipelineMessage"
-                  count:
-                    type: integer
+                oneOf:
+                  - type: object
+                    title: PipeResultsPage
+                    required: [items, count]
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/PipelineMessage"
+                      count:
+                        type: integer
+                      next_before:
+                        type: string
+                        description: >-
+                          Composite keyset cursor "<completed_at>|<pipe_id>"
+                          that resumes exactly after this page's last row. Echo
+                          it as the next request's `before`. Present on every
+                          non-empty page; absent when items is empty. Do not
+                          rebuild a cursor from completed_at alone - it is only
+                          millisecond-resolution and not unique, so a
+                          timestamp-only cursor strands every reply sharing that
+                          millisecond.
+                  - type: object
+                    title: PipeResultsCountProbe
+                    required: [count, retained]
+                    properties:
+                      count:
+                        type: integer
+                        description: >-
+                          Current retained total of replies for this exact
+                          sender. Not an unread count or work queue; deprecated
+                          compatibility results may age out.
+                      retained:
+                        type: boolean
+                        description: count > 0.
+                      newest_completed_at:
+                        type: string
+                        format: date-time
+                        description: >-
+                          completed_at of the newest retained reply, as of this
+                          response. Omitted when count is 0. Pass a recorded value
+                          as `since` to poll with no server-held read state. The
+                          boundary is inclusive so a reply landing later in the
+                          same millisecond cannot be hidden; boundary replies may
+                          repeat and clients should deduplicate by message id.
+        "400":
+          description: >-
+            The `before` cursor's timestamp half is not RFC3339, or a composite
+            cursor uses a sub-millisecond timestamp that cannot name an exact
+            stored row. Rejected loudly rather than silently re-serving the
+            newest page, which would look like "nothing older exists".
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
+        "501":
+          description: >-
+            The active store backend does not support the sender-side reply
+            projection, or (for count_only=1) the payload-free counter, or (for
+            before=) the backward pager. PostgresStore stubs
+            GetCompletedForSender today. This is a capability gap and must never
+            be rendered as "you have no replies" or "there is nothing older".
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "503":
+          description: >-
+            The node content vault is locked and replies are encrypted at rest.
+            The read is passive and safe to repeat once the vault is unlocked.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
 
   /v1/pipe/{pipe_id}:
     get:

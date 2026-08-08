@@ -6518,19 +6518,38 @@ func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, agentID, res
 	return nil
 }
 
-func (s *SQLiteStore) GetCompletedForSender(ctx context.Context, agentID string, limit int) ([]*PipelineMessage, error) {
-	rows, err := s.conn.QueryContext(ctx,
-		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent,
-		        COALESCE(result, ''), status, created_at, completed_at, expires_at, COALESCE(journal_id, ''),
-		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision,
-		        federation_authorization_mode, federation_linked_relation
-		 FROM pipeline_messages
-		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'
-		 ORDER BY completed_at DESC LIMIT ?`,
-		agentID, limit)
-	if err != nil {
-		return nil, err
-	}
+// pipelineTimestampLayout mirrors the ONE format pipeline_messages timestamps
+// are ever written in — strftime('%Y-%m-%dT%H:%M:%fZ', ...) at sqlite.go
+// CompletePipeline and pipeline_transport.go ApplyFederatedPipelineResult. The
+// existing ORDER BY completed_at DESC already depends on that format sorting
+// lexicographically; formatting a Go bound the same way lets the backward
+// pager's `completed_at < ?` predicate use the same ordering instead of
+// time.RFC3339Nano, whose variable-width fraction compares wrongly against it
+// ("...:00Z" sorts AFTER "...:00.123Z" byte-wise, which would drop rows).
+const pipelineTimestampLayout = "2006-01-02T15:04:05.000Z"
+
+func formatPipelineTimestamp(t time.Time) string {
+	return t.UTC().Format(pipelineTimestampLayout)
+}
+
+// completedForSenderColumns is shared by the whole-list and backward-paged
+// reply projections so the two can never drift apart in what they expose.
+//
+// claimed_by IS selected on purpose: it is the agent that actually completed
+// the row, which is NOT necessarily the addressee. callerCanClaimPipe
+// (api/rest/pipe_handler.go) admits an operator/admin on any local pipe and a
+// provider peer on a provider-addressed one, so presenting to_agent as "who
+// replied" would misattribute untrusted, model-consumed content to an agent
+// that never saw the message. The sender already sees this column on the
+// pre-existing GetOutbox path, so surfacing it here widens nothing. The request
+// payload and the claim TIMING remain unselected: neither is provenance.
+const completedForSenderColumns = `pipe_id, from_agent, from_provider, to_agent, to_provider, intent,
+	        COALESCE(result, ''), status, created_at, completed_at, expires_at, COALESCE(journal_id, ''),
+	        COALESCE(claimed_by, ''),
+	        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision,
+	        federation_authorization_mode, federation_linked_relation`
+
+func (s *SQLiteStore) scanCompletedForSender(rows *sql.Rows) ([]*PipelineMessage, error) {
 	defer func() { _ = rows.Close() }()
 
 	items := make([]*PipelineMessage, 0)
@@ -6540,6 +6559,7 @@ func (s *SQLiteStore) GetCompletedForSender(ctx context.Context, agentID string,
 		var completedAt *string
 		if err := rows.Scan(&m.PipeID, &m.FromAgent, &m.FromProvider, &m.ToAgent, &m.ToProvider,
 			&m.Intent, &m.Result, &m.Status, &createdAt, &completedAt, &expiresAt, &m.JournalID,
+			&m.ClaimedBy,
 			&m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID, &m.FederationPolicyEpoch,
 			&m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision,
 			&m.FederationAuthorizationMode, &m.FederationLinkedRelation); err != nil {
@@ -6554,6 +6574,109 @@ func (s *SQLiteStore) GetCompletedForSender(ctx context.Context, agentID string,
 		items = append(items, &m)
 	}
 	return items, rows.Err()
+}
+
+// completedForSenderOrder is the TOTAL order both reply projections page over.
+//
+// completed_at alone is not a usable keyset cursor on this table: it is written
+// by strftime('%Y-%m-%dT%H:%M:%fZ') at MILLISECOND resolution, so a recipient
+// answering a queued batch — or the federated result drain loop — routinely
+// stamps many rows with the identical value. Ordering by completed_at alone
+// leaves those rows in an arbitrary, unstable order, and a cursor built from
+// the last row's completed_at cannot distinguish the rows a page already
+// returned from the ones it did not. pipe_id is unique on this table, so
+// (completed_at, pipe_id) is total and the cursor below is exact.
+const completedForSenderOrder = ` ORDER BY completed_at DESC, pipe_id DESC LIMIT ?`
+
+func (s *SQLiteStore) GetCompletedForSender(ctx context.Context, agentID string, limit int) ([]*PipelineMessage, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT `+completedForSenderColumns+`
+		 FROM pipeline_messages
+		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'`+
+			completedForSenderOrder,
+		agentID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return s.scanCompletedForSender(rows)
+}
+
+// GetCompletedForSenderBefore is the backward pager behind
+// GET /v1/pipe/results?before=<RFC3339>[|<pipe_id>]. Its WHERE clause is
+// GetCompletedForSender's plus one strictly-older bound in the SAME total
+// order, so scope is identical (exact from_agent equality, local namespace
+// only, completed only) and only the window moves.
+//
+// The bound is composite on purpose. `completed_at` has millisecond resolution
+// and is NOT unique, so a bare `completed_at < ?` silently drops every row that
+// shares the boundary millisecond with the last row of the previous page —
+// including rows that page never returned. Those replies then become
+// permanently unreadable through the canonical tool while the count probe keeps
+// advertising them, which is exactly the sender-cannot-read-the-reply failure
+// this release exists to eliminate. `(completed_at, pipe_id)` is unique, so
+// `completed_at < ? OR (completed_at = ? AND pipe_id < ?)` resumes at exactly
+// the row after the cursor, ties included.
+//
+// beforeID may be empty, in which case the predicate degrades to a plain
+// strictly-older instant bound: the empty string is lexicographically smallest,
+// so the equality branch matches nothing. That form is a coarse TIME FILTER,
+// not a pager cursor — callers paging through the archive must carry the
+// pipe_id half as well, which is why every page advertises the composite
+// cursor.
+//
+// The cursor lives entirely in the caller's hands. The server records nothing,
+// so paging stays passive and replay-safe: repeating a call with the same bound
+// returns the same rows, and no read state can be consumed by a lost response.
+func (s *SQLiteStore) GetCompletedForSenderBefore(
+	ctx context.Context, agentID string, before time.Time, beforeID string, limit int,
+) ([]*PipelineMessage, error) {
+	bound := formatPipelineTimestamp(before)
+	// A bare RFC3339Nano instant may fall between two representable SQLite
+	// milliseconds. In that case rows at the floored millisecond are genuinely
+	// older than the caller's bound and must be included. Composite cursors are
+	// emitted only from stored rows and therefore always land exactly on a
+	// millisecond; the REST layer rejects a sub-millisecond composite cursor.
+	includeBoundMillisecond := beforeID == "" && !before.Equal(before.Truncate(time.Millisecond))
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT `+completedForSenderColumns+`
+		 FROM pipeline_messages
+		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'
+		   AND completed_at IS NOT NULL
+		   AND (completed_at < ? OR (completed_at = ? AND (? OR pipe_id < ?)))`+
+			completedForSenderOrder,
+		agentID, bound, bound, includeBoundMillisecond, beforeID, limit)
+	if err != nil {
+		return nil, err
+	}
+	return s.scanCompletedForSender(rows)
+}
+
+// SummarizeCompletedForSender is the payload-free counterpart of
+// GetCompletedForSender. The WHERE clause is intentionally byte-identical to
+// that projection (exact from_agent equality, local namespace only, completed
+// only) so the sage_inbox reply pointer can never announce a reply the sender
+// would not be shown. It decrypts nothing and returns no identifiers.
+//
+// The count is the current retained total, not an unread counter. Canonical
+// msg-* rows remain durable, but this compatibility projection also includes
+// deprecated pipe-* rows and PurgePipelines may age those out. Callers must
+// therefore present it as a snapshot archive size, never as monotonic state or
+// pending work.
+//
+// newest_completed_at is what makes that total actionable without any
+// server-held read state: a caller passes it back as the reply read's inclusive
+// `since` watermark and deduplicates boundary rows by message id.
+func (s *SQLiteStore) SummarizeCompletedForSender(ctx context.Context, agentID string) (PipelineReplySummary, error) {
+	var summary PipelineReplySummary
+	var newest *string
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*), MAX(completed_at) FROM pipeline_messages
+		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'`,
+		agentID).Scan(&summary.Count, &newest); err != nil {
+		return PipelineReplySummary{}, err
+	}
+	summary.NewestCompletedAt = parseTimePtr(newest)
+	return summary, nil
 }
 
 func (s *SQLiteStore) ListPipelines(ctx context.Context, status string, limit int) ([]*PipelineMessage, error) {

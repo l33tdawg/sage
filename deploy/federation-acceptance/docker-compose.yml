@@ -27,7 +27,7 @@ services:
       context: ../..
       dockerfile: deploy/federation-acceptance/Dockerfile.node
       args:
-        VERSION: v11.18.1-acceptance
+        VERSION: v11.18.2-acceptance
         COMMIT: docker-acceptance
     environment:
       SAGE_HOME: /root/.sage

@@ -54,6 +54,7 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/UPGRADING.md', '`upgrade lineage status|doctor|verify`'],
     ['deploy/federation-acceptance/Dockerfile.node', `ARG VERSION=v${version}-acceptance`],
     ['deploy/federation-acceptance/docker-compose.yml', 'name: sage-v111800-federation'],
+    ['deploy/federation-acceptance/docker-compose.yml', `VERSION: v${version}-acceptance`],
     ['docs/reference/app-v23-access-control-design.md', '## App-v24 readiness and memory-write barrier'],
     ['docs/reference/mcp-tools.md', 'A level-2 grant is never a remedy for a hard'],
     ['docs/reference/mcp-tools.md', 'never be substituted for this caller-scoped projection'],
@@ -92,7 +93,7 @@ test('v11.18 user, recovery, federation, and SDK guides stay aligned', () => {
   assert.match(read('docs/FEDERATION.md'), /15 minutes/);
   assert.match(read('docs/UPGRADING.md'), /sage-gui upgrade lineage verify --json --manifest repair\.json/);
   assert.match(roadmap, /helper outside the replaceable bundle/);
-  assert.match(gettingStarted, /advertises 31 MCP tools/);
+  assert.match(gettingStarted, /advertises 32 MCP tools/);
   assert.match(gettingStarted, /Deprecated `sage_pipe\*`\s+compatibility/);
   assert.match(sdkReadme, /Compatibility pipeline/);
 });

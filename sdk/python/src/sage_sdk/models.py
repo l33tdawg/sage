@@ -435,6 +435,15 @@ class PipeMessage(BaseModel):
     expires_at: str | None = None
     journal_id: str | None = None
     claimed_by: str | None = None
+    # replied_by is the PROVENANCE of a completed reply: the agent that actually
+    # wrote the result, which is not necessarily `to_agent`. An operator/admin
+    # may claim any local pipe and any same-provider agent may claim a
+    # provider-addressed one, so trusting `to_agent` as the author lets content
+    # an agent never wrote be attributed to it. The server derives this from
+    # claimed_by on GET /v1/pipe/results; it is None on nodes that predate
+    # v11.18.2 or when the node cannot attribute the row — in which case the
+    # addressee must NOT be substituted for it.
+    replied_by: str | None = None
     source_chain_id: str | None = None
     source_pipe_id: str | None = None
     destination_chain_id: str | None = None

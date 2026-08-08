@@ -27,7 +27,7 @@ sudo mv sage-gui /usr/local/bin/  # or add to your PATH
 
 ```bash
 sage-gui version
-# sage-gui v11.18.1
+# sage-gui v11.18.2
 ```
 
 ---
@@ -197,7 +197,7 @@ sage-gui setup
 
 ### 3. Start using it
 
-Just chat normally. SAGE v11.18.1 advertises 31 MCP tools. The core workflow is:
+Just chat normally. SAGE v11.18.2 advertises 32 MCP tools. The core workflow is:
 
 | Tool | What it does |
 |------|-------------|
@@ -218,6 +218,7 @@ Just chat normally. SAGE v11.18.1 advertises 31 MCP tools. The core workflow is:
 | `sage_message_send` | Idempotently send work to one exact agent |
 | `sage_messages_receive` / `sage_inbox` | Receive bounded untrusted inbox work |
 | `sage_message_reply` | Reply to one received message |
+| `sage_message_replies` | Read the replies recipients returned for messages **you** sent |
 | `sage_message_status` / `sage_message_history` | Inspect sender-only lifecycle state and retained history |
 
 Governance, quorum-scope, directory, federation, rename, reinstate, and

@@ -139,13 +139,41 @@ const (
 // persist or submit their own authority.
 type pipelineMessageRESTResponse struct {
 	*store.PipelineMessage
-	ReplySourceChainID     string `json:"reply_source_chain_id,omitempty"`
-	Authority              string `json:"authority,omitempty"`
-	Trust                  string `json:"trust"`
-	SecurityNotice         string `json:"security_notice"`
-	PayloadAuthority       string `json:"payload_authority,omitempty"`
-	ResultAuthority        string `json:"result_authority,omitempty"`
+	ReplySourceChainID string `json:"reply_source_chain_id,omitempty"`
+	Authority          string `json:"authority,omitempty"`
+	Trust              string `json:"trust"`
+	SecurityNotice     string `json:"security_notice"`
+	PayloadAuthority   string `json:"payload_authority,omitempty"`
+	ResultAuthority    string `json:"result_authority,omitempty"`
+	// RepliedBy is the provenance of untrusted, model-consumed reply content:
+	// the agent that ACTUALLY completed the row. It is not the addressee.
+	// callerCanClaimPipe admits an operator/admin on any local pipe and a
+	// provider peer on a provider-addressed one, so to_agent alone would let an
+	// agent that never saw the message be presented to the sender as its author.
+	RepliedBy              string `json:"replied_by,omitempty"`
 	ReceiptProtocolVersion int    `json:"receipt_protocol_version,omitempty"`
+}
+
+// pipeReplyProvenanceAgent names the agent that actually wrote the reply on a
+// completed row, or "" when this node cannot attribute it.
+//
+// claimed_by is authoritative for a local reply: CompletePipeline stamps it on
+// completion and only a claimant may complete. A federated reply landed home
+// leaves claimed_by empty (ApplyFederatedPipelineResult completes the outbound
+// row directly), but the transport has already verified the remote author
+// equals to_agent — it refuses the result otherwise — so the addressee is the
+// verified author in exactly that case and nowhere else.
+func pipeReplyProvenanceAgent(msg *store.PipelineMessage) string {
+	if msg == nil || msg.Status != "completed" {
+		return ""
+	}
+	if msg.ClaimedBy != "" {
+		return msg.ClaimedBy
+	}
+	if msg.DestinationChainID != "" {
+		return msg.ToAgent
+	}
+	return ""
 }
 
 func pipelineMessageREST(msg *store.PipelineMessage, surface string) pipelineMessageRESTResponse {
@@ -172,6 +200,7 @@ func pipelineMessageREST(msg *store.PipelineMessage, surface string) pipelineMes
 		// historical request carried alongside the result remains request_only.
 		response.Authority = pipeResultAuthority
 		response.ResultAuthority = pipeResultAuthority
+		response.RepliedBy = pipeReplyProvenanceAgent(msg)
 		if msg.Payload == "" && msg.Intent == "" {
 			response.SecurityNotice = pipeRESTResultSecurityNotice
 		} else {
@@ -1495,7 +1524,99 @@ func (s *Server) handlePipeStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-// handlePipeResults returns completed pipeline items sent by this agent.
+// pipeResultsRepeatableReadDetail is appended to every non-2xx answer this route
+// produces. Both modes are passive sender projections that write nothing, so a
+// caller may always repeat the read; saying so keeps a transient failure from
+// being mistaken for "no replies exist".
+const pipeResultsRepeatableReadDetail = "This read is passive and safe to repeat; it claims, acknowledges, and re-queues nothing."
+
+// writePipeResultsStoreProblem maps a sender-side reply projection failure onto
+// a status a caller can act on. The distinction matters: an empty list means
+// "no replies", while these mean "this node could not answer". Collapsing a
+// capability gap or a locked vault into 200/[] is exactly the silent-zero that
+// hides a recipient's reply from its sender.
+func writePipeResultsStoreProblem(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrPipelineUnsupported):
+		writeProblem(w, http.StatusNotImplemented, "Reply projection unsupported",
+			"This node's store backend does not implement the sender-side reply projection. "+
+				"This is a capability gap, not evidence that no replies exist. "+pipeResultsRepeatableReadDetail)
+	case errors.Is(err, store.ErrPipeContentUnavailable):
+		writeProblem(w, http.StatusServiceUnavailable, "Reply content unavailable",
+			"Replies are encrypted at rest and this node's content vault is locked. "+
+				"Unlock the vault and retry; this read is passive and safe to repeat.")
+	default:
+		// The raw store error is deliberately not echoed: it can carry
+		// identifiers or SQL text that this sender-exact surface never returns.
+		writeProblem(w, http.StatusInternalServerError, "Results query failed",
+			"The reply projection could not be read. "+pipeResultsRepeatableReadDetail)
+	}
+}
+
+// pipeResultsCursorSeparator joins the two halves of the backward pager's
+// cursor. It cannot occur in an RFC3339 timestamp or in a generated pipe id, so
+// splitting is unambiguous.
+const pipeResultsCursorSeparator = "|"
+
+// parsePipeResultsCursor decodes the `before` cursor into its composite halves.
+//
+// The cursor is "<RFC3339>" or "<RFC3339>|<pipe_id>". The second half is what
+// makes the cursor a usable keyset bound: completed_at is stored at millisecond
+// resolution and is not unique, so a timestamp alone cannot say which of the
+// rows sharing the boundary millisecond were already returned. The bare form is
+// still accepted as a coarse "older than this instant" filter, but a caller
+// walking the archive must echo the composite cursor the page advertises.
+func parsePipeResultsCursor(raw string) (time.Time, string, error) {
+	timestamp := raw
+	id := ""
+	if idx := strings.Index(raw, pipeResultsCursorSeparator); idx >= 0 {
+		timestamp = strings.TrimSpace(raw[:idx])
+		id = strings.TrimSpace(raw[idx+len(pipeResultsCursorSeparator):])
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	if id != "" && !parsed.Equal(parsed.Truncate(time.Millisecond)) {
+		return time.Time{}, "", fmt.Errorf("a composite cursor timestamp must be at millisecond precision")
+	}
+	return parsed, id, nil
+}
+
+// formatPipeResultsCursor builds the composite cursor for the row a page ended
+// on. Both halves come from data the item already carries, so the cursor leaks
+// nothing the sender is not already reading.
+func formatPipeResultsCursor(item *store.PipelineMessage) string {
+	if item == nil || item.CompletedAt == nil {
+		return ""
+	}
+	return item.CompletedAt.UTC().Format(time.RFC3339Nano) + pipeResultsCursorSeparator + item.PipeID
+}
+
+// handlePipeResults is the sender-exact reply projection: replies recipients
+// returned for messages the authenticated agent SENT. Authorization is exact
+// original-sender equality inside GetCompletedForSender, deliberately not
+// callerCanViewPipe — the recipient that wrote the reply, a peer sharing the
+// addressed provider, and an operator all read nothing here. Both modes are
+// passive: nothing is claimed, acknowledged, re-queued, or mutated, so a repeat
+// after a lost response returns the identical projection.
+//
+// ?count_only=1 serves the additive payload-free probe used by the sage_inbox
+// reply pointer: a scalar {count, retained, newest_completed_at} with no reply
+// body, no intent, and no message identifiers. The count is a CURRENT
+// RETAINED TOTAL, not an unread counter (no read state exists on this path).
+// Canonical msg-* replies are durable, while deprecated pipe-* rows may age
+// out. The probe also returns newest_completed_at as a polling watermark.
+//
+// ?before=<RFC3339>[|<pipe_id>] pages BACKWARD through the archive. Without it
+// the reachable reply set would be exactly the newest `limit` rows, so every
+// older reply would be permanently unreadable through the canonical tool while
+// the probe kept counting it. The cursor is COMPOSITE because completed_at is
+// stored at millisecond resolution and is not unique: a timestamp-only bound
+// silently strands every reply sharing the boundary millisecond. Each page
+// therefore advertises `next_before`, the exact cursor that resumes after its
+// last row. The cursor is entirely client-held, so paging remains passive,
+// stateless, and replay-safe.
 func (s *Server) handlePipeResults(w http.ResponseWriter, r *http.Request) {
 	limit := 5
 	if l := r.URL.Query().Get("limit"); l != "" {
@@ -1508,13 +1629,69 @@ func (s *Server) handlePipeResults(w http.ResponseWriter, r *http.Request) {
 
 	pipeStore, ok := s.store.(store.PipelineStore)
 	if !ok {
-		writeProblem(w, http.StatusInternalServerError, "Pipeline not available", "store does not support pipeline operations")
+		writeProblem(w, http.StatusNotImplemented, "Reply projection unsupported",
+			"This node's store backend does not support pipeline operations. "+
+				"This is a capability gap, not evidence that no replies exist. "+pipeResultsRepeatableReadDetail)
 		return
 	}
 
-	items, err := pipeStore.GetCompletedForSender(r.Context(), agentID, limit)
+	if r.URL.Query().Get("count_only") == "1" {
+		counter, ok := pipeStore.(store.PipelineResultCounter)
+		if !ok {
+			// A silent 200 count=0 here would let sage_inbox tell an agent it
+			// has no replies when the node simply cannot count them.
+			writeProblem(w, http.StatusNotImplemented, "Reply count probe unsupported",
+				"This node's store backend cannot count retained replies. "+
+					"This is a capability gap, not a reply count of zero. "+pipeResultsRepeatableReadDetail)
+			return
+		}
+		summary, err := counter.SummarizeCompletedForSender(r.Context(), agentID)
+		if err != nil {
+			writePipeResultsStoreProblem(w, err)
+			return
+		}
+		// A scalar only: no items array, no identifiers, no content. `retained`
+		// is a retained total, never an unread counter, so repeating the probe
+		// returns the same body.
+		probe := map[string]any{"count": summary.Count, "retained": summary.Count > 0}
+		if summary.NewestCompletedAt != nil {
+			// A timestamp, not an identifier: it names no message and carries no
+			// content, but it lets a caller ask for exactly what is newer than
+			// what it already read without the server holding read state.
+			probe["newest_completed_at"] = summary.NewestCompletedAt.UTC().Format(time.RFC3339Nano)
+		}
+		writeJSON(w, http.StatusOK, probe)
+		return
+	}
+
+	var items []*store.PipelineMessage
+	var err error
+	if beforeRaw := strings.TrimSpace(r.URL.Query().Get("before")); beforeRaw != "" {
+		before, beforeID, parseErr := parsePipeResultsCursor(beforeRaw)
+		if parseErr != nil {
+			writeProblem(w, http.StatusBadRequest, "Invalid before cursor",
+				"before must be an RFC3339 timestamp, optionally followed by \"|<message_id>\" "+
+					"(for example 2026-08-08T00:05:00Z|msg-aaaa1111). "+
+					"Echo the next_before value from the previous page: a timestamp alone cannot "+
+					"separate replies that share the same millisecond. "+pipeResultsRepeatableReadDetail)
+			return
+		}
+		pager, pagerOK := pipeStore.(store.PipelineReplyPager)
+		if !pagerOK {
+			// Silently ignoring the cursor and returning the newest page again
+			// would look like "there is nothing older", which is the same
+			// silent-zero this route exists to avoid.
+			writeProblem(w, http.StatusNotImplemented, "Reply paging unsupported",
+				"This node's store backend cannot page backward through retained replies. "+
+					"This is a capability gap, not the end of the list. "+pipeResultsRepeatableReadDetail)
+			return
+		}
+		items, err = pager.GetCompletedForSenderBefore(r.Context(), agentID, before, beforeID, limit)
+	} else {
+		items, err = pipeStore.GetCompletedForSender(r.Context(), agentID, limit)
+	}
 	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Results query failed", err.Error())
+		writePipeResultsStoreProblem(w, err)
 		return
 	}
 	if items == nil {
@@ -1525,10 +1702,26 @@ func (s *Server) handlePipeResults(w http.ResponseWriter, r *http.Request) {
 	for _, item := range items {
 		responseItems = append(responseItems, pipelineMessageREST(item, "results"))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"items": responseItems,
 		"count": len(items),
-	})
+	}
+	// next_before is the exact composite cursor that resumes after this page's
+	// last row. It is published so no caller has to reconstruct one from
+	// completed_at alone — which is precisely the reconstruction that strands
+	// every reply sharing the boundary millisecond.
+	if cursor := formatPipeResultsCursor(lastPipelineItem(items)); cursor != "" {
+		response["next_before"] = cursor
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+// lastPipelineItem returns the final row of an ordered page, or nil.
+func lastPipelineItem(items []*store.PipelineMessage) *store.PipelineMessage {
+	if len(items) == 0 {
+		return nil
+	}
+	return items[len(items)-1]
 }
 
 // handlePipeUpdates atomically returns payload-free terminal delivery notices

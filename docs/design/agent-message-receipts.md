@@ -14,6 +14,19 @@ separate public surfaces. Federated evidence exists only when both peers
 negotiate `federated-pipeline-receipts-v2`; a locally queued legacy pipe must
 never be described as delivered or read.
 
+> **Superseded on one point (v11.18.2).** This document is the v11.17 design
+> record and still describes the sender reading completed replies through
+> `sage_turn.pipe_results`. That turn channel no longer exists — it was removed
+> in `b0e7ca9e`, and `sage_turn` is now payload-free for messaging apart from an
+> unread flag. The sender-side reply read is the advertised MCP tool
+> **`sage_message_replies`**, backed by the same `GET /v1/pipe/results` results
+> surface, with a payload-free `retained_reply_count` pointer in `sage_inbox`.
+> Everywhere below that says `sage_turn.pipe_results`, read
+> `sage_message_replies`. The surrounding argument is unchanged: replies are a
+> sender-side projection, never inbox items, and receipts remain a third,
+> payload-free status surface. See
+> [`../reference/concepts/message-reply-lifecycle.md`](../reference/concepts/message-reply-lifecycle.md).
+
 ## Product promise
 
 An agent that sends one exact pipeline message can later ask SAGE whether:

@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.18.1. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.18.2. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -2443,17 +2443,135 @@ provenance field is present.
 
 ### `GET /v1/pipe/results`
 
-Completed pipeline messages sent by the authenticated agent.
+The **sender-exact reply projection**: replies that recipients returned for
+messages the authenticated agent sent. This is the only REST surface that hands
+a reply body back to the agent that asked for it, and since v11.18.2 it is the
+route behind the advertised MCP tool `sage_message_replies` and the
+`retained_reply_count` pointer in `sage_inbox`
+(`api/rest/pipe_handler.go`, `Server.handlePipeResults`; route registered in
+`api/rest/server.go` inside the `appV23PipelineAgentBoundary` group, so the
+loopback CEREBRUM Root control plane cannot call it).
 
-**Query parameters:** `limit` (1–20, default 5)
+**Authorization is exact original sender, not `callerCanViewPipe`.** The gate is
+the SQL predicate in `GetCompletedForSender` (`internal/store/sqlite.go`):
+`from_agent = ? AND source_chain_id = '' AND status = 'completed'`. There is no
+role check and no operator bypass, so the recipient that wrote the reply, an
+agent sharing the message's `to_provider` (which the `GET /v1/pipe/{pipe_id}`
+status route *does* admit), an unrelated agent, an agent ID that is a prefix or
+extension of the sender's, and `root` all receive an empty list when
+authenticated through the agent API boundary — never a 403 that would confirm
+existence. An unauthenticated caller is rejected with 401 before the projection
+runs
+(`api/rest/pipe_results_reply_visibility_test.go`,
+`TestPipeResultsIsExactSenderOnlyNotPipeViewAuthorization`).
 
-**Response** (HTTP 200): `{"items": [...], "count": N}`. Empty results use
-`items:[]`, never `items:null`. Each result is labeled
+The `source_chain_id = ''` clause is a federation-namespace guard, not an
+exclusion of federated replies. An outbound federated send sets only
+`DestinationChainID` (`api/rest/pipe_handler.go`), and
+`ApplyFederatedPipelineResult` (`internal/store/pipeline_transport.go`) rejects
+any inbound row carrying `SourceChainID` and UPDATEs that same outbound row — so
+**a federated reply landed home matches and is returned**, labelled
+`external_untrusted`. What the clause excludes is an *imported foreign work row*
+whose `from_agent` happens to collide byte-for-byte with a local agent ID
+(`internal/store/pipeline_test.go`,
+`TestPipelineFederationNamespacesCannotEnterLocalInboxOrResults`).
+
+**Query parameters:**
+
+| Name | Values | Meaning |
+|---|---|---|
+| `limit` | 1–20, default 5 | Page size, newest first by `completed_at DESC, pipe_id DESC`. Out-of-range or unparseable values (`0`, `-1`, `999`, `abc`) fall back to 5 rather than widening the page. |
+| `before` | `<RFC3339>` or `<RFC3339>\|<pipe_id>` | v11.18.2 backward **keyset cursor**. Echo the previous page's `next_before` verbatim to walk backward through the whole archive. The composite form resumes strictly after the named row in the `(completed_at, pipe_id)` total order and must use exact millisecond precision. A bare timestamp is accepted as a strict instant filter, including sub-millisecond instants; a bare bound exactly on a stored millisecond excludes every reply sharing that millisecond, so it is a coarse filter rather than a pager cursor. An invalid timestamp or sub-millisecond composite cursor is a `400`, never a silent fall back to page one. Requires the optional `store.PipelineReplyPager`; a backend without it answers `501` rather than pretending nothing older exists. |
+| `count_only` | `1` | v11.18.2 additive probe. Returns a scalar instead of a page (see below). Any other value is ignored and the normal projection is served. |
+
+Without `before`, the reachable reply set would be exactly the newest `limit`
+rows for all time: `limit` is capped at 20 server-side, and the MCP-side `since`
+filter can only narrow that window to *newer* items. The cursor is held entirely
+by the caller — the server records nothing — so paging stays passive, stateless,
+and replay-safe (`api/rest/pipe_results_reply_visibility_test.go`,
+`TestPipeResultsBeforePagesBackwardThroughEveryReply`).
+
+**The cursor is composite because `completed_at` is not unique.** It is written
+by `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')` at **millisecond** resolution, so a
+recipient answering a queued batch, or the federated result drain loop, stamps
+many completed rows with the identical value. A `completed_at < X` bound alone
+drops every row stamped exactly `X` — including rows the previous page never
+returned — and it fails silently: the next page comes back short, which reads as
+"there is nothing older", while `?count_only=1` keeps advertising the higher
+total. Both projections therefore order by `(completed_at DESC, pipe_id DESC)`
+and the pager resumes with `completed_at < ? OR (completed_at = ? AND pipe_id <
+?)`. Echo `next_before` and every retained reply is reachable
+(`TestPipeResultsBeforeReachesRepliesSharingACompletedMillisecond`).
+
+**Response** (HTTP 200, normal mode): `{"items": [...], "count": N,
+"next_before": "<completed_at>|<pipe_id>"}`. `next_before` is present on every
+non-empty page and is the exact cursor that resumes after its last row; it is
+absent when `items` is empty. Empty results use `items:[]`, never `items:null`. Each result is labeled
 `authority:"data_only"` and `result_authority:"data_only"` for the singular
-results endpoint. Because a row also contains its original request, that
-content remains explicitly `payload_authority:"request_only"` and the combined
-security notice explains both fields. Local and foreign rows use
-`agent_untrusted` and `external_untrusted`, respectively.
+results endpoint. Local and foreign rows use `agent_untrusted` and
+`external_untrusted` respectively.
+
+**The row carries its retained `intent` but never its `payload`.**
+`GetCompletedForSender` does not select the `payload` column
+(`internal/store/sqlite.go`), so `payload_authority:"request_only"` on this
+surface labels the retained *intent*, not returned request content.
+`store.PipelineMessage.Payload` has no `omitempty`, so the `payload` key is
+present-but-empty rather than absent
+(`api/rest/pipe_results_reply_visibility_test.go`,
+`TestPipeResultsNeverEchoesRequestPayload`). Earlier revisions of this page
+claimed the row "also contains its original request" — that was wrong and is
+corrected here.
+
+**`replied_by` is the provenance of the untrusted content, and it is not
+`to_agent`.** The projection selects `claimed_by` and the route derives
+`replied_by` from it (`api/rest/pipe_handler.go`,
+`pipeReplyProvenanceAgent`). The agent that completes a row need not be the
+addressee: `callerCanClaimPipe` falls through to `callerIsOperatorOrAdmin` on
+**any** local pipe, and admits any same-provider agent on a provider-addressed
+row. A federated reply landed home leaves `claimed_by` empty, and there
+`replied_by` is `to_agent` — but only because `ApplyFederatedPipelineResult`
+refuses the result unless the remote author equals `to_agent`. Treat
+`replied_by` as the author and `to_agent` as the addressee; they are different
+questions (`api/rest/pipe_results_reply_visibility_test.go`,
+`TestPipeResultsNamesTheAgentThatActuallyWroteTheReply`). Claim *timing*
+(`claimed_at`) remains unselected: it is workflow detail, not provenance.
+
+**Response** (HTTP 200, `?count_only=1`): `{"count": N, "retained": bool,
+"newest_completed_at": "<RFC3339>"}` and nothing else. No `items` array, no
+reply text, no intent, no message identifiers; `newest_completed_at` is omitted
+entirely when `count` is 0. `retained` is simply `count > 0`.
+
+`count` is the **current retained total, not an unread counter**. Canonical
+`msg-*` replies are durable, while this compatibility projection also includes
+deprecated `pipe-*` results that may age out. The snapshot is therefore not
+universally monotonic and callers must never render it as pending work.
+`newest_completed_at` is a polling watermark that requires no server-held read
+state. The MCP reply read applies `since` inclusively because SQLite completion
+timestamps have millisecond resolution: excluding equality could hide a reply
+that lands later in the same millisecond. Boundary rows may repeat and callers
+must deduplicate by message id; an equal-time composite `next_before` remains
+valid when the boundary millisecond spans more than one page
+(`api/rest/pipe_results_count_probe_test.go`).
+
+**Error responses:**
+
+| Status | When | Meaning |
+|---|---|---|
+| `400` | `?before=`'s timestamp half is not RFC3339, or a composite cursor carries a non-millisecond timestamp | The cursor is rejected loudly; generated composite cursors always name an exact stored millisecond, while a bare sub-millisecond instant remains a valid coarse strict-before filter. |
+| `501` | `?count_only=1` and the active store does not implement the optional `store.PipelineResultCounter` | Capability gap. Reported instead of a `200 {"count":0}` that would let the inbox silently claim there are no replies. |
+| `501` | `?before=` and the active store does not implement the optional `store.PipelineReplyPager` | Capability gap. Reported instead of silently ignoring the cursor and re-serving the newest page. |
+| `501` | `GetCompletedForSender` returns `store.ErrPipelineUnsupported` | The backend has no sender-side reply projection at all. `PostgresStore.GetCompletedForSender` is still a stub (`internal/store/postgres.go`) — along with `InsertPipeline`, `ClaimPipeline`, `CompletePipeline`, and `GetInbox` — so messaging does not function on a Postgres-backed node. The `501` makes that a legible capability gap rather than a `500`. |
+| `503` | `GetCompletedForSender` returns `store.ErrPipeContentUnavailable` | The node content vault is locked and replies are encrypted at rest. The body states the read is passive and safe to repeat after unlocking. |
+| `500` | any other store failure | Generic; the raw store error is not echoed to the caller. |
+
+**Passive and replay-safe.** All modes write nothing: no claim, no
+acknowledgement, no re-queue, no workflow-state mutation, and unrelated open
+work is not made claimable. Two identical reads return byte-identical bodies, so
+a retry after a lost response is safe. The MCP client classifies the path
+(query string stripped, so `?limit=N`, `?before=…`, and `?count_only=1` all
+inherit it) as replay-safe and re-sends with a fresh nonce
+(`internal/mcp/server.go`, `retryableReadOnlyGETPaths` and
+`classifySignedRequestReplay`; pinned in `internal/mcp/signing_nonce_test.go`).
 
 ---
 

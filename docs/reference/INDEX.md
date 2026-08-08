@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.18.1. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.18.2. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -24,6 +24,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`environment-variables.md`](environment-variables.md) | Every env var SAGE reads (`SAGE_HOME`, embeddings, hybrid recall, TLS, snapshots, …), with defaults and the `file:line` that consumes each. |
 | [`cpu-only-embeddings.md`](cpu-only-embeddings.md) | Model/dimension pairing, CPU timeout sizing, Ollama and TEI/OpenAI-compatible deployment, plus the reproducible real-endpoint latency/request-count benchmark. |
 | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) | submit → proposed → committed/deprecated; node-local vs on-chain data; confidence decay; corroboration. |
+| [`concepts/message-reply-lifecycle.md`](concepts/message-reply-lifecycle.md) | send → claim → reply → **read the reply**. Which surface returns a reply body, why the exact original sender is the only reader, why `replied_by` (not the addressee) is the provenance of the untrusted content, why a reply is untrusted data and never inbound work, why the request payload never comes back through the reply path, and how `before` pages backward so no reply is stranded. Read this if a reply looks "invisible". |
 | [`concepts/clearance-classification.md`](concepts/clearance-classification.md) | Per-record classification (0–4), the REST-vs-wire default gotcha, and the per-record query gate. |
 | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, current fail-closed cross-chain Read/Copy policy, the five-gate query pipeline, and the app-v20 one-chain quorum-scope boundary. |
 | [`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md) | The current local Access Group contract: explicit Read / Read+Write / Read+Write+Modify member authority, ownership-preserving join/leave semantics, CAS revisions, hard-deny intersections, and the app-v25 → app-v26 migration boundary. |
@@ -53,6 +54,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | Make sure submitted memories actually get committed (not stuck at `proposed`) | [`concepts/voter-operations.md`](concepts/voter-operations.md) |
 | Pair two SAGE nodes, export participating agents for default borrowed Read, or change manual Read/Copy without re-pairing | [`federation-and-brain-api.md`](federation-and-brain-api.md) — “Trust and directional peer RBAC” |
 | Send agent work to a visible shared-domain recipient on another federated SAGE | [`mcp-tools.md`](mcp-tools.md) — `sage_find_agent`, then `sage_message_send`; [`federation-and-brain-api.md`](federation-and-brain-api.md) — internal compatibility transport `POST /fed/v1/pipe/event` |
+| Read the reply a recipient returned for a message **you** sent | [`mcp-tools.md`](mcp-tools.md) — `sage_message_replies` (v11.18.2); [`concepts/message-reply-lifecycle.md`](concepts/message-reply-lifecycle.md). Not `sage_inbox` (that is work addressed to you) and not `sage_message_status` (deliberately payload-free). |
 | Discover connected SAGEs and live-read a domain they share | [`mcp-tools.md`](mcp-tools.md) — `sage_federation`, then `sage_recall` with `federated=true` |
 | Distinguish internet federation, app-v20 quorum replication, and local-vs-network snapshot recovery | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) — “v11.9 quorum scopes are not cross-chain federation” |
 | Understand Root handover or why a federated agent is read-only | [`app-v23-access-control-design.md`](app-v23-access-control-design.md) + [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) |
@@ -166,7 +168,40 @@ CometBFT without treating the consensus RPC as proof of application storage.
 
 ---
 
-## Related docs (reconciled through v11.18.1)
+## Drift corrected in v11.18.2
+
+Three claims inside this reference directory were wrong and have been fixed. They
+are recorded here because agents may have cached them.
+
+- **`mcp-tools.md` listed `GET /v1/pipe/results` under `sage_turn`'s REST calls.**
+  False. `sage_turn` never called it — a repo-wide grep for `pipe/results` in
+  `internal/mcp/tools.go` returned zero hits before v11.18.2, and the retired
+  `message_replies` turn channel was removed in `b0e7ca9e`. What `sage_turn`
+  actually does is three payload-free reads, all issued by
+  `Server.checkPipelineInbox` (`internal/mcp/tools.go`, called from `toolTurn`):
+  `GET /v1/pipe/history/inbox?count_only=1`,
+  `GET /v1/dashboard/task-notifications?limit=5`, and `GET /v1/pipe/updates?limit=5`.
+  It calls neither `GET /v1/pipe/results` **nor `GET /v1/pipe/inbox`** — the
+  latter is a claiming route, registered in `nonReplayableGETPaths`
+  (`internal/mcp/server.go`) and pinned as single-attempt by
+  `internal/mcp/signing_nonce_test.go`, and naming it here would have made
+  turn-time reads look like they consume pending work. The advertised reply read
+  is now `sage_message_replies`.
+- **`rest-api.md` said a `GET /v1/pipe/results` row "also contains its original
+  request".** False. `GetCompletedForSender` (`internal/store/sqlite.go`) never
+  selects `payload`. `payload_authority:"request_only"` on that surface labels
+  the retained `intent` only. The `payload` key is present-but-empty because
+  `store.PipelineMessage.Payload` has no `omitempty`. The projection *does*
+  select `claimed_by` and expose it as `replied_by`: that is the provenance of
+  untrusted, model-consumed content, not request payload, and the same sender
+  already sees it via `sage_message_history(folder="outbox")`.
+- **`mcp-tools.md` told a sender to "inspect it with `sage_message_status`" when
+  the inbox was clean.** Misdirecting: `sage_message_status` is deliberately
+  payload-free and returns no reply body. The correct read is
+  `sage_message_replies`, or `sage_message_history(folder="outbox")` for the
+  untruncated text.
+
+## Related docs (reconciled through v11.18.2)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 
@@ -175,6 +210,16 @@ These were stale earlier in v8 and have now been reconciled against the code. Wh
 - **`api/openapi.yaml`** — the machine-readable **network/agent REST** spec, reconciled to the core remotely callable surface (including the v11.5 `reinstateMemory` operation; `classification` on `MemorySubmitRequest`; `task` in `MemoryType`; `tx_hash` on vote responses; clearance-0 labeled PUBLIC; `/v1/agent/register` documents 201-new / 200-idempotent). It intentionally excludes the same-machine, loopback-only human CEREBRUM control plane under `/v1/dashboard/**`; those operator routes are documented in [`rest-api.md`](rest-api.md), the app-v23 design, and the app-v26 Access Group reference. This exclusion is a trust boundary, not missing SDK coverage. *(A few org/federation/dept GET responses are typed as generic objects — their store models live outside the REST package; fill in later if needed.)*
 - **`docs/ARCHITECTURE.md`** — accurate: it documents *both* the operational and data-classification meanings of the 0–4 integer, and treats BadgerDB as authoritative with SQLite as legacy fallback. Documents PoE-weighted quorum (Phase 2, live since v8.2/`app-v3` and complete through v8.4/`app-v5`): post-fork blocks weight each vote by the validator's demonstrated PoE track record; the equal-weight (1.0) branch is retained only for pre-fork byte-identical replay. For precise per-record gate logic with file:line, prefer [`concepts/`](concepts/).
 - **`sdk/python/README.md`** — reconciled: signing docs now include the nonce/`X-Nonce`, `propose()` documents `classification`, and `hybrid()`/`forget()`/`list_orgs_by_name()` are in the tables. [`python-sdk.md`](python-sdk.md) is the fuller reference.
+
+**Known gap (v11.18.2, Python SDK):** `SageClient.pipe_results()` /
+`AsyncSageClient.pipe_results()` already reach `GET /v1/pipe/results`, so a Python
+sender *can* read replies today. Three things are missing and are documented as
+"not yet implemented" in [`python-sdk.md`](python-sdk.md) rather than as shipped
+API: (1) no client method exposes the additive `?count_only=1` probe, (2) no
+client method exposes the `?before=` backward cursor, so a Python caller can only
+reach the newest ≤20 replies, and (3) there is no canonical `message_replies()`
+name matching the MCP tool and the rest of the v11.17 Messages vocabulary. All
+three are additive client-side changes; the REST route needs nothing further.
 
 ---
 

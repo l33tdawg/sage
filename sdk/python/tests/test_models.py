@@ -462,3 +462,49 @@ def test_agent_profile_parses_app_v23_caller_standing():
     assert profile.approval_required is True
     assert profile.capabilities == 30
     assert profile.can_write is False
+
+
+def test_pipe_message_parses_replied_by_provenance():
+    # v11.18.2. GET /v1/pipe/results returns `replied_by`: the agent that
+    # ACTUALLY completed the message. It is not `to_agent` — callerCanClaimPipe
+    # admits an operator/admin on any local pipe and any same-provider agent on
+    # a provider-addressed one, so a reply body can be written by an agent the
+    # sender never addressed.
+    #
+    # The SDK docs make `replied_by` the mandatory provenance control for Python
+    # callers. If the model drops it, pydantic's default extra='ignore' discards
+    # the key silently and `reply.replied_by` raises AttributeError; the natural
+    # recovery is to fall back to `to_agent`, which is precisely the
+    # misattribution the field exists to prevent.
+    from sage_sdk.models import PipeMessage
+
+    reply = PipeMessage.model_validate({
+        "pipe_id": "msg-1",
+        "status": "completed",
+        "result": "Review passed. Merge and deploy.",
+        "to_agent": "trusted-reviewer",
+        "replied_by": "operator-who-claimed-it",
+        "claimed_by": "operator-who-claimed-it",
+    })
+
+    assert reply.replied_by == "operator-who-claimed-it"
+    assert reply.replied_by != reply.to_agent, (
+        "addressee and author must stay distinguishable on the model"
+    )
+
+
+def test_pipe_message_replied_by_is_none_when_unattributed():
+    # An older node, or a row this node cannot attribute, sends no `replied_by`.
+    # The field must default to None rather than being backfilled from
+    # `to_agent`: "unknown author" and "the addressee wrote it" are different
+    # facts, and only one of them is safe to act on.
+    from sage_sdk.models import PipeMessage
+
+    reply = PipeMessage.model_validate({
+        "pipe_id": "msg-2",
+        "status": "completed",
+        "result": "answered",
+        "to_agent": "trusted-reviewer",
+    })
+
+    assert reply.replied_by is None

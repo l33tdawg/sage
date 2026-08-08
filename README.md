@@ -51,6 +51,37 @@ The dashboard also includes agent management, domain permissions, key rotation, 
 
 ---
 
+## What's New in v11.18.2
+
+**A reply to a message you sent is readable again, through an advertised MCP
+tool.** Previously a recipient could answer, the durable row flipped to
+`completed`, and the answer was reachable only through the passive REST
+projection `GET /v1/pipe/results` — which no MCP tool ever called. `sage_inbox`
+shows work addressed to you, not answers to you, and `sage_message_status` is
+sender-only but deliberately payload-free. So in MCP and bookend clients the
+reply was invisible and work round-tripped. v11.18.2 adds `sage_message_replies`
+as an explicit sender-side read (SAGE now advertises 32 MCP tools) plus a
+payload-free pointer inside `sage_inbox` that reports how many replies are
+retained without ever presenting them as new work.
+
+**The reply read is exact-sender-only, passive, and honest about provenance.**
+Authorization is the SQL predicate `from_agent = ?` against the caller's own
+signed identity — not the wider `callerCanViewPipe` rule the workflow route
+uses — and no parameter names another agent, so the tool cannot serve as a
+message-existence oracle. Reading claims nothing, acknowledges nothing, and
+re-queues nothing. Every body is labelled untrusted data and attributed to the
+agent that actually wrote it rather than the agent you addressed.
+`GET /v1/pipe/results` gains a payload-free `?count_only=1` probe and a
+composite `(completed_at, pipe_id)` `before=` cursor, so replies sharing a
+millisecond are never stranded behind the page boundary. A store backend
+lacking the optional capability answers `501` instead of an empty page that
+would read as "no replies".
+
+Memory, agent, RBAC, federation, and consensus behavior are unchanged; **app-v26
+remains the binary ceiling and v11.18.2 introduces no app-v27**.
+
+Container: `ghcr.io/l33tdawg/sage:11.18.2`. SDK 11.18.2.
+
 ## What's New in v11.18.1
 
 **MCP session guidance now uses the protocol surface intended for it.** SAGE
@@ -76,8 +107,6 @@ chains remain readable; new v1 repair proposals fail closed.
 The lineage change is confined to the exceptional app-v21 → app-v22 recovery
 ceremony. Memory, agent, RBAC, and federation policy are unchanged; **app-v26
 remains the binary ceiling and v11.18.1 introduces no app-v27**.
-
-Container: `ghcr.io/l33tdawg/sage:11.18.1`. SDK 11.18.1.
 
 ## What's New in v11.18.0
 
@@ -1463,7 +1492,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.18.1`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.18.2`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -1502,9 +1531,11 @@ not an unauthenticated MCP endpoint.
 ### Upgrading from an older version?
 
 **Upgrading an existing node — including the v10.x → v11 jump — is
-[docs/UPGRADING.md](docs/UPGRADING.md).** Short version: install the new binary,
-stop the node, `sage-gui backup --full`, `sage-gui upgrade preflight`, then start
-it. (The binary comes first because it is what provides those two commands.)
+[docs/UPGRADING.md](docs/UPGRADING.md).** Short version: install **v11.18.0 or
+later**, stop the node, `sage-gui backup --full`, `sage-gui upgrade preflight`,
+then start it. (The binary comes first because it is what provides those
+commands — an older one ignores `--full` and silently backs up the SQLite
+projection instead.)
 Your chain advances in place; a personal node climbs the consensus fork ladder by
 itself. Read the guide before a multi-admin chain crosses app-v23 — that
 activation re-derives administrator authority.

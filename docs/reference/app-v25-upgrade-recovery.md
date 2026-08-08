@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.18.1: internal/abci/app.go (app-v25 gate and immutable envelope), web/appv25_memory_legacy_adoption_worker.go, web/appv25_domain_continuity_worker.go, web/appv25_memory_legacy_adoption_control.go, and internal/store/appv25_domain_continuity.go. -->
+<!-- Reconciled through SAGE v11.18.2: internal/abci/app.go (app-v25 gate and immutable envelope), web/appv25_memory_legacy_adoption_worker.go, web/appv25_domain_continuity_worker.go, web/appv25_memory_legacy_adoption_control.go, and internal/store/appv25_domain_continuity.go. -->
 
 # App-v25 Upgrade, Historical Recovery, and Domain Continuity
 

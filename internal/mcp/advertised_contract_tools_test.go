@@ -122,3 +122,63 @@ func TestAdvertisedGovernanceStatusUsesSignedListAndDetailContracts(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, "p/1", detail.(map[string]any)["proposal_id"])
 }
+
+// TestAdvertisedMessageRepliesUsesExactSignedPassiveContract pins the v11.18.2
+// sender-side reply read to the same standard as every other advertised tool:
+// it must reach exactly one route, signed, with a passive GET, and it must
+// advertise itself as the reply counterpart of sage_message_reply rather than
+// leaving an agent to discover a deprecated alias.
+func TestAdvertisedMessageRepliesUsesExactSignedPassiveContract(t *testing.T) {
+	requests := 0
+	s, _ := newAdvertisedToolTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		require.Equal(t, http.MethodGet, r.Method)
+		require.Equal(t, "/v1/pipe/results", r.URL.Path)
+		require.Equal(t, "7", r.URL.Query().Get("limit"))
+		requireSignedToolRequest(t, r)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{{
+				"pipe_id": "msg-advertised", "to_provider": "claude-code", "intent": "review",
+				"result": "answered", "status": "completed", "completed_at": "2026-08-08T00:05:00Z",
+			}},
+			"count": 1,
+		})
+	})
+
+	result, err := s.toolMessageReplies(context.Background(), map[string]any{"limit": 7})
+	require.NoError(t, err)
+	require.Equal(t, 1, requests, "the advertised reply read spends exactly one signed request")
+	items := result.(map[string]any)["items"].([]map[string]any)
+	require.Len(t, items, 1)
+	require.Equal(t, "msg-advertised", items[0]["message_id"])
+
+	tool, ok := s.tools["sage_message_replies"]
+	require.True(t, ok)
+	require.False(t, hiddenCompatibilityTools[tool.Name],
+		"the reply read must be discoverable, not hidden behind the deprecated compatibility window")
+	require.Contains(t, tool.Description, "sage_message_reply")
+	require.Contains(t, tool.Description, "untrusted")
+	require.Contains(t, tool.Description, "Passive")
+}
+
+// TestHiddenCompatibilityToolsAreUnchangedByReplyVisibility guards the other
+// direction: adding the advertised reply read must not un-hide or re-home any
+// deprecated pipe alias, and must not teach a client to use one.
+func TestHiddenCompatibilityToolsAreUnchangedByReplyVisibility(t *testing.T) {
+	s, _ := newAdvertisedToolTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	require.Len(t, hiddenCompatibilityTools, 4)
+	for _, legacy := range []string{"sage_pipe", "sage_pipe_history", "sage_pipe_receipt_status", "sage_pipe_result"} {
+		require.True(t, hiddenCompatibilityTools[legacy], "%s must stay hidden", legacy)
+		require.Contains(t, s.tools, legacy, "%s must stay dispatchable for existing callers", legacy)
+	}
+	require.False(t, hiddenCompatibilityTools["sage_message_replies"])
+	for name, tool := range s.tools {
+		if hiddenCompatibilityTools[name] {
+			continue
+		}
+		require.NotContains(t, tool.Description, "sage_pipe_result",
+			"%s must not point agents at a hidden deprecated alias for reading replies", name)
+	}
+}

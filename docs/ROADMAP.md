@@ -1,23 +1,56 @@
 # SAGE Roadmap
 
-**Status (2026-08):** **v11.18.1 is the current release.** It keeps the
+**Status (2026-08):** **v11.18.2 is the current release.** It keeps the
 pairwise exported-agent federation model, safe registered-name addressing and
 reply-event visibility, the three-tab Access Controls redesign, five-minute
 JOIN route discovery, complete stopped-node backup/restore/preflight tooling,
 and the governed app-v21 → app-v22 legacy-lineage recovery ceremony from
-v11.18.0. It moves per-session auto-connect guidance into MCP
+v11.18.0. It makes a reply to a message you sent readable from MCP through the
+advertised `sage_message_replies` tool and a payload-free `sage_inbox` pointer,
+closing a gap where a completed reply existed only on a REST projection no MCP
+tool called. It moves per-session auto-connect guidance into MCP
 `initialize.instructions`, leaving the first tool result payload clean while
 retaining a compatibility fallback for clients that skip initialization. It
 also corrects the exceptional app-v21 → app-v22 recovery lane so proven
 skip-ahead transitions remain virtual, evidence-bound history rather than
 synthetic applied-upgrade records. Existing app-v22 through app-v26 chains are
-not rewritten. The supported consensus ceiling remains app-v26; **v11.18.1
+not rewritten. The supported consensus ceiling remains app-v26; **v11.18.2
 does not introduce app-v27**.
 
 **Hard constraint driving the whole plan:** no chain reset. Existing chains must
 upgrade in place across all future releases. Routine personal-node upgrades
 remain automatic; the exceptional legacy-lineage repair is deliberately an
 explicit, reviewed operator ceremony rather than a silent mutation.
+
+## v11.18.2 patch
+
+v11.18.2 closes a sender-side reply-visibility defect. A recipient could call
+`sage_message_reply`, the durable row flipped to `completed`, and the result was
+retained — but the original sender had no advertised MCP path to it. The result
+was attached only to the passive REST projection `GET /v1/pipe/results`, which
+no MCP tool called, while `sage_inbox` returns work addressed to the caller and
+`sage_message_status` is deliberately payload-free. In bookend clients the reply
+was therefore invisible and work round-tripped.
+
+The release adds `sage_message_replies` as an explicit, advertised sender-side
+read — taking the advertised tool count from 31 to 32 — plus a payload-free
+pointer inside `sage_inbox` carrying `retained_reply_count` and
+`newest_reply_completed_at`. Replies never enter `sage_inbox` items and never
+count as work: every reply item is `requires_reply: false`, `requires_result:
+false`, and `data_only`. Authorization is the exact-sender SQL predicate
+`from_agent = ?`, not the wider `callerCanViewPipe` rule, and no parameter names
+another agent, so the surface cannot act as a message-existence oracle. Reads
+are passive and replay-safe: they claim, acknowledge, and re-queue nothing.
+
+`GET /v1/pipe/results` gains a payload-free `?count_only=1` probe and a
+composite `(completed_at, pipe_id)` `before=` cursor. The composite cursor is
+load-bearing rather than cosmetic: `completed_at` is stored at millisecond
+resolution, so a timestamp-only cursor silently strands every reply sharing the
+boundary millisecond — a burst of replies is routine, not an edge case. Store
+backends lacking the optional capability answer `501` rather than an empty page
+that would read as "no replies". Reply bodies are attributed to the agent that
+actually completed the row rather than the addressee. The consensus ceiling
+remains app-v26 and no consensus schema changes.
 
 ## v11.18.1 patch
 

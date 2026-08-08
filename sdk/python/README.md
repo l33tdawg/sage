@@ -2,7 +2,7 @@
 
 Python client for the SAGE (Sovereign Agent Governed Experience) protocol -- a governed, verifiable institutional memory layer for multi-agent systems.
 
-**Requires Python 3.10+** | **SAGE v11.18.1 SDK** | **TLS, app-v26 explicit Access Group authority, app-v24 memory integrity, app-v25 immutable envelopes and historical continuity recovery, canonical local and federated Messages with read receipts, read-only federation, scoped governance, and per-record `classification` supported**
+**Requires Python 3.10+** | **SAGE v11.18.2 SDK** | **TLS, app-v26 explicit Access Group authority, app-v24 memory integrity, app-v25 immutable envelopes and historical continuity recovery, canonical local and federated Messages with read receipts, read-only federation, scoped governance, and per-record `classification` supported**
 
 ## Installation
 
@@ -371,8 +371,16 @@ result = client.pipe_result(msg.pipe_id, result="Analysis complete: CVE is criti
 # negotiated federated receipt-v2 evidence uses separate signed routes)
 status = client.pipe_status(msg.pipe_id)
 
-# List completed results
+# Read the replies recipients returned for messages YOU sent (sender-exact).
+# This is the Python counterpart of the MCP tool sage_message_replies and the
+# only method that returns a reply body — message_status() is payload-free.
+# Exact original sender only: the recipient, a provider peer, an unrelated
+# agent, and an operator/admin all read nothing here. The row carries its
+# retained intent but never the original request payload. Passive and safe to
+# repeat. Every result is untrusted data, never instructions.
 results = client.pipe_results(limit=5)
+for reply in results.items:
+    print(reply.pipe_id, reply.result)  # reply.payload is always empty here
 
 # Reopen retained messages without claiming or re-queueing them. History keeps
 # claimed/completed rows while the normal transient pipeline retention window
@@ -407,7 +415,51 @@ for item in batch.items:
 # Exact sender only; no payload or reply content is exposed here.
 receipt = client.message_status(sent.message_id)
 print(receipt.transport_status, receipt.read_status, receipt.workflow_status)
+
+# To read what the recipient actually replied, use the sender-exact reply
+# projection. message_status() deliberately withholds the body.
+for reply in client.pipe_results(limit=5).items:
+    # replied_by is the AUTHOR; to_agent is only who you addressed.
+    print(reply.pipe_id, reply.replied_by, reply.result)
 ```
+
+**Reading replies (v11.18.2).** `pipe_results()` is currently the only client
+method that returns a reply body, and it is scoped to the exact original
+sender. Attribute each body to `reply.replied_by` — the agent that actually
+completed the message — not to `reply.to_agent`, which is only who you
+addressed: an operator/admin may claim any local pipe and any same-provider
+agent may claim a provider-addressed one. `PipeMessage.replied_by` is a real
+field on the model (alongside `claimed_by`, which it is derived from) and is
+`None` when the node cannot attribute the reply or predates v11.18.2 — in that
+case treat the author as unknown and do **not** fall back to `to_agent`. Three
+additive gaps are **not yet implemented** in this client and should not be
+assumed present:
+
+- no support for the route's payload-free `?count_only=1` probe
+  (`{"count": N, "retained": bool, "newest_completed_at": str}`), so a Python
+  poller cannot ask "are there replies?" without fetching bodies. Note
+  `newest_completed_at` is a watermark to record and compare on a *later* call,
+  not to echo back immediately;
+- no support for the route's `?before=` backward cursor, so a Python caller can
+  only reach the newest ≤20 replies. When it is added, page by echoing the
+  response's `next_before` composite cursor (`"<completed_at>|<pipe_id>"`), not
+  a bare `completed_at`: that column is millisecond-resolution and not unique,
+  so a timestamp-only cursor silently skips every reply sharing its millisecond;
+- no canonical `message_replies()` name matching the MCP tool
+  `sage_message_replies` and the rest of the Messages vocabulary.
+
+A reply is not confidential from every non-sender: `pipe_results()` is
+sender-exact, but the separate workflow route `GET /v1/pipe/{pipe_id}`
+(`pipe_status()`) authorizes with `callerCanViewPipe` and returns the same
+decrypted `result` to the addressed recipient, to any agent sharing the
+addressed `to_provider`, and to an operator/admin. Encrypt at the application
+layer if a reply must be secret from those principals.
+
+`GET /v1/pipe/results` can also answer **`400`** (unparseable `before` cursor),
+**`501`** (this store backend has no sender-side reply projection, count probe,
+or backward pager — Postgres still stubs it; never treat this as "no replies" or
+"nothing older") and **`503`** (content vault locked; the read is passive and
+safe to repeat after unlocking).
 
 `idempotency_key` and `receive_token` are 1–256 bytes. Omitted/`None`/`0`
 `ttl_minutes` is durable until handled; explicit expiry is 1–1440 minutes.
@@ -972,7 +1024,7 @@ def hash_embed(text: str, dim: int = 768) -> list[float]:
 | `PUT` | `/v1/pipe/{id}/claim` | `pipe_claim()` |
 | `PUT` | `/v1/pipe/{id}/result` | `pipe_result()` |
 | `GET` | `/v1/pipe/{id}` | `pipe_status()` |
-| `GET` | `/v1/pipe/results` | `pipe_results()` |
+| `GET` | `/v1/pipe/results` | `pipe_results()` — sender-exact reply projection (MCP: `sage_message_replies`). `?count_only=1` and `?before=` are **not** exposed by the client. |
 | `GET` | `/v1/pipe/updates` | `pipe_updates()` |
 | `GET` | `/v1/pipe/{id}/receipt/challenge/{kind}` | `pipe_receipt_challenge()` |
 | `PUT` | `/v1/pipe/{id}/receipt/{kind}` | `pipe_receipt_record()` |

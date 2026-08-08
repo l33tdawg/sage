@@ -785,7 +785,7 @@ send → pending → claimed → completed
 1. **Send** — `POST /v1/messages` requires an exact recipient and a caller-scoped idempotency key. Exact retries return the original message; key reuse with different content conflicts.
 2. **Pending** — The durable row waits in the exact recipient's inbox. A federated send may remain safely queued while the trusted peer is offline.
 3. **Claimed/read** — `POST /v1/messages/receive` claims one ordered batch using a replayable receive token. Exact-recipient read acknowledgement is separate evidence and never means comprehension.
-4. **Completed** — The exact recipient replies through `POST /v1/messages/{id}/reply`. The sender reads payload-free transport, read, and workflow dimensions from the status projection.
+4. **Completed** — The exact recipient replies through `POST /v1/messages/{id}/reply`. The sender reads payload-free transport, read, and workflow dimensions from the status projection, and reads the reply **body** from the sender-exact reply projection `GET /v1/pipe/results` (MCP: `sage_message_replies`). That projection is sender-exact: no other agent can read the reply *through it*. It is **not** a confidentiality guarantee for the reply itself — the pre-existing workflow route `GET /v1/pipe/{pipe_id}` authorizes with `callerCanViewPipe` and still returns the completed row's decrypted `result` to the addressed recipient, to any agent sharing the addressed `to_provider`, and to an operator/admin. Treat a reply as confidential from unrelated agents, not from those principals.
 5. **Expired** — If the explicit TTL elapses first, the row is no longer actionable. Expiry is independent of delivery/read evidence.
 
 Legacy local `pipe_result` completion can create a summary journal. Canonical
@@ -814,7 +814,13 @@ governed memory; an agent must remember durable knowledge explicitly.
 The `/v1/pipe/*` routes remain the compatibility and federated transport
 surface. MCP clients should use `sage_find_agent`, `sage_message_send`,
 `sage_inbox`/`sage_messages_receive`, `sage_message_reply`,
-`sage_message_status`, and `sage_message_history`.
+`sage_message_replies`, `sage_message_status`, and `sage_message_history`.
+
+`sage_message_replies` (v11.18.2) is the sender-side counterpart to
+`sage_message_reply` and the only advertised tool that returns reply content.
+`sage_inbox` shows work addressed to you and never lists a reply as an item; it
+carries a payload-free `retained_reply_count` pointer instead. See
+[`reference/concepts/message-reply-lifecycle.md`](reference/concepts/message-reply-lifecycle.md).
 
 ### Use Cases
 
@@ -954,7 +960,7 @@ marker; see `docs/reference/rest-api.md` for the authoritative details.
 | `PUT` | `/v1/pipe/{id}/claim` | Yes | Claim a pending pipeline message |
 | `PUT` | `/v1/pipe/{id}/result` | Yes | Post result for a claimed pipeline message |
 | `GET` | `/v1/pipe/{id}` | Yes | Get a specific pipeline message by ID |
-| `GET` | `/v1/pipe/results` | Yes | List completed pipeline messages with results |
+| `GET` | `/v1/pipe/results` | Yes | Sender-exact projection of replies to messages this agent sent. Returns the reply body but never the original request payload. `?count_only=1` returns `{count, retained, newest_completed_at}` |
 | `GET` | `/health` | No | Liveness probe |
 | `GET` | `/ready` | No | Readiness probe (checks PostgreSQL + CometBFT) |
 

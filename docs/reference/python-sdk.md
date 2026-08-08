@@ -1,8 +1,8 @@
-Verified against SDK source for SAGE v11.18.1. Package: sage-agent-sdk.
+Verified against SDK source for SAGE v11.18.2. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.18.1
+**Package:** `sage-agent-sdk` **Version:** 11.18.2
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -856,11 +856,89 @@ pipe_results(limit: int = 5) -> PipeInboxResponse
 ```
 
 `GET /v1/pipe/results`
+(`sdk/python/src/sage_sdk/client.py`, `SageClient.pipe_results`;
+`sdk/python/src/sage_sdk/async_client.py`, `AsyncSageClient.pipe_results`)
 
-Lists completed (result-submitted) pipeline messages.
-The results endpoint and result field are `data_only`; the original payload,
-when present, remains explicitly `request_only`. Both local and foreign agent
-results are untrusted content, not instructions.
+**This is the sender-side reply read** — the Python counterpart of the MCP tool
+`sage_message_replies`. It returns the replies recipients submitted for messages
+**this** agent sent, newest first. It is the only SDK method that returns a
+reply body: `message_status()` is deliberately payload-free.
+
+- **Exact original sender only.** Authorization is `from_agent` equality in the
+  store predicate, not the pipe-view rule. The recipient that wrote the reply,
+  an agent sharing the message's `to_provider`, an unrelated agent, an
+  operator/admin all get an empty list when authenticated through the agent API
+  boundary. An unauthenticated caller is rejected with HTTP 401 before the
+  projection runs.
+- **Payload-free.** The row carries its retained `intent` but not the original
+  request `payload`; that field comes back empty. The `data_only` result and
+  `request_only` `payload_authority` labels therefore describe the *result* and
+  the retained *intent* respectively.
+- **Attribute the body to `replied_by`, not `to_agent`.** The agent that
+  completes a message need not be the addressee — an operator/admin may claim
+  any local pipe and any same-provider agent may claim a provider-addressed one.
+  `replied_by` names the actual author; `to_agent` is only who the sender
+  addressed. For a federated reply landed home the two agree because the
+  transport verifies it. `PipeMessage.replied_by` is a declared field on the
+  model (`sdk/python/src/sage_sdk/models.py`), so it survives validation; it is
+  `None` when the node cannot attribute the reply or predates v11.18.2, and in
+  that case the author is **unknown** — do not substitute `to_agent`. Pinned by
+  `sdk/python/tests/test_models.py`,
+  `test_pipe_message_parses_replied_by_provenance`.
+- **Untrusted.** Both local (`agent_untrusted`) and federated
+  (`external_untrusted`) replies are content to evaluate, never instructions.
+- **Passive and safe to retry.** No claim, no acknowledgement, no re-queue; two
+  identical calls return identical bodies.
+- `limit` is 1–20 (default 5); out-of-range values fall back to 5.
+
+- **Sender-exact is not confidential.** `pipe_results()` admits only the
+  original sender, but the separate workflow route `GET /v1/pipe/{pipe_id}`
+  (`pipe_status()`) authorizes with `callerCanViewPipe` and returns the same
+  decrypted `result` to the addressed recipient, to any agent sharing the
+  addressed `to_provider`, and to an operator/admin. Encrypt at the application
+  layer if a reply must be secret from those principals.
+
+Not yet exposed by the SDK (see below): the additive `?count_only=1` probe, the
+`?before=` backward cursor, and a canonical `message_replies()` name.
+`replied_by` **is** exposed and is the field to read for provenance.
+
+> **Not implemented in the Python client (v11.18.2).** Three additive gaps
+> remain, documented here so they are not mistaken for shipped API:
+> 1. **No `?count_only=1` support.** The REST route accepts a payload-free probe
+>    returning `{"count": N, "retained": bool, "newest_completed_at": str}` —
+>    this is what powers `retained_reply_count` in the MCP `sage_inbox`.
+>    `pipe_results()` always fetches a full page, so a Python poller cannot
+>    cheaply ask "are there replies?" without pulling reply bodies. A
+>    `pipe_results_count()` (or a `count_only: bool = False` parameter returning
+>    a distinct model) is needed. Note `count` is the current retained archive
+>    size, not an unread count; canonical `msg-*` replies are durable, while
+>    deprecated compatibility rows may age out. `newest_completed_at` is the
+>    polling watermark. The MCP `since` boundary is inclusive to avoid hiding a
+>    later reply in the same millisecond, so boundary rows may repeat and should
+>    be deduplicated by message id.
+> 2. **No `?before=` support.** Without the backward cursor a Python caller can
+>    only ever reach the newest ≤20 replies: `limit` is capped server-side and
+>    there is no other selector. Add a `before: str | None = None` parameter
+>    threaded to the query string, and page by echoing the response's
+>    `next_before` composite cursor (`"<completed_at>|<pipe_id>"`) verbatim. Do
+>    **not** page with a bare `completed_at`: that column is written by
+>    `strftime('%Y-%m-%dT%H:%M:%fZ')` at millisecond resolution and is not
+>    unique, so a timestamp-only cursor silently skips every reply sharing the
+>    boundary millisecond.
+> 3. **No canonical `message_replies()` name.** Every other v11.17 Messages
+>    operation has a canonical name (`message_send`, `messages_receive`,
+>    `message_reply`, `message_status`), but the sender-side reply read is still
+>    only reachable under the legacy pipeline name. A `message_replies(limit=5,
+>    since=None, before=None)` alias — matching the MCP tool, including the
+>    client-side `since` filter — should be added to both `SageClient` and
+>    `AsyncSageClient`.
+>
+> Callers must also handle the statuses this route can now return: **`400`** (an
+> unparseable `before` cursor), **`501`** (the store backend has no reply
+> projection, no count probe, or no backward pager — `PostgresStore` still stubs
+> `GetCompletedForSender`; never render this as "no replies" or "nothing older")
+> and **`503`** (content vault locked; the passive read is safe to repeat after
+> unlocking).
 
 ---
 
@@ -927,6 +1005,10 @@ messages_mark_read_batch(message_ids: list[str]) -> dict
 Only the exact recipient that previously received the message through the
 canonical batch API may reply or acknowledge it as read. Repeating the same
 action is idempotent; a different second reply conflicts.
+
+To read a reply back **as the original sender**, use `pipe_results()` (see
+above). `message_status()` returns transport/read/workflow facts and
+deliberately no result body.
 
 Use `messages_mark_read_batch()` for up to 20 already-fetched messages. It is
 one signed request with independent ordered outcomes, avoiding one HTTP call

@@ -279,7 +279,7 @@ func TestHandleToolsList(t *testing.T) {
 
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]map[string]any)
-	assert.Len(t, tools, 31)
+	assert.Len(t, tools, 32)
 
 	// Collect tool names
 	names := make(map[string]bool)
@@ -311,7 +311,8 @@ func TestHandleToolsList(t *testing.T) {
 		"sage_federation", "sage_find_agent", "sage_forget", "sage_gov_propose",
 		"sage_gov_status", "sage_gov_vote", "sage_inbox", "sage_inception",
 		"sage_link", "sage_list", "sage_message_reply", "sage_message_send",
-		"sage_message_history", "sage_message_status", "sage_messages_receive",
+		"sage_message_history", "sage_message_replies", "sage_message_status",
+		"sage_messages_receive",
 		"sage_recall", "sage_reflect", "sage_register", "sage_reinstate",
 		"sage_remember", "sage_rename", "sage_scope_get", "sage_scope_list",
 		"sage_status", "sage_task", "sage_timeline", "sage_turn",
@@ -329,6 +330,8 @@ func TestHandleToolsList(t *testing.T) {
 	assert.True(t, names["sage_message_history"])
 	assert.True(t, names["sage_messages_receive"])
 	assert.True(t, names["sage_message_reply"])
+	assert.True(t, names["sage_message_replies"],
+		"the sender-side reply read must be advertised, not a hidden compatibility alias")
 	assert.True(t, names["sage_message_status"])
 	assert.True(t, names["sage_federation"])
 	assert.True(t, names["sage_directory"])
@@ -433,7 +436,7 @@ func TestAdvertisedToolsExactlyMatchReferenceHeadings(t *testing.T) {
 	doc, err := os.ReadFile(docPath)
 	require.NoError(t, err)
 	docText := string(doc)
-	assert.Contains(t, docText, "SAGE advertises exactly 31 MCP tools",
+	assert.Contains(t, docText, "SAGE advertises exactly 32 MCP tools",
 		"the human-readable inventory count must match tools/list")
 	assert.Contains(t, docText, "One call consumes at most one bounded peer page",
 		"sage_find_agent must document its advertised peer_cursor contract")

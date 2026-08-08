@@ -1,4 +1,4 @@
-# v11.18.1 federation Docker acceptance
+# v11.18.2 federation Docker acceptance
 
 This harness gives two SAGE personal nodes separate persisted homes, separate
 Docker edge networks, and one self-hosted natter relay. A temporary third

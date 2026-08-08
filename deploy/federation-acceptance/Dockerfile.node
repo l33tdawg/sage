@@ -5,7 +5,7 @@ COPY go.mod go.sum ./
 COPY third_party/cometbft/go.mod third_party/cometbft/go.sum ./third_party/cometbft/
 RUN go mod download
 COPY . .
-ARG VERSION=v11.18.1-acceptance
+ARG VERSION=v11.18.2-acceptance
 ARG COMMIT=docker-acceptance
 RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \

@@ -3563,8 +3563,17 @@ func (s *PostgresStore) CompletePipeline(_ context.Context, _, _, _, _ string) e
 	return fmt.Errorf("CompletePipeline not implemented for PostgresStore")
 }
 
+// GetCompletedForSender is not implemented for PostgresStore. The whole
+// pipeline surface above is stubbed, so a Postgres-backed node cannot serve
+// messaging at all. Wrapping ErrPipelineUnsupported lets the REST reply route
+// answer 501 (capability gap) instead of 500, which is what keeps a sender from
+// reading "this node cannot do replies" as "you have no replies".
+// PostgresStore deliberately does NOT implement PipelineResultCounter or
+// PipelineReplyPager for the same reason: the payload-free probe and the
+// backward pager must report the gap, not a false zero and not a false end of
+// list.
 func (s *PostgresStore) GetCompletedForSender(_ context.Context, _ string, _ int) ([]*PipelineMessage, error) {
-	return nil, fmt.Errorf("GetCompletedForSender not implemented for PostgresStore")
+	return nil, fmt.Errorf("GetCompletedForSender not implemented for PostgresStore: %w", ErrPipelineUnsupported)
 }
 
 func (s *PostgresStore) ListPipelines(_ context.Context, _ string, _ int) ([]*PipelineMessage, error) {

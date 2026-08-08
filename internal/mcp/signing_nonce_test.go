@@ -168,6 +168,7 @@ func TestSignedRequestReplayClassificationFailsClosed(t *testing.T) {
 		{name: "passive pipe inbox history", method: http.MethodGet, path: "/v1/pipe/history/inbox?limit=20", want: signedRequestReplaySafe},
 		{name: "passive pipe outbox history", method: http.MethodGet, path: "/v1/pipe/history/outbox?limit=20", want: signedRequestReplaySafe},
 		{name: "passive results projection", method: http.MethodGet, path: "/v1/pipe/results?limit=5", want: signedRequestReplaySafe},
+		{name: "passive results count probe", method: http.MethodGet, path: "/v1/pipe/results?count_only=1", want: signedRequestReplaySafe},
 		{name: "canonical message status", method: http.MethodGet, path: "/v1/messages/msg-1/status", want: signedRequestReplaySafe},
 		{name: "idempotent message send", method: http.MethodPost, path: "/v1/messages", want: signedRequestReplaySafe},
 		{name: "idempotent message receive", method: http.MethodPost, path: "/v1/messages/receive", want: signedRequestReplaySafe},
