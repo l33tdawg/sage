@@ -41,12 +41,12 @@ code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-si
 <body>
 <div class="container">
   <h1>Privacy Policy</h1>
-  <p class="updated">Last updated: March 7, 2026</p>
+  <p class="updated">Last updated: August 13, 2026</p>
 
   <p><strong>(S)AGE — (S)overeign Agent Governed Experience</strong> is an open-source, local-first AI memory system. This policy covers both the (S)AGE desktop application and the (S)AGE Memory browser extension.</p>
 
   <h2>The short version</h2>
-  <p><strong>Your data never leaves your machine.</strong> (S)AGE runs entirely on your computer. There are no cloud servers, no accounts, no tracking, and no telemetry. Everything stays local.</p>
+  <p><strong>Your data stays local by default.</strong> (S)AGE runs on your computer with no required SAGE cloud account or product telemetry. Data leaves the node only when you explicitly configure federation, synchronization, an AI connector, an external embedding or reranking provider, or another network integration.</p>
 
   <h2>What data is stored</h2>
   <ul>
@@ -63,7 +63,7 @@ code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-si
     <li>No conversation content sent to external servers</li>
     <li>No analytics or telemetry</li>
     <li>No cookies (except a local session cookie for the dashboard)</li>
-    <li>No third-party services</li>
+    <li>No required third-party service; optional integrations contact only the services you configure</li>
   </ul>
 
   <h2>Browser extension permissions</h2>
@@ -76,7 +76,7 @@ code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-si
   </ul>
 
   <h2>Network requests</h2>
-  <p>By default, (S)AGE talks to <strong>your own local server</strong> at <code>localhost:8080</code> (or whatever URL you configure). Optional connector flows you configure, such as Cloudflare tunnel or ChatGPT connector setup, make only the network requests needed for that feature. The SAGE project does not receive your memory contents.</p>
+  <p>By default, (S)AGE talks to <strong>your own local server</strong> at <code>localhost:8080</code> (or the URL you configure). Optional federation, synchronization, Cloudflare tunnel, ChatGPT connector, embedding, and reranking flows make the network requests required by those features. Federation relays carry encrypted traffic but can observe connection metadata. The SAGE project does not receive your memory contents merely because you run a node.</p>
 
   <h2>Open source</h2>
   <p>All source code is publicly available at <a href="https://github.com/l33tdawg/sage">github.com/l33tdawg/sage</a> under the Apache 2.0 license. You can audit every line of code.</p>

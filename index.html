@@ -13,7 +13,7 @@
 </script>
 <title>SAGE v11 — CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Install SAGE v11.16: local-first persistent memory for AI agents with governed access, safe in-place upgrades, controlled federation, and the CEREBRUM MRI brain.">
+<meta name="description" content="Install SAGE v11.18.9: local-first persistent memory for AI agents with governed access, durable agent messaging, signed updates, controlled federation, and the CEREBRUM MRI brain.">
 <meta name="theme-color" content="#0a0614">
 <meta property="og:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
 <meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
@@ -1042,7 +1042,7 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="v11-hero-grid">
         <div class="hero-copy">
-          <div class="hero-kicker">SAGE v11.16 · governed local memory · controlled agent collaboration</div>
+          <div class="hero-kicker">SAGE v11.18.9 · governed local memory · controlled agent collaboration</div>
           <h1>Your AI's memory, visible as a <em>living brain</em></h1>
           <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, attributed memory, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
           <div class="hero-proof">
@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.16.2</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.18.9</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter" style="display:none;">
           <span class="download-counter-pill">
@@ -1115,7 +1115,7 @@ footer a:hover { text-decoration: underline; }
           <img src="screen-network.png" alt="Federation dashboard showing LAN and internet SAGE-to-SAGE links">
         </div>
         <div class="reveal">
-          <div class="section-tag">Built through v11.16</div>
+          <div class="section-tag">Built through v11.18.9</div>
           <h2>Keep agents connected, governed, and safely up to date.</h2>
           <p class="section-desc">CEREBRUM is the local control plane for memory, agent access, recovery, and sharing. Existing nodes upgrade in place; memory history stays attributable while current access remains explicit and reviewable.</p>
           <ul class="fed-list">
@@ -1186,13 +1186,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.16.2</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">The v11.8–v11.16 line turns SAGE into a complete local control plane: safe chain upgrades, governed local roles, controlled collaboration, and record-level recovery that keeps working memories available when historical data needs review.</p>
+        <h3>What's new in <span id="whats-new-version">v11.18.9</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">The current v11 line combines governed local access, durable agent coordination, exact-recipient messaging, verified in-place recovery, and fail-closed transaction handling. v11.18.9 keeps the app-v26 consensus ceiling and adds no app-v27 migration.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Recovery without a blank brain</h4><p>A historical record that cannot be verified is isolated for CEREBRUM review. Readable memories, search, and agents stay available.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Local Root and governed roles</h4><p>CEREBRUM Root is a dedicated local authority. Member, Manager, and Admin roles make current access explicit while historical authorship stays immutable.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Safe shared-domain continuity</h4><p>Agents that have genuinely collaborated on a local domain retain the appropriate working access after the governed upgrade.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>First-party companion setup</h4><p>A new bundled companion is provisioned with its reviewed profile and home domain before first use, so it can save and recall from day one.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Access Groups with explicit authority</h4><p>Root, roles, security profiles, and local Access Groups compose without rewriting immutable memory authorship. Group membership uses revision-bound updates so stale edits fail instead of overwriting newer policy.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Durable agent messages</h4><p>Canonical Messages provide idempotent send, exact-recipient receive and reply, passive history, and independently reported delivery and read evidence across trusted SAGE links.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Verified updates and recovery</h4><p>Signed assets, coherent recovery snapshots, bounded federation retry, and record-local quarantine keep upgrades recoverable without presenting a broken history as an empty brain.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Indeterminate outcomes fail closed</h4><p>Ambiguous CometBFT submissions are typed and fenced at the shared broadcaster boundary so a signer cannot silently reuse a transaction whose fate is still unknown.</p></div></div>
         </div>
       </div>
 
@@ -1207,7 +1207,7 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces &mdash; all from the dashboard.</p></div></div>
         <div class="feature-card"><div><h3>Federation</h3><p>Link two SAGE brains on a LAN or operator-provided route with a human-verified join ceremony. Share chosen domains live, at a clearance you set &mdash; revocable any time.</p></div></div>
         <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Local BadgerDB/SQLite stores under your home directory. Inspect, query, back up, and move your data.</p></div></div>
-        <div class="feature-card"><div><h3>Agent Pipeline</h3><p>Route work between AI agents. Send research to one model, analysis to another, results back to your primary &mdash; all through SAGE.</p></div></div>
+        <div class="feature-card"><div><h3>Agent Messages</h3><p>Route durable work between exact agent identities, reply idempotently, and inspect passive history without turning delivery, read evidence, or results into the same state.</p></div></div>
         <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
       </div>
 
@@ -1350,11 +1350,11 @@ footer a:hover { text-decoration: underline; }
 
       <div class="network-grid reveal">
         <div class="feature-card"><div><h3>Agent Management</h3><p>Add, configure, and manage agents from the dashboard. Each gets its own signing keys, identity, role, and permissions.</p></div></div>
-        <div class="feature-card"><div><h3>Domain Access Control</h3><p>Per-domain read/write permissions with a visual matrix. Five clearance tiers from Guest to Top Secret.</p></div></div>
+        <div class="feature-card"><div><h3>Access Groups</h3><p>Grant explicit Read, Read+Write, or Read+Write+Modify authority to reviewed local members. Roles, clearance, ownership, and security-profile hard denies remain separate controls.</p></div></div>
         <div class="feature-card"><div><h3>Per-Project Identity</h3><p>Each project folder receives its own Ed25519 keypair automatically. No shared keys, no manual setup. One CLI command claims a pre-configured identity.</p></div></div>
-        <div class="feature-card"><div><h3>Key Rotation</h3><p>Rotate agent keys with one click. All memories re-attributed atomically. Old keys permanently retired.</p></div></div>
-        <div class="feature-card"><div><h3>Redeployment Orchestrator</h3><p>Nine-phase state machine handles chain redeployment. Backups at every phase, automatic rollback on failure.</p></div></div>
-        <div class="feature-card"><div><h3>Agent Attribution</h3><p>Every memory tracks which agent created it. Admin agents are marked in the dashboard. Filter the brain view by agent.</p></div></div>
+        <div class="feature-card"><div><h3>Key Rotation</h3><p>Rotate active credentials without rewriting historical memory authorship. Retired credentials cannot return as a new messaging, task, or federation identity.</p></div></div>
+        <div class="feature-card"><div><h3>Controlled Federation</h3><p>Pair nodes through a human-verified trust ceremony, then grant chosen domains independently for live Read or receiver-controlled Copy. Pairing alone shares nothing.</p></div></div>
+        <div class="feature-card"><div><h3>Agent Attribution</h3><p>Every memory retains the exact agent that created it. CEREBRUM shows current ownership and authority separately from immutable authorship.</p></div></div>
       </div>
 
       <!-- Onboarding flow -->
@@ -1362,14 +1362,14 @@ footer a:hover { text-decoration: underline; }
         <div class="reveal" style="text-align:center;">
           <div class="section-tag">Agent Onboarding</div>
           <h2>One command.<br>Fully configured.</h2>
-          <p class="section-desc" style="margin:0 auto;">Create an agent in the dashboard with name, role, and RBAC permissions. Get a one-liner. Run it in your project folder. The agent claims its pre-configured identity automatically.</p>
+          <p class="section-desc" style="margin:0 auto;">Create an agent in CEREBRUM with a reviewed role, security profile, clearance, and owned home domain. Get a one-liner, run it in the project folder, and redeem that exact pre-configured identity.</p>
         </div>
         <div class="steps-grid reveal" style="margin-top:40px;">
           <div class="step-card">
             <div class="step-num">01</div>
             <div class="step-icon"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg></div>
             <h3>Create in Dashboard</h3>
-            <p>Add an agent with name, role, clearance level, and domain permissions. The dashboard generates a claim token.</p>
+            <p>Add an agent with a role, security profile, clearance, and home domain. CEREBRUM generates a short-lived claim token for that exact enrollment.</p>
           </div>
           <div class="step-card">
             <div class="step-num">02</div>
@@ -1466,7 +1466,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.16.2"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.18.9"</span></div>
         </div>
       </div>
 
@@ -1695,12 +1695,12 @@ function copyPrompt(box) {
   // both at time of commit. Do this every release — re-tagged assets reset
   // GitHub's per-asset download_count, which drops github_now below the old
   // floor and freezes the displayed number (the localStorage clamp pins it).
-  // Last updated: 2026-06-05 (re-baselined at v10.0.0: githubNow=4294, displayed total=4667)
-  const HWM_FLOOR = 4667;
+  // Last updated: 2026-08-13 (re-baselined at v11.18.9: githubNow=8187, displayed total=8560)
+  const HWM_FLOOR = 8560;
 
   // GITHUB_AT_FLOOR: what GitHub reported when HWM_FLOOR was recorded.
   // New downloads = github_now - GITHUB_AT_FLOOR (only if positive).
-  const GITHUB_AT_FLOOR = 4294;
+  const GITHUB_AT_FLOOR = 8187;
 
   async function fetchAllReleases() {
     const all = [];
