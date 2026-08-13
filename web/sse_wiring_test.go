@@ -167,9 +167,18 @@ type sseEmitSite struct {
 // sseSourceScan is the result of reading every non-test Go file in the module
 // for SSE event vocabulary and SSE emit sites.
 type sseSourceScan struct {
-	consts     map[string]string // EventType const identifier -> event name
-	emits      []sseEmitSite
-	unresolved []string
+	consts map[string]string // EventType const identifier -> event name
+	// stringConsts holds plain untyped string consts, which is how a package
+	// that cannot import web (api/rest, by design — see EventTypeFromREST)
+	// names an event it emits. They are a strictly weaker source than consts:
+	// the map is keyed by bare identifier across the whole module, so any name
+	// declared twice with different values is recorded in stringConstConflicts
+	// and refused at resolve time rather than silently resolving to whichever
+	// file the walk happened to reach last.
+	stringConsts         map[string]string
+	stringConstConflicts map[string]bool
+	emits                []sseEmitSite
+	unresolved           []string
 }
 
 // sitesByName renders the emit sites grouped by event name so a failure names
@@ -242,7 +251,11 @@ func scanSSESources(t *testing.T) sseSourceScan {
 	require.NoError(t, walkErr)
 	require.NotEmpty(t, parsed, "found no Go sources to scan")
 
-	scan := sseSourceScan{consts: map[string]string{}}
+	scan := sseSourceScan{
+		consts:               map[string]string{},
+		stringConsts:         map[string]string{},
+		stringConstConflicts: map[string]bool{},
+	}
 
 	// Pass 1: the EventType vocabulary, so pass 2 can resolve identifiers.
 	for _, pf := range parsed {
@@ -256,8 +269,31 @@ func scanSSESources(t *testing.T) sseSourceScan {
 				if !ok {
 					continue
 				}
-				typeIdent, ok := value.Type.(*ast.Ident)
-				if !ok || typeIdent.Name != "EventType" {
+				typeIdent, isIdent := value.Type.(*ast.Ident)
+				if !isIdent || typeIdent.Name != "EventType" {
+					// Not EventType. Still record plain `const x = "..."` string
+					// values, so an emit site in a package that cannot import
+					// web stays resolvable instead of unscannable.
+					if value.Type == nil {
+						for i, name := range value.Names {
+							if i >= len(value.Values) {
+								continue
+							}
+							lit, isLit := value.Values[i].(*ast.BasicLit)
+							if !isLit || lit.Kind != token.STRING {
+								continue
+							}
+							unquoted, unquoteErr := strconv.Unquote(lit.Value)
+							if unquoteErr != nil {
+								continue
+							}
+							if prior, seen := scan.stringConsts[name.Name]; seen && prior != unquoted {
+								scan.stringConstConflicts[name.Name] = true
+								continue
+							}
+							scan.stringConsts[name.Name] = unquoted
+						}
+					}
 					continue
 				}
 				for i, name := range value.Names {
@@ -293,6 +329,19 @@ func scanSSESources(t *testing.T) sseSourceScan {
 		ast.Inspect(pf.file, func(node ast.Node) bool {
 			switch n := node.(type) {
 			case *ast.CallExpr:
+				// The contentless retrieval choke point forwards OnEvent as a
+				// func VALUE, so the OnEvent call inside it names its event
+				// through a parameter the scan cannot follow. Recording the
+				// wrapper's own call sites keeps recall/search/hybrid visible
+				// to the wiring pin instead of silently dropping out of it —
+				// which is exactly what happened when that helper was
+				// introduced. Its caller set stays pinned by the bounded-bypass
+				// subtest, so this cannot become an open door.
+				if ident, isIdent := n.Fun.(*ast.Ident); isIdent &&
+					ident.Name == "emitContentlessRetrievalActivity" && len(n.Args) >= 2 {
+					record(n.Args[1], "emitContentlessRetrievalActivity event name")
+					return true
+				}
 				sel, ok := n.Fun.(*ast.SelectorExpr)
 				if !ok || sel.Sel.Name != "OnEvent" || len(n.Args) == 0 {
 					return true
@@ -360,7 +409,16 @@ func (s *sseSourceScan) resolve(file *ast.File, expr ast.Expr, depth int) ([]str
 		if value, ok := s.consts[e.Name]; ok {
 			return []string{value}, true
 		}
-		return s.resolveLocalVar(file, e.Name, depth)
+		if names, ok := s.resolveLocalVar(file, e.Name, depth); ok {
+			return names, true
+		}
+		// Weakest source, checked last and never when ambiguous: a plain
+		// untyped string const. Refusing a conflicted name keeps a wrong
+		// resolution from masquerading as a checked one.
+		if value, ok := s.stringConsts[e.Name]; ok && !s.stringConstConflicts[e.Name] {
+			return []string{value}, true
+		}
+		return nil, false
 	case *ast.SelectorExpr:
 		if value, ok := s.consts[e.Sel.Name]; ok {
 			return []string{value}, true
@@ -383,6 +441,13 @@ func (s *sseSourceScan) resolve(file *ast.File, expr ast.Expr, depth int) ([]str
 				return names, true
 			}
 			return nil, true
+		}
+		// string(x) is a conversion, not a choice: it cannot change the value,
+		// so the argument is exactly as checkable as a bare name would be. This
+		// is the shape api/rest must use, since it holds its event names as
+		// untyped consts rather than web.EventType.
+		if isCalled(e.Fun, "string") {
+			return s.resolve(file, e.Args[0], depth+1)
 		}
 		if !isCalled(e.Fun, "EventType") {
 			return nil, false
