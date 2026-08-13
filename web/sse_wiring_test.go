@@ -94,11 +94,35 @@ func TestSSEEventWiring(t *testing.T) {
 	// or the array could be preserved as decoration while the browser stops
 	// subscribing.
 	t.Run("the eventTypes array actually registers the listeners", func(t *testing.T) {
-		js := readDashboardSSEScript(t)
+		// Assert against COMMENT-STRIPPED source. A raw substring check passes
+		// happily on `// for (const type of eventTypes) {` — commenting the loop
+		// out would leave the array intact as decoration, the browser
+		// subscribing to nothing, and this test green. That is the precise
+		// failure mode the whole file exists to prevent, so it must not be
+		// reintroduced by the assertion itself.
+		js := stripJSComments(readDashboardSSEScript(t))
 		assert.Contains(t, js, "for (const type of eventTypes) {",
-			"eventTypes must be the loop that registers listeners")
+			"eventTypes must be the LIVE loop that registers listeners (commented-out code does not count)")
 		assert.Contains(t, js, "this.es.addEventListener(type, (e) => {",
 			"each event type in the array must be subscribed on the EventSource")
+	})
+
+	// The scanner grants exactly two call-sites a pass: the REST bridge adopts a
+	// name checked at its own OnEvent site, and the contentless retrieval
+	// wrapper forwards OnEvent through a func parameter the scan cannot follow.
+	// Both are sound ONLY while they stay where they are. An unbounded pass is
+	// how an unregistered event would reach the stream unnoticed, so the set of
+	// callers is pinned: adding one is a deliberate act that fails this test and
+	// has to be justified rather than absorbed.
+	t.Run("the scanner's sanctioned bypasses stay bounded", func(t *testing.T) {
+		assert.Equal(t,
+			[]string{"cmd/sage-gui/node.go"},
+			callerFilesOf(t, "EventTypeFromREST"),
+			"EventTypeFromREST is the single REST->SSE bridge; a new caller can launder an unregistered name past the scan")
+		assert.Equal(t,
+			[]string{"api/rest/memory_handler.go"},
+			callerFilesOf(t, "emitContentlessRetrievalActivity"),
+			"the contentless retrieval wrapper is scanned by name; a new caller elsewhere is invisible to the wiring pin")
 	})
 }
 
@@ -509,5 +533,91 @@ func difference(from, remove []string) []string {
 			out = append(out, name)
 		}
 	}
+	return out
+}
+
+// stripJSComments removes // line comments and /* */ block comments so a
+// structural assertion cannot be satisfied by code that has been commented out.
+// String-literal awareness is deliberately omitted: sse.js contains no string
+// holding a comment marker, and the check is asserting the PRESENCE of live
+// code, so an over-eager strip can only make the assertion stricter.
+func stripJSComments(src string) string {
+	var b strings.Builder
+	for i := 0; i < len(src); {
+		if strings.HasPrefix(src[i:], "//") {
+			end := strings.IndexByte(src[i:], '\n')
+			if end < 0 {
+				break
+			}
+			i += end
+			continue
+		}
+		if strings.HasPrefix(src[i:], "/*") {
+			end := strings.Index(src[i+2:], "*/")
+			if end < 0 {
+				break
+			}
+			i += 2 + end + 2
+			continue
+		}
+		b.WriteByte(src[i])
+		i++
+	}
+	return b.String()
+}
+
+// callerFilesOf returns the sorted, repo-relative production files that call
+// fn, excluding the file that declares it and all test files. It walks the tree
+// rather than grepping so a caller added in a new package cannot slip past.
+func callerFilesOf(t *testing.T, fn string) []string {
+	t.Helper()
+	root := moduleRoot(t)
+	seen := map[string]bool{}
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			switch info.Name() {
+			case ".git", "node_modules", "target", "dist":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		fset := token.NewFileSet()
+		file, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return nil
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || !isCalled(call.Fun, fn) {
+				return true
+			}
+			// The declaration site is not a caller.
+			for _, decl := range file.Decls {
+				if fd, isFunc := decl.(*ast.FuncDecl); isFunc && fd.Name.Name == fn {
+					return true
+				}
+			}
+			seen[filepath.ToSlash(rel)] = true
+			return true
+		})
+		return nil
+	})
+	require.NoError(t, err)
+
+	out := make([]string, 0, len(seen))
+	for f := range seen {
+		out = append(out, f)
+	}
+	sort.Strings(out)
 	return out
 }
