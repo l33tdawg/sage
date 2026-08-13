@@ -47,7 +47,77 @@ const (
 	// filter as the single enforcement point, so the guarantee holds by
 	// construction rather than by a second filter kept in sync by hand.
 	EventConnectome EventType = "connectome"
+	// EventReinstate is the counterpart of EventForget: a deprecated memory
+	// returned to active service by consensus.
+	EventReinstate EventType = "reinstate"
+	// EventCoCommit is a multi-agent shared commit. It is a commit like
+	// EventRemember, so the dashboard must be able to observe it.
+	EventCoCommit EventType = "cocommit"
+	// EventSearch is a text-search retrieval — the lexical sibling of
+	// EventRecall.
+	EventSearch EventType = "search"
+	// EventHybrid is a combined vector+text retrieval — the hybrid sibling of
+	// EventRecall.
+	EventHybrid EventType = "hybrid"
+	// EventPipelineSend reports a message handed to an agent pipeline.
+	EventPipelineSend EventType = "pipeline_send"
+	// EventPipelineComplete reports an agent pipeline run reaching its end.
+	EventPipelineComplete EventType = "pipeline_complete"
+	// EventRedeploy reports chain-reconfiguration progress for the network page.
+	EventRedeploy EventType = "redeploy"
 )
+
+// AllEventTypes is the canonical registry of every SSE event the node emits.
+//
+// An SSE event only reaches a user when three separate places agree on the same
+// string: the emit site in Go, this registry, and the listener list in
+// static/js/sse.js. Nothing about the language links them — the REST layer emits
+// raw strings that cmd/sage-gui converts straight into EventType, and the
+// browser only receives event names it explicitly subscribed to. Miss one copy
+// and the feature compiles, runs, emits, and is seen by nobody.
+//
+// This slice is the single Go-side source of truth that closes that gap:
+// TestSSEEventWiring in sse_wiring_test.go proves the const block above, every
+// emit site in the repository, and the JavaScript listener list all name exactly
+// these events. Adding an event means adding it here and in static/js/sse.js;
+// the test fails until both are done.
+var AllEventTypes = []EventType{
+	EventRemember,
+	EventRecall,
+	EventForget,
+	EventVote,
+	EventConsensus,
+	EventAgent,
+	EventImport,
+	EventUpdate,
+	EventGovernance,
+	EventTask,
+	EventRecovery,
+	EventAccess,
+	EventConnectome,
+	EventReinstate,
+	EventCoCommit,
+	EventSearch,
+	EventHybrid,
+	EventPipelineSend,
+	EventPipelineComplete,
+	EventRedeploy,
+}
+
+// EventTypeFromREST adopts an event name produced by the REST layer, which
+// passes plain strings to api/rest.Server.OnEvent because that package does not
+// import this one.
+//
+// This is the ONLY place an unconstrained string is allowed to become an
+// EventType. The name is still checked — TestSSEEventWiring reads the OnEvent
+// call sites directly and requires every name they pass to be registered in
+// AllEventTypes — so routing the bridge through a named function keeps that one
+// unchecked-looking conversion greppable instead of letting any
+// EventType(someExpression) anywhere in the tree slip an unregistered event onto
+// the stream.
+func EventTypeFromREST(name string) EventType {
+	return EventType(name)
+}
 
 // SSEEvent is an event sent to connected dashboard clients.
 type SSEEvent struct {

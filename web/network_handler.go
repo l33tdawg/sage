@@ -1518,7 +1518,7 @@ func (h *DashboardHandler) handleTriggerRedeploy(w http.ResponseWriter, r *http.
 		// Broadcast completion via SSE if available
 		if h.SSE != nil {
 			h.SSE.Broadcast(SSEEvent{
-				Type: "redeploy",
+				Type: EventRedeploy,
 				Data: map[string]any{
 					"operation": req.Operation,
 					"agent_id":  req.AgentID,

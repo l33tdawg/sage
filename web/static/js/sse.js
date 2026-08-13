@@ -29,7 +29,17 @@ export class SSEClient {
             this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
         };
 
-        const eventTypes = ['remember', 'recall', 'forget', 'vote', 'consensus', 'agent', 'access', 'update', 'governance', 'import', 'task', 'recovery', 'connectome'];
+        // Every event the node emits must be listed here: EventSource only
+        // delivers named events to listeners that were explicitly registered, so
+        // an omitted name is emitted by the server and seen by nobody. This list
+        // is kept in lockstep with web.AllEventTypes (web/sse.go) by
+        // TestSSEEventWiring — add an event there and here, or the build fails.
+        const eventTypes = [
+            'remember', 'recall', 'forget', 'vote', 'consensus', 'agent',
+            'access', 'update', 'governance', 'import', 'task', 'recovery',
+            'connectome', 'reinstate', 'cocommit', 'search', 'hybrid',
+            'pipeline_send', 'pipeline_complete', 'redeploy',
+        ];
         for (const type of eventTypes) {
             this.es.addEventListener(type, (e) => {
                 try {
