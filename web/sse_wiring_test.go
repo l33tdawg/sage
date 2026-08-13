@@ -269,6 +269,19 @@ func scanSSESources(t *testing.T) sseSourceScan {
 		ast.Inspect(pf.file, func(node ast.Node) bool {
 			switch n := node.(type) {
 			case *ast.CallExpr:
+				// emitContentlessRetrievalActivity (api/rest/sse_retrieval_activity.go)
+				// is the sanctioned wrapper the memory handlers use to fire the
+				// recall/search/hybrid retrieval pulses without any result material.
+				// It reaches OnEvent through a func parameter the scanner cannot
+				// follow across the call boundary, so match the wrapper itself and
+				// hold its second argument — the event name — to the registry
+				// exactly as a direct OnEvent literal is.
+				if isCalled(n.Fun, "emitContentlessRetrievalActivity") {
+					if len(n.Args) >= 2 {
+						record(n.Args[1], "emitContentlessRetrievalActivity event name")
+					}
+					return true
+				}
 				sel, ok := n.Fun.(*ast.SelectorExpr)
 				if !ok || sel.Sel.Name != "OnEvent" || len(n.Args) == 0 {
 					return true
