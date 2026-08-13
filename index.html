@@ -13,7 +13,7 @@
 </script>
 <title>SAGE v11 — CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Install SAGE v11.18.9: local-first persistent memory for AI agents with governed access, durable agent messaging, signed updates, controlled federation, and the CEREBRUM MRI brain.">
+<meta name="description" content="Install SAGE v11.18.10: local-first persistent memory for AI agents with governed access, coordinated agent messaging, signed updates, controlled federation, and the CEREBRUM connectome brain.">
 <meta name="theme-color" content="#0a0614">
 <meta property="og:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
 <meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
@@ -1042,7 +1042,7 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="v11-hero-grid">
         <div class="hero-copy">
-          <div class="hero-kicker">SAGE v11.18.9 · governed local memory · controlled agent collaboration</div>
+          <div class="hero-kicker">SAGE v11.18.10 · governed local memory · controlled agent collaboration</div>
           <h1>Your AI's memory, visible as a <em>living brain</em></h1>
           <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, attributed memory, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
           <div class="hero-proof">
@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.18.9</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.18.10</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter" style="display:none;">
           <span class="download-counter-pill">
@@ -1115,7 +1115,7 @@ footer a:hover { text-decoration: underline; }
           <img src="screen-network.png" alt="Federation dashboard showing LAN and internet SAGE-to-SAGE links">
         </div>
         <div class="reveal">
-          <div class="section-tag">Built through v11.18.9</div>
+          <div class="section-tag">Built through v11.18.10</div>
           <h2>Keep agents connected, governed, and safely up to date.</h2>
           <p class="section-desc">CEREBRUM is the local control plane for memory, agent access, recovery, and sharing. Existing nodes upgrade in place; memory history stays attributable while current access remains explicit and reviewable.</p>
           <ul class="fed-list">
@@ -1186,13 +1186,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.18.9</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">The current v11 line combines governed local access, durable agent coordination, exact-recipient messaging, verified in-place recovery, and fail-closed transaction handling. v11.18.9 keeps the app-v26 consensus ceiling and adds no app-v27 migration.</p>
+        <h3>What's new in <span id="whats-new-version">v11.18.10</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">The current v11 line combines governed local access, coordinated multi-runtime agents, exact-recipient messaging, verified in-place recovery, and a live CEREBRUM agent connectome. v11.18.10 keeps the app-v26 consensus ceiling and adds no app-v27 migration.</p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Access Groups with explicit authority</h4><p>Root, roles, security profiles, and local Access Groups compose without rewriting immutable memory authorship. Group membership uses revision-bound updates so stale edits fail instead of overwriting newer policy.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Durable agent messages</h4><p>Canonical Messages provide idempotent send, exact-recipient receive and reply, passive history, and independently reported delivery and read evidence across trusted SAGE links.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>One agent, coordinated runtimes</h4><p>Each MCP conversation now owns claims through an opaque session identity. Concurrent runtimes get one winner, can hand work off atomically, and cannot complete a reply after ownership moves.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Live agent connectome</h4><p>CEREBRUM can project registered agents as neurons and directed message traffic as weighted synapses, with hub depth, domain colour, RBAC filtering, and race-safe view switching.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Verified updates and recovery</h4><p>Signed assets, coherent recovery snapshots, bounded federation retry, and record-local quarantine keep upgrades recoverable without presenting a broken history as an empty brain.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Indeterminate outcomes fail closed</h4><p>Ambiguous CometBFT submissions are typed and fenced at the shared broadcaster boundary so a signer cannot silently reuse a transaction whose fate is still unknown.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Replay-safe recovery</h4><p>Lost receive responses can be replayed without double-claiming work, passive history exposes the winning session, and legacy direct REST clients retain their agent-level compatibility path.</p></div></div>
         </div>
       </div>
 
@@ -1466,7 +1466,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.18.9"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.18.10"</span></div>
         </div>
       </div>
 
