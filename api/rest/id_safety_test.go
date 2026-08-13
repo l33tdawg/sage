@@ -108,5 +108,10 @@ func TestHandlePipeSendLegacyShortTargetEventNoPanic(t *testing.T) {
 		httptest.NewRequest(http.MethodPost, "/v1/pipe/send", strings.NewReader(string(body))))
 
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
-	require.Contains(t, eventDescription, "piped work to "+target)
+	// A sub-16-byte legacy agent id used to be sliced for this activity row,
+	// which is why this test exists. The row no longer names either endpoint at
+	// all (see TestPipeSendActivityEventCarriesNoEndpointIdentity), so the
+	// surviving contract is: a short target id still sends, and still produces
+	// the metadata-only row rather than an empty or panicking one.
+	require.Equal(t, pipeSendActivityRow, eventDescription)
 }

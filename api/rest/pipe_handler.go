@@ -17,7 +17,6 @@ import (
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/federation"
-	"github.com/l33tdawg/sage/internal/idfmt"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
 )
@@ -438,6 +437,26 @@ func (s *Server) handlePipeResolve(w http.ResponseWriter, r *http.Request) {
 	writeProblem(w, http.StatusNotFound, "Unknown target", fmt.Sprintf("no registered local or visible federated agent matches %q", target))
 }
 
+// pipelineSendActivitySummary renders the dashboard Chain Activity row for a
+// newly created pipeline message. It is deliberately metadata-only.
+//
+// A pipe is private between its sender and its addressed recipient:
+// handlePipeStatus below hands a byte-identical 404 to any other caller so the
+// route cannot even confirm that a given pipe exists. The activity stream has
+// no such authorization — it is one global fan-out with no per-subscriber
+// identity — so naming the sending provider, naming the recipient agent or
+// provider, or echoing the caller-supplied intent here would publish to every
+// attached client exactly the association that handlePipeStatus withholds.
+// Keep this row free of both endpoints and of untrusted request text; the
+// pipeline_complete row is scrubbed the same way and for the same reason.
+func pipelineSendActivitySummary(payloadBytes int) string {
+	return fmt.Sprintf(
+		"[Pipeline] Local agent pipeline opened. Work request queued (%d chars). "+
+			"Untrusted endpoints and intent omitted from the activity stream.",
+		payloadBytes,
+	)
+}
+
 // handlePipeSend creates a pipeline message addressed to another agent/provider.
 func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -788,15 +807,14 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.OnEvent != nil {
-		target := req.ToProvider
-		if target == "" && req.ToAgent != "" {
-			target = idfmt.Prefix(req.ToAgent)
-			if len(req.ToAgent) >= 16 {
-				target += "..."
-			}
-		}
+		// OnEvent feeds the dashboard Chain Activity stream, which is a single
+		// global fan-out: web.SSEBroadcaster.Subscribe takes no subscriber
+		// identity and Broadcast writes identical bytes to every attached
+		// client. Anything placed in this row is therefore readable by every
+		// client on that stream, not only by the pipe's two parties — so the
+		// row must carry no data this handler would refuse to a non-party.
 		s.OnEvent("pipeline_send", msg.PipeID, "agent-pipeline",
-			fmt.Sprintf("%s piped work to %s (intent: %s)", fromProvider, target, req.Intent), nil)
+			pipelineSendActivitySummary(len(req.Payload)), nil)
 	}
 
 	statusCode := http.StatusCreated
