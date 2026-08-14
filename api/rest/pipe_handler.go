@@ -449,13 +449,25 @@ func (s *Server) handlePipeResolve(w http.ResponseWriter, r *http.Request) {
 // attached client exactly the association that handlePipeStatus withholds.
 // Keep this row free of both endpoints and of untrusted request text; the
 // pipeline_complete row is scrubbed the same way and for the same reason.
-func pipelineSendActivitySummary(payloadBytes int) string {
-	return fmt.Sprintf(
-		"[Pipeline] Local agent pipeline opened. Work request queued (%d chars). "+
-			"Untrusted endpoints and intent omitted from the activity stream.",
-		payloadBytes,
-	)
-}
+// The dashboard activity stream is a single global fan-out:
+// web.SSEBroadcaster.Subscribe takes no subscriber identity and Broadcast writes
+// identical bytes to every attached client. A pipe is a private channel between
+// two specific agents, so NOTHING about one may cross that boundary — not the
+// endpoints, not the intent, not the pipe id, and not a size.
+//
+// These summaries are CONSTANT by construction. A size is not harmless here: on
+// a stream every client reads, payload and result lengths are a side channel
+// that correlates with content, and a length series over time profiles a pipe's
+// traffic without naming it. The activity row exists to say THAT something
+// happened, never what.
+//
+// The pipe id is held out of the event id field for the same reason. It is a
+// private identifier for one channel; publishing it lets any connected client
+// correlate every subsequent event about that pipe.
+const (
+	pipelineSendActivitySummary     = "[Pipeline] Local agent pipeline opened. Details omitted from the activity stream."
+	pipelineCompleteActivitySummary = "[Pipeline] Local agent pipeline completed. Details omitted from the activity stream."
+)
 
 // handlePipeSend creates a pipeline message addressed to another agent/provider.
 func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
@@ -813,8 +825,7 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 		// client. Anything placed in this row is therefore readable by every
 		// client on that stream, not only by the pipe's two parties — so the
 		// row must carry no data this handler would refuse to a non-party.
-		s.OnEvent("pipeline_send", msg.PipeID, "agent-pipeline",
-			pipelineSendActivitySummary(len(req.Payload)), nil)
+		s.OnEvent("pipeline_send", "", "agent-pipeline", pipelineSendActivitySummary, nil)
 	}
 
 	statusCode := http.StatusCreated
@@ -1442,7 +1453,11 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if s.OnEvent != nil {
-		s.OnEvent("pipeline_complete", pipeID, "agent-pipeline", summary, nil)
+		// `summary` deliberately NOT reused here. It carries the pipe id, the
+		// result length and the elapsed duration, which the JOURNAL legitimately
+		// records — that entry is an authorized memory, not a broadcast. The
+		// activity row gets the constant form instead.
+		s.OnEvent("pipeline_complete", "", "agent-pipeline", pipelineCompleteActivitySummary, nil)
 	}
 
 	response := map[string]any{

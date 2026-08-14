@@ -13,11 +13,15 @@ import (
 )
 
 // pipeSendActivityRow is the EXACT dashboard Chain Activity content that
-// /v1/pipe/send is allowed to publish for a 10-byte payload. It is spelled out
-// here rather than obtained from pipelineSendActivitySummary so that widening
-// the production row is a test failure, not a silently mirrored change.
-const pipeSendActivityRow = "[Pipeline] Local agent pipeline opened. Work request queued (10 chars). " +
-	"Untrusted endpoints and intent omitted from the activity stream."
+// /v1/pipe/send is allowed to publish. It is spelled out here rather than
+// obtained from pipelineSendActivitySummary so that widening the production row
+// is a test failure, not a silently mirrored change — a test constant derived
+// from the thing it guards cannot detect that thing growing.
+//
+// It carries no payload size any more. A length is not neutral on a stream every
+// client reads: it correlates with content, and a series of lengths profiles a
+// private channel without ever naming it.
+const pipeSendActivityRow = "[Pipeline] Local agent pipeline opened. Details omitted from the activity stream."
 
 // TestPipeSendActivityEventCarriesNoEndpointIdentity pins the privacy contract
 // of the pipeline_send event.
@@ -95,6 +99,19 @@ func TestPipeSendActivityEventCarriesNoEndpointIdentity(t *testing.T) {
 			require.Equal(t, "pipeline_send", gotType)
 			require.Equal(t, "agent-pipeline", gotDomain)
 
+			// THE EVENT ID MUST BE EMPTY. It reaches the global stream as
+			// SSEEvent.MemoryID, and the pipe id is a private identifier for one
+			// channel between two agents — publishing it lets any connected
+			// client correlate every later event about that pipe, even when the
+			// text says nothing.
+			require.Empty(t, gotPipeID,
+				"the pipe id must not cross the identity-free stream as the event id")
+
+			// CONSTANT CONTENT. Asserted as exact equality, not absence of
+			// secrets: a size or a duration leaks nothing by name yet is still a
+			// side channel on a stream every client reads, and only an equality
+			// catches a field that is added later.
+
 			// Name every identifier that must not appear, so a regression says
 			// which one came back. This runs BEFORE the exact-match assertion
 			// below on purpose: require.* aborts the test, so a leak check
@@ -128,15 +145,106 @@ func TestPipeSendActivityEventCarriesNoEndpointIdentity(t *testing.T) {
 			require.Equal(t, pipeSendActivityRow, gotContent,
 				"pipeline_send activity content must stay metadata-only")
 
-			// The pipe id stays as the row's correlation handle (it is random,
-			// carries no agent identity, and matches pipeline_complete), so
-			// assert it is exactly the id returned to the sender.
+			// THE PIPE ID MUST NOT BE THE ROW'S CORRELATION HANDLE. An earlier
+			// version of this test asserted the opposite, on the reasoning that
+			// the id is random and names no agent. That reasoning was wrong: the
+			// id reaches the identity-free stream as SSEEvent.MemoryID, and a
+			// stable handle lets any connected client correlate every later
+			// event about one private channel even when each row says nothing.
+			// Randomness prevents guessing the id, not linking on it.
 			var resp struct {
 				PipeID string `json:"pipe_id"`
 			}
 			require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
-			require.NotEmpty(t, resp.PipeID)
-			require.Equal(t, resp.PipeID, gotPipeID)
+			require.NotEmpty(t, resp.PipeID, "precondition: the send produced a pipe id")
+			require.Empty(t, gotPipeID,
+				"the pipe id must not cross the identity-free stream as the event id")
+			require.NotContains(t, gotContent, resp.PipeID,
+				"nor may it be embedded in the row text")
 		})
 	}
+}
+
+// TestPipeCompleteActivityEventCarriesNoPipeIdentity covers the SECOND emit
+// mode. It is the stricter of the two: pipeline_complete published the pipe id
+// in the event id field AND embedded it again in the default summary text
+// ("federated pipeline <id> completed"), and in the journaled variant it also
+// carried the result length and the elapsed duration.
+//
+// The detailed summary is deliberately still built — autoJournalPipeline writes
+// it to a memory, which is an AUTHORIZED record rather than a broadcast. What
+// must not happen is that same string reaching the identity-free stream.
+func TestPipeCompleteActivityEventCarriesNoPipeIdentity(t *testing.T) {
+	srv, sqlite := newPipeServer(t)
+	const (
+		senderID   = "agent-complete-sender"
+		workerID   = "agent-complete-worker"
+		resultText = "ZZQX-SENTINEL-RESULT-do-not-broadcast"
+	)
+	addMessageAgent(t, sqlite, senderID)
+	addMessageAgent(t, sqlite, workerID)
+
+	sendBody, err := json.Marshal(map[string]any{
+		"to_agent": workerID, "intent": "review", "payload": "work",
+	})
+	require.NoError(t, err)
+	rr := httptest.NewRecorder()
+	pipeRouterAs(srv, senderID).ServeHTTP(rr,
+		httptest.NewRequest(http.MethodPost, "/v1/pipe/send", bytes.NewReader(sendBody)))
+	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
+
+	var sent struct {
+		PipeID string `json:"pipe_id"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &sent))
+	require.NotEmpty(t, sent.PipeID, "precondition: the send produced a pipe id")
+
+	claimRR := httptest.NewRecorder()
+	pipeRouterAs(srv, workerID).ServeHTTP(claimRR,
+		httptest.NewRequest(http.MethodPut, "/v1/pipe/"+sent.PipeID+"/claim",
+			bytes.NewReader([]byte(`{}`))))
+	require.Equal(t, http.StatusOK, claimRR.Code,
+		"precondition: the worker must claim the pipe before completing it: %s", claimRR.Body.String())
+
+	var (
+		calls      int
+		gotType    string
+		gotPipeID  string
+		gotContent string
+		gotData    any
+	)
+	srv.OnEvent = func(eventType, memoryID, domain, content string, data any) {
+		if eventType != "pipeline_complete" {
+			return
+		}
+		calls++
+		gotType, gotPipeID, gotContent, gotData = eventType, memoryID, content, data
+	}
+
+	resultBody, err := json.Marshal(map[string]any{"result": resultText})
+	require.NoError(t, err)
+	doneRR := httptest.NewRecorder()
+	pipeRouterAs(srv, workerID).ServeHTTP(doneRR,
+		httptest.NewRequest(http.MethodPut, "/v1/pipe/"+sent.PipeID+"/result",
+			bytes.NewReader(resultBody)))
+	// NO SKIP HERE, DELIBERATELY. An earlier version of this test skipped when
+	// the result path returned an unexpected status — and it did, because the
+	// request used the wrong method. The test reported SKIP, which reads as
+	// harmless, while covering nothing: two mutations that reintroduced the pipe
+	// id on this very event survived it. A test that cannot reach its subject
+	// must FAIL and say so.
+	require.Equal(t, http.StatusOK, doneRR.Code,
+		"the completion path must be reachable or this test proves nothing: %s", doneRR.Body.String())
+	require.Equal(t, 1, calls, "exactly one completion activity row")
+	require.Equal(t, "pipeline_complete", gotType)
+
+	require.Empty(t, gotPipeID,
+		"the pipe id must not cross the identity-free stream as the event id")
+	require.Equal(t, pipelineCompleteActivitySummary, gotContent,
+		"the completion row must be the constant summary")
+	require.NotContains(t, gotContent, sent.PipeID,
+		"the pipe id must not be embedded in the summary text either")
+	require.NotContains(t, gotContent, resultText,
+		"the result content must never reach the activity stream")
+	require.Nil(t, gotData, "no structured payload may ride the completion row")
 }
