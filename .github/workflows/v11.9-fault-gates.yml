@@ -64,7 +64,7 @@ jobs:
   real-comet-chaos:
     name: App-v26 real Comet/ABCI crash, partition, and state-sync gate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     # Independent of app-multiprocess: no needs.app-multiprocess.* reference
     # exists, so this edge only serialized two separate suites.
     steps:

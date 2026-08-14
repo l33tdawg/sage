@@ -80,6 +80,15 @@ function ciJob(id) {
   return next === -1 ? remainder : remainder.slice(0, next);
 }
 
+function faultJob(id) {
+  const marker = `  ${id}:\n`;
+  const start = faultWorkflow.indexOf(marker);
+  assert.notEqual(start, -1, `missing consensus fault job: ${id}`);
+  const remainder = faultWorkflow.slice(start + marker.length);
+  const next = remainder.search(/^  [a-z0-9][a-z0-9-]*:\n/m);
+  return next === -1 ? remainder : remainder.slice(0, next);
+}
+
 function shellFunction(source, name) {
   const marker = `${name}() {\n`;
   const start = source.indexOf(marker);
@@ -459,9 +468,15 @@ test('the Linux cold gate proves the closed placeholder through the real Comet d
 });
 
 test('the mandatory cold gate transfers one exact app-v26 session', () => {
+  const realCometChaos = faultJob('real-comet-chaos');
   assert.match(
-    faultWorkflow,
+    realCometChaos,
     /name: App-v26 real Comet\/ABCI crash, partition, and state-sync gate/,
+  );
+  assert.equal(
+    (realCometChaos.match(/^    timeout-minutes: 40$/gm) || []).length,
+    1,
+    'the bounded job ceiling must cover pinned image builds, the real-process gate, and cleanup',
   );
   assert.match(v119StateSync, /^TARGET_APP_VERSION=26$/m);
   assert.match(v119StateSync, /"app_version": \$\{TARGET_APP_VERSION\}/);
