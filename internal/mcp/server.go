@@ -273,13 +273,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if !ok {
 			return
 		}
-		channelCtx, cancel := context.WithCancel(ctx)
-		channelCancel = cancel
-		channelDone = make(chan struct{})
-		go func() {
-			defer close(channelDone)
-			runClaudeChannel(channelCtx, out, cfg)
-		}()
+		channelCancel, channelDone = startClaudeChannel(ctx, out, cfg)
 	}
 	executable, err := captureMCPExecutableSnapshot()
 	if err != nil {

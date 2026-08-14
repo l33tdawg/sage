@@ -49,7 +49,7 @@ type claudeChannelConfig struct {
 // agent identity by its caller.
 func (s *Server) ConfigureClaudeChannel(source ClaudeWakeSource) error {
 	if source == nil {
-		return errors.New("Claude channel wake source is required")
+		return errors.New("claude channel wake source is required")
 	}
 	s.claudeChannelMu.Lock()
 	s.claudeChannel = &claudeChannelConfig{
@@ -60,6 +60,18 @@ func (s *Server) ConfigureClaudeChannel(source ClaudeWakeSource) error {
 	}
 	s.claudeChannelMu.Unlock()
 	return nil
+}
+
+// startClaudeChannel transfers ownership of cancel to the caller. The caller
+// must invoke it and wait for done before closing or handing off stdout.
+func startClaudeChannel(parent context.Context, out *stdioOutbound, cfg claudeChannelConfig) (context.CancelFunc, chan struct{}) {
+	channelCtx, cancel := context.WithCancel(parent)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runClaudeChannel(channelCtx, out, cfg)
+	}()
+	return cancel, done
 }
 
 // DisableClaudeChannel restores standard MCP behavior. Configure/disable is
