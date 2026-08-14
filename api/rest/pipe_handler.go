@@ -1378,7 +1378,6 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 	// high-confidence sage-system memory would launder prompt-injection text into
 	// future consensus-backed recall.
 	journalID := ""
-	summary := fmt.Sprintf("federated pipeline %s completed", pipeID)
 	journaled := false
 	if s.shouldAutoJournalPipeline(msg) {
 		elapsed := ""
@@ -1386,7 +1385,13 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 			elapsed = fmt.Sprintf(" in %s", time.Since(*msg.ClaimedAt).Truncate(time.Second))
 		}
 
-		summary = fmt.Sprintf(
+		// Scoped to this branch on purpose. The journal is the ONLY consumer of
+		// the detailed summary — it becomes an authorized memory, so it keeps
+		// the result size and elapsed time. The dashboard activity row uses the
+		// constant form instead, because that one is broadcast to every client.
+		// Declaring it outside would leave a dead assignment whenever this
+		// branch does not run.
+		summary := fmt.Sprintf(
 			"[Pipeline] Local agent pipeline completed. Result received (%d chars)%s. Untrusted request and result content omitted from memory.",
 			len(req.Result), elapsed,
 		)
