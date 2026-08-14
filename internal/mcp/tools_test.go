@@ -19,13 +19,17 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	restapi "github.com/l33tdawg/sage/api/rest"
 	authmw "github.com/l33tdawg/sage/api/rest/middleware"
 	sageauth "github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/authzdenial"
+	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/vault"
 	"github.com/l33tdawg/sage/web"
@@ -3996,6 +4000,180 @@ func TestSageInceptionAppV23CountsExactHomeWithoutHistoricalBroadQuery(t *testin
 	require.Equal(t, int32(1), countReads.Load())
 	require.Equal(t, int32(0), unscopedCountReads.Load(),
 		"app-v23 inception must never try the historical unscoped count first")
+}
+
+func TestSageInceptionAppV23MigratedEmptyHomeDoesNotReseedLegacyCorpus(t *testing.T) {
+	ctx := context.Background()
+	sqlStore, err := store.NewSQLiteStore(ctx, filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	badgerStore, err := store.NewBadgerStore(filepath.Join(t.TempDir(), "badger"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, badgerStore.CloseBadger()) })
+
+	_, rootKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	agentPub, agentKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	rootID := sageauth.PublicKeyToAgentID(rootKey.Public().(ed25519.PublicKey))
+	agentID := sageauth.PublicKeyToAgentID(agentPub)
+	require.NoError(t, badgerStore.RegisterAgentWithCapabilities(
+		rootID, "root", store.AppV23RoleAdmin, "", "", "", 1, 0,
+	))
+	require.NoError(t, badgerStore.RegisterAgentWithCapabilities(
+		agentID, "migrated-agent", store.AppV23RoleMember, "", "", "", 2, 0,
+	))
+	require.NoError(t, badgerStore.EnsureAppV23Root("mcp-inception-migrated-empty-home", 100))
+	enrollment, err := badgerStore.GetAppV23Enrollment(agentID)
+	require.NoError(t, err)
+	require.NotNil(t, enrollment)
+	require.Equal(t, store.AppV23ProfileStandard, enrollment.Profile)
+	require.NotEmpty(t, enrollment.HomeDomain,
+		"the default migration cohort must receive a new synthesized home")
+	homeDomain := enrollment.HomeDomain
+	require.NoError(t, sqlStore.CreateAgent(ctx, &store.AgentEntry{
+		AgentID: agentID, Name: "migrated-agent", Role: store.AppV23RoleMember,
+		Status: "active", CreatedAt: time.Now().UTC(),
+	}))
+
+	for index, domain := range []string{"general", "self", "meta"} {
+		content := "established legacy corpus in " + domain
+		hash := sha256.Sum256([]byte(content))
+		record := &memory.MemoryRecord{
+			MemoryID: fmt.Sprintf("legacy-%d", index), SubmittingAgent: agentID,
+			Content: content, ContentHash: hash[:], MemoryType: memory.TypeFact,
+			DomainTag: domain, ConfidenceScore: .95,
+			Status: memory.StatusCommitted, CreatedAt: time.Now().UTC(),
+		}
+		require.NoError(t, sqlStore.InsertMemory(ctx, record))
+		require.NoError(t, badgerStore.SetMemoryHash(record.MemoryID, record.ContentHash, string(record.Status)))
+		require.NoError(t, badgerStore.SetMemoryDomain(record.MemoryID, record.DomainTag))
+		require.NoError(t, badgerStore.SetMemoryAuthor(record.MemoryID, record.SubmittingAgent))
+		require.NoError(t, badgerStore.SetMemoryAuthorPrincipal(record.MemoryID, agentID))
+		require.NoError(t, badgerStore.SetMemoryClassification(record.MemoryID, uint8(store.ClearanceInternal)))
+	}
+
+	health := metrics.NewHealthChecker()
+	health.SetPostgresHealth(true)
+	health.SetCometBFTHealth(true)
+	restServer := restapi.NewServer(
+		"", sqlStore, sqlStore, badgerStore, health, zerolog.Nop(),
+		embedding.NewClient("", ""),
+	)
+	restServer.SetPostV23ForNextTxAccessor(func() bool { return true })
+
+	var embedCalls, submitCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agent_id": agentID, "name": "migrated-agent",
+			"registered_name": "migrated-agent", "status": "already_registered",
+		})
+	})
+	mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "standing", r.URL.Query().Get("view"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agent_id": agentID, "profile": store.AppV23ProfileStandard,
+			"enrollment_status": "active", "home_domain": homeDomain,
+			"can_read": true, "can_write": true, "access_scope": "home_domain",
+		})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, _ *http.Request) {
+		embedCalls.Add(1)
+		http.Error(w, "established migrated brain must not be reseeded", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, _ *http.Request) {
+		submitCalls.Add(1)
+		http.Error(w, "established migrated brain must not be reseeded", http.StatusInternalServerError)
+	})
+	mux.Handle("/v1/memory/list", restServer.Router())
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	result, err := NewServer(ts.URL, agentKey).toolInception(ctx, map[string]any{})
+	require.NoError(t, err)
+	payload := result.(map[string]any)
+	require.Equal(t, "awakened", payload["status"])
+	require.Equal(t, "already_registered", payload["registration"])
+	require.Zero(t, embedCalls.Load())
+	require.Zero(t, submitCalls.Load())
+}
+
+func TestSageInceptionAppV23ZeroHomeSeedsOnlyFirstRegistration(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		registration    string
+		profile         string
+		canWrite        bool
+		wantStatus      string
+		wantSubmitCalls int32
+	}{
+		{
+			name: "first registration remains seedable", registration: "registered",
+			profile: store.AppV23ProfileStandard, canWrite: true,
+			wantStatus: "inception_complete", wantSubmitCalls: 6,
+		},
+		{
+			name: "established standard migration is never reseeded", registration: "already_registered",
+			profile: store.AppV23ProfileStandard, canWrite: true,
+			wantStatus: "awakened", wantSubmitCalls: 0,
+		},
+		{
+			name: "established read only profile is never reseeded", registration: "already_registered",
+			profile: store.AppV23ProfileReadOnly, canWrite: false,
+			wantStatus: "awakened", wantSubmitCalls: 0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var submitCalls atomic.Int32
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"agent_id": "zero-home-agent", "name": "zero-home-agent",
+					"status": tc.registration,
+				})
+			})
+			mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"agent_id": r.Header.Get("X-Agent-ID"), "profile": tc.profile,
+					"enrollment_status": "active", "home_domain": "empty-home",
+					"can_read": true, "can_write": tc.canWrite, "access_scope": "home_domain",
+				})
+			})
+			mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+			})
+			mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1}})
+			})
+			mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, _ *http.Request) {
+				submitCalls.Add(1)
+				w.WriteHeader(http.StatusCreated)
+				_ = json.NewEncoder(w).Encode(map[string]any{"memory_id": "seed", "committed": true})
+			})
+			mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "empty-home", r.URL.Query().Get("domain"))
+				if r.URL.Query().Get("limit") != "1" {
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"memories": []any{}, "total": 0, "has_more": false, "total_exact": true,
+					})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"total": 0, "has_more": false, "total_exact": true,
+				})
+			})
+			ts := httptest.NewServer(mux)
+			t.Cleanup(ts.Close)
+
+			_, privateKey, err := ed25519.GenerateKey(nil)
+			require.NoError(t, err)
+			result, err := NewServer(ts.URL, privateKey).toolInception(context.Background(), map[string]any{})
+			require.NoError(t, err)
+			require.Equal(t, tc.wantStatus, result.(map[string]any)["status"])
+			require.Equal(t, tc.wantSubmitCalls, submitCalls.Load())
+		})
+	}
 }
 
 func TestSageInceptionAppV23CountHasIndependentBoundedDeadline(t *testing.T) {

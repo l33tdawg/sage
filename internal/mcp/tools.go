@@ -3194,6 +3194,7 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 	self, appV23, standingErr := s.selfWritePolicy(standingCtx)
 	cancelStanding()
 	statsResp := map[string]any(nil)
+	appV23FreshBrainConfirmed := false
 	var err error
 	if standingErr != nil {
 		err = fmt.Errorf("resolve inception count domain: %w", standingErr)
@@ -3204,6 +3205,18 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 				err = errors.New("resolve inception count domain: authenticated app-v23 caller has no approved home domain")
 			} else {
 				statsResp, err = s.callerScopedMemoryCountForDomain(countCtx, self.HomeDomain)
+				if err == nil {
+					total, totalOK := statsResp["total_memories"].(int)
+					exact, exactOK := statsResp["total_exact"].(bool)
+					if totalOK && total == 0 && exactOK && exact {
+						// An already-registered app-v23 identity may be an
+						// established migration cohort whose newly synthesized
+						// home is empty while its legacy corpus remains in shared
+						// domains it can no longer enumerate. Only the atomic
+						// first-registration result can prove this identity is new.
+						appV23FreshBrainConfirmed = regResp.Status == "registered"
+					}
+				}
 			}
 		} else {
 			statsResp, err = s.callerScopedMemoryCount(countCtx)
@@ -3240,7 +3253,9 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 	totalMemories := 1
 	countExact, _ := statsResp["total_exact"].(bool)
 	if v, ok := statsResp["total_memories"].(int); ok && countExact {
-		totalMemories = v
+		if !appV23 || v > 0 || appV23FreshBrainConfirmed {
+			totalMemories = v
+		}
 	}
 
 	// Fetch custom boot instructions from preferences

@@ -118,7 +118,13 @@ before any other action in every new conversation.
 the exact authenticated `home_domain` with a separately deadline-bounded
 `GET /v1/memory/list?domain=...&limit=1&status=committed`; it never starts with
 the historical unscoped query, which can correctly return `422 Query too broad`
-on a mature corpus. Pre-v23 nodes retain the historical signed caller-scoped
+on a mature corpus. An exact zero home count is not sufficient to declare an
+established migrated agent fresh because its legacy `general`, `self`, or
+`meta` corpus may no longer be caller-enumerable. App-v23 seeds only when the
+same call atomically reports a first-time `registered` identity and its exact
+home count is zero; `already_registered` zero-home callers take the
+non-mutating awakened path. Malformed, inexact, or transient counts likewise
+fail closed. Pre-v23 nodes retain the historical signed caller-scoped
 `GET /v1/memory/list?limit=1&status=committed` count. Optional boot preferences
 use their dedicated dashboard settings routes; inception never uses the
 CEREBRUM operator-only `/v1/dashboard/stats` surface.
