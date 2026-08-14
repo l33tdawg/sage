@@ -1073,6 +1073,13 @@ test('App-v26 fixtures bound persistent-peer retries below their recovery assert
   );
   assert.match(mutualPeers, /provider_peers=.*rpc_peer_ids "\$\{PROVIDER\}"/);
   assert.match(mutualPeers, /receiver_peers=.*rpc_peer_ids "\$\{RECEIVER\}"/);
+  const exactReciprocalPeerSet = `if [ "\${provider_peers}" = "\${receiver_id}" ] &&
+       [ "\${receiver_peers}" = "\${provider_id}" ]; then`;
+  assert.ok(
+    mutualPeers.includes(exactReciprocalPeerSet),
+    'authorized provider and receiver must both report exactly the reciprocal peer ID',
+  );
+  assert.doesNotMatch(mutualPeers, /\]\s*\|\|\s*\[/);
   assert.match(mutualPeers, /persistent-peer max dial=\$\{PERSISTENT_PEER_MAX_DIAL_PERIOD\}/);
 });
 

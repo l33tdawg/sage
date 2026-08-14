@@ -734,20 +734,12 @@ rpc_peer_ids() {
 wait_mutual_authorized_peers() {
   local deadline=$((SECONDS + AUTHORIZED_PEER_ASSERT_TIMEOUT))
   local provider_peers=unavailable receiver_peers=unavailable
-  local provider_has_receiver=0 receiver_has_provider=0
   while [ "${SECONDS}" -lt "${deadline}" ]; do
     provider_peers=$(rpc_peer_ids "${PROVIDER}" 2>/dev/null || printf unavailable)
     receiver_peers=$(rpc_peer_ids "${RECEIVER}" 2>/dev/null || printf unavailable)
-    case " ${provider_peers} " in
-      *" ${receiver_id} "*) provider_has_receiver=1 ;;
-      *) provider_has_receiver=0 ;;
-    esac
-    case " ${receiver_peers} " in
-      *" ${provider_id} "*) receiver_has_provider=1 ;;
-      *) receiver_has_provider=0 ;;
-    esac
-    if [ "${provider_has_receiver}" = 1 ] && [ "${receiver_has_provider}" = 1 ]; then
-      echo "authorized provider and receiver reported reciprocal peer IDs"
+    if [ "${provider_peers}" = "${receiver_id}" ] &&
+       [ "${receiver_peers}" = "${provider_id}" ]; then
+      echo "authorized provider and receiver reported the exact reciprocal peer set"
       return 0
     fi
     sleep 1
