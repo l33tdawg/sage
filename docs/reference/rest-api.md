@@ -2105,6 +2105,7 @@ principal.
 | Route | Contract |
 |---|---|
 | `POST /v1/messages` | Exact-local-agent send. Requires `to_agent`, `payload`, and a 1–256-byte caller-scoped `idempotency_key`; optional `intent` and `ttl_minutes` 0–1440. Omitted/0 is durable until handled; 1–1440 requests explicit expiry. Exact retry returns the original `message_id`; same key/different request is HTTP 409. |
+| `GET /v1/messages/wake` | Exact-caller payload-free catch-up/SSE. Requires a 1–128-byte `consumer_id`; accepts `after_seq` or matching `Last-Event-ID`. Events use `id:<seq>` and data exactly `{version,seq,pending}`. One exact agent has one active consumer lease; same-consumer reconnect supersedes its stale stream, while a different live consumer receives HTTP 409. |
 | `POST /v1/messages/receive` | Requires a 1–256-byte `receive_token`; optional limit 1–20 and opaque `claimant_session_id` up to 128 bytes. Claims and persists one exact ordered batch with session attribution. Same caller/token/limit replays that batch after a lost response; a different limit is HTTP 409. Replay metadata is retained for 48 hours and capped at 4096 tokens per agent: capacity returns HTTP 429, while a purged/incomplete exact batch returns HTTP 410 instead of claiming later work. |
 | `PUT /v1/messages/{message_id}/handoff` | Exact fetched recipient only. Atomically compare-and-swaps `from_session_id` to `to_session_id` for one still-claimed local message. A stale expected session is HTTP 409; repeating an already-applied transfer is idempotent. Session IDs coordinate runtimes sharing one agent identity and confer no authorization. |
 | `POST /v1/messages/{message_id}/reply` | Exact fetched recipient only. MCP supplies its opaque `claimant_session_id`, which must still own the claim after any handoff; legacy direct clients may omit it. Same result is idempotent; different second result is HTTP 409. Reply and local exact-read evidence commit atomically. |
@@ -2122,12 +2123,27 @@ the addressed inbox row is durable on the same SQLite transaction boundary.
 `read_status:confirmed` is only exact addressed-recipient evidence; it is not
 presence, comprehension, or action.
 
+A fresh canonical local pending insertion also advances that exact recipient's
+durable monotonic wake sequence in the **same SQLite transaction** as the inbox
+row and idempotency binding. Exact send replay advances nothing. The signed
+`GET /v1/messages/wake` route first catches up from that durable state, then
+uses a bounded process-local broker for new sequences. A crash between commit
+and broker publication therefore loses no wake: reconnect with `after_seq` or
+`Last-Event-ID` observes the durable sequence. Heartbeats are SSE comments;
+slow consumers have a one-sequence coalescing buffer and bounded writes. Wake
+state reads never claim, acknowledge, read, or decrypt a message and never
+assert delivery, presence, attention, or workflow progress. See
+`internal/store/messages.go` (`SendLocalMessage`, `GetMessageWakeState`) and
+`api/rest/message_wake.go`.
+
 Successful new local admission may invoke a best-effort HTTP MCP SSE wake-up
 for already-connected sessions authenticated as the exact `to_agent`. The
 additive JSON-RPC method is `notifications/sage_message` and its params contain
 only `message_id`, `from_agent`, and `sent_at`. A missing/full stream never
 fails the send, does not alter any message state, and is not evidence that a
 recipient is online. Stdio and Streamable HTTP have no server-push contract.
+This compatibility notification is separate from the durable ordinary-agent
+Wake Bus above and does not use its sequence or consumer lease.
 
 A successful federated reply returns its immutable `reply_event_id` and
 `reply_status:queued`. That ID names the already-existing signed result outbox

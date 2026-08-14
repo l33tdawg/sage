@@ -86,6 +86,10 @@ func (s *SQLiteStore) migrateMessages(ctx context.Context) error {
 			read_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			FOREIGN KEY (message_id) REFERENCES pipeline_messages(pipe_id) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS message_wake_state (
+			recipient_agent_id TEXT PRIMARY KEY,
+			seq INTEGER NOT NULL CHECK(seq >= 0)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.writeExecContext(ctx, statement); err != nil {
@@ -123,6 +127,15 @@ func (s *SQLiteStore) migrateMessages(ctx context.Context) error {
 		SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ',created_at,'+100 years')
 		WHERE pipe_id LIKE 'msg-%' AND status IN ('pending','claimed')`); err != nil {
 		return fmt.Errorf("extend canonical message inbox retention: %w", err)
+	}
+	// An upgraded node may already hold canonical pending work. Give each exact
+	// recipient one durable baseline sequence so a fresh after_seq=0 consumer
+	// receives a catch-up event after restart rather than waiting for a new send.
+	if _, err := s.writeExecContext(ctx, `INSERT OR IGNORE INTO message_wake_state(recipient_agent_id,seq)
+		SELECT DISTINCT to_agent,1 FROM pipeline_messages
+		WHERE source_chain_id='' AND destination_chain_id='' AND to_provider=''
+		  AND to_agent<>'' AND status='pending' AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`); err != nil {
+		return fmt.Errorf("backfill canonical message wake state: %w", err)
 	}
 	return nil
 }
@@ -240,7 +253,7 @@ func (s *SQLiteStore) openMessageFingerprint(stored string) (string, error) {
 // returns the original row; reusing the key for different content fails.
 func (s *SQLiteStore) SendLocalMessage(ctx context.Context, idempotencyKey string, msg *PipelineMessage) (*PipelineMessage, bool, error) {
 	if msg == nil || strings.TrimSpace(msg.FromAgent) == "" || strings.TrimSpace(msg.ToAgent) == "" ||
-		msg.SourceChainID != "" || msg.DestinationChainID != "" || msg.ToProvider != "" {
+		msg.SourceChainID != "" || msg.DestinationChainID != "" || msg.ToProvider != "" || msg.Status != "pending" {
 		return nil, false, fmt.Errorf("canonical local message requires exact local sender and recipient")
 	}
 	if idempotencyKey == "" || len(idempotencyKey) > MaxMessageTokenBytes {
@@ -275,6 +288,16 @@ func (s *SQLiteStore) SendLocalMessage(ctx context.Context, idempotencyKey strin
 		if insertErr := tx.InsertPipeline(ctx, msg); insertErr != nil {
 			return insertErr
 		}
+		var wakeSeq int64
+		if writeErr := tx.conn.QueryRowContext(ctx,
+			`INSERT INTO message_wake_state(recipient_agent_id,seq) VALUES(?,1)
+			 ON CONFLICT(recipient_agent_id) DO UPDATE SET seq=message_wake_state.seq+1
+			 RETURNING seq`, msg.ToAgent).Scan(&wakeSeq); writeErr != nil {
+			return writeErr
+		}
+		if wakeSeq < 1 {
+			return errors.New("canonical message wake sequence did not advance")
+		}
 		sealedHash, err := tx.sealMessageFingerprint(requestHash)
 		if err != nil {
 			return err
@@ -285,10 +308,42 @@ func (s *SQLiteStore) SendLocalMessage(ctx context.Context, idempotencyKey strin
 			return writeErr
 		}
 		copy := *msg
+		copy.WakeSeq = uint64(wakeSeq)
 		result = &copy
 		return nil
 	})
 	return result, replayed, err
+}
+
+// GetMessageWakeState returns only the authenticated caller's exact durable
+// wake sequence and whether currently claimable canonical local work exists.
+// It never decrypts a message and does not claim, read, acknowledge, or mutate.
+func (s *SQLiteStore) GetMessageWakeState(ctx context.Context, recipientID string) (MessageWakeState, error) {
+	recipientID = strings.TrimSpace(recipientID)
+	if recipientID == "" {
+		return MessageWakeState{}, errors.New("message wake recipient is required")
+	}
+	var seq int64
+	err := s.conn.QueryRowContext(ctx,
+		`SELECT seq FROM message_wake_state WHERE recipient_agent_id=?`, recipientID).Scan(&seq)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return MessageWakeState{}, err
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		seq = 0
+	}
+	if seq < 0 {
+		return MessageWakeState{}, errors.New("message wake sequence is invalid")
+	}
+	var pending int
+	if err := s.conn.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pipeline_messages
+		 WHERE source_chain_id='' AND destination_chain_id='' AND to_provider=''
+		   AND to_agent=? AND status='pending'
+		   AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))`, recipientID).Scan(&pending); err != nil {
+		return MessageWakeState{}, err
+	}
+	return MessageWakeState{Seq: uint64(seq), Pending: pending != 0}, nil
 }
 
 func loadReceiveBatch(ctx context.Context, s *SQLiteStore, receiverID, tokenHash string, expectedCount int) ([]*PipelineMessage, error) {

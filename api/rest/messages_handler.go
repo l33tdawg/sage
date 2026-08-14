@@ -132,6 +132,13 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 	if replayed {
 		code = http.StatusOK
 	}
+	if !replayed {
+		// Wake metadata is published only after SendLocalMessage has committed the
+		// inbox row, idempotency binding, and exact-recipient sequence together.
+		// It is best-effort process-local acceleration; durable catch-up remains
+		// authoritative across a crash between this return and publication.
+		s.publishMessageWake(msg.ToAgent, msg.WakeSeq)
+	}
 	if !replayed && s.OnEvent != nil {
 		// Live connectome firing. Emitted ONLY here: after the send has
 		// durably succeeded and only when it is NOT an idempotent replay, so a

@@ -58,6 +58,9 @@ type Server struct {
 	embedder                      embedding.Provider // Embedding provider (Ollama or hash)
 	OnEvent                       EventCallback      // Optional: called when notable events occur
 	messageNotifier               func(AgentMessageNotification)
+	messageWakeMu                 sync.Mutex
+	messageWake                   *messageWakeBroker
+	messageWakeHeartbeat          time.Duration   // zero uses the production default; tests may shorten it
 	suppCache                     SuppCacheWriter // Bridges off-chain data (embeddings) to ABCI for consensus-first writes
 	mempool                       *mempoolSampler // TTL-cached CometBFT mempool depth for backpressure signals
 	taskIdempotencyMu             sync.Mutex
@@ -831,6 +834,7 @@ func (s *Server) setupRouter() chi.Router {
 		r.Group(func(r chi.Router) {
 			r.Use(s.appV23PipelineAgentBoundary)
 			r.Post("/v1/messages", s.handleMessageSend)
+			r.Get("/v1/messages/wake", s.handleMessageWake)
 			r.Post("/v1/messages/receive", s.handleMessagesReceive)
 			r.Post("/v1/messages/{message_id}/reply", s.handleMessageReply)
 			r.Put("/v1/messages/{message_id}/handoff", s.handleMessageHandoff)

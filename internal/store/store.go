@@ -835,6 +835,11 @@ type PipelineMessage struct {
 	FederationReceiptProtocolVersion  int    `json:"-"`
 	FederationReceiptContentDigest    string `json:"-"`
 	FederationReceiptRecipientChainID string `json:"-"`
+	// WakeSeq is the durable exact-recipient wake sequence allocated in the
+	// same transaction as a fresh canonical local inbox insertion. It is
+	// process-local return metadata only and is never stored in the pipeline
+	// row or exposed as message/delivery/read evidence.
+	WakeSeq uint64 `json:"-"`
 }
 
 // PipelineStore defines the interface for agent-to-agent pipeline storage.
@@ -946,6 +951,14 @@ type MessageStatus struct {
 	TerminalReason  string     `json:"terminal_reason,omitempty"`
 }
 
+// MessageWakeState is payload-free exact-recipient inbox wake metadata. Seq is
+// monotonic and advances only for a fresh canonical local pending insertion;
+// Pending is a current bounded queue predicate, not delivery/read/presence.
+type MessageWakeState struct {
+	Seq     uint64 `json:"seq"`
+	Pending bool   `json:"pending"`
+}
+
 // MessageStore is the canonical local Messages service. Legacy pipeline
 // routes remain compatibility wrappers over the same pipeline_messages rows;
 // these methods add durable request idempotency and exact receipt evidence,
@@ -958,6 +971,7 @@ type MessageStore interface {
 	ReplyLocalMessage(ctx context.Context, receiverID, messageID, result string, claimantSessionID ...string) (bool, error)
 	AcknowledgeLocalMessageRead(ctx context.Context, receiverID, messageID string) (bool, error)
 	GetMessageStatusForSender(ctx context.Context, senderID, messageID string) (*MessageStatus, error)
+	GetMessageWakeState(ctx context.Context, recipientID string) (MessageWakeState, error)
 }
 
 // PipelineAgentProof preserves the exact already-verified local REST request
