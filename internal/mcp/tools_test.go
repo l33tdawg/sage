@@ -1906,10 +1906,121 @@ func TestSageListBoundsCallerPaginationBeforeREST(t *testing.T) {
 
 	_, priv, _ := ed25519.GenerateKey(nil)
 	_, err := NewServer(ts.URL, priv).toolList(context.Background(), map[string]any{
+		"domain": "legacy-explicit",
 		"limit":  float64(1_000_000),
 		"offset": float64(-1),
 	})
 	require.NoError(t, err)
+}
+
+func TestSageListAppV23DefaultsToExactAuthenticatedHomeDomain(t *testing.T) {
+	var standingReads, scopedReads, unscopedReads atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+		standingReads.Add(1)
+		require.Equal(t, "standing", r.URL.Query().Get("view"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agent_id": r.Header.Get("X-Agent-ID"), "profile": "standard",
+			"enrollment_status": "active", "home_domain": "voice+ops & audit",
+		})
+	})
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("domain") == "" {
+			unscopedReads.Add(1)
+			w.Header().Set("Content-Type", "application/problem+json")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"title": "Query too broad", "status": http.StatusUnprocessableEntity,
+			})
+			return
+		}
+		scopedReads.Add(1)
+		require.Equal(t, "voice+ops & audit", r.URL.Query().Get("domain"),
+			"the authenticated domain must survive URL query escaping exactly")
+		require.Contains(t, r.URL.RawQuery, "domain=voice%2Bops+%26+audit")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"memories": []any{}, "total": 0, "has_more": false, "total_exact": true,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	got, err := NewServer(ts.URL, priv).toolList(context.Background(), map[string]any{})
+	require.NoError(t, err)
+	require.Equal(t, 0, got.(map[string]any)["total_count"])
+	require.Equal(t, int32(1), standingReads.Load())
+	require.Equal(t, int32(1), scopedReads.Load())
+	require.Equal(t, int32(0), unscopedReads.Load(),
+		"domainless app-v23 list must not retry the historical broad query")
+}
+
+func TestSageListExplicitDomainSkipsSelfLookupAndNeverRemaps(t *testing.T) {
+	var standingReads atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, _ *http.Request) {
+		standingReads.Add(1)
+		t.Error("an explicit list domain must not perform authenticated-home discovery")
+	})
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "foreign+exact & audit", r.URL.Query().Get("domain"))
+		_ = json.NewEncoder(w).Encode(map[string]any{"memories": []any{}, "total": 0})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	_, err = NewServer(ts.URL, priv).toolList(context.Background(), map[string]any{
+		"domain": "foreign+exact & audit",
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(0), standingReads.Load())
+}
+
+func TestSageListPreAppV23DomainlessPreservesHistoricalUnscopedRequest(t *testing.T) {
+	var standingReads, unscopedReads atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+		standingReads.Add(1)
+		http.NotFound(w, r)
+	})
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+		unscopedReads.Add(1)
+		require.Empty(t, r.URL.Query().Get("domain"))
+		_ = json.NewEncoder(w).Encode(map[string]any{"memories": []any{}, "total": 0})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	_, err = NewServer(ts.URL, priv).toolList(context.Background(), map[string]any{})
+	require.NoError(t, err)
+	require.Equal(t, int32(1), standingReads.Load())
+	require.Equal(t, int32(1), unscopedReads.Load())
+}
+
+func TestSageListHomeResolutionHasBoundedDeadline(t *testing.T) {
+	cancelElapsed := make(chan time.Duration, 4)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		<-r.Context().Done()
+		cancelElapsed <- time.Since(started)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	started := time.Now()
+	_, err = NewServer(ts.URL, priv).toolList(context.Background(), map[string]any{})
+	require.Error(t, err)
+	require.Less(t, time.Since(started), callerHomeResolutionBudget+time.Second)
+	require.LessOrEqual(t, <-cancelElapsed, callerHomeResolutionBudget+500*time.Millisecond,
+		"the client must cancel slow self-standing discovery within its local budget")
 }
 
 func TestSageListSurfacesCallerScopedPartialAndFiltering(t *testing.T) {
@@ -1929,7 +2040,7 @@ func TestSageListSurfacesCallerScopedPartialAndFiltering(t *testing.T) {
 
 	_, priv, _ := ed25519.GenerateKey(nil)
 	s := NewServer(ts.URL, priv)
-	got, err := s.toolList(context.Background(), map[string]any{})
+	got, err := s.toolList(context.Background(), map[string]any{"domain": "legacy-explicit"})
 	require.NoError(t, err)
 	result := got.(map[string]any)
 	require.Equal(t, 0, result["total_count"])
@@ -1949,7 +2060,7 @@ func TestSageListPreAppV23MissingMetadataDefaultsToExactComplete(t *testing.T) {
 	defer ts.Close()
 
 	_, priv, _ := ed25519.GenerateKey(nil)
-	got, err := NewServer(ts.URL, priv).toolList(context.Background(), map[string]any{})
+	got, err := NewServer(ts.URL, priv).toolList(context.Background(), map[string]any{"domain": "legacy-explicit"})
 	require.NoError(t, err)
 	result := got.(map[string]any)
 	require.Equal(t, false, result["has_more"])
@@ -3823,6 +3934,105 @@ func TestSageInceptionInexactZeroCountNeverSeedsOverExistingMemory(t *testing.T)
 	require.Equal(t, true, stats["has_more"])
 }
 
+func TestSageInceptionAppV23CountsExactHomeWithoutHistoricalBroadQuery(t *testing.T) {
+	var countReads, unscopedCountReads atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agent_id": "bounded-agent", "name": "bounded-agent", "status": "already_registered",
+		})
+	})
+	mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "standing", r.URL.Query().Get("view"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agent_id": r.Header.Get("X-Agent-ID"), "profile": "standard",
+			"enrollment_status": "active", "home_domain": "ops+release & audit",
+		})
+	})
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+		// Only limit=1 is inception's aggregate count. The later safeguard probe
+		// is separately scoped and is not part of this assertion.
+		if r.URL.Query().Get("limit") == "1" {
+			countReads.Add(1)
+			if r.URL.Query().Get("domain") == "" {
+				unscopedCountReads.Add(1)
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"title": "Query too broad", "status": http.StatusUnprocessableEntity,
+				})
+				return
+			}
+			require.Equal(t, "ops+release & audit", r.URL.Query().Get("domain"))
+			require.Contains(t, r.URL.RawQuery, "domain=ops%2Brelease+%26+audit")
+			require.Equal(t, "committed", r.URL.Query().Get("status"))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"total": 2, "has_more": true, "total_exact": true,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"memories": []any{}, "total": 0})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	result, err := NewServer(ts.URL, priv).toolInception(context.Background(), map[string]any{})
+	require.NoError(t, err)
+	payload := result.(map[string]any)
+	require.Equal(t, "awakened", payload["status"])
+	require.NotContains(t, payload, "memory_access")
+	require.Equal(t, int32(1), countReads.Load())
+	require.Equal(t, int32(0), unscopedCountReads.Load(),
+		"app-v23 inception must never try the historical unscoped count first")
+}
+
+func TestSageInceptionAppV23CountHasIndependentBoundedDeadline(t *testing.T) {
+	var countReads atomic.Int32
+	cancelElapsed := make(chan time.Duration, 4)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agent_id": "bounded-agent", "name": "bounded-agent", "status": "already_registered",
+		})
+	})
+	mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"agent_id": r.Header.Get("X-Agent-ID"), "profile": "standard",
+			"enrollment_status": "active", "home_domain": "bounded-home",
+		})
+	})
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("limit") != "1" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"memories": []any{}, "total": 0})
+			return
+		}
+		countReads.Add(1)
+		require.Equal(t, "bounded-home", r.URL.Query().Get("domain"))
+		started := time.Now()
+		<-r.Context().Done()
+		cancelElapsed <- time.Since(started)
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	started := time.Now()
+	result, err := NewServer(ts.URL, priv).toolInception(context.Background(), map[string]any{})
+	require.NoError(t, err)
+	require.Less(t, time.Since(started), callerInceptionCountBudget+time.Second)
+	payload := result.(map[string]any)
+	require.Equal(t, "awakened", payload["status"])
+	require.Equal(t, "temporarily_unavailable", payload["memory_access"])
+	require.GreaterOrEqual(t, countReads.Load(), int32(1))
+	require.LessOrEqual(t, countReads.Load(), int32(4),
+		"the bounded read may only use the shared finite replay policy")
+	require.LessOrEqual(t, <-cancelElapsed, callerInceptionCountBudget+500*time.Millisecond,
+		"the client must cancel a slow count within the boot-only budget")
+}
+
 func TestSageInception_SignedAgentSurvivesQuarantinedProjection(t *testing.T) {
 	for _, encrypted := range []bool{false, true} {
 		t.Run(fmt.Sprintf("encrypted=%t", encrypted), func(t *testing.T) {
@@ -3975,6 +4185,10 @@ func TestMaybeAutoInceptionRegistersBeforeAnyCallerScopedRead(t *testing.T) {
 			if !registered {
 				http.Error(w, "active registration required", http.StatusForbidden)
 				return
+			}
+			if r.URL.Query().Get("limit") == "1" {
+				require.Empty(t, r.URL.Query().Get("domain"),
+					"pre-v23 inception must retain its historical unscoped count")
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"total": 1})

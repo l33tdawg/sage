@@ -146,11 +146,11 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_list": {
 			Name:        "sage_list",
-			Description: "Browse memories with filters. Use this to see what memories exist in a domain, with a specific status, or tagged with a label.",
+			Description: "Browse memories with filters. When domain is omitted, app-v23 uses this agent's exact authenticated home domain; pre-v23 retains the historical unscoped list. An explicit domain is never looked up or remapped.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"domain": map[string]any{"type": "string", "description": "Filter by domain tag"},
+					"domain": map[string]any{"type": "string", "description": "Exact domain tag. Omit to use the app-v23 caller's authenticated home domain; pre-v23 remains unscoped. Explicit values are never remapped."},
 					"tag":    map[string]any{"type": "string", "description": "Filter by user-defined tag"},
 					"status": map[string]any{"type": "string", "description": "Filter by status (proposed, committed, deprecated)"},
 					"limit":  map[string]any{"type": "integer", "description": "Max results to return (default: 20, max: 200)", "minimum": 1, "maximum": 200, "default": 20},
@@ -2367,6 +2367,20 @@ func (s *Server) toolLink(ctx context.Context, params map[string]any) (any, erro
 
 func (s *Server) toolList(ctx context.Context, params map[string]any) (any, error) {
 	domain := stringParam(params, "domain", "")
+	if domain == "" {
+		standingCtx, cancel := context.WithTimeout(ctx, callerHomeResolutionBudget)
+		self, appV23, err := s.selfWritePolicy(standingCtx)
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("resolve default list domain: %w", err)
+		}
+		if appV23 {
+			if self.HomeDomain == "" {
+				return nil, errors.New("resolve default list domain: authenticated app-v23 caller has no approved home domain; provide an explicit readable domain or ask the local CEREBRUM administrator to assign one")
+			}
+			domain = self.HomeDomain
+		}
+	}
 	tag := stringParam(params, "tag", "")
 	status := stringParam(params, "status", "")
 	limit := intParam(params, "limit", 20)
@@ -2558,8 +2572,10 @@ func (s *Server) toolDomains(ctx context.Context, params map[string]any) (any, e
 }
 
 const (
+	callerHomeResolutionBudget = 1500 * time.Millisecond
 	callerStatusStandingBudget = 1500 * time.Millisecond
 	callerStatusOptionalBudget = 750 * time.Millisecond
+	callerInceptionCountBudget = 750 * time.Millisecond
 )
 
 // callerBoundedStatus deliberately avoids the unscoped memory-list surface.
@@ -3170,7 +3186,30 @@ func (s *Server) toolInception(ctx context.Context, _ map[string]any) (any, erro
 	// Registration remains first so a brand-new MCP client has a committed
 	// caller identity before the RBAC-filtered memory read. CEREBRUM's global
 	// operator stats are deliberately not part of agent boot.
-	statsResp, err := s.callerScopedMemoryCount(ctx)
+	// App-v23's unscoped memory list is deliberately scan-bounded and can return
+	// Query too broad for a mature caller. Resolve authenticated standing first,
+	// then count only the exact home domain under a short boot-only deadline.
+	// Legacy nodes retain the historical unscoped count.
+	standingCtx, cancelStanding := context.WithTimeout(ctx, callerHomeResolutionBudget)
+	self, appV23, standingErr := s.selfWritePolicy(standingCtx)
+	cancelStanding()
+	statsResp := map[string]any(nil)
+	var err error
+	if standingErr != nil {
+		err = fmt.Errorf("resolve inception count domain: %w", standingErr)
+	} else {
+		countCtx, cancelCount := context.WithTimeout(ctx, callerInceptionCountBudget)
+		if appV23 {
+			if self.HomeDomain == "" {
+				err = errors.New("resolve inception count domain: authenticated app-v23 caller has no approved home domain")
+			} else {
+				statsResp, err = s.callerScopedMemoryCountForDomain(countCtx, self.HomeDomain)
+			}
+		} else {
+			statsResp, err = s.callerScopedMemoryCount(countCtx)
+		}
+		cancelCount()
+	}
 	memoryAccessAvailable := true
 	if err != nil {
 		retryable, statusCode, _ := inceptionErrorStanding(err)

@@ -113,10 +113,15 @@ before any other action in every new conversation.
 - `bookend`: call `sage_turn` only at session start/end to conserve tokens.
 - `on-demand`: SAGE tools are passive; only call when the user explicitly asks.
 
-**REST:** `POST /v1/agent/register`, then the signed caller-scoped
-`GET /v1/memory/list?limit=1&status=committed` count path. Optional boot
-preferences use their dedicated dashboard settings routes; inception never
-uses the CEREBRUM operator-only `/v1/dashboard/stats` surface.
+**REST:** `POST /v1/agent/register`, then signed
+`GET /v1/agent/me?view=standing` discovery. On app-v23, inception counts only
+the exact authenticated `home_domain` with a separately deadline-bounded
+`GET /v1/memory/list?domain=...&limit=1&status=committed`; it never starts with
+the historical unscoped query, which can correctly return `422 Query too broad`
+on a mature corpus. Pre-v23 nodes retain the historical signed caller-scoped
+`GET /v1/memory/list?limit=1&status=committed` count. Optional boot preferences
+use their dedicated dashboard settings routes; inception never uses the
+CEREBRUM operator-only `/v1/dashboard/stats` surface.
 `GET /v1/dashboard/settings/boot-instructions`,
 `GET /v1/dashboard/settings/memory-mode`, `POST /v1/embed`,
 `POST /v1/memory/submit`
@@ -587,7 +592,7 @@ specific status, or tagged with a label.
 
 | Name     | Type   | Required | Description |
 |----------|--------|----------|-------------|
-| `domain` | string | no       | Filter by domain tag. |
+| `domain` | string | no       | Exact domain tag. When omitted, app-v23 resolves the authenticated caller's exact home domain; pre-v23 retains the historical unscoped list. An explicit domain is never looked up or remapped. |
 | `tag`    | string | no       | Filter by user-defined tag. |
 | `status` | string | no       | Filter by status: `proposed`, `committed`, `deprecated`. |
 | `limit`  | int    | no       | Max results. Default: 20. |
@@ -598,7 +603,11 @@ specific status, or tagged with a label.
 - `memories`: array of `{memory_id, content, domain, confidence, type, status, created_at}`.
 - `total_count`: total matching memories.
 
-**REST:** `GET /v1/memory/list`
+**REST:** When app-v23 `domain` is omitted, signed
+`GET /v1/agent/me?view=standing` followed by
+`GET /v1/memory/list?domain=<exact-home>...`. Explicit domains go directly to
+`GET /v1/memory/list` with no self lookup or remapping. Pre-v23 domainless calls
+retain the historical unscoped request.
 
 App-v23 examines at most 8,192 raw authorization candidates per request. An
 offset above 7,900 or a page that cannot be authorized within that raw budget
