@@ -158,6 +158,10 @@ func readDashboardSSEScript(t *testing.T) string {
 var (
 	jsEventTypesArrayRe = regexp.MustCompile(`(?s)const\s+eventTypes\s*=\s*\[(.*?)]`)
 	jsStringLiteralRe   = regexp.MustCompile(`'([^']*)'|"([^"]*)"`)
+	// Anchored at BOTH ends, so an element must be entirely a quoted string:
+	// `void 'x'`, `f('x')` and `c ? 'x' : 'y'` fail to match rather than
+	// yielding their inner text.
+	jsBareStringLiteralRe = regexp.MustCompile(`^(?:'([^']*)'|"([^"]*)")$`)
 )
 
 // jsListenedEventTypes extracts the event names the dashboard client subscribes
@@ -168,12 +172,31 @@ func jsListenedEventTypes(t *testing.T, js string) []string {
 	require.Len(t, matches, 1,
 		"static/js/sse.js must declare exactly one eventTypes array; a second one would shadow the checked list")
 
-	entries := jsStringLiteralRe.FindAllStringSubmatch(matches[0][1], -1)
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		name := entry[1]
+	// Validate the SHAPE of every element rather than harvesting any quoted
+	// string out of the array body. Harvesting was trivially defeatable by an
+	// element that CONTAINS a string literal but does not EVALUATE to one:
+	// `void 'redeploy'` is valid JavaScript, evaluates to undefined, and made
+	// the browser subscribe to "undefined" while this function still reported
+	// "redeploy" as listened — a false negative in the one direction that
+	// matters, since the event then reaches nobody.
+	//
+	// Anything that is not a bare quoted literal is refused loudly rather than
+	// silently reinterpreted. A call, an operator, a template literal, a
+	// conditional, a spread or an identifier each evaluate to something this
+	// test cannot predict, and a listener list is exactly where "probably
+	// fine" is not good enough.
+	names := make([]string, 0)
+	for _, element := range strings.Split(matches[0][1], ",") {
+		element = strings.TrimSpace(element)
+		if element == "" {
+			continue
+		}
+		literal := jsBareStringLiteralRe.FindStringSubmatch(element)
+		require.NotNil(t, literal,
+			"every element of the eventTypes array in web/static/js/sse.js must be a bare quoted string literal; %q is not, so what the browser actually subscribes to cannot be determined from the source", element)
+		name := literal[1]
 		if name == "" {
-			name = entry[2]
+			name = literal[2]
 		}
 		names = append(names, name)
 	}
@@ -409,6 +432,68 @@ func scanSSESources(t *testing.T) sseSourceScan {
 			return true
 		})
 
+		// An SSEEvent can be built INCREMENTALLY rather than as a composite
+		// literal:
+		//	var event SSEEvent
+		//	event.Type = EventType(name)
+		//	h.SSE.Broadcast(event)
+		// That shape has no composite literal to inspect and no OnEvent call,
+		// so it passed the scan entirely. Track every variable declared as an
+		// SSEEvent, resolve its .Type assignment as an emit site, and report
+		// any that never receives one.
+		builtEvents := map[string]token.Pos{}
+		ast.Inspect(pf.file, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.ValueSpec:
+				if !isSSEEventType(n.Type) {
+					return true
+				}
+				for _, name := range n.Names {
+					if name.Name != "_" {
+						builtEvents[name.Name] = name.Pos()
+					}
+				}
+			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					if lit, ok := lhs.(*ast.Ident); ok {
+						if len(n.Rhs) == 1 {
+							if comp, isComp := n.Rhs[0].(*ast.CompositeLit); isComp &&
+								isSSEEventType(comp.Type) && len(comp.Elts) == 0 && lit.Name != "_" {
+								builtEvents[lit.Name] = lit.Pos()
+							}
+						}
+					}
+				}
+			}
+			return true
+		})
+		ast.Inspect(pf.file, func(node ast.Node) bool {
+			assign, ok := node.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for i, lhs := range assign.Lhs {
+				sel, isSel := lhs.(*ast.SelectorExpr)
+				if !isSel || sel.Sel.Name != "Type" || i >= len(assign.Rhs) {
+					continue
+				}
+				base, isIdent := sel.X.(*ast.Ident)
+				if !isIdent {
+					continue
+				}
+				if _, tracked := builtEvents[base.Name]; !tracked {
+					continue
+				}
+				delete(builtEvents, base.Name)
+				record(assign.Rhs[i], "SSEEvent Type assignment")
+			}
+			return true
+		})
+		for name, pos := range builtEvents {
+			scan.unresolved = append(scan.unresolved,
+				"SSEEvent variable "+name+" never receives a checkable Type at "+relPos(root, fset, pos))
+		}
+
 		ast.Inspect(pf.file, func(node ast.Node) bool {
 			switch n := node.(type) {
 			case *ast.CallExpr:
@@ -446,12 +531,15 @@ func scanSSESources(t *testing.T) sseSourceScan {
 					record(kv.Value, "SSEEvent Type field")
 					return true
 				}
-				// Report the zero literal too. SSEEvent{} followed by a later
-				// ev.Type = ... assignment is the natural shape for building an
-				// event incrementally, and skipping it let an arbitrary runtime
-				// string reach the stream with no emit recorded and no complaint.
-				scan.unresolved = append(scan.unresolved,
-					"SSEEvent literal without a Type field at "+relPos(root, fset, n.Pos()))
+				// A zero literal is not reported here: it is tracked above as an
+				// incrementally-built event, so it is resolved when a later
+				// ev.Type = ... assignment supplies a checkable name and
+				// reported when nothing ever does. Reporting it here as well
+				// would refuse the legitimate incremental shape outright.
+				if len(n.Elts) > 0 {
+					scan.unresolved = append(scan.unresolved,
+						"SSEEvent literal without a Type field at "+relPos(root, fset, n.Pos()))
+				}
 			}
 			return true
 		})
@@ -491,11 +579,23 @@ func (s *sseSourceScan) resolve(file *ast.File, expr ast.Expr, depth int) ([]str
 		}
 		return []string{unquoted}, true
 	case *ast.Ident:
+		// A LOCAL BINDING SHADOWS A PACKAGE CONST, so it must be consulted
+		// FIRST. Reading s.consts up front meant
+		//	EventRemember := EventType(r.Header.Get("X-Whatever"))
+		// resolved through the GLOBAL const map to "remember" while the site
+		// actually emitted arbitrary runtime input. That is the same
+		// certified-with-a-value-it-does-not-have failure as the file-scoped
+		// resolution below, reached by shadowing instead of by scope.
+		if names, ok, bound := s.resolveLocalVar(file, e, depth); bound {
+			// Bound but unresolvable is a REFUSAL, never a fallthrough to the
+			// const map — falling through is precisely the shadowing bug.
+			if !ok {
+				return nil, false
+			}
+			return names, true
+		}
 		if value, ok := s.consts[e.Name]; ok {
 			return []string{value}, true
-		}
-		if names, ok := s.resolveLocalVar(file, e, depth); ok {
-			return names, true
 		}
 		// Weakest source, checked last and never when ambiguous: a plain
 		// untyped string const. Refusing a conflicted name keeps a wrong
@@ -548,7 +648,10 @@ func (s *sseSourceScan) resolve(file *ast.File, expr ast.Expr, depth int) ([]str
 // resolveLocalVar resolves an identifier that is not an EventType const by
 // collecting every value assigned to that name in the same file — the shape used
 // where a handler picks between two event types before broadcasting.
-func (s *sseSourceScan) resolveLocalVar(file *ast.File, ident *ast.Ident, depth int) ([]string, bool) {
+// The third result reports whether the name is BOUND in the enclosing function
+// (by a parameter, a := or a var). A bound name shadows any package const of
+// the same name, so the caller must refuse rather than fall through.
+func (s *sseSourceScan) resolveLocalVar(file *ast.File, ident *ast.Ident, depth int) ([]string, bool, bool) {
 	name := ident.Name
 
 	// Scope the search to the function the identifier actually appears in.
@@ -560,14 +663,14 @@ func (s *sseSourceScan) resolveLocalVar(file *ast.File, ident *ast.Ident, depth 
 	// would inherit that false clearance.
 	enclosing := enclosingFunc(file, ident.Pos())
 	if enclosing == nil {
-		return nil, false
+		return nil, false, false
 	}
 
 	// A parameter, receiver or named result is supplied by the CALLER. Its value
 	// is not knowable here, so refuse it outright rather than resolving it from
 	// some same-function assignment that happens to share the name.
 	if isFuncScopedName(enclosing, name) {
-		return nil, false
+		return nil, false, true
 	}
 
 	var values []string
@@ -605,9 +708,9 @@ func (s *sseSourceScan) resolveLocalVar(file *ast.File, ident *ast.Ident, depth 
 	})
 
 	if !found {
-		return nil, false
+		return nil, false, false
 	}
-	return values, resolvedAll
+	return values, resolvedAll, true
 }
 
 // enclosingFunc returns the function declaration or literal body containing pos,
