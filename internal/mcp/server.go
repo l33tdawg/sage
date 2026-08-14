@@ -119,6 +119,9 @@ type Server struct {
 	submitEmbeddingAuthoritative *bool
 	submitEmbeddingCacheAge      time.Time
 
+	claudeChannelMu sync.RWMutex
+	claudeChannel   *claudeChannelConfig
+
 	version string
 }
 
@@ -245,6 +248,39 @@ func (s *Server) requireBoundFederatedCaller(ctx context.Context) error {
 // Run starts the stdio MCP server loop.
 func (s *Server) Run(ctx context.Context) error {
 	reader := bufio.NewReaderSize(os.Stdin, 64<<10)
+	out := newStdioOutbound(ctx, os.Stdout)
+	var channelCancel context.CancelFunc
+	var channelDone chan struct{}
+	stopChannel := func() {
+		if channelCancel == nil {
+			return
+		}
+		channelCancel()
+		<-channelDone
+		channelCancel = nil
+		channelDone = nil
+	}
+	shutdown := func() {
+		stopChannel()
+		out.Close()
+	}
+	defer shutdown()
+	startChannel := func() {
+		if channelCancel != nil {
+			return
+		}
+		cfg, ok := s.claudeChannelSnapshot()
+		if !ok {
+			return
+		}
+		channelCtx, cancel := context.WithCancel(ctx)
+		channelCancel = cancel
+		channelDone = make(chan struct{})
+		go func() {
+			defer close(channelDone)
+			runClaudeChannel(channelCtx, out, cfg)
+		}()
+	}
 	executable, err := captureMCPExecutableSnapshot()
 	if err != nil {
 		return fmt.Errorf("SAGE MCP: establish executable handoff fence: %w", err)
@@ -256,7 +292,7 @@ func (s *Server) Run(ctx context.Context) error {
 		os.Getppid(),
 	)
 	if lifecycle.takeToolsChangedNotification() {
-		if err := writeMCPToolsChangedNotification(os.Stdout); err != nil {
+		if err := out.WriteJSON(ctx, mcpToolsChangedNotification()); err != nil {
 			return fmt.Errorf("SAGE MCP: announce upgraded tool registry: %w", err)
 		}
 	}
@@ -266,7 +302,9 @@ func (s *Server) Run(ctx context.Context) error {
 			return nil
 		}
 		if errors.Is(readErr, errMCPFrameTooLarge) {
-			s.writeError(nil, -32600, "Request too large")
+			if err := writeMCPError(ctx, out, nil, -32600, "Request too large"); err != nil {
+				return err
+			}
 			continue
 		}
 		if readErr != nil {
@@ -288,6 +326,9 @@ func (s *Server) Run(ctx context.Context) error {
 				return fmt.Errorf("SAGE MCP: installed executable became unavailable during runtime handoff")
 			}
 			fmt.Fprintf(os.Stderr, "SAGE MCP: installed executable changed; handing the pending request to the upgraded runtime\n")
+			// No old-runtime goroutine may retain stdout after the replacement owns
+			// it. Stop the optional channel first, then drain/stop the sole writer.
+			shutdown()
 			// Pass the buffered reader, not raw os.Stdin: ReadSlice may already
 			// have pulled bytes from following frames into reader's buffer.
 			started, err := handoffMCPProcess(ctx, executable.path, os.Args[1:], line, reader, os.Stdout, os.Stderr, os.Environ(), lifecycle.initialized)
@@ -306,21 +347,26 @@ func (s *Server) Run(ctx context.Context) error {
 
 		var req jsonRPCRequest
 		if err := json.Unmarshal(line, &req); err != nil {
-			s.writeError(nil, -32700, "Parse error")
+			if err := writeMCPError(ctx, out, nil, -32700, "Parse error"); err != nil {
+				return err
+			}
 			continue
 		}
 
 		resp := s.DispatchJSONRPC(ctx, &req)
 		if resp != nil {
-			s.writeResponse(resp)
+			if err := out.WriteJSON(ctx, resp); err != nil {
+				return fmt.Errorf("SAGE MCP: write response: %w", err)
+			}
 		}
 		if req.Method == "notifications/initialized" {
 			lifecycle.initialized = true
 			if lifecycle.takeToolsChangedNotification() {
-				if err := writeMCPToolsChangedNotification(os.Stdout); err != nil {
+				if err := out.WriteJSON(ctx, mcpToolsChangedNotification()); err != nil {
 					return fmt.Errorf("SAGE MCP: announce upgraded tool registry: %w", err)
 				}
 			}
+			startChannel()
 		}
 	}
 }
@@ -437,15 +483,19 @@ func withMCPEnvironment(environ []string, key, value string) []string {
 }
 
 func writeMCPToolsChangedNotification(writer io.Writer) error {
-	payload, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"method":  "notifications/tools/list_changed",
-	})
+	payload, err := json.Marshal(mcpToolsChangedNotification())
 	if err != nil {
 		return err
 	}
 	_, err = fmt.Fprintln(writer, string(payload))
 	return err
+}
+
+func mcpToolsChangedNotification() map[string]any {
+	return map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/tools/list_changed",
+	}
 }
 
 // readMCPFrame reads one newline-delimited JSON-RPC frame while enforcing a
@@ -526,14 +576,20 @@ func (s *Server) handleInitialize(ctx context.Context, req *jsonRPCRequest) *jso
 		// in handleToolsCall below.
 		instructions = autoInceptionMsg
 	}
+	capabilities := map[string]any{
+		"tools": map[string]any{"listChanged": true},
+	}
+	if _, enabled := s.claudeChannelSnapshot(); enabled {
+		capabilities["experimental"] = map[string]any{
+			"claude/channel": map[string]any{},
+		}
+	}
 	return &jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      req.ID,
 		Result: map[string]any{
 			"protocolVersion": "2024-11-05",
-			"capabilities": map[string]any{
-				"tools": map[string]any{"listChanged": true},
-			},
+			"capabilities":    capabilities,
 			"serverInfo": map[string]any{
 				"name":    "sage-mcp",
 				"version": s.version,
@@ -679,13 +735,8 @@ func (s *Server) ensureAutoInception(ctx context.Context, suppress bool) (messag
 	return conversation.autoInceptionMsg, true
 }
 
-func (s *Server) writeResponse(resp *jsonRPCResponse) {
-	data, _ := json.Marshal(resp)
-	fmt.Fprintln(os.Stdout, string(data))
-}
-
-func (s *Server) writeError(id any, code int, message string) {
-	s.writeResponse(&jsonRPCResponse{
+func writeMCPError(ctx context.Context, out *stdioOutbound, id any, code int, message string) error {
+	return out.WriteJSON(ctx, &jsonRPCResponse{
 		JSONRPC: "2.0",
 		ID:      id,
 		Error:   &rpcError{Code: code, Message: message},
