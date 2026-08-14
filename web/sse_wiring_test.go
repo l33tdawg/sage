@@ -83,7 +83,14 @@ func TestSSEEventWiring(t *testing.T) {
 	})
 
 	t.Run("dashboard JavaScript subscribes to exactly the registered events", func(t *testing.T) {
-		js := readDashboardSSEScript(t)
+		// Comment-stripped for the same reason the loop check below strips: a
+		// commented-out entry is the single most common way anyone removes a
+		// name from a JS array, and the literal harvester cannot tell a live
+		// element from one inside a comment. Reading the raw source here would
+		// let `// 'redeploy',` satisfy the registry while the browser
+		// subscribes to nothing — the exact defect this file exists to catch,
+		// reintroduced by the assertion meant to catch it.
+		js := stripJSComments(readDashboardSSEScript(t))
 		listened := jsListenedEventTypes(t, js)
 		assertNoDuplicates(t, listened, "the eventTypes array in web/static/js/sse.js")
 		assertSameEventSet(t, registry, listened,
@@ -123,6 +130,21 @@ func TestSSEEventWiring(t *testing.T) {
 			[]string{"api/rest/memory_handler.go"},
 			callerFilesOf(t, "emitContentlessRetrievalActivity"),
 			"the contentless retrieval wrapper is scanned by name; a new caller elsewhere is invisible to the wiring pin")
+
+		// Pinning the two helper NAMES does not bound the bypass, because the
+		// thing that launders a name is the callback ESCAPING as a value:
+		//
+		//	emit := s.OnEvent
+		//	emit("brand_new_event", "", "", "", nil)
+		//
+		// produces no emit site and no unresolved entry — the scan simply does
+		// not see it, and every other subtest here stays green. Any new wrapper
+		// taking an api/rest.EventCallback has the same effect without touching
+		// either pinned name. So pin the SHAPE: OnEvent may be called, handed to
+		// the one sanctioned wrapper, nil-checked, or assigned to. Reading it as
+		// a value anywhere else has to be a deliberate act that fails here.
+		assert.Empty(t, scan.escapes,
+			"the OnEvent callback must not escape as a value: a func value carries the event name past the AST scan, so a new indirection would emit unregistered events with every wiring assertion still green")
 	})
 }
 
@@ -175,10 +197,27 @@ type sseSourceScan struct {
 	// declared twice with different values is recorded in stringConstConflicts
 	// and refused at resolve time rather than silently resolving to whichever
 	// file the walk happened to reach last.
+	// Keyed by "<package dir>\x00<identifier>". Keying by bare identifier
+	// across the module made this rail 394 names wide and one-directional: a
+	// const in an unrelated package could resolve an emit site here, and the
+	// conflict set could not see it because it only compares const against
+	// const — a package-level VAR of the same name is invisible to it while
+	// still shadowing at the call site. Same-package scoping removes the whole
+	// class instead of widening the conflict detector to chase it.
 	stringConsts         map[string]string
 	stringConstConflicts map[string]bool
-	emits                []sseEmitSite
-	unresolved           []string
+	// fileDirs resolves an AST file back to its package directory, so a lookup
+	// can be restricted to consts declared alongside the emit site.
+	fileDirs   map[*ast.File]string
+	emits      []sseEmitSite
+	unresolved []string
+	// escapes records every place the OnEvent callback is read as a VALUE
+	// rather than called. That is the shape that actually launders an event
+	// name past this scan: `emit := s.OnEvent; emit("anything", ...)` produces
+	// no emit site and no unresolved entry, so pinning the callers of two
+	// named helper functions does not bound the bypass — the escaping callback
+	// does.
+	escapes []string
 }
 
 // sitesByName renders the emit sites grouped by event name so a failure names
@@ -255,10 +294,12 @@ func scanSSESources(t *testing.T) sseSourceScan {
 		consts:               map[string]string{},
 		stringConsts:         map[string]string{},
 		stringConstConflicts: map[string]bool{},
+		fileDirs:             map[*ast.File]string{},
 	}
 
 	// Pass 1: the EventType vocabulary, so pass 2 can resolve identifiers.
 	for _, pf := range parsed {
+		scan.fileDirs[pf.file] = filepath.ToSlash(filepath.Dir(pf.path))
 		for _, decl := range pf.file.Decls {
 			gen, ok := decl.(*ast.GenDecl)
 			if !ok || gen.Tok != token.CONST {
@@ -287,11 +328,12 @@ func scanSSESources(t *testing.T) sseSourceScan {
 							if unquoteErr != nil {
 								continue
 							}
-							if prior, seen := scan.stringConsts[name.Name]; seen && prior != unquoted {
-								scan.stringConstConflicts[name.Name] = true
+							key := filepath.ToSlash(filepath.Dir(pf.path)) + "\x00" + name.Name
+							if prior, seen := scan.stringConsts[key]; seen && prior != unquoted {
+								scan.stringConstConflicts[key] = true
 								continue
 							}
-							scan.stringConsts[name.Name] = unquoted
+							scan.stringConsts[key] = unquoted
 						}
 					}
 					continue
@@ -325,6 +367,47 @@ func scanSSESources(t *testing.T) sseSourceScan {
 				scan.emits = append(scan.emits, sseEmitSite{name: name, pos: pos})
 			}
 		}
+
+		// Positions of OnEvent references that are legitimate: called directly,
+		// handed to the one sanctioned wrapper, compared against nil, or
+		// assigned TO (which installs the callback rather than reading it).
+		sanctioned := map[token.Pos]bool{}
+		ast.Inspect(pf.file, func(node ast.Node) bool {
+			switch n := node.(type) {
+			case *ast.CallExpr:
+				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "OnEvent" {
+					sanctioned[sel.Pos()] = true
+				}
+				if ident, ok := n.Fun.(*ast.Ident); ok && ident.Name == "emitContentlessRetrievalActivity" {
+					for _, arg := range n.Args {
+						if sel, isSel := arg.(*ast.SelectorExpr); isSel && sel.Sel.Name == "OnEvent" {
+							sanctioned[sel.Pos()] = true
+						}
+					}
+				}
+			case *ast.BinaryExpr:
+				for _, side := range []ast.Expr{n.X, n.Y} {
+					if sel, ok := side.(*ast.SelectorExpr); ok && sel.Sel.Name == "OnEvent" {
+						sanctioned[sel.Pos()] = true
+					}
+				}
+			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && sel.Sel.Name == "OnEvent" {
+						sanctioned[sel.Pos()] = true
+					}
+				}
+			}
+			return true
+		})
+		ast.Inspect(pf.file, func(node ast.Node) bool {
+			sel, ok := node.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "OnEvent" || sanctioned[sel.Pos()] {
+				return true
+			}
+			scan.escapes = append(scan.escapes, relPos(root, fset, sel.Pos()))
+			return true
+		})
 
 		ast.Inspect(pf.file, func(node ast.Node) bool {
 			switch n := node.(type) {
@@ -363,10 +446,12 @@ func scanSSESources(t *testing.T) sseSourceScan {
 					record(kv.Value, "SSEEvent Type field")
 					return true
 				}
-				if len(n.Elts) > 0 {
-					scan.unresolved = append(scan.unresolved,
-						"SSEEvent literal without a Type field at "+relPos(root, fset, n.Pos()))
-				}
+				// Report the zero literal too. SSEEvent{} followed by a later
+				// ev.Type = ... assignment is the natural shape for building an
+				// event incrementally, and skipping it let an arbitrary runtime
+				// string reach the stream with no emit recorded and no complaint.
+				scan.unresolved = append(scan.unresolved,
+					"SSEEvent literal without a Type field at "+relPos(root, fset, n.Pos()))
 			}
 			return true
 		})
@@ -409,14 +494,17 @@ func (s *sseSourceScan) resolve(file *ast.File, expr ast.Expr, depth int) ([]str
 		if value, ok := s.consts[e.Name]; ok {
 			return []string{value}, true
 		}
-		if names, ok := s.resolveLocalVar(file, e.Name, depth); ok {
+		if names, ok := s.resolveLocalVar(file, e, depth); ok {
 			return names, true
 		}
 		// Weakest source, checked last and never when ambiguous: a plain
 		// untyped string const. Refusing a conflicted name keeps a wrong
 		// resolution from masquerading as a checked one.
-		if value, ok := s.stringConsts[e.Name]; ok && !s.stringConstConflicts[e.Name] {
-			return []string{value}, true
+		if dir, known := s.fileDirs[file]; known {
+			key := dir + "\x00" + e.Name
+			if value, ok := s.stringConsts[key]; ok && !s.stringConstConflicts[key] {
+				return []string{value}, true
+			}
 		}
 		return nil, false
 	case *ast.SelectorExpr:
@@ -460,7 +548,28 @@ func (s *sseSourceScan) resolve(file *ast.File, expr ast.Expr, depth int) ([]str
 // resolveLocalVar resolves an identifier that is not an EventType const by
 // collecting every value assigned to that name in the same file — the shape used
 // where a handler picks between two event types before broadcasting.
-func (s *sseSourceScan) resolveLocalVar(file *ast.File, name string, depth int) ([]string, bool) {
+func (s *sseSourceScan) resolveLocalVar(file *ast.File, ident *ast.Ident, depth int) ([]string, bool) {
+	name := ident.Name
+
+	// Scope the search to the function the identifier actually appears in.
+	// Collecting assignments from anywhere in the FILE resolves one function's
+	// identifier from an unrelated function's local variable — and because this
+	// returns found=true, the site is not merely missed, it is CERTIFIED with a
+	// value it does not have. web/handler.go is 5,000 lines and already declares
+	// `eventType :=`, so any new handler there taking an EventType parameter
+	// would inherit that false clearance.
+	enclosing := enclosingFunc(file, ident.Pos())
+	if enclosing == nil {
+		return nil, false
+	}
+
+	// A parameter, receiver or named result is supplied by the CALLER. Its value
+	// is not knowable here, so refuse it outright rather than resolving it from
+	// some same-function assignment that happens to share the name.
+	if isFuncScopedName(enclosing, name) {
+		return nil, false
+	}
+
 	var values []string
 	found := false
 	resolvedAll := true
@@ -481,7 +590,7 @@ func (s *sseSourceScan) resolveLocalVar(file *ast.File, name string, depth int) 
 		}
 	}
 
-	ast.Inspect(file, func(node ast.Node) bool {
+	ast.Inspect(enclosing, func(node ast.Node) bool {
 		switch n := node.(type) {
 		case *ast.AssignStmt:
 			collect(n.Lhs, n.Rhs)
@@ -499,6 +608,57 @@ func (s *sseSourceScan) resolveLocalVar(file *ast.File, name string, depth int) 
 		return nil, false
 	}
 	return values, resolvedAll
+}
+
+// enclosingFunc returns the function declaration or literal body containing pos,
+// preferring the innermost, so a closure is scoped to itself rather than to the
+// function that encloses it.
+func enclosingFunc(file *ast.File, pos token.Pos) ast.Node {
+	var best ast.Node
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.FuncDecl, *ast.FuncLit:
+		default:
+			return true
+		}
+		if pos < n.Pos() || pos > n.End() {
+			return true
+		}
+		if best == nil || n.Pos() > best.Pos() {
+			best = n
+		}
+		return true
+	})
+	return best
+}
+
+// isFuncScopedName reports whether name is bound by the function's signature —
+// a parameter, a receiver, or a named result. Those are caller-supplied and
+// therefore unknowable from this side of the call.
+func isFuncScopedName(fn ast.Node, name string) bool {
+	var sig *ast.FuncType
+	var recv *ast.FieldList
+	switch f := fn.(type) {
+	case *ast.FuncDecl:
+		sig, recv = f.Type, f.Recv
+	case *ast.FuncLit:
+		sig = f.Type
+	default:
+		return false
+	}
+	for _, list := range []*ast.FieldList{recv, sig.Params, sig.Results} {
+		if list == nil {
+			continue
+		}
+		for _, field := range list.List {
+			for _, ident := range field.Names {
+				if ident.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // isCalled reports whether a call's function expression names fn, written either
@@ -666,11 +826,24 @@ func callerFilesOf(t *testing.T, fn string) []string {
 			if !ok || !isCalled(call.Fun, fn) {
 				return true
 			}
-			// The declaration site is not a caller.
+			// Exempt the declaration ITSELF, by position — not every call that
+			// happens to share a file with it. web.EventTypeFromREST is declared
+			// in web/sse.go, the same file that owns SSEBroadcaster.Broadcast, so
+			// a file-wide exemption blinds this check to a bridge call sitting
+			// directly next to the broadcaster.
+			inDeclaration := false
 			for _, decl := range file.Decls {
-				if fd, isFunc := decl.(*ast.FuncDecl); isFunc && fd.Name.Name == fn {
-					return true
+				fd, isFunc := decl.(*ast.FuncDecl)
+				if !isFunc || fd.Name.Name != fn {
+					continue
 				}
+				if call.Pos() >= fd.Pos() && call.End() <= fd.End() {
+					inDeclaration = true
+					break
+				}
+			}
+			if inDeclaration {
+				return true
 			}
 			seen[filepath.ToSlash(rel)] = true
 			return true
