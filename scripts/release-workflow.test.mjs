@@ -1069,7 +1069,7 @@ test('App-v26 fixtures bound persistent-peer retries below their recovery assert
   assert.match(v119RetryCeiling, /cfg\.PersistentPeersMaxDialPeriod = period/);
   assert.match(
     vendoredNode,
-    /cometCfg\.P2P\.PersistentPeers = joinPeers\(cfg\.Quorum\.Peers\)[\s\S]*?applyV119FixturePersistentPeerDialCeiling\(cometCfg\.P2P\)[\s\S]*?return fmt\.Errorf\("configure fixture persistent-peer retry ceiling: %w", err\)/,
+    /cometCfg\.P2P\.PersistentPeers = joinPeers\(cfg\.Quorum\.Peers\)[\s\S]*?fixtureErr := applyV119FixturePersistentPeerDialCeiling\(cometCfg\.P2P\); fixtureErr != nil[\s\S]*?return fmt\.Errorf\("configure fixture persistent-peer retry ceiling: %w", fixtureErr\)/,
   );
   assert.match(mutualPeers, /provider_peers=.*rpc_peer_ids "\$\{PROVIDER\}"/);
   assert.match(mutualPeers, /receiver_peers=.*rpc_peer_ids "\$\{RECEIVER\}"/);
