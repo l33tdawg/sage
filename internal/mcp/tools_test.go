@@ -4176,6 +4176,75 @@ func TestSageInceptionAppV23ZeroHomeSeedsOnlyFirstRegistration(t *testing.T) {
 	}
 }
 
+func TestSageInceptionAppV23ActiveEmptyHomeNeverTouchesMemoryRoutes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		profile  string
+		canRead  bool
+		canWrite bool
+	}{
+		{
+			name: "read only", profile: store.AppV23ProfileReadOnly,
+			canRead: true, canWrite: false,
+		},
+		{
+			name: "legacy restricted", profile: store.AppV23ProfileLegacyRestricted,
+			canRead: true, canWrite: false,
+		},
+		{
+			name: "empty profile active standing", profile: "",
+			canRead: false, canWrite: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var listCalls, embedCalls, submitCalls atomic.Int32
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/agent/register", func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"agent_id": "domainless-active", "name": "domainless-active",
+					"status": "already_registered",
+				})
+			})
+			mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "standing", r.URL.Query().Get("view"))
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"agent_id": r.Header.Get("X-Agent-ID"), "profile": tc.profile,
+					"enrollment_status": "active", "home_domain": "",
+					"can_read": tc.canRead, "can_write": tc.canWrite,
+					"access_scope": "home_domain",
+				})
+			})
+			mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, _ *http.Request) {
+				listCalls.Add(1)
+				http.Error(w, "domainless app-v23 inception must not issue an unscoped list", http.StatusInternalServerError)
+			})
+			mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, _ *http.Request) {
+				embedCalls.Add(1)
+				http.Error(w, "domainless app-v23 inception must not embed seeds", http.StatusInternalServerError)
+			})
+			mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, _ *http.Request) {
+				submitCalls.Add(1)
+				http.Error(w, "domainless app-v23 inception must not submit seeds", http.StatusInternalServerError)
+			})
+			ts := httptest.NewServer(mux)
+			t.Cleanup(ts.Close)
+
+			_, privateKey, err := ed25519.GenerateKey(nil)
+			require.NoError(t, err)
+			result, err := NewServer(ts.URL, privateKey).toolInception(context.Background(), map[string]any{})
+			require.NoError(t, err)
+			payload := result.(map[string]any)
+			require.Equal(t, "awakened", payload["status"])
+			require.Equal(t, "already_registered", payload["registration"])
+			require.Equal(t, "temporarily_unavailable", payload["memory_access"])
+			require.Equal(t, true, payload["retryable"])
+			require.Zero(t, listCalls.Load())
+			require.Zero(t, embedCalls.Load())
+			require.Zero(t, submitCalls.Load())
+		})
+	}
+}
+
 func TestSageInceptionAppV23CountHasIndependentBoundedDeadline(t *testing.T) {
 	// Keep the maximum independent from callerInceptionCountBudget so inflating
 	// the production timeout cannot also inflate the test's allowed duration.
