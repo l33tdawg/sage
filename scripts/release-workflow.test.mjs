@@ -56,6 +56,11 @@ const v119StateSyncFixture = readFileSync(
   new URL('../cmd/sage-gui/v119_state_sync_fixture_command_v119testfixture.go', import.meta.url),
   'utf8',
 );
+const v119RetryCeiling = readFileSync(
+  new URL('../cmd/sage-gui/v119_p2p_retry_ceiling_v119testfixture.go', import.meta.url),
+  'utf8',
+);
+const vendoredNode = readFileSync(new URL('../cmd/sage-gui/node.go', import.meta.url), 'utf8');
 
 function job(id) {
   const marker = `  ${id}:\n`;
@@ -956,7 +961,10 @@ test('the real-Comet fixture proves full mesh recovery before the 2+2 split', ()
     'assert_matched_apphash "post-one-validator partition" 180',
   );
   const healedAppVersion = v119Chaos.indexOf('wait_all_app_version 23 180', healedAppHash);
-  const recoveryCall = v119Chaos.indexOf('wait_full_peer_mesh 90 2', healedAppVersion);
+  const recoveryCall = v119Chaos.indexOf(
+    'wait_full_peer_mesh "${FULL_MESH_RECOVERY_TIMEOUT}" 2',
+    healedAppVersion,
+  );
   const recoveredMesh = v119Chaos.indexOf(
     'proved the full peer mesh recovered before the next partition',
     healedAppVersion,
@@ -988,7 +996,8 @@ test('the real-Comet fixture proves full mesh recovery before the 2+2 split', ()
   );
   const recoveryWindow = v119Chaos.slice(healedAppVersion, recoveredMesh);
   assert.equal(
-    (recoveryWindow.match(/wait_full_peer_mesh 90 2/g) || []).length,
+    (recoveryWindow.match(/wait_full_peer_mesh "\$\{FULL_MESH_RECOVERY_TIMEOUT\}" 2/g) || [])
+      .length,
     1,
     'fault 2 must have one bounded two-round full-mesh precondition',
   );
@@ -1034,6 +1043,59 @@ test('the real-Comet fixture proves full mesh recovery before the 2+2 split', ()
     /consecutive=\$\(\(consecutive \+ 1\)\)[\s\S]*?\[ "\$\{consecutive\}" -ge "\$\{required_rounds\}" \][\s\S]*?else[\s\S]*?consecutive=0/,
     'one bounded sampling loop must observe every exact peer set in two consecutive rounds',
   );
+});
+
+test('App-v26 fixtures bound persistent-peer retries below their recovery assertions', () => {
+  const chaosConfig = v119Chaos.slice(
+    v119Chaos.indexOf('python3 - "${APP_V20_MEMPOOL_MAX_TX_BYTES}"'),
+    v119Chaos.indexOf("echo \"validated external Comet profile", v119Chaos.indexOf('python3 - "${APP_V20_MEMPOOL_MAX_TX_BYTES}"')),
+  );
+  const mutualPeers = shellFunction(v119StateSync, 'wait_mutual_authorized_peers');
+
+  for (const script of [v119Chaos, v119StateSync]) {
+    assert.match(script, /^PERSISTENT_PEER_MAX_DIAL_SECONDS=5$/m);
+    assert.match(script, /^PERSISTENT_PEER_MAX_DIAL_PERIOD="\$\{PERSISTENT_PEER_MAX_DIAL_SECONDS\}s"$/m);
+  }
+  assert.match(v119Chaos, /^FULL_MESH_RECOVERY_TIMEOUT=90$/m);
+  assert.match(v119Chaos, /FULL_MESH_RECOVERY_TIMEOUT.*PERSISTENT_PEER_MAX_DIAL_SECONDS \* 6/s);
+  assert.match(chaosConfig, /persistent_peers_max_dial_period/);
+  assert.match(chaosConfig, /path\.write_text\(text\)/);
+  assert.match(
+    v119StateSync,
+    /-e "SAGE_V119_PERSISTENT_PEER_MAX_DIAL_PERIOD=\$\{PERSISTENT_PEER_MAX_DIAL_PERIOD\}"/,
+  );
+  assert.match(v119RetryCeiling, /time\.ParseDuration\(raw\)/);
+  assert.match(v119RetryCeiling, /period <= 0/);
+  assert.match(v119RetryCeiling, /cfg\.PersistentPeersMaxDialPeriod = period/);
+  assert.match(
+    vendoredNode,
+    /cometCfg\.P2P\.PersistentPeers = joinPeers\(cfg\.Quorum\.Peers\)[\s\S]*?applyV119FixturePersistentPeerDialCeiling\(cometCfg\.P2P\)[\s\S]*?return fmt\.Errorf\("configure fixture persistent-peer retry ceiling: %w", err\)/,
+  );
+  assert.match(mutualPeers, /provider_peers=.*rpc_peer_ids "\$\{PROVIDER\}"/);
+  assert.match(mutualPeers, /receiver_peers=.*rpc_peer_ids "\$\{RECEIVER\}"/);
+  assert.match(mutualPeers, /persistent-peer max dial=\$\{PERSISTENT_PEER_MAX_DIAL_PERIOD\}/);
+});
+
+test('the authorized receiver restart preserves the pre-publication readiness sentinel', () => {
+  const placeholderSwap = v119StateSync.indexOf(
+    'docker network disconnect "${P2P_NETWORK}" "${RECEIVER}"',
+  );
+  const receiverReconnect = v119StateSync.indexOf(
+    'docker network connect --alias receiver-p2p "${P2P_NETWORK}" "${RECEIVER}"',
+    placeholderSwap + 1,
+  );
+  const sealWait = v119StateSync.indexOf('wait_pre_publish_marker', receiverReconnect);
+  const swap = v119StateSync.slice(placeholderSwap, sealWait);
+  const probe = shellFunction(v119StateSync, 'start_readiness_probe');
+
+  assert.ok(
+    placeholderSwap >= 0 && receiverReconnect > placeholderSwap && sealWait > receiverReconnect,
+  );
+  assert.match(swap, /stop_readiness_probe[\s\S]*?stop_sage "\$\{RECEIVER\}"/);
+  assert.match(swap, /docker start "\$\{RECEIVER\}"[\s\S]*?start_readiness_probe[\s\S]*?wait_rpc "\$\{RECEIVER\}"/);
+  assert.match(swap, /wait_mutual_authorized_peers\s*$/m);
+  assert.doesNotMatch(probe, /rm -f/);
+  assert.equal((v119StateSync.match(/rm -f "\$\{READINESS_VIOLATION\}"/g) || []).length, 1);
 });
 
 test('all private artifacts converge at one publication gate', () => {

@@ -28,6 +28,14 @@ REBUILD=${V119_STATE_SYNC_REBUILD:-${V119_CHAOS_REBUILD:-1}}
 KEEP=${V119_STATE_SYNC_KEEP:-0}
 TIMEOUT=${V119_STATE_SYNC_TIMEOUT:-240}
 TARGET_APP_VERSION=26
+PERSISTENT_PEER_MAX_DIAL_SECONDS=5
+PERSISTENT_PEER_MAX_DIAL_PERIOD="${PERSISTENT_PEER_MAX_DIAL_SECONDS}s"
+AUTHORIZED_PEER_ASSERT_TIMEOUT=30
+
+if [ "${AUTHORIZED_PEER_ASSERT_TIMEOUT}" -lt "$((PERSISTENT_PEER_MAX_DIAL_SECONDS * 4))" ]; then
+  echo "ERROR: authorized peer assertion must cover at least four bounded persistent-peer retries" >&2
+  exit 1
+fi
 
 for setting in "REBUILD=${REBUILD}" "KEEP=${KEEP}"; do
   case "${setting#*=}" in
@@ -420,6 +428,7 @@ create_sage() {
     -e SAGE_CMT_RPC_ADDR=tcp://0.0.0.0:26657 \
     -e SAGE_CMT_P2P_ADDR=tcp://0.0.0.0:26656 \
     -e SAGE_NO_BROWSER=1 \
+    -e "SAGE_V119_PERSISTENT_PEER_MAX_DIAL_PERIOD=${PERSISTENT_PEER_MAX_DIAL_PERIOD}" \
     -e "SAGE_V119_STATE_SYNC_PRE_PUBLISH_PAUSE_FILE=${pre_publish_pause_file}" \
     -v "${home}:/sage" \
     "${ABCI_IMAGE}" ./sage-gui-v119-fixture serve >/dev/null
@@ -565,7 +574,6 @@ start_readiness_probe() {
   fi
   docker exec "${RECEIVER}" sh -ec '
     violation=$1
-    rm -f "${violation}"
     while :; do
       if wget -qO- http://127.0.0.1:8080/ready >/dev/null 2>&1; then
         printf "%s\n" "REST /ready opened before the durable pre-publication boundary" >"${violation}"
@@ -721,6 +729,34 @@ strip_ansi() {
 
 rpc_peer_ids() {
   rpc_json "$1" /net_info | python3 -c 'import json,sys; print(" ".join(sorted(p["node_info"]["id"] for p in json.load(sys.stdin)["result"]["peers"])))'
+}
+
+wait_mutual_authorized_peers() {
+  local deadline=$((SECONDS + AUTHORIZED_PEER_ASSERT_TIMEOUT))
+  local provider_peers=unavailable receiver_peers=unavailable
+  local provider_has_receiver=0 receiver_has_provider=0
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    provider_peers=$(rpc_peer_ids "${PROVIDER}" 2>/dev/null || printf unavailable)
+    receiver_peers=$(rpc_peer_ids "${RECEIVER}" 2>/dev/null || printf unavailable)
+    case " ${provider_peers} " in
+      *" ${receiver_id} "*) provider_has_receiver=1 ;;
+      *) provider_has_receiver=0 ;;
+    esac
+    case " ${receiver_peers} " in
+      *" ${provider_id} "*) receiver_has_provider=1 ;;
+      *) receiver_has_provider=0 ;;
+    esac
+    if [ "${provider_has_receiver}" = 1 ] && [ "${receiver_has_provider}" = 1 ]; then
+      echo "authorized provider and receiver reported reciprocal peer IDs"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "ERROR: authorized peer IDs were not reciprocal within ${AUTHORIZED_PEER_ASSERT_TIMEOUT}s" >&2
+  echo "ERROR: persistent-peer max dial=${PERSISTENT_PEER_MAX_DIAL_PERIOD} provider=${provider_peers} receiver=${receiver_peers}" >&2
+  echo "ERROR: provider/receiver network attachments:" >&2
+  docker inspect --format '{{json .NetworkSettings.Networks}}' "${PROVIDER}" "${RECEIVER}" >&2 || true
+  return 1
 }
 
 rpc_p2p_filter_code() {
@@ -1287,6 +1323,7 @@ docker network connect --alias unauthorized-p2p "${P2P_NETWORK}" "${ATTACKER}"
 docker start "${RECEIVER}" "${ATTACKER}" >/dev/null
 wait_rpc "${RECEIVER}"
 wait_rpc "${ATTACKER}"
+docker exec "${RECEIVER}" rm -f "${READINESS_VIOLATION}"
 start_readiness_probe
 for candidate in "${RECEIVER}" "${ATTACKER}"; do
   assert_remote_rpc_origins "${candidate}" "${snapshot_height}"
@@ -1305,6 +1342,8 @@ fi
 # An outbound switch may transiently list its locally approved provider before
 # that remote admission rejection and EOF arrive.
 docker network disconnect "${P2P_NETWORK}" "${RECEIVER}" >/dev/null
+stop_readiness_probe
+stop_sage "${RECEIVER}"
 docker rm -f "${P2P_PLACEHOLDER}" >/dev/null
 authenticated_eofs_before=$(authenticated_outbound_eofs "${ATTACKER}" "${provider_id}")
 docker network connect --alias provider-p2p "${P2P_NETWORK}" "${PROVIDER}"
@@ -1409,6 +1448,10 @@ if [ "${provider_serving_height}" != "${latest_height}" ] ||
   exit 1
 fi
 docker network connect --alias receiver-p2p "${P2P_NETWORK}" "${RECEIVER}"
+docker start "${RECEIVER}" >/dev/null
+start_readiness_probe
+wait_rpc "${RECEIVER}"
+wait_mutual_authorized_peers
 wait_pre_publish_marker
 if rest_ready "${RECEIVER}"; then
   echo "ERROR: receiver exposed REST while its durable activation was still unpublished" >&2

@@ -699,6 +699,9 @@ func runServe(startupProof string) (rerr error) {
 		cometCfg.P2P.AddrBookStrict = false  // Allow LAN addresses
 		cometCfg.P2P.AllowDuplicateIP = true // Multiple nodes on same network
 		cometCfg.P2P.PexReactor = false      // Use persistent peers only
+		if err := applyV119FixturePersistentPeerDialCeiling(cometCfg.P2P); err != nil {
+			return fmt.Errorf("configure fixture persistent-peer retry ceiling: %w", err)
+		}
 		logger.Info().
 			Str("p2p_addr", p2pAddr).
 			Int("peers", len(cfg.Quorum.Peers)).

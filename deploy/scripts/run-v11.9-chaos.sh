@@ -34,6 +34,9 @@ NETWORK=${PROJECT}_sagenet
 FIREWALL_CHAIN=SAGE_V119
 P2P_PORT=26656
 P2P_TCP_RETRIES2=3
+PERSISTENT_PEER_MAX_DIAL_SECONDS=5
+PERSISTENT_PEER_MAX_DIAL_PERIOD="${PERSISTENT_PEER_MAX_DIAL_SECONDS}s"
+FULL_MESH_RECOVERY_TIMEOUT=90
 APP_V20_MEMPOOL_MAX_TX_BYTES=1048576
 COMETBFT_SOURCE_COMMIT=feb2aea4dc271d612129afc958cb844713ec792b
 COMETBFT_RUNTIME_VERSION="0.38.22+${COMETBFT_SOURCE_COMMIT}"
@@ -74,6 +77,11 @@ V119_VALIDATOR_PROBE_KEY=
 export V119_GOVERNANCE_OPERATOR_ID=
 export V119_GOVERNANCE_HEARTBEAT_ID=
 export V119_VALIDATOR_PROBE_ID=
+
+if [ "${FULL_MESH_RECOVERY_TIMEOUT}" -lt "$((PERSISTENT_PEER_MAX_DIAL_SECONDS * 6))" ]; then
+  echo "ERROR: full-mesh recovery timeout must cover at least six bounded persistent-peer retries" >&2
+  exit 1
+fi
 
 dump_diagnostics() {
   "${COMPOSE[@]}" ps -a || true
@@ -1052,6 +1060,7 @@ wait_full_peer_mesh() {
   local required_rounds=${2:-2}
   local deadline=$((SECONDS + timeout))
   local consecutive=0
+  local service id
   local expected0 expected1 expected2 expected3
   local actual0=ERROR actual1=ERROR actual2=ERROR actual3=ERROR
   expected0=$(expected_peer_ids "${NODE_IDS[1]}" "${NODE_IDS[2]}" "${NODE_IDS[3]}")
@@ -1080,7 +1089,17 @@ wait_full_peer_mesh() {
   done
 
   echo "ERROR: full peer mesh did not remain exact for ${required_rounds} consecutive rounds within ${timeout}s" >&2
+  echo "ERROR: configured persistent-peer max dial is ${PERSISTENT_PEER_MAX_DIAL_PERIOD}; recovery budget is ${timeout}s" >&2
   echo "ERROR: RPC peer snapshots: 0=${actual0} 1=${actual1} 2=${actual2} 3=${actual3}" >&2
+  for service in cometbft0 cometbft1 cometbft2 cometbft3; do
+    id=$(service_container "${service}" 2>/dev/null || true)
+    echo "ERROR: ${service} firewall diagnostics:" >&2
+    if [ -n "${id}" ]; then
+      docker exec "${id}" iptables -w 5 -S "${FIREWALL_CHAIN}" >&2 || true
+    else
+      echo "ERROR: ${service} has no container" >&2
+    fi
+  done
   return 1
 }
 
@@ -1347,7 +1366,7 @@ SAGE_TESTNET_ABCI_HOST_SUFFIX="-local" \
 COMETBFT_DOCKER_IMAGE="sage-v119-chaos-node:local" \
   bash deploy/init-testnet.sh
 
-python3 - "${APP_V20_MEMPOOL_MAX_TX_BYTES}" \
+python3 - "${APP_V20_MEMPOOL_MAX_TX_BYTES}" "${PERSISTENT_PEER_MAX_DIAL_PERIOD}" \
   "${V119_CHAOS_GENESIS_DIR}/node0/config/config.toml" \
   "${V119_CHAOS_GENESIS_DIR}/node1/config/config.toml" \
   "${V119_CHAOS_GENESIS_DIR}/node2/config/config.toml" \
@@ -1357,7 +1376,8 @@ import re
 import sys
 
 max_tx_bytes = int(sys.argv[1])
-for raw_path in sys.argv[2:]:
+max_dial_period = sys.argv[2]
+for raw_path in sys.argv[3:]:
     path = pathlib.Path(raw_path)
     text = path.read_text()
 
@@ -1369,8 +1389,20 @@ for raw_path in sys.argv[2:]:
     one(r"^recheck\s*=\s*(\S+)\s*$", "true")
     one(r"^max_tx_bytes\s*=\s*(\d+)\s*$", str(max_tx_bytes))
     one(r'^wal_dir\s*=\s*("[^"]*")\s*$', '""')
+    values = re.findall(r'^persistent_peers_max_dial_period\s*=\s*"([^"]*)"\s*$', text, flags=re.MULTILINE)
+    if len(values) != 1:
+        raise SystemExit(f"{path}: wanted one persistent_peers_max_dial_period, got {values!r}")
+    text = re.sub(
+        r'^(persistent_peers_max_dial_period\s*=\s*)"[^"]*"\s*$',
+        rf'\1"{max_dial_period}"',
+        text,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    path.write_text(text)
+    one(r'^persistent_peers_max_dial_period\s*=\s*"([^"]*)"\s*$', max_dial_period)
 PY
-echo "validated external Comet mempool transition profile (recheck=true, max_tx_bytes=${APP_V20_MEMPOOL_MAX_TX_BYTES}, wal_dir empty)"
+echo "validated external Comet profile (recheck=true, max_tx_bytes=${APP_V20_MEMPOOL_MAX_TX_BYTES}, wal_dir empty, persistent-peer max dial ${PERSISTENT_PEER_MAX_DIAL_PERIOD})"
 
 NODE_PUBKEYS=()
 NODE_PUBKEYS_B64=()
@@ -1742,7 +1774,7 @@ for service in cometbft0 cometbft1 cometbft2 cometbft3; do
 done
 assert_matched_apphash "post-one-validator partition" 180
 wait_all_app_version 23 180
-wait_full_peer_mesh 90 2
+wait_full_peer_mesh "${FULL_MESH_RECOVERY_TIMEOUT}" 2
 echo "proved the full peer mesh recovered before the next partition"
 
 echo "--- fault 2: post-removal stable-IP 2+2 split must halt both live halves ---"
