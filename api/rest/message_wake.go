@@ -197,12 +197,28 @@ func writeMessageWakeEvent(w http.ResponseWriter, state store.MessageWakeState) 
 	if err != nil {
 		return err
 	}
+	return writeMessageWakeFrame(w, func() error {
+		_, err := fmt.Fprintf(w, "id: %d\nevent: wake\ndata: %s\n\n", state.Seq, payload)
+		return err
+	})
+}
+
+func writeMessageWakeHeartbeat(w http.ResponseWriter) error {
+	return writeMessageWakeFrame(w, func() error {
+		_, err := fmt.Fprint(w, ": heartbeat\n\n")
+		return err
+	})
+}
+
+func writeMessageWakeFrame(w http.ResponseWriter, write func() error) error {
 	controller := http.NewResponseController(w)
+	// In-process/test writers may not expose transport deadlines. Retain their
+	// existing best-effort behavior, but fail closed on real transport errors.
 	if err := controller.SetWriteDeadline(time.Now().Add(messageWakeWriteBudget)); err != nil &&
 		!errors.Is(err, http.ErrNotSupported) {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "id: %d\nevent: wake\ndata: %s\n\n", state.Seq, payload); err != nil {
+	if err := write(); err != nil {
 		return err
 	}
 	return controller.Flush()
@@ -283,14 +299,7 @@ func (s *Server) handleMessageWake(w http.ResponseWriter, r *http.Request) {
 		case <-subscription.done:
 			return
 		case <-heartbeat.C:
-			if err := controller.SetWriteDeadline(time.Now().Add(messageWakeWriteBudget)); err != nil &&
-				!errors.Is(err, http.ErrNotSupported) {
-				return
-			}
-			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
-				return
-			}
-			if err := controller.Flush(); err != nil {
+			if err := writeMessageWakeHeartbeat(w); err != nil {
 				return
 			}
 		case <-subscription.events:

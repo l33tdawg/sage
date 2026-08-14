@@ -2,7 +2,9 @@ package rest
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,39 @@ import (
 
 	"github.com/l33tdawg/sage/internal/store"
 )
+
+type deadlineAwareWakeWriter struct {
+	header      http.Header
+	body        bytes.Buffer
+	steps       []string
+	deadline    time.Time
+	deadlineErr error
+}
+
+func (w *deadlineAwareWakeWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = make(http.Header)
+	}
+	return w.header
+}
+
+func (*deadlineAwareWakeWriter) WriteHeader(int) {}
+
+func (w *deadlineAwareWakeWriter) Write(payload []byte) (int, error) {
+	w.steps = append(w.steps, "write")
+	return w.body.Write(payload)
+}
+
+func (w *deadlineAwareWakeWriter) SetWriteDeadline(deadline time.Time) error {
+	w.steps = append(w.steps, "deadline")
+	w.deadline = deadline
+	return w.deadlineErr
+}
+
+func (w *deadlineAwareWakeWriter) FlushError() error {
+	w.steps = append(w.steps, "flush")
+	return nil
+}
 
 func TestMessageWakeBrokerIsExactCoalescedAndSingleConsumer(t *testing.T) {
 	broker := newMessageWakeBroker(time.Minute)
@@ -66,6 +101,52 @@ func TestMessageWakeWireContractAndProductionBoundsAreFixed(t *testing.T) {
 	require.NoError(t, writeMessageWakeEvent(recorder, store.MessageWakeState{Seq: 7, Pending: true}))
 	require.Equal(t, "id: 7\nevent: wake\ndata: {\"version\":1,\"seq\":7,\"pending\":true}\n\n", recorder.Body.String(),
 		"the supervisor contract is byte-stable and contains no extensible message metadata")
+}
+
+func TestMessageWakeFramesSetBoundedDeadlineBeforeWriteAndFlush(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(http.ResponseWriter) error
+		body  string
+	}{
+		{
+			name: "event",
+			write: func(w http.ResponseWriter) error {
+				return writeMessageWakeEvent(w, store.MessageWakeState{Seq: 7, Pending: true})
+			},
+			body: "id: 7\nevent: wake\ndata: {\"version\":1,\"seq\":7,\"pending\":true}\n\n",
+		},
+		{name: "heartbeat", write: writeMessageWakeHeartbeat, body: ": heartbeat\n\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			writer := &deadlineAwareWakeWriter{}
+			before := time.Now()
+			require.NoError(t, test.write(writer))
+			after := time.Now()
+
+			require.Equal(t, []string{"deadline", "write", "flush"}, writer.steps,
+				"the finite deadline must be installed before every frame write and flush")
+			require.False(t, writer.deadline.IsZero(), "every frame must have a finite write deadline")
+			require.False(t, writer.deadline.Before(before), "the deadline must not already be expired")
+			require.False(t, writer.deadline.After(after.Add(messageWakeWriteBudget)),
+				"the deadline must not exceed the bounded slow-client write budget")
+			require.Equal(t, test.body, writer.body.String())
+		})
+	}
+}
+
+func TestMessageWakeFrameDeadlineFallbackIsExplicit(t *testing.T) {
+	unsupported := &deadlineAwareWakeWriter{deadlineErr: http.ErrNotSupported}
+	require.NoError(t, writeMessageWakeHeartbeat(unsupported))
+	require.Equal(t, []string{"deadline", "write", "flush"}, unsupported.steps,
+		"writers without deadline support retain the documented best-effort fallback")
+
+	deadlineFailure := errors.New("deadline failed")
+	failed := &deadlineAwareWakeWriter{deadlineErr: deadlineFailure}
+	require.ErrorIs(t, writeMessageWakeHeartbeat(failed), deadlineFailure)
+	require.Equal(t, []string{"deadline"}, failed.steps,
+		"real deadline failures must stop before a potentially blocking write")
 }
 
 func TestMessageWakeBrokerLeaseExpires(t *testing.T) {
