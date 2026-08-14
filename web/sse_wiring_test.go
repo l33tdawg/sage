@@ -656,6 +656,15 @@ func (s *sseSourceScan) resolve(file *ast.File, expr ast.Expr, depth int) ([]str
 func (s *sseSourceScan) resolveLocalVar(file *ast.File, ident *ast.Ident, depth int) ([]string, bool, bool) {
 	name := ident.Name
 
+	// Walk the enclosing scope chain OUTWARD, innermost first, the way Go's
+	// lexical scoping resolves a name. Stopping at the innermost function was
+	// itself a false negative: a shadowing declaration in an OUTER function
+	// with the emit inside a nested closure fell outside the innermost scope,
+	// so the name looked unbound and resolution fell through to the package
+	// const map — certifying the site with the const's value while Go bound it
+	// to the outer local. The first scope that binds the name wins; only a
+	// name bound by NO enclosing scope may reach the const map.
+	//
 	// Scope the search to the function the identifier actually appears in.
 	// Collecting assignments from anywhere in the FILE resolves one function's
 	// identifier from an unrelated function's local variable — and because this
@@ -663,16 +672,26 @@ func (s *sseSourceScan) resolveLocalVar(file *ast.File, ident *ast.Ident, depth 
 	// value it does not have. web/handler.go is 5,000 lines and already declares
 	// `eventType :=`, so any new handler there taking an EventType parameter
 	// would inherit that false clearance.
-	enclosing := enclosingFunc(file, ident.Pos())
-	if enclosing == nil {
+	scopes := enclosingFuncChain(file, ident.Pos())
+	if len(scopes) == 0 {
 		return nil, false, false
 	}
 
-	// A parameter, receiver or named result is supplied by the CALLER. Its value
-	// is not knowable here, so refuse it outright rather than resolving it from
-	// some same-function assignment that happens to share the name.
-	if isFuncScopedName(enclosing, name) {
-		return nil, false, true
+	var enclosing ast.Node
+	for _, scope := range scopes {
+		// A parameter, receiver or named result is supplied by the CALLER. Its
+		// value is not knowable here, so refuse it outright rather than
+		// resolving it from an assignment that happens to share the name.
+		if isFuncScopedName(scope, name) {
+			return nil, false, true
+		}
+		if scopeBindsName(scope, name) {
+			enclosing = scope
+			break
+		}
+	}
+	if enclosing == nil {
+		return nil, false, false
 	}
 
 	var values []string
@@ -715,11 +734,12 @@ func (s *sseSourceScan) resolveLocalVar(file *ast.File, ident *ast.Ident, depth 
 	return values, resolvedAll, true
 }
 
-// enclosingFunc returns the function declaration or literal body containing pos,
-// preferring the innermost, so a closure is scoped to itself rather than to the
-// function that encloses it.
-func enclosingFunc(file *ast.File, pos token.Pos) ast.Node {
-	var best ast.Node
+// enclosingFuncChain returns every function declaration or literal containing
+// pos, INNERMOST FIRST. A closure and each function enclosing it are all real
+// scopes for name resolution, so a caller looking for the binding of a name has
+// to consider them in that order rather than only the innermost.
+func enclosingFuncChain(file *ast.File, pos token.Pos) []ast.Node {
+	var chain []ast.Node
 	ast.Inspect(file, func(n ast.Node) bool {
 		switch n.(type) {
 		case *ast.FuncDecl, *ast.FuncLit:
@@ -729,12 +749,44 @@ func enclosingFunc(file *ast.File, pos token.Pos) ast.Node {
 		if pos < n.Pos() || pos > n.End() {
 			return true
 		}
-		if best == nil || n.Pos() > best.Pos() {
-			best = n
+		chain = append(chain, n)
+		return true
+	})
+	sort.Slice(chain, func(i, j int) bool { return chain[i].Pos() > chain[j].Pos() })
+	return chain
+}
+
+// scopeBindsName reports whether this function scope declares name at all, by
+// := or var. It is deliberately coarse: a binding anywhere in the scope counts,
+// including inside a sibling closure. That over-approximates, which refuses
+// rather than certifies — the safe direction for a guard, since the cost is a
+// loud failure on an odd-but-correct shape rather than a silent pass on a
+// wrong one.
+func scopeBindsName(scope ast.Node, name string) bool {
+	bound := false
+	ast.Inspect(scope, func(n ast.Node) bool {
+		if bound {
+			return false
+		}
+		switch decl := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range decl.Lhs {
+				if ident, ok := lhs.(*ast.Ident); ok && ident.Name == name {
+					bound = true
+					return false
+				}
+			}
+		case *ast.ValueSpec:
+			for _, ident := range decl.Names {
+				if ident.Name == name {
+					bound = true
+					return false
+				}
+			}
 		}
 		return true
 	})
-	return best
+	return bound
 }
 
 // isFuncScopedName reports whether name is bound by the function's signature —
