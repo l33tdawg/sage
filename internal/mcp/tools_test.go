@@ -2003,6 +2003,16 @@ func TestSageListPreAppV23DomainlessPreservesHistoricalUnscopedRequest(t *testin
 }
 
 func TestSageListHomeResolutionHasBoundedDeadline(t *testing.T) {
+	// These ceilings are deliberately independent of the production constant.
+	// Deriving the assertion from callerHomeResolutionBudget would let a timeout
+	// inflation mutate both the behavior and its test oracle together.
+	const (
+		maxAllowedHomeResolutionBudget = 2 * time.Second
+		homeResolutionElapsedCeiling   = 2500 * time.Millisecond
+	)
+	require.LessOrEqual(t, callerHomeResolutionBudget, maxAllowedHomeResolutionBudget,
+		"home discovery may be tightened but must not grow beyond the fixed boot ceiling")
+
 	cancelElapsed := make(chan time.Duration, 4)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
@@ -2018,8 +2028,8 @@ func TestSageListHomeResolutionHasBoundedDeadline(t *testing.T) {
 	started := time.Now()
 	_, err = NewServer(ts.URL, priv).toolList(context.Background(), map[string]any{})
 	require.Error(t, err)
-	require.Less(t, time.Since(started), callerHomeResolutionBudget+time.Second)
-	require.LessOrEqual(t, <-cancelElapsed, callerHomeResolutionBudget+500*time.Millisecond,
+	require.Less(t, time.Since(started), homeResolutionElapsedCeiling)
+	require.LessOrEqual(t, <-cancelElapsed, homeResolutionElapsedCeiling,
 		"the client must cancel slow self-standing discovery within its local budget")
 }
 
@@ -3989,6 +3999,15 @@ func TestSageInceptionAppV23CountsExactHomeWithoutHistoricalBroadQuery(t *testin
 }
 
 func TestSageInceptionAppV23CountHasIndependentBoundedDeadline(t *testing.T) {
+	// Keep the maximum independent from callerInceptionCountBudget so inflating
+	// the production timeout cannot also inflate the test's allowed duration.
+	const (
+		maxAllowedInceptionCountBudget = time.Second
+		inceptionCountElapsedCeiling   = 1250 * time.Millisecond
+	)
+	require.LessOrEqual(t, callerInceptionCountBudget, maxAllowedInceptionCountBudget,
+		"the boot count may be tightened but must remain below the fixed ceiling")
+
 	var countReads atomic.Int32
 	cancelElapsed := make(chan time.Duration, 4)
 	mux := http.NewServeMux()
@@ -4022,14 +4041,14 @@ func TestSageInceptionAppV23CountHasIndependentBoundedDeadline(t *testing.T) {
 	started := time.Now()
 	result, err := NewServer(ts.URL, priv).toolInception(context.Background(), map[string]any{})
 	require.NoError(t, err)
-	require.Less(t, time.Since(started), callerInceptionCountBudget+time.Second)
+	require.Less(t, time.Since(started), inceptionCountElapsedCeiling)
 	payload := result.(map[string]any)
 	require.Equal(t, "awakened", payload["status"])
 	require.Equal(t, "temporarily_unavailable", payload["memory_access"])
 	require.GreaterOrEqual(t, countReads.Load(), int32(1))
 	require.LessOrEqual(t, countReads.Load(), int32(4),
 		"the bounded read may only use the shared finite replay policy")
-	require.LessOrEqual(t, <-cancelElapsed, callerInceptionCountBudget+500*time.Millisecond,
+	require.LessOrEqual(t, <-cancelElapsed, inceptionCountElapsedCeiling,
 		"the client must cancel a slow count within the boot-only budget")
 }
 
