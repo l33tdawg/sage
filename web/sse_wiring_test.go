@@ -233,9 +233,14 @@ type sseSourceScan struct {
 	stringConstConflicts map[string]bool
 	// fileDirs resolves an AST file back to its package directory, so a lookup
 	// can be restricted to consts declared alongside the emit site.
-	fileDirs   map[*ast.File]string
-	emits      []sseEmitSite
-	unresolved []string
+	fileDirs map[*ast.File]string
+	// fileImports records, per file, the identifiers that are genuinely package
+	// qualifiers. Without it a selector cannot be told apart from a field access
+	// on a local value, and every EventType const is impersonable by any struct
+	// field sharing its name.
+	fileImports map[*ast.File]map[string]bool
+	emits       []sseEmitSite
+	unresolved  []string
 	// escapes records every place the OnEvent callback is read as a VALUE
 	// rather than called. That is the shape that actually launders an event
 	// name past this scan: `emit := s.OnEvent; emit("anything", ...)` produces
@@ -320,11 +325,28 @@ func scanSSESources(t *testing.T) sseSourceScan {
 		stringConsts:         map[string]string{},
 		stringConstConflicts: map[string]bool{},
 		fileDirs:             map[*ast.File]string{},
+		fileImports:          map[*ast.File]map[string]bool{},
 	}
 
 	// Pass 1: the EventType vocabulary, so pass 2 can resolve identifiers.
 	for _, pf := range parsed {
 		scan.fileDirs[pf.file] = filepath.ToSlash(filepath.Dir(pf.path))
+		imports := map[string]bool{}
+		for _, spec := range pf.file.Imports {
+			name := ""
+			if spec.Name != nil {
+				name = spec.Name.Name
+			} else if path, err := strconv.Unquote(spec.Path.Value); err == nil {
+				name = path
+				if idx := strings.LastIndex(name, "/"); idx >= 0 {
+					name = name[idx+1:]
+				}
+			}
+			if name != "" && name != "_" && name != "." {
+				imports[name] = true
+			}
+		}
+		scan.fileImports[pf.file] = imports
 		for _, decl := range pf.file.Decls {
 			gen, ok := decl.(*ast.GenDecl)
 			if !ok || gen.Tok != token.CONST {
@@ -443,7 +465,14 @@ func scanSSESources(t *testing.T) sseSourceScan {
 		// so it passed the scan entirely. Track every variable declared as an
 		// SSEEvent, resolve its .Type assignment as an emit site, and report
 		// any that never receives one.
-		builtEvents := map[string]token.Pos{}
+		// Keyed by the DECLARATION's own position, never by the bare variable
+		// name. A file-global name map let two functions that each declare
+		// `var event SSEEvent` collide: the first function's safe
+		// `event.Type = EventRemember` deleted the shared entry, and the second
+		// function's `event.Type = EventType(runtime)` then had nothing left to
+		// report. Declaration identity cannot collide, so the shape is closed
+		// rather than narrowed.
+		builtEvents := map[token.Pos]builtEventDecl{}
 		ast.Inspect(pf.file, func(node ast.Node) bool {
 			switch n := node.(type) {
 			case *ast.ValueSpec:
@@ -452,7 +481,11 @@ func scanSSESources(t *testing.T) sseSourceScan {
 				}
 				for _, name := range n.Names {
 					if name.Name != "_" {
-						builtEvents[name.Name] = name.Pos()
+						builtEvents[name.Pos()] = builtEventDecl{
+							name:  name.Name,
+							scope: declScopeOf(pf.file, name.Pos()),
+							pos:   name.Pos(),
+						}
 					}
 				}
 			case *ast.AssignStmt:
@@ -461,7 +494,11 @@ func scanSSESources(t *testing.T) sseSourceScan {
 						if len(n.Rhs) == 1 {
 							if comp, isComp := n.Rhs[0].(*ast.CompositeLit); isComp &&
 								isSSEEventType(comp.Type) && len(comp.Elts) == 0 && lit.Name != "_" {
-								builtEvents[lit.Name] = lit.Pos()
+								builtEvents[lit.Pos()] = builtEventDecl{
+									name:  lit.Name,
+									scope: declScopeOf(pf.file, lit.Pos()),
+									pos:   lit.Pos(),
+								}
 							}
 						}
 					}
@@ -483,17 +520,34 @@ func scanSSESources(t *testing.T) sseSourceScan {
 				if !isIdent {
 					continue
 				}
-				if _, tracked := builtEvents[base.Name]; !tracked {
+				// Match the assignment to the declaration it actually refers to:
+				// same name AND the assignment sits inside that declaration's
+				// scope. Matching on name alone is what let one function clear
+				// another function's tracking.
+				matched := token.NoPos
+				for pos, decl := range builtEvents {
+					if decl.name != base.Name {
+						continue
+					}
+					if decl.scope == nil ||
+						base.Pos() < decl.scope.Pos() || base.Pos() > decl.scope.End() {
+						continue
+					}
+					if matched == token.NoPos || pos > matched {
+						matched = pos
+					}
+				}
+				if matched == token.NoPos {
 					continue
 				}
-				delete(builtEvents, base.Name)
+				delete(builtEvents, matched)
 				record(assign.Rhs[i], "SSEEvent Type assignment")
 			}
 			return true
 		})
-		for name, pos := range builtEvents {
+		for _, decl := range builtEvents {
 			scan.unresolved = append(scan.unresolved,
-				"SSEEvent variable "+name+" never receives a checkable Type at "+relPos(root, fset, pos))
+				"SSEEvent variable "+decl.name+" never receives a checkable Type at "+relPos(root, fset, decl.pos))
 		}
 
 		ast.Inspect(pf.file, func(node ast.Node) bool {
@@ -610,6 +664,19 @@ func (s *sseSourceScan) resolve(file *ast.File, expr ast.Expr, depth int) ([]str
 		}
 		return nil, false
 	case *ast.SelectorExpr:
+		// A selector resolves ONLY when its qualifier is genuinely a package
+		// this file imports. Matching on Sel.Name alone meant ANY expression
+		// whose final identifier happened to equal a const name resolved to
+		// that const's value:
+		//	eventNames := probeEventNames{EventRedeploy: EventType(req.Operation)}
+		//	h.SSE.Broadcast(SSEEvent{Type: eventNames.EventRedeploy, ...})
+		// certified as "redeploy" while emitting arbitrary runtime input. A
+		// struct field, a method value, or any receiver at all could borrow a
+		// const's identity that way.
+		pkg, isIdent := e.X.(*ast.Ident)
+		if !isIdent || !s.fileImports[file][pkg.Name] {
+			return nil, false
+		}
 		if value, ok := s.consts[e.Sel.Name]; ok {
 			return []string{value}, true
 		}
@@ -732,6 +799,25 @@ func (s *sseSourceScan) resolveLocalVar(file *ast.File, ident *ast.Ident, depth 
 		return nil, false, false
 	}
 	return values, resolvedAll, true
+}
+
+// builtEventDecl identifies ONE declaration of an SSEEvent variable. It carries
+// the declaring scope so an assignment can be matched to the declaration it
+// really refers to rather than to any same-named variable elsewhere in the file.
+type builtEventDecl struct {
+	name  string
+	scope ast.Node
+	pos   token.Pos
+}
+
+// declScopeOf returns the innermost function containing pos, which is the scope
+// a local declaration belongs to.
+func declScopeOf(file *ast.File, pos token.Pos) ast.Node {
+	chain := enclosingFuncChain(file, pos)
+	if len(chain) == 0 {
+		return nil
+	}
+	return chain[0]
 }
 
 // enclosingFuncChain returns every function declaration or literal containing
