@@ -157,10 +157,12 @@ func readDashboardSSEScript(t *testing.T) string {
 
 var (
 	jsEventTypesArrayRe = regexp.MustCompile(`(?s)const\s+eventTypes\s*=\s*\[(.*?)]`)
-	jsStringLiteralRe   = regexp.MustCompile(`'([^']*)'|"([^"]*)"`)
 	// Anchored at BOTH ends, so an element must be entirely a quoted string:
 	// `void 'x'`, `f('x')` and `c ? 'x' : 'y'` fail to match rather than
-	// yielding their inner text.
+	// yielding their inner text. The older unanchored form it replaced is
+	// deliberately gone rather than kept around: an unanchored harvester is
+	// exactly the false negative this file just closed, and leaving it in
+	// scope invites the next edit to reach for it.
 	jsBareStringLiteralRe = regexp.MustCompile(`^(?:'([^']*)'|"([^"]*)")$`)
 )
 
