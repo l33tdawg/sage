@@ -1960,6 +1960,74 @@ func TestSageListAppV23DefaultsToExactAuthenticatedHomeDomain(t *testing.T) {
 		"domainless app-v23 list must not retry the historical broad query")
 }
 
+func TestSageListAppV23ActiveEmptyHomeFailsBeforeMemoryRoute(t *testing.T) {
+	const noHomeError = "resolve default list domain: authenticated app-v23 caller has no approved home domain; provide an explicit readable domain or ask the local CEREBRUM administrator to assign one"
+
+	for _, tc := range []struct {
+		name     string
+		profile  string
+		canRead  bool
+		canWrite bool
+	}{
+		{
+			name: "read only", profile: store.AppV23ProfileReadOnly,
+			canRead: true, canWrite: false,
+		},
+		{
+			name: "legacy restricted", profile: store.AppV23ProfileLegacyRestricted,
+			canRead: true, canWrite: false,
+		},
+		{
+			name: "empty profile active standing", profile: "",
+			canRead: false, canWrite: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var standingReads, listReads atomic.Int32
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/agent/me", func(w http.ResponseWriter, r *http.Request) {
+				standingReads.Add(1)
+				require.Equal(t, "standing", r.URL.Query().Get("view"))
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"agent_id": r.Header.Get("X-Agent-ID"), "profile": tc.profile,
+					"enrollment_status": "active", "home_domain": "",
+					"can_read": tc.canRead, "can_write": tc.canWrite,
+					"access_scope": "home_domain",
+				})
+			})
+			mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+				listReads.Add(1)
+				require.Equal(t, "explicit-readable+domain & audit", r.URL.Query().Get("domain"),
+					"a domainless active app-v23 caller must never reach this route")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"memories": []any{}, "total": 0, "has_more": false, "total_exact": true,
+				})
+			})
+			ts := httptest.NewServer(mux)
+			t.Cleanup(ts.Close)
+
+			_, priv, err := ed25519.GenerateKey(nil)
+			require.NoError(t, err)
+			s := NewServer(ts.URL, priv)
+
+			_, err = s.toolList(context.Background(), map[string]any{})
+			require.EqualError(t, err, noHomeError)
+			require.Equal(t, int32(1), standingReads.Load())
+			require.Zero(t, listReads.Load(),
+				"domainless active app-v23 list must fail before any memory request")
+
+			got, err := s.toolList(context.Background(), map[string]any{
+				"domain": "explicit-readable+domain & audit",
+			})
+			require.NoError(t, err)
+			require.Equal(t, 0, got.(map[string]any)["total_count"])
+			require.Equal(t, int32(1), standingReads.Load(),
+				"an explicit readable domain must not perform another standing lookup")
+			require.Equal(t, int32(1), listReads.Load())
+		})
+	}
+}
+
 func TestSageListExplicitDomainSkipsSelfLookupAndNeverRemaps(t *testing.T) {
 	var standingReads atomic.Int32
 	mux := http.NewServeMux()
