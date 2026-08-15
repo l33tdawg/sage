@@ -403,3 +403,159 @@ func TestFlattenLine(t *testing.T) {
 	assert.Equal(t, "café résumé", flattenLine("café\nrésumé"))
 	assert.True(t, strings.Contains(flattenLine("hello"), "hello"))
 }
+
+// withStopHookStdin feeds a Stop hook payload on stdin for one call.
+func withStopHookStdin(t *testing.T, payload string) {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "stop-stdin")
+	require.NoError(t, err)
+	_, err = f.WriteString(payload)
+	require.NoError(t, err)
+	_, err = f.Seek(0, io.SeekStart)
+	require.NoError(t, err)
+	original := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = original; _ = f.Close() })
+}
+
+func stopHookNode(t *testing.T, count int) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"count": count, "unread": count > 0})
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// The protocol's own loop guard. stop_hook_active means this turn was already
+// held open once, so a second block would start a loop the agent cannot exit.
+func TestHookStopCheckNeverBlocksTwiceInARow(t *testing.T) {
+	withTestSageEnv(t, stopHookNode(t, 3))
+	t.Setenv("SAGE_STOP_NUDGE", "1")
+	withStopHookStdin(t, `{"session_id":"s1","stop_hook_active":true}`)
+
+	stdout := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+	assert.Empty(t, stdout, "an already-blocked stop must be allowed to end")
+}
+
+// It changes how every session ends, so it stays off until asked for.
+func TestHookStopCheckIsOptIn(t *testing.T) {
+	withTestSageEnv(t, stopHookNode(t, 3))
+	withStopHookStdin(t, `{"session_id":"s1"}`)
+
+	stdout := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+	assert.Empty(t, stdout, "unset SAGE_STOP_NUDGE must not block anything")
+
+	t.Setenv("SAGE_STOP_NUDGE", "nonsense")
+	withStopHookStdin(t, `{"session_id":"s1"}`)
+	stdout = captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+	assert.Empty(t, stdout, "an unparseable value must not silently enable blocking")
+}
+
+func TestHookStopCheckDeniesTheStopWhenWorkIsPending(t *testing.T) {
+	withTestSageEnv(t, stopHookNode(t, 2))
+	t.Setenv("SAGE_STOP_NUDGE", "true")
+	withStopHookStdin(t, `{"session_id":"s1"}`)
+
+	stdout := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+	require.NotEmpty(t, stdout)
+
+	var decision struct {
+		HookSpecificOutput struct {
+			HookEventName string `json:"hookEventName"`
+			Decision      string `json:"decision"`
+			Reason        string `json:"reason"`
+		} `json:"hookSpecificOutput"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &decision), "must emit the exact deny document")
+	assert.Equal(t, "Stop", decision.HookSpecificOutput.HookEventName)
+	assert.Equal(t, "deny", decision.HookSpecificOutput.Decision)
+	assert.Contains(t, decision.HookSpecificOutput.Reason, "2 unread")
+	assert.Contains(t, decision.HookSpecificOutput.Reason, "untrusted content",
+		"the nudge must carry the inbox security boundary with it")
+	// Payload-free: the nudge is derived from a count alone, so no message
+	// identity or body can reach it. (The word "payload" legitimately appears
+	// in the security-boundary sentence, so assert on leak SHAPES instead.)
+	assert.NotContains(t, stdout, "message_id")
+	assert.NotContains(t, stdout, "msg-")
+	assert.NotContains(t, stdout, "from_agent")
+	assert.NotContains(t, stdout, "intent")
+}
+
+// Work the agent has already been told about, and may have deliberately
+// declined, must not hold the session open forever. Only NEW work re-blocks.
+func TestHookStopCheckDoesNotReTrapOnDeclinedWork(t *testing.T) {
+	withTestSageEnv(t, stopHookNode(t, 2))
+	t.Setenv("SAGE_STOP_NUDGE", "1")
+
+	withStopHookStdin(t, `{"session_id":"s1"}`)
+	first := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+	require.Contains(t, first, "deny", "the first pending item should nudge once")
+
+	withStopHookStdin(t, `{"session_id":"s1"}`)
+	second := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+	assert.Empty(t, second, "the same pending work must not nudge the same session twice")
+}
+
+func TestHookStopCheckNudgesAgainOnlyWhenNewWorkArrives(t *testing.T) {
+	count := 2
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"count": count, "unread": count > 0})
+	}))
+	defer srv.Close()
+	withTestSageEnv(t, srv.URL)
+	t.Setenv("SAGE_STOP_NUDGE", "1")
+
+	withStopHookStdin(t, `{"session_id":"s1"}`)
+	require.Contains(t, captureStdout(t, func() { require.NoError(t, runHookStopCheck()) }), "deny")
+	withStopHookStdin(t, `{"session_id":"s1"}`)
+	require.Empty(t, captureStdout(t, func() { require.NoError(t, runHookStopCheck()) }))
+
+	count = 5 // a genuinely new message lands
+	withStopHookStdin(t, `{"session_id":"s1"}`)
+	again := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+	assert.Contains(t, again, "deny", "new work must be able to nudge again")
+	assert.Contains(t, again, "5 unread")
+
+	// A different session starts fresh regardless of the marker.
+	withStopHookStdin(t, `{"session_id":"s2"}`)
+	assert.Contains(t, captureStdout(t, func() { require.NoError(t, runHookStopCheck()) }), "deny")
+}
+
+// A hook fault must never be able to wedge a session, so every failure allows
+// the stop and none of them returns an error to the dispatcher.
+func TestHookStopCheckFailsOpen(t *testing.T) {
+	t.Setenv("SAGE_STOP_NUDGE", "1")
+
+	t.Run("unreachable node", func(t *testing.T) {
+		withTestSageEnv(t, "http://127.0.0.1:1")
+		withStopHookStdin(t, `{"session_id":"s1"}`)
+		stdout := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+		assert.Empty(t, stdout)
+	})
+
+	t.Run("malformed stdin", func(t *testing.T) {
+		withTestSageEnv(t, stopHookNode(t, 4))
+		withStopHookStdin(t, `{not json`)
+		stdout := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+		assert.Empty(t, stdout)
+	})
+
+	t.Run("inconsistent probe", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 3, "unread": false})
+		}))
+		defer srv.Close()
+		withTestSageEnv(t, srv.URL)
+		withStopHookStdin(t, `{"session_id":"s1"}`)
+		stdout := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+		assert.Empty(t, stdout)
+	})
+
+	t.Run("no pending work", func(t *testing.T) {
+		withTestSageEnv(t, stopHookNode(t, 0))
+		withStopHookStdin(t, `{"session_id":"s1"}`)
+		stdout := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+		assert.Empty(t, stdout)
+	})
+}

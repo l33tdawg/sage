@@ -119,9 +119,25 @@ echo "Reminder: call sage_turn early in your response with the topic + an observ
 `
 
 const sageStopScript = `#!/bin/bash
-# SAGE Stop / SubagentStop hook — silent. Per-turn memory commits are the
-# agent's responsibility (via sage_turn); this hook is reserved for future
-# end-of-response checks without adding chatter today.
+# SAGE Stop / SubagentStop hook. Per-turn memory commits remain the agent's
+# responsibility (via sage_turn); this hook only asks whether the turn should
+# end while durable unclaimed work is pending.
+#
+# An MCP server cannot wake a session that has already stopped, so the check is
+# the inverse: decline the stop once, so the agent handles the work in-session.
+# Opt-in via SAGE_STOP_NUDGE, and silent unless it decides to decline.
+#
+# Fail-open is deliberate and belt-and-braces: the subcommand allows the stop on
+# every internal error, and the || true means even a crashed or missing binary
+# ends the turn normally. Only exit code 2 or a deny document blocks a stop, and
+# neither can be produced by a failure here.
+SAGE_GUI_BIN="${SAGE_GUI_BIN:-__SAGE_GUI_BIN__}"
+SAGE_PROVIDER="__SAGE_PROVIDER__"
+SAGE_IDENTITY_PATH="__SAGE_IDENTITY_PATH__"
+export SAGE_PROVIDER SAGE_IDENTITY_PATH
+if [ -x "$SAGE_GUI_BIN" ]; then
+    "$SAGE_GUI_BIN" hook stop-check 2>/dev/null || true
+fi
 exit 0
 `
 
