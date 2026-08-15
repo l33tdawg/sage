@@ -179,6 +179,35 @@ func (s *Server) resolvePipelineAgentPresentations(
 	if s.agentStore == nil {
 		return presentations
 	}
+	// ONE query when the store can batch. GetAgent computes MemoryCount and
+	// LastCommittedMemoryAt through two correlated subqueries over the memories
+	// table; this function reads only Name/RegisteredName/Provider and discards
+	// both. Paying that per counterparty turned a passive inbox read into a
+	// per-agent scan of memories — measurable in hundreds of milliseconds on a
+	// page of a mature brain, on surfaces including the every-turn inbox check.
+	//
+	// Optional interface rather than an AgentStore method, matching the
+	// domainActivityProvider precedent: a store that cannot batch keeps working
+	// through the per-agent path below instead of every implementation having to
+	// grow a method.
+	if batcher, ok := s.agentStore.(agentPresentationBatcher); ok {
+		resolved, err := batcher.GetAgentPresentations(ctx, agentIDs)
+		if err == nil {
+			for id, p := range resolved {
+				presentations[id] = pipelineAgentPresentation{
+					DisplayName:    strings.TrimSpace(p.DisplayName),
+					RegisteredName: strings.TrimSpace(p.RegisteredName),
+					Provider:       strings.TrimSpace(p.Provider),
+				}
+			}
+			return presentations
+		}
+		// Fall through on error rather than returning empty: losing every label
+		// on a page because one batch query failed would be a worse outcome than
+		// the slower path, and the "never hide work" boundary applies to labels
+		// exactly as it applies to rows.
+	}
+
 	seen := make(map[string]struct{}, len(agentIDs))
 	for _, agentID := range agentIDs {
 		if agentID == "" {
@@ -199,6 +228,12 @@ func (s *Server) resolvePipelineAgentPresentations(
 		}
 	}
 	return presentations
+}
+
+// agentPresentationBatcher is satisfied by stores that can resolve many agent
+// labels in one metadata-only query.
+type agentPresentationBatcher interface {
+	GetAgentPresentations(ctx context.Context, agentIDs []string) (map[string]store.AgentPresentation, error)
 }
 
 func pipelineMessageAgentIDs(items []*store.PipelineMessage) []string {
