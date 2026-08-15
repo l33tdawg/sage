@@ -59,7 +59,7 @@ toggle. Current code makes this a bounded consensus window: the gate is live aft
 app-v7 activation and turns off again after app-v14 activation
 (`internal/abci/app.go:704-729`). A node in the live window with NO registry stays
 bootable (a generic-only fleet is valid) but emits an advisory — see
-`ContentValidationEnforcementWarning` (`app.go:1238-1258`). A MIXED fleet
+`ContentValidationEnforcementWarning` (`app.go:2105-2132`). A MIXED fleet
 (some nodes with a registry, some without) during the live window is the
 real hazard: it forks `AppHash`. Every validator in a fleet must run the SAME
 registry.

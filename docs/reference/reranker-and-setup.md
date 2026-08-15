@@ -131,7 +131,7 @@ tools read: `recall_top_k` and `recall_min_confidence`. Routes at
 
 ### `GET /v1/dashboard/settings/recall`
 
-Returns the current values (`handleGetRecallSettings`, `web/handler.go:2439`).
+Returns the current values (`handleGetRecallSettings`, `web/handler.go:5333`).
 
 **Response** (HTTP 200): `{"top_k": 5, "min_confidence": 70}`
 
@@ -141,7 +141,7 @@ and inferences (0.60+), not just facts.
 
 ### `POST /v1/dashboard/settings/recall`
 
-Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:2472`).
+Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:5366`).
 
 **Request:** `{"top_k": 10, "min_confidence": 75}`
 **Response** (HTTP 200): `{"ok": true, "top_k": 10, "min_confidence": 75}`
@@ -369,7 +369,7 @@ means the feature is unavailable on this node and every endpoint returns
 `{"available": false}` or HTTP 501.
 
 **Auth:** these routes carry `authMiddleware` **plus** a strict same-origin gate
-(`wizardSecurityGate`, `web/handler.go:397-400`, `web/handler.go:741`). Because setup
+(`wizardSecurityGate`, `web/handler.go:1789-1802`, `web/handler.go:741`). Because setup
 downloads and `chmod`s a binary and spawns `llama-server` as a subprocess, the same
 gate the ChatGPT / federation / network-join wizards use rejects any request whose
 `Origin` / `Sec-Fetch-Site` is not local, independent of cookie or session state - a

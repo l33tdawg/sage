@@ -52,9 +52,9 @@ CometBFT calls `CheckTx`. The ABCI app decodes the tx, verifies the Ed25519 node
 
 ### 3. FinalizeBlock — processMemorySubmit
 
-`FinalizeBlock` (`app.go:543-664`) is the deterministic execution path. Key constraint from the code comment: **"No time.Now(), no map iteration without sorting, no goroutines, no external I/O except BadgerDB reads."** Block time from `req.Time` is used for all timestamps.
+`FinalizeBlock` (`app.go:3815-3882`) is the deterministic execution path, delegating to `finalizeBlockUncommitted` (`app.go:3883`). Key constraint from the code comment: **"CRITICAL: No time.Now(), no map iteration without sorting, no goroutines, and no external I/O except the supplied BadgerStore view."** Block time from `req.Time` is used for all timestamps.
 
-`processMemorySubmit` (`app.go:826-989`) does:
+`processMemorySubmit` (`app.go:4926-5469`) does:
 
 1. Post-app-v17, action-binds any delegated agent proof to the exact signed REST request, checks it against block time, and atomically consumes its proof fingerprint. It then verifies the agent Ed25519 identity proof embedded in the tx (same-key node transactions are already payload-bound by the outer signature).
 2. Domain-access check: if domain has a registered owner, calls `HasAccessMultiOrg`; if unowned and not a shared domain, auto-registers the domain with the submitting agent as owner (also issues a level-2 access grant to the owner, buffered for Commit).
@@ -67,7 +67,7 @@ CometBFT calls `CheckTx`. The ABCI app decodes the tx, verifies the Ed25519 node
 
 ### 4. Commit — offchain flush
 
-`Commit` (`app.go:2596-2665`) runs after `FinalizeBlock` for each block. It:
+`Commit` (`app.go:9846-10009`) runs after `FinalizeBlock` for each block. It:
 
 1. Inside the same SQL transaction as every `pendingWrite`, claims the permanent `abci_projection_batches(height, app_hash)` receipt. An exact replay skips the whole already-durable batch; a different AppHash at the same height fails closed.
 2. Flushes all `pendingWrites` to PostgreSQL **inside that single database transaction** (via `RunInTx`), with exponential-backoff retry for `SQLITE_BUSY`. Invalid or unknown buffered sink payloads fail the transaction instead of silently committing a receipt.
@@ -82,13 +82,13 @@ One narrow PostgreSQL-only merge remains reachable after an exact receipt. `Supp
 
 Each validator (in personal mode: the single node's own auto-voter; in multi-node mode: every validator node, each voting with its own consensus key) broadcasts a `TxTypeMemoryVote` tx. Note `POST /v1/memory/{id}/vote` signs with the **node's** validator key, not a per-agent identity, so all REST votes through one node collapse into that node's single validator slot — see [`voter-operations.md`](voter-operations.md) §8.
 
-`processMemoryVote` (`app.go:991-1041`):
+`processMemoryVote` (`app.go:6240-6384`):
 - Rejects votes from non-validators.
 - Stores vote in BadgerDB at key `state:vote:<memoryID>:<validatorID>` (value: `"accept"` / `"reject"` / `"abstain"`).
 - Increments on-chain validator vote stats (used for PoE scoring at epoch boundaries).
 - Calls `checkAndApplyQuorum`.
 
-`checkAndApplyQuorum` (`app.go:3602-3818`):
+`checkAndApplyQuorum` (`app.go:6385-6616`):
 - Loads all validators, reads each vote from BadgerDB.
 - Current chains use PoE-weighted votes after the app-v3 fork, with equal-weight replay retained only for pre-fork blocks.
 - Calls `validator.CheckQuorum` (threshold: `>= 2/3` of total weight, `internal/validator/quorum.go:6`).
@@ -101,9 +101,9 @@ A committed memory may be challenged via `TxTypeMemoryChallenge`. Chains authori
 
 In a one-strike path there is no separate voting round: the challenged memory transitions from `committed` → `deprecated` in the same `processMemoryChallenge` call that includes the tx. app-v17 (below) replaces this with a quorum-scaled two-phase path when the domain has two or more modify-verb holders; app-v21 supersedes fresh challenge selection with the corroboration-weighted policy documented below.
 
-**app-v16 - domainless-forget remediation.** The deprecation gate keys off the on-chain `memdomain:<memoryID>` record. Legacy memories committed before app-v8.4 never received one, so the gate rejected even the owner's challenge/forget with a generic "no recorded domain" denial (Code 91). app-v16 hardens the gate to split that into two distinct denials — both still DENY (Code 91, no new authorization): a legacy record predating app-v8.4 ("repair via an `OpMemoryDomainRepair` governance proposal") versus a genuinely unknown memory ("no memory record and no recorded domain") (`app.go:3862-3867`). The domained-but-unauthorized case is unchanged (Code 92). To unblock a legacy record, an **`OpMemoryDomainRepair`** governance proposal (`governance.ProposalOp = 6`, app-v16-gated) backfills the missing domain: it is created through the normal admin-gated propose path with a JSON payload of `[{"memory_id":"…","domain":"…"}]`, requires the default **2/3 supermajority** (`ThresholdFor` is fork-unaware, so a new op must not retroactively change quorum — replay parity), and on execution writes `memdomain:` only for a memory that already exists on-chain, has no domain yet, and whose target domain is already registered — idempotent, never overwriting, skipping unknown, already-domained, or unregistered-target IDs (`applyMemoryDomainRepair`, `app.go:7161`). After repair, a normal challenge/forget by an authorized agent deprecates as usual. app-v16 also requires every submit to carry a non-empty `domain_tag` **and persists that domain under app-v16+ rules even when app-v8.4 was never independently activated**, so the domainless state cannot recur on a skip-ahead chain.
+**app-v16 - domainless-forget remediation.** The deprecation gate keys off the on-chain `memdomain:<memoryID>` record. Legacy memories committed before app-v8.4 never received one, so the gate rejected even the owner's challenge/forget with a generic "no recorded domain" denial (Code 91). app-v16 hardens the gate to split that into two distinct denials — both still DENY (Code 91, no new authorization): a legacy record predating app-v8.4 ("repair via an `OpMemoryDomainRepair` governance proposal") versus a genuinely unknown memory ("no memory record and no recorded domain") (`app.go:3862-3867`). The domained-but-unauthorized case is unchanged (Code 92). To unblock a legacy record, an **`OpMemoryDomainRepair`** governance proposal (`governance.ProposalOp = 6`, app-v16-gated) backfills the missing domain: it is created through the normal admin-gated propose path with a JSON payload of `[{"memory_id":"…","domain":"…"}]`, requires the default **2/3 supermajority** (`ThresholdFor` is fork-unaware, so a new op must not retroactively change quorum — replay parity), and on execution writes `memdomain:` only for a memory that already exists on-chain, has no domain yet, and whose target domain is already registered — idempotent, never overwriting, skipping unknown, already-domained, or unregistered-target IDs (`applyMemoryDomainRepair`, `app.go:12408`). After repair, a normal challenge/forget by an authorized agent deprecates as usual. app-v16 also requires every submit to carry a non-empty `domain_tag` **and persists that domain under app-v16+ rules even when app-v8.4 was never independently activated**, so the domainless state cannot recur on a skip-ahead chain.
 
-**app-v17 - quorum-scaled two-phase challenge + reinstate.** Ships dormant behind the app-v17 fork and activates only via the governed upgrade ladder (`postAppV17Rules`, strict `>`); every pre-fork block and the activation block itself replay byte-identically. Once active, `processMemoryChallenge` (`app.go:3897-4007`) branches on the memory's domain:
+**app-v17 - quorum-scaled two-phase challenge + reinstate.** Ships dormant behind the app-v17 fork and activates only via the governed upgrade ladder (`postAppV17Rules`, strict `>`); every pre-fork block and the activation block itself replay byte-identically. Once active, `processMemoryChallenge` (`app.go:6764-7354`) branches on the memory's domain:
 
 - **Count the modify-verb holders.** At challenge execution the handler enumerates the distinct modify-verb holders on the memory's domain from committed state (the owner, ancestor owners, and unexpired level-3 grantees), in sorted order (`ModifyVerbHolders`, `app.go:3948`).
 - **One or fewer holders → legacy one-strike.** The outcome is byte-identical to the pre-fork deprecate above, so personal nodes and single-owner domains see zero change.
@@ -217,7 +217,7 @@ Combined with decay: a memory with many corroborations decays more slowly in eff
 
 A memory reaches `deprecated` via these paths:
 
-1. **Quorum failure**: all validators voted, `acceptWeight / totalWeight < 2/3` → deprecated in `checkAndApplyQuorum` (`app.go:3766`).
+1. **Quorum failure**: all validators voted, `acceptWeight / totalWeight < 2/3` → deprecated in `checkAndApplyQuorum` (`app.go:6385`).
 2. **Challenge (one-strike)**: a `TxTypeMemoryChallenge` is included in a block → immediately deprecated (`app.go:4011`). No secondary vote. This is the behavior before app-v17 activates; between app-v17 and app-v21 it also applies to a domain with a single modify-verb holder. Post-app-v21, immediate resolution instead means `k=0` eligible corroborators.
 3. **Challenge confirmed (app-v17 two-phase)**: on a domain with two or more modify-verb holders the first authorized challenge parks the memory `challenged`; a second, *distinct* modify-verb holder's confirming challenge finalizes the deprecation (`app.go:3918-3943`). The original challenger cannot self-confirm.
 4. **Corroboration-weighted challenge (app-v21)**: a governed post-v21 chain snapshots current modify holders plus current read-authorized canonical corroborators and requires `k+1` distinct challengers, where `k` is the eligible supporter count excluding the opener. Zero corroborators still resolve immediately; oversized modifier rosters use the bounded app-v17 two-party fallback and oversized supporter rosters use a deterministic bounded committee.

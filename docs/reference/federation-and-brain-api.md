@@ -195,10 +195,10 @@ two-party enrollment attestation. The peer router is built in
 
 | Group | Routes | Middleware | Why |
 |---|---|---|---|
-| Established peers | `status`, `query`, reserved `write`, `receipt`, `connection/revoke-notice`, `p2p/routes`, `sync/*`, `pipe/event`, `pipe/contacts/lookup` | `peerAuth` (`internal/federation/server.go:74-220`) | Requires an ACTIVE cross_fed agreement; reserved Write returns `501` |
+| Established peers | `status`, `query`, reserved `write`, `receipt`, `connection/revoke-notice`, `p2p/routes`, `sync/*`, `pipe/event`, `pipe/contacts/lookup` | `peerAuth` (`internal/federation/server.go:137-302`) | Requires an ACTIVE cross_fed agreement; reserved Write returns `501` |
 | Pre-agreement JOIN | `join/ca`, `join/request`, `join/status`, `join/confirm`, `join/abort` | `joinAuth` (`internal/federation/join_routes.go`) | No agreement exists yet during a join |
 
-### `peerAuth` - the established-peer authenticator (`internal/federation/server.go:74-220`)
+### `peerAuth` - the established-peer authenticator (`internal/federation/server.go:137-302`)
 
 Every established-peer request, including `query`, `write`, and `sync`, is authenticated end-to-end:
 
@@ -445,7 +445,7 @@ Accepts a peer's Mode-2 `CommitReceipt` push and anchors it via `TxTypeCoCommitA
 
 ### JOIN ceremony routes (behind `joinAuth`)
 
-`joinAuth` (`internal/federation/join_routes.go:192-226`) requires a client cert
+`joinAuth` (`internal/federation/join_routes.go:237-273`) requires a client cert
 but NOT an active agreement; it rate-limits on the direct TCP peer (never
 `X-Forwarded-For`), caps the body at 64 KB (`joinBodyCap`), and threads the
 client-cert leaf SPKI into context for per-session binding. Nothing here is on
@@ -475,9 +475,9 @@ timeout does not silently recreate a shorter HTTP deadline
 
 | Method + path | Handler | Purpose |
 |---|---|---|
-| `GET /fed/v1/join/ca?session_id=…` | `handleJoinCA` (`join_routes.go:237-252`) | Serves the host's own CA PEM to a scanning guest (guest authenticates it by the scanned pin, not the transport). Returns `{chain_id, ca_pem}` (`JoinCAResp`). `404` if no live session. |
+| `GET /fed/v1/join/ca?session_id=…` | `handleJoinCA` (`join_routes.go:286-302`) | Serves the host's own CA PEM to a scanning guest (guest authenticates it by the scanned pin, not the transport). Returns `{chain_id, ca_pem}` (`JoinCAResp`). `404` if no live session. |
 | `POST /fed/v1/join/request` | `handleJoinRequest` (`join_routes.go`) | Guest -> host. Rejects non-trust-only scope, exact host/guest endpoint drift from either scanned card, binds the guest to the session, asserts the presented guest CA SPKI equals the scanned anchor pin, verifies the TLS client cert chains to that CA, and stages (does not commit) the guest CA. |
-| `GET /fed/v1/join/status?session_id=…` | `handleJoinStatus` (`join_routes.go:370-406`) | Guest polls state flags; once the host approves, also returns the fixed compatibility scope. Only the bound client cert may read. |
+| `GET /fed/v1/join/status?session_id=…` | `handleJoinStatus` (`join_routes.go:427-463`) | Guest polls state flags; once the host approves, also returns the fixed compatibility scope. Only the bound client cert may read. |
 | `POST /fed/v1/join/abort` | `handleJoinAbort` (`join_routes.go`) | A bound guest propagates Stop to the host. The exact bound client-cert SPKI is required; active connections must use permanent revoke instead. |
 | `POST /fed/v1/join/confirm` | `handleJoinConfirm` (`join_routes.go`) | Guest -> host approval #2. Verifies the guest's signatures over the frozen attestation E, then the host broadcasts its tx-33, commits the staged CA + seed, and marks ACTIVE. An identical confirm from the same bound certificate replays the stored activation result after a lost HTTP response without a second broadcast; changed certificates/signatures still fail. |
 
@@ -717,29 +717,29 @@ Every route 501s when the transport is not wired (`fedReady`,
 | Method + path | Handler | Purpose |
 |---|---|---|
 | `GET /v1/dashboard/federation/shareable-domains` | `handleFedShareableDomains` (`web/federation_permissions.go`) | List existing registered/observed local domains and whether this operator may share them; never creates a domain. A row may include durable `copy_sources:[{chain_id,memory_count}]` from admitted local copies, without peer endpoints, keys, content, or policy metadata. |
-| `GET /v1/dashboard/federation/connections` | `handleFedConnections` (`web/federation_join.go:748-800`) | List agreements with `sharing_paused` and durable end-event context for past rows. |
-| `GET /v1/dashboard/federation/connections/{chain_id}/permissions` | `handleFedPermissionsGet` (`web/federation_permissions.go:200-287`) | Return editable `local_permissions`, `local_paused`, and the authenticated peer's read-only permissions/pause state. `?live=0` deliberately skips the peer probe and returns the durable local snapshot immediately with `remote_known:false`; CEREBRUM uses that for first paint, then consumes the single authenticated connection-status refresh owned by the parent page. |
-| `PUT /v1/dashboard/federation/connections/{chain_id}/permissions` | `handleFedPermissionsPut` (`web/federation_permissions.go:254-402`) | Replace this node's complete existing-domain Read/Copy snapshot for the frozen peer. A true `write` field is rejected. |
+| `GET /v1/dashboard/federation/connections` | `handleFedConnections` (`web/federation_join.go:849-912`) | List agreements with `sharing_paused` and durable end-event context for past rows. |
+| `GET /v1/dashboard/federation/connections/{chain_id}/permissions` | `handleFedPermissionsGet` (`web/federation_permissions.go:212-300`) | Return editable `local_permissions`, `local_paused`, and the authenticated peer's read-only permissions/pause state. `?live=0` deliberately skips the peer probe and returns the durable local snapshot immediately with `remote_known:false`; CEREBRUM uses that for first paint, then consumes the single authenticated connection-status refresh owned by the parent page. |
+| `PUT /v1/dashboard/federation/connections/{chain_id}/permissions` | `handleFedPermissionsPut` (`web/federation_permissions.go:375-539`) | Replace this node's complete existing-domain Read/Copy snapshot for the frozen peer. A true `write` field is rejected. |
 | `GET/PUT /v1/dashboard/federation/connections/{chain_id}/agent-exports` | `handleFedAgentExportsGet/Put` (`web/federation_agent_exports.go`) | List or CAS-mutate (`active`/`paused`) the exact active ordinary local agents exported into this pairwise federation. Current owned domains are derived live; classification ceiling and domain exclusions may narrow them. Pause immediately removes derived identity, Read, and messaging. Revocation is reserved for internal generation retirement. |
 | `GET/PUT /v1/dashboard/federation/connections/{chain_id}/reader-restrictions` | `handleFedReaderRestrictionsGet/Put` (`web/federation_reader_restrictions.go`) | List or CAS-mutate receiver-local per-agent deny-all/domain-subtree exceptions. Absent/revoked means default allow; ceremony binding is server-derived and cannot be supplied by the browser. |
-| `PUT /v1/dashboard/federation/connections/{chain_id}/pause` | `handleFedPause` (`web/federation_permissions.go:230-270`) | Set `{"paused":true|false}` for this node's directional grant without deleting trust or saved domains. |
+| `PUT /v1/dashboard/federation/connections/{chain_id}/pause` | `handleFedPause` (`web/federation_permissions.go:301-339`) | Set `{"paused":true|false}` for this node's directional grant without deleting trust or saved domains. |
 | `GET/PUT /v1/dashboard/federation/connections/{chain_id}/sync` | `handleFedSyncGet/Set` (`web/federation_join.go:344-579`) | Read or change directional copy lanes; current UI changes only the receiver's `subscribe_domains` choice. |
-| `GET /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsGet` (`web/federation_pipe_contacts.go:20-63`) | Return the current explicit-export contact projection and the peer's authenticated read-only snapshot. Manual domain-only policy never creates a contact. `?live=0` skips the peer probe and reports `remote_known:false`. |
-| `PUT /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsPut` (`web/federation_pipe_contacts.go:66-107`) | Legacy exact-contact acceptance control. Current exported agents accept messaging by membership unless `DenyFederatedPipe`; this route never creates export membership or memory authority. |
+| `GET /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsGet` (`web/federation_pipe_contacts.go:29-92`) | Return the current explicit-export contact projection and the peer's authenticated read-only snapshot. Manual domain-only policy never creates a contact. `?live=0` skips the peer probe and reports `remote_known:false`. |
+| `PUT /v1/dashboard/federation/connections/{chain_id}/pipe-contacts` | `handleFedPipeContactsPut` (`web/federation_pipe_contacts.go:118-165`) | Legacy exact-contact acceptance control. Current exported agents accept messaging by membership unless `DenyFederatedPipe`; this route never creates export membership or memory authority. |
 | `POST /v1/dashboard/federation/connections/{chain_id}/revoke` | `handleFedRevoke` (`web/federation_join.go`) | Commit local tx-34, best-effort notify the peer with the retained exact old credentials, purge locally, and return notification status. |
 | `GET /v1/dashboard/federation/connections/{chain_id}/status` | `handleFedPeerStatus` (`web/federation_join.go`) | The panel's cheap authenticated peer reachability preflight. `?retry=1` is reserved for an operator click: concurrent clicks share one bounded route refresh for the exact active JOIN/policy generation and then exactly one authenticated status re-probe. Polling never enters that recovery workflow. Retry copies the exact checked snapshot targets before dialing, treats route-exchange 401/403 as a typed security stop, and revalidates the complete agreement/control tuple after the status response before success. A stale generation is never dialed; an unprovable legacy binding returns explicit pair-again guidance instead of inventing a P2P identity. Typed manager diagnostics distinguish disabled, missing/expired bundles, stale Direct, relay unavailable, trust-generation mismatch, security block, and legacy pair-again. On success the route preserves the peer's advertised `capabilities` plus the peer-scoped `peer_rbac_grant`, legacy `sharing_grant`, and `pipe_contacts` projections from `/fed/v1/status`, while omitting the agreement-binding digest and transport internals. CEREBRUM uses missing current capabilities only as a non-blocking mixed-version warning; capability advertisement is not read authorization, presence, or delivery evidence. |
 | `POST /v1/dashboard/federation/groups/refresh` | `handleFedGroupRefresh` (`web/federation_join.go`) | Prompt one bounded group-journal anti-entropy pass and wait for it to finish before CEREBRUM reloads the local group projection. Ordinary group-list polling remains a local SQLite read. |
 | `GET /v1/dashboard/federation/join/routes` | `handleFedJoinRoutes` (`web/federation_join.go`) | Return locally prepared Direct/Secure relay candidates. `ready` means prepared locally, not proven reachable and not currently selected. |
 | `POST /v1/dashboard/federation/join/host/create` | `handleFedHostCreate` (`web/federation_join.go`) | Host H1; current CEREBRUM sends `transport:"auto"`. `lan` and `internet` remain compatibility inputs for older clients. |
-| `POST /v1/dashboard/federation/join/host/scan-return` | `handleFedHostScanReturn` (`web/federation_join.go:827`) | Host scans guest return QR |
-| `GET /v1/dashboard/federation/join/host/{session_id}` | `handleFedHostStatus` (`web/federation_join.go:846`) | Host wizard poll |
-| `POST /v1/dashboard/federation/join/host/{session_id}/approve` | `handleFedHostApprove` (`web/federation_join.go:858`) | Host approval #1 |
-| `POST /v1/dashboard/federation/join/host/{session_id}/abort` | `handleFedHostAbort` (`web/federation_join.go:886`) | Burn session |
-| `POST /v1/dashboard/federation/join/guest/scan` | `handleFedGuestScan` (`web/federation_join.go:896`) | Guest scan host QR |
-| `POST /v1/dashboard/federation/join/guest/request` | `handleFedGuestRequest` (`web/federation_join.go:918`) | Guest request |
-| `GET /v1/dashboard/federation/join/guest/{session_id}/status` | `handleFedGuestStatus` (`web/federation_join.go:949`) | Guest poll host approval |
+| `POST /v1/dashboard/federation/join/host/scan-return` | `handleFedHostScanReturn` (`web/federation_join.go:1112`) | Host scans guest return QR |
+| `GET /v1/dashboard/federation/join/host/{session_id}` | `handleFedHostStatus` (`web/federation_join.go:1131`) | Host wizard poll |
+| `POST /v1/dashboard/federation/join/host/{session_id}/approve` | `handleFedHostApprove` (`web/federation_join.go:1143`) | Host approval #1 |
+| `POST /v1/dashboard/federation/join/host/{session_id}/abort` | `handleFedHostAbort` (`web/federation_join.go:1193`) | Burn session |
+| `POST /v1/dashboard/federation/join/guest/scan` | `handleFedGuestScan` (`web/federation_join.go:1210`) | Guest scan host QR |
+| `POST /v1/dashboard/federation/join/guest/request` | `handleFedGuestRequest` (`web/federation_join.go:1236`) | Guest request |
+| `GET /v1/dashboard/federation/join/guest/{session_id}/status` | `handleFedGuestStatus` (`web/federation_join.go:1267`) | Guest poll host approval |
 | `POST /v1/dashboard/federation/join/guest/{session_id}/abort` | `handleFedGuestAbort` (`web/federation_join.go`) | Propagate a guest-side Stop and zeroize the local draft |
-| `POST /v1/dashboard/federation/join/guest/confirm` | `handleFedGuestConfirm` (`web/federation_join.go:963`) | Guest approval #2 |
+| `POST /v1/dashboard/federation/join/guest/confirm` | `handleFedGuestConfirm` (`web/federation_join.go:1301`) | Guest approval #2 |
 
 (JOIN handlers live in `web/federation_join.go`.) The dashboard owns automatic
 route intent and the fixed trust-only compatibility scope; the remaining join

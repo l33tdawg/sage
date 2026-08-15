@@ -30,7 +30,7 @@ explicitly node-local federation relation state.
 
 ### Registration
 
-`POST /v1/org/register` → `handleOrgRegister` (`api/rest/org_handler.go:56+`) → `TxTypeOrgRegister` → `processOrgRegister` (`internal/abci/app.go`).
+`POST /v1/org/register` → `handleOrgRegister` (`api/rest/org_handler.go:74+`) → `TxTypeOrgRegister` → `processOrgRegister` (`internal/abci/app.go`).
 
 The REST handler precomputes `OrgID` as `hex(SHA256(admin_agent_pubkey + name)[:16])` before broadcasting. If a transaction arrives without an ID, ABCI derives a deterministic fallback from `adminID:name:height`. The registering agent becomes the `AdminAgent`. One admin per org at registration; additional admins can be added via `OrgAddMember` with role `"admin"`.
 
@@ -367,7 +367,7 @@ A `POST /v1/memory/query` request passes through these gates in order (`memory_h
 
 ### Gate 1: checkDomainAccess (DomainAccess policy)
 
-`checkDomainAccess` (`memory_handler.go:159-251`) reads the agent's `DomainAccess` JSON field (on-chain BadgerDB first, SQLite fallback):
+`checkDomainAccess` (`memory_handler.go:329-332`) reads the agent's `DomainAccess` JSON field (on-chain BadgerDB first, SQLite fallback):
 
 - `role == "admin"` → bypass all checks, full access
 - `role == "observer"` → write operations blocked
@@ -389,7 +389,7 @@ Applied when `domainAccessApproved == false` and the domain has a registered own
 - `agentID == nodeOperatorID` → `seeAll = true` (node operator bypass)
 - `role == "admin"` → `seeAll = true`
 - `visible_agents == "*"` → `seeAll = true`
-- **Any org member with clearance=4 (TOP SECRET)** → `seeAll = true` (`agentHasTopSecretClearance` check, `memory_handler.go:310`)
+- **Any org member with clearance=4 (TOP SECRET)** → `seeAll = true` (`agentHasTopSecretClearance` check, `memory_handler.go:1027`)
 - Otherwise: agent sees memories from `[agentID] + parsed(visible_agents)` list
 
 If `seeAll == false`, `opts.SubmittingAgents` is set to the allowed list, which `QuerySimilar` uses to filter at the PostgreSQL level.
@@ -486,7 +486,7 @@ The `FederationID` is deterministic: computed from the two org IDs + height to a
 
 ### MaxClearance Cap
 
-`checkFederationAccess` (`badger.go:2156-2175`) enforces: `if memoryClassification > maxClearance → deny`. This means a federation with `max_clearance=1` (INTERNAL) cannot expose CONFIDENTIAL (2) or higher memories to the federated org, regardless of the individual agent's clearance within their own org.
+`checkFederationAccess` (`badger.go:6421-6501`) enforces: `if memoryClassification > maxClearance → deny`. This means a federation with `max_clearance=1` (INTERNAL) cannot expose CONFIDENTIAL (2) or higher memories to the federated org, regardless of the individual agent's clearance within their own org.
 
 Every proposal remains `"proposed"` until an explicit target-organization
 approval changes it to `"active"`, regardless of the stored

@@ -141,7 +141,7 @@ Both stores are updated in the same block's Commit call. The BadgerDB entry is t
 
 ## handleGetMemory Classification
 
-`GET /v1/memory/{memory_id}` (`handleGetMemory`, `memory_handler.go:1118+`) also reads classification from BadgerDB and returns it in the response body. The same `if memClass > 0` gate logic applies to single-record fetches.
+`GET /v1/memory/{memory_id}` (`handleGetMemory`, `memory_handler.go:3071+`) also reads classification from BadgerDB and returns it in the response body. The same `if memClass > 0` gate logic applies to single-record fetches.
 
 ---
 
