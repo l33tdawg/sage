@@ -1741,10 +1741,30 @@ components:
           type: string
         from_provider:
           type: string
+          description: Persisted provider metadata; never replaced by a friendly name.
+        from_display_name:
+          type: string
+          description: Response-only current local display name. Presentation metadata, not authority.
+        from_registered_name:
+          type: string
+          description: Response-only immutable local registration name. The exact from_agent remains authoritative.
+        from_agent_provider:
+          type: string
+          description: Response-only current provider for the exact local from_agent; presentation fallback only.
         to_agent:
           type: string
         to_provider:
           type: string
+          description: Persisted provider routing selector; never replaced by a friendly name.
+        to_display_name:
+          type: string
+          description: Response-only current local recipient display name. Omitted for a foreign recipient.
+        to_registered_name:
+          type: string
+          description: Response-only immutable local recipient registration name. Omitted for a foreign recipient.
+        to_agent_provider:
+          type: string
+          description: Response-only current provider for the exact local to_agent; distinct from the persisted to_provider routing selector.
         intent:
           type: string
         payload:
@@ -1895,6 +1915,13 @@ components:
           type: string
         from_provider:
           type: string
+          description: Persisted provider metadata; never replaced by a friendly name.
+        from_display_name:
+          type: string
+          description: Response-only current local display name. Presentation metadata, not authority.
+        from_registered_name:
+          type: string
+          description: Response-only immutable local registration name. The exact from_agent remains authoritative.
         intent:
           type: string
         payload:

@@ -47,7 +47,9 @@ func TestCanonicalMessageToolsSendReceiveReplyAndStatus(t *testing.T) {
 		require.Regexp(t, `^mcp-[0-9a-f]{32}$`, claimantSessionID)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"items": []map[string]any{
-				{"message_id": "local-a", "from_agent": "alice", "intent": "ask", "payload": "one", "claimant_session_id": claimantSessionID},
+				{"message_id": "local-a", "from_agent": "alice", "from_provider": "claude-code",
+					"from_display_name": "Claude reviewer", "from_registered_name": "claude-code/sage",
+					"intent": "ask", "payload": "one", "claimant_session_id": claimantSessionID},
 				{"message_id": "local-b", "from_agent": "alice", "intent": "ask", "payload": "two", "claimant_session_id": claimantSessionID},
 			},
 			"count": 2,
@@ -104,6 +106,9 @@ func TestCanonicalMessageToolsSendReceiveReplyAndStatus(t *testing.T) {
 	require.Len(t, items, 2)
 	require.Equal(t, "local-a", items[0]["message_id"])
 	require.NotContains(t, items[0], "pipe_id")
+	require.Equal(t, "Claude reviewer", items[0]["from"])
+	require.Equal(t, "alice", items[0]["sender_agent"])
+	require.Equal(t, "claude-code/sage", items[0]["from_registered_name"])
 	require.Equal(t, "confirmed", items[0]["read_status"])
 	require.Equal(t, claimantSessionID, items[0]["claimant_session_id"])
 	require.Equal(t, claimantSessionID, received.(map[string]any)["claimant_session_id"])

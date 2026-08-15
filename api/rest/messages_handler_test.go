@@ -2,9 +2,11 @@ package rest
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -48,6 +50,16 @@ func addMessageAgent(t *testing.T, s *store.SQLiteStore, id string) {
 	require.NoError(t, s.CreateAgent(t.Context(), &store.AgentEntry{
 		AgentID: id, Name: id, Provider: "test", Status: "active",
 	}))
+}
+
+type countingExactAgentStore struct {
+	store.AgentStore
+	getCalls map[string]int
+}
+
+func (s *countingExactAgentStore) GetAgent(ctx context.Context, agentID string) (*store.AgentEntry, error) {
+	s.getCalls[agentID]++
+	return s.AgentStore.GetAgent(ctx, agentID)
 }
 
 func callMessageJSON(t *testing.T, handler http.Handler, method, path string, body any) *httptest.ResponseRecorder {
@@ -137,6 +149,61 @@ func TestCanonicalLocalMessagesEndToEndAndAntiEnumeration(t *testing.T) {
 	require.NotContains(t, unauthorized.Body.String(), "private request")
 	require.NotContains(t, unauthorized.Body.String(), "alice")
 	require.NotContains(t, unauthorized.Body.String(), "bob")
+}
+
+func TestCanonicalMessageReceiveEnrichesCurrentNamesWithoutMutatingProviderIdentity(t *testing.T) {
+	s, sqlite := newPipeServer(t)
+	senderID := strings.Repeat("a", 64)
+	recipientID := strings.Repeat("b", 64)
+	require.NoError(t, sqlite.CreateAgent(t.Context(), &store.AgentEntry{
+		AgentID: senderID, Name: "Claude release reviewer", RegisteredName: "claude-code/sage",
+		Provider: "claude-code", Status: "active",
+	}))
+	require.NoError(t, sqlite.CreateAgent(t.Context(), &store.AgentEntry{
+		AgentID: recipientID, Name: "Voice bridge", RegisteredName: "mynah/voice-bridge",
+		Provider: "codex", Status: "active",
+	}))
+
+	for i := 0; i < 2; i++ {
+		sent := callMessageJSON(t, messageRouterAs(s, senderID, true), http.MethodPost, "/v1/messages", map[string]any{
+			"to_agent": recipientID, "payload": fmt.Sprintf("request-%d", i),
+			"idempotency_key": fmt.Sprintf("sender-label-%d", i),
+		})
+		require.Equal(t, http.StatusCreated, sent.Code, sent.Body.String())
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(sent.Body.Bytes(), &body))
+		stored, err := sqlite.GetPipeline(t.Context(), body["message_id"].(string))
+		require.NoError(t, err)
+		require.Equal(t, "claude-code", stored.FromProvider,
+			"response-only names must not repurpose persisted provider identity")
+	}
+
+	sender, err := sqlite.GetAgent(t.Context(), senderID)
+	require.NoError(t, err)
+	sender.Name = "Pretend trusted operator"
+	require.NoError(t, sqlite.UpdateAgent(t.Context(), sender))
+
+	counting := &countingExactAgentStore{AgentStore: sqlite, getCalls: make(map[string]int)}
+	s.agentStore = counting
+	received := callMessageJSON(t, messageRouterAs(s, recipientID, true), http.MethodPost,
+		"/v1/messages/receive", map[string]any{
+			"receive_token": "sender-label-receive", "limit": 2, "claimant_session_id": "voice-session",
+		})
+	require.Equal(t, http.StatusOK, received.Code, received.Body.String())
+	var page struct {
+		Items []map[string]any `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(received.Body.Bytes(), &page))
+	require.Len(t, page.Items, 2)
+	for _, item := range page.Items {
+		require.Equal(t, senderID, item["from_agent"])
+		require.Equal(t, "claude-code", item["from_provider"])
+		require.Equal(t, "Pretend trusted operator", item["from_display_name"])
+		require.Equal(t, "claude-code/sage", item["from_registered_name"])
+		require.Equal(t, "agent_untrusted", item["trust"])
+	}
+	require.Equal(t, 1, counting.getCalls[senderID],
+		"one bounded page must resolve each distinct sender exactly once")
 }
 
 func TestCanonicalFederatedMessageStatusIsSenderOnly(t *testing.T) {

@@ -237,23 +237,34 @@ func (s *Server) handleMessagesReceive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type receivedMessage struct {
-		MessageID         string    `json:"message_id"`
-		FromAgent         string    `json:"from_agent"`
-		FromProvider      string    `json:"from_provider,omitempty"`
-		Intent            string    `json:"intent,omitempty"`
-		Payload           string    `json:"payload"`
-		Status            string    `json:"status"`
-		CreatedAt         time.Time `json:"created_at"`
-		ExpiresAt         time.Time `json:"expires_at"`
-		Authority         string    `json:"authority"`
-		Trust             string    `json:"trust"`
-		SecurityNotice    string    `json:"security_notice"`
-		ClaimantSessionID string    `json:"claimant_session_id,omitempty"`
+		MessageID          string    `json:"message_id"`
+		FromAgent          string    `json:"from_agent"`
+		FromProvider       string    `json:"from_provider,omitempty"`
+		FromDisplayName    string    `json:"from_display_name,omitempty"`
+		FromRegisteredName string    `json:"from_registered_name,omitempty"`
+		Intent             string    `json:"intent,omitempty"`
+		Payload            string    `json:"payload"`
+		Status             string    `json:"status"`
+		CreatedAt          time.Time `json:"created_at"`
+		ExpiresAt          time.Time `json:"expires_at"`
+		Authority          string    `json:"authority"`
+		Trust              string    `json:"trust"`
+		SecurityNotice     string    `json:"security_notice"`
+		ClaimantSessionID  string    `json:"claimant_session_id,omitempty"`
 	}
+	agentIDs := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			agentIDs = append(agentIDs, item.FromAgent)
+		}
+	}
+	presentations := s.resolvePipelineAgentPresentations(r.Context(), agentIDs...)
 	response := make([]receivedMessage, 0, len(items))
 	for _, item := range items {
+		presentation := presentations[item.FromAgent]
 		response = append(response, receivedMessage{
 			MessageID: item.PipeID, FromAgent: item.FromAgent, FromProvider: item.FromProvider,
+			FromDisplayName: presentation.DisplayName, FromRegisteredName: presentation.RegisteredName,
 			Intent: item.Intent, Payload: item.Payload, Status: item.Status,
 			CreatedAt: item.CreatedAt, ExpiresAt: item.ExpiresAt,
 			Authority: pipeRequestAuthority, Trust: pipeLocalTrust,

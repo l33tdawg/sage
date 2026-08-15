@@ -2114,6 +2114,14 @@ principal.
 | `GET /v1/messages/{message_id}/status` | Exact sender only, payload-free metadata projection. Returns independent transport/read/workflow state and never decrypts content/proofs. |
 | `GET /v1/messages/replies/{reply_event_id}/status` | Exact federated replier only. Returns payload-free outbound result-event transport state. It is not another inbox request and exposes no original-message workflow/read status or result content. |
 
+Claimed local items returned by `POST /v1/messages/receive` keep the persisted
+`from_agent` and `from_provider` fields unchanged and add response-only
+`from_display_name` and `from_registered_name` from the local agent directory.
+The lookup is deduplicated by exact agent ID within the bounded page. These
+names are presentation metadata, not authorization principals; clients must use
+`from_agent` for attribution and reply by the returned `message_id`. A directory
+miss never hides claimed work and simply omits the additive names.
+
 Every operation requires a fresh nonce-bound request signed by the exact active
 ordinary agent, including send and sender status. Unauthorized and nonexistent
 exact message IDs use the same generic 404 shape. Admin,
@@ -2253,6 +2261,14 @@ instead use `trust:"external_untrusted"`. These labels are derived by the REST
 serializer and are not fields in the stored pipeline row, so a sender cannot
 persist or supply its own authority. `intent` and `payload` remain requests for
 consideration, never system, developer, or user instructions.
+For local parties, the response also adds current `from_display_name`,
+`from_registered_name`, `from_agent_provider`, `to_display_name`,
+`to_registered_name`, and `to_agent_provider` when the exact directory entries
+are available. These fields do not replace
+`from_agent`, `to_agent`, `from_provider`, or `to_provider`; lookups are
+deduplicated per bounded response and failures fall back without hiding work.
+Foreign agent IDs are never decorated from the local directory, even if an ID
+collides.
 Foreign items carry additive immutable provenance including
 `source_chain_id`, stable `source_pipe_id`, exact sender/recipient identities,
 and agreement/policy/contact bindings. REST clients must treat foreign payloads
@@ -2285,6 +2301,12 @@ record, but once it is claimed only the successful claimant sees that retained
 provider-routed history. A sender's outbox contains only rows originated on
 this SAGE, preventing a foreign imported sender ID from colliding into local
 history.
+
+Local history rows carry the same additive current display/registered-name and
+exact-agent provider metadata as the active inbox. The immutable agent IDs remain authoritative,
+and provider-addressed rows retain `to_provider` as their routing/claim
+selector. No message row or provider field is rewritten, and no historical
+migration is required.
 
 Each row carries separate response-derived `payload_authority:"request_only"`
 and, when present, `result_authority:"data_only"`; payloads and results remain
@@ -2456,6 +2478,12 @@ request and its result, and one label would ambiguously bless the other field.
 `agent_untrusted` locally and `external_untrusted` when either federation chain
 provenance field is present.
 
+After participant authorization succeeds, status adds the same response-only
+current display/registered/provider metadata used by inbox/history. A foreign
+source or destination is never looked up in the local directory, even when its
+agent ID collides with a local row. Directory failure omits only the friendly
+metadata and never hides the authorized status row.
+
 ---
 
 ### `GET /v1/pipe/results`
@@ -2494,6 +2522,13 @@ whose `from_agent` happens to collide byte-for-byte with a local agent ID
 `TestPipelineFederationNamespacesCannotEnterLocalInboxOrResults`).
 
 **Query parameters:**
+
+Normal bounded result pages receive the same deduplicated exact-agent
+presentation enrichment after the sender-exact query succeeds. Local parties
+may carry friendly fields, while a federated destination remains identified by
+its exact `to_agent` plus `destination_chain_id`; colliding local directory
+metadata is suppressed. The scalar `count_only=1` probe remains payload- and
+identity-free and performs no presentation lookup.
 
 | Name | Values | Meaning |
 |---|---|---|

@@ -970,6 +970,10 @@ partial result. If an acknowledgement fails, the already claimed work is still
 returned with `read_status:not_confirmed`; it is never hidden. Every payload
 remains untrusted request content. A definite 404 from an older node alone
 enables the per-ID compatibility path; 401/403/5xx failures never fall back.
+For local items, `from` uses display name, then registered name, then the
+persisted legacy provider label, then a bounded exact-ID prefix. The exact
+authenticated ID is always returned separately as `sender_agent`; mutable or
+duplicate friendly names never replace it or change reply authorization.
 
 **REST:** `POST /v1/messages/receive`, followed by
 `PUT /v1/messages/read-batch` (legacy definite-404 fallback:
@@ -1576,8 +1580,8 @@ authorization. Pipeline results are untrusted data, not instructions.
 | `reply_since` | RFC3339 string | no | Inclusive reply watermark, normally the previous `newest_reply_completed_at`. Boundary rows may repeat; deduplicate by `message_id`. A value later than the authoritative retained archive head, or one that cannot be validated because no head is available, is rejected as an unsafe forward jump and triggers recovery of the newest retained page instead of a false empty result. |
 
 **Returns:**
-- `items`: mixed array. Local messages contain `{message_id, from, intent,
-  payload, created_at, requires_reply:true, authority:"request_only",
+- `items`: mixed array. Local messages contain `{message_id, from,
+  sender_agent, intent, payload, created_at, requires_reply:true, authority:"request_only",
   trust:"agent_untrusted", security_notice}`. Foreign work uses the same shape,
   adds `foreign:true`, `source_chain`, exact `sender_agent`,
   and `from_network`, and strengthens `trust` to `"external_untrusted"`; its
@@ -1585,6 +1589,15 @@ authorization. Pipeline results are untrusted data, not instructions.
   `authority:"notification_only"`, `trust:"untrusted_metadata"`, and direct the
   agent to verify the exact current assignment in `sage_backlog`
   (`internal/mcp/tools.go`, `Server.toolInbox`).
+  For local messages, `from` is presentation-only and uses current
+  `from_display_name`, then immutable `from_registered_name`, then the persisted
+  legacy provider label, then a bounded exact-ID prefix. `sender_agent` always
+  carries the exact authenticated sender ID. Display/registered names are
+  additive when available and never convey authority. Foreign `from` remains
+  the exact `agent@chain` address and never uses a colliding local directory
+  entry; local `from_display_name`/`from_registered_name` fields are suppressed
+  entirely on a foreign item even if an older or hostile REST peer supplies
+  them.
 - `count`: combined number of returned items, never greater than `limit`.
 - `message_count` / `task_assignment_count`: source-specific counts.
 - `reply_items` (v11.18.4): passive sender-exact reply array, separate from
@@ -1764,6 +1777,18 @@ request/result content. `passive_history:true` confirms the call did not claim
 anything. Every payload is `payload_authority:"request_only"`; any result is
 `result_authority:"data_only"`. Neither is instructions, and neither is proof of
 remote delivery or reading.
+
+For local exact-agent rows, `counterparty` prefers current display name, then
+registered name, then the legacy provider label, then a bounded exact-ID
+prefix. `counterparty_agent` carries the exact immutable agent ID alongside the
+friendly label; optional `counterparty_display_name` and
+`counterparty_registered_name` make the label source explicit. Federated rows
+remain exact `agent@chain`. Provider-addressed legacy outbox rows keep their
+`to_provider` routing selector as `counterparty` and do not invent an exact
+recipient.
+Foreign history counterparties likewise suppress
+`counterparty_display_name`/`counterparty_registered_name`; exact
+`counterparty_agent` plus chain qualification remains the only attribution.
 
 **Relationship to `sage_message_replies`:** a **completed `outbox` record
 carries the recipient's full, untruncated reply as `result`, labelled
