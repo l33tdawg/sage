@@ -99,14 +99,12 @@ does not define this durable sequence contract.
 
 The Claude host adapter is the one shipped adapter for this route, but it is
 off for every host unless `SAGE_CLAUDE_CHANNEL=1` (or another accepted true
-spelling) explicitly enables it (`claudeChannelEnabled`,
-`cmd/sage-gui/mcp.go:241`). Its subscription
+spelling) explicitly enables it (`claudeChannelEnabled`, `mcp.go:241`). Its subscription
 owns the one exact-agent wake lease, so an operator should enable it only when
 the attached host consumes the custom notification. Constructing an MCP
 `Server` never advertises or emits the experimental protocol on its own; the
-executable still makes an explicit enablement call (`EnableRESTClaudeChannel`,
-`internal/mcp/claude_wake_source.go:85`) through `ConfigureClaudeChannel`
-(`internal/mcp/claude_channel.go:50`).
+executable still makes an explicit enablement call (`EnableRESTClaudeChannel`, `internal/mcp/claude_wake_source.go:85`)
+through `ConfigureClaudeChannel` (`internal/mcp/claude_channel.go:50`).
 
 When armed, the adapter subscribes to this agent's own signed wake stream and
 turns durable unfinished-work state into a `notifications/claude/channel` JSON-RPC
