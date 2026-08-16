@@ -52,6 +52,20 @@ func TestCorroborationIndexDeclaredOnBothBackends(t *testing.T) {
 	require.Contains(t, string(pgSrc),
 		"ORDER BY created_at, agent_id, id LIMIT $2",
 		"postgres must keep the same total order and database-side row bound")
+
+	// The UNBOUNDED GetCorroborations read must carry the SAME total order. The `, memoryID)`
+	// tail (no LIMIT parameter) distinguishes it from the bounded sibling above; reverting it
+	// to plain created_at reintroduces the same-block nondeterminism this closes. (The SQLite
+	// behaviour is planner-masked by its INDEXED BY hint, so the deterministic same-timestamp
+	// ordering is exercised end-to-end against real PostgreSQL in the integration test.)
+	const unboundedOrder = "ORDER BY created_at, agent_id, id`, memoryID)"
+	require.Contains(t, string(sqlSrc), unboundedOrder,
+		"sqlite GetCorroborations (unbounded) must keep the total order")
+	require.Contains(t, string(pgSrc), unboundedOrder,
+		"postgres GetCorroborations (unbounded) must keep the total order")
+	require.Contains(t, string(sqlSrc),
+		"FROM corroborations INDEXED BY idx_corroborations_memory_order\n\t\tWHERE memory_id = ? ORDER BY created_at, agent_id, id`",
+		"sqlite GetCorroborations must pin the composite index so the order needs no temp sort")
 }
 
 // TestCorroborationIndexServesPerMemoryRead pins the bounded CEREBRUM query:
@@ -123,6 +137,85 @@ func TestGetCorroborationsBoundedCapsAndTotallyOrdersRows(t *testing.T) {
 	}
 	_, err = s.GetCorroborationsBounded(ctx, "m1", 0)
 	require.Error(t, err, "an absent SQL bound must fail closed")
+}
+
+// TestGetCorroborationsTotallyOrdered pins the UNBOUNDED GetCorroborations read to the same
+// deterministic total order (created_at, agent_id, id) as its bounded sibling. created_at
+// alone is not a total order — corroborations committed in one block share the block's
+// canonical timestamp — so without the agent_id/id tiebreak the row order is arbitrary and
+// diverges across SQLite/Postgres and across runs. The detail endpoint that renders these
+// rows must not reshuffle between reads. Removing the tiebreak fails this.
+func TestGetCorroborationsTotallyOrdered(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	at := time.Unix(1_700_000_000, 0).UTC()
+	require.NoError(t, s.InsertMemory(ctx, testMemory("m1", "author", "content-m1", "dom")))
+	// All 20 share one timestamp, inserted in REVERSE, so only the tiebreak yields a stable order.
+	for i := 19; i >= 0; i-- {
+		require.NoError(t, s.InsertCorroboration(ctx, &Corroboration{
+			MemoryID: "m1", AgentID: fmt.Sprintf("agent-%02d", i), CreatedAt: at,
+		}))
+	}
+
+	got, err := s.GetCorroborations(ctx, "m1")
+	require.NoError(t, err)
+	require.Len(t, got, 20)
+	for i, corr := range got {
+		require.Equal(t, fmt.Sprintf("agent-%02d", i), corr.AgentID,
+			"same-timestamp rows must be ordered by the agent_id tiebreak, not arbitrary order")
+	}
+
+	names := func(cs []*Corroboration) []string {
+		out := make([]string, len(cs))
+		for i, c := range cs {
+			out[i] = c.AgentID
+		}
+		return out
+	}
+	again, err := s.GetCorroborations(ctx, "m1")
+	require.NoError(t, err)
+	require.Equal(t, names(got), names(again), "the unbounded read must be a stable total order")
+}
+
+// TestGetCorroborationsServesIndexNoTempSort pins the unbounded read's plan: it must SEARCH
+// via idx_corroborations_memory_order and satisfy ORDER BY without a temp b-tree — the same
+// INDEXED BY protection the bounded read carries, verified WITHOUT ANALYZE (SAGE never runs
+// ANALYZE, per PR #181). Without the INDEXED BY hint the total order regresses to a temp sort.
+func TestGetCorroborationsServesIndexNoTempSort(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	at := time.Unix(1_700_000_000, 0).UTC()
+	for i := 0; i < 20; i++ {
+		require.NoError(t, s.InsertMemory(ctx, testMemory(fmt.Sprintf("m%03d", i), "author", "c", "dom")))
+	}
+	for i := 0; i < 200; i++ {
+		require.NoError(t, s.InsertCorroboration(ctx, &Corroboration{
+			MemoryID: fmt.Sprintf("m%03d", i%20), AgentID: fmt.Sprintf("agent-%d", i),
+			CreatedAt: at.Add(time.Duration(i) * time.Second),
+		}))
+	}
+
+	rows, err := s.conn.QueryContext(ctx,
+		`EXPLAIN QUERY PLAN SELECT id, memory_id, agent_id, evidence, created_at
+		 FROM corroborations INDEXED BY idx_corroborations_memory_order
+		 WHERE memory_id = ? ORDER BY created_at, agent_id, id`, "m003")
+	require.NoError(t, err)
+	defer rows.Close() //nolint:errcheck
+	var plan string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notUsed, &detail))
+		plan += detail + "\n"
+	}
+	require.NoError(t, rows.Err())
+
+	require.Contains(t, plan, "idx_corroborations_memory_order",
+		"the unbounded corroborator read must SEARCH via the composite index; plan was:\n"+plan)
+	require.NotContains(t, plan, "SCAN corroborations",
+		"a full scan is what the index must prevent; plan was:\n"+plan)
+	require.NotContains(t, plan, "USE TEMP B-TREE",
+		"the composite index must satisfy the order without a temp sort; plan was:\n"+plan)
 }
 
 // The CEREBRUM agent-as-lobe read is `WHERE submitting_agent = ? [AND status = ?]

@@ -1237,7 +1237,7 @@ func (s *PostgresStore) InsertCorroboration(ctx context.Context, corr *Corrobora
 func (s *PostgresStore) GetCorroborations(ctx context.Context, memoryID string) ([]*Corroboration, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, memory_id, agent_id, evidence, created_at
-		FROM corroborations WHERE memory_id = $1 ORDER BY created_at`, memoryID)
+		FROM corroborations WHERE memory_id = $1 ORDER BY created_at, agent_id, id`, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("get corroborations: %w", err)
 	}
