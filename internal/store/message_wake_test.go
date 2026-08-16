@@ -115,6 +115,38 @@ func TestMessageWakeStateSurvivesRestartAndBackfillsPendingUpgrade(t *testing.T)
 	require.Equal(t, MessageWakeState{Seq: 1, Pending: true}, state)
 }
 
+func TestMessageWakeStateBackfillsClaimedOnlyUpgrade(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "wake-claimed-upgrade.db")
+	s, err := NewSQLiteStore(ctx, path)
+	require.NoError(t, err)
+	_, _, err = s.SendLocalMessage(ctx, "wake-claimed-upgrade",
+		testLocalMessage("msg-wake-claimed-upgrade", "alice", "bob", "work"))
+	require.NoError(t, err)
+
+	// Model an upgraded database whose only live canonical work was already
+	// claimed through the production receive path before the Wake Bus side table
+	// existed. Claimed work is still unfinished, so startup must allocate a
+	// non-zero catch-up sequence.
+	claimed, replayed, err := s.ReceiveLocalMessages(
+		ctx, "bob", "upgrade-session", "wake-claimed-receive", 1)
+	require.NoError(t, err)
+	require.False(t, replayed)
+	require.Len(t, claimed, 1)
+	_, err = s.writeExecContext(ctx,
+		`DELETE FROM message_wake_state WHERE recipient_agent_id='bob'`)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	s, err = NewSQLiteStore(ctx, path)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	state, err := s.GetMessageWakeState(ctx, "bob")
+	require.NoError(t, err)
+	require.Equal(t, MessageWakeState{Seq: 1, Pending: true}, state,
+		"claimed-only upgraded work must never expose the silent {seq:0,pending:true} state")
+}
+
 func TestMessageWakeSchemaRejectsNegativeSequence(t *testing.T) {
 	s := newMessageTestStore(t)
 	_, err := s.writeExecContext(t.Context(),

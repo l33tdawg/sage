@@ -152,7 +152,7 @@ func (s *SQLiteStore) migrateMessages(ctx context.Context) error {
 	if _, err := s.writeExecContext(ctx, `INSERT OR IGNORE INTO message_wake_state(recipient_agent_id,seq)
 		SELECT DISTINCT to_agent,1 FROM pipeline_messages
 		WHERE source_chain_id='' AND destination_chain_id='' AND to_provider=''
-		  AND to_agent<>'' AND status='pending' AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`); err != nil {
+		  AND to_agent<>'' AND status IN ('pending','claimed') AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`); err != nil {
 		return fmt.Errorf("backfill canonical message wake state: %w", err)
 	}
 	return nil
