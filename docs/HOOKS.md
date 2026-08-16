@@ -18,7 +18,8 @@ The hooks under `.claude/` here are what the SAGE maintainers use day-to-day. Yo
 | `SessionEnd` | `sage-session-end.sh` | **direct-write** | Calls `sage-gui hook session-end`, which submits a `session-lifecycle` observation memory through full BFT consensus so the timeline shows session bookends. Soft-fails silently if SAGE isn't reachable — never blocks the agent's exit path. |
 | `PreCompact` | `sage-pre-compact.sh` | nudge | Fires right before Claude Code compresses the context. Turn-level detail is about to be discarded — this nudge prompts the agent to call `sage_reflect` (and any `sage_remember` for durable facts) while context is still fresh. |
 | `UserPromptSubmit` | `sage-user-prompt.sh` | passive pointer + nudge | In `full` and `bookend`, calls `sage-gui hook inbox-status` to surface a payload-free exact-agent unread count without claiming work. `full` also reminds the agent to call `sage_turn`; `bookend` suppresses only that memory nudge. Probe failures are reported as unavailable, never as zero. |
-| `Stop` / `SubagentStop` | `sage-stop.sh` | reserved | No-op placeholder. Fires per-turn (and per-subagent), too high-frequency for direct-write without batching. |
+| `Stop` | `sage-stop.sh` | opt-in nudge | Calls `sage-gui hook stop-check`. When `SAGE_STOP_NUDGE` is set, it declines the stop once while durable unclaimed inbox work is pending, so the agent handles it in-session instead of going idle on it. Payload-free (derived from a count, never message content), never blocks twice in a row (`stop_hook_active`), never re-nudges the same session for work it already declined, and fails open on every error. Default off. |
+| `SubagentStop` | `sage-stop.sh` | silent | Deliberately no-op. A subagent finishing is not evidence the owning host session is idle, and nudging it toward `sage_inbox` could create a second claimant for the same agent. `stop-check` refuses any event other than `Stop`. |
 
 ### How the direct-write hooks work
 
@@ -65,7 +66,7 @@ Comment out or remove the matching event entry in `.claude/settings.json`. Hooks
 
 ## Mixed model
 
-SAGE ships **two SessionStart/SessionEnd direct-write hooks**, a payload-free exact-agent inbox pointer on `UserPromptSubmit`, and **nudge hooks** where direct-write would be too noisy (`UserPromptSubmit`, `PreCompact`) or too high-frequency without batching (`Stop` / `SubagentStop`). The inbox pointer never claims or exposes messages. Conversation-level memory remains the agent's job (via `sage_turn`, `sage_reflect`) since only the LLM has enough context to distill what's worth remembering. The `memory_mode` flag tunes memory nudges independently from coordination visibility.
+SAGE ships **two SessionStart/SessionEnd direct-write hooks**, a payload-free exact-agent inbox pointer on `UserPromptSubmit`, and **nudge hooks** where direct-write would be too noisy (`UserPromptSubmit`, `PreCompact`) or too high-frequency without batching (`SubagentStop`). The inbox pointer never claims or exposes messages. Conversation-level memory remains the agent's job (via `sage_turn`, `sage_reflect`) since only the LLM has enough context to distill what's worth remembering. The `memory_mode` flag tunes memory nudges independently from coordination visibility.
 
 ## Forward direction
 

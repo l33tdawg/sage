@@ -795,8 +795,10 @@ func installClaudeMD(projectDir string) error {
 // The wiring uses Claude Code's full lifecycle: SessionStart pre-fetches
 // memories, UserPromptSubmit nudges per turn (replacing the noisier
 // PostToolUse on every Edit/Write/Bash), PreCompact crystallises before
-// detail is lost, SessionEnd writes a lifecycle observation, and Stop /
-// SubagentStop are wired silent (placeholder for future per-response checks).
+// detail is lost, SessionEnd writes a lifecycle observation, Stop runs the
+// opt-in end-of-turn work check (SAGE_STOP_NUDGE, default off), and
+// SubagentStop stays silent because a subagent finishing does not mean the
+// owning host session is idle.
 //
 // hookDirExpr is the directory expression used to root each script's bash
 // invocation. Claude Code installs pass `${CLAUDE_PROJECT_DIR}/.claude/hooks`
@@ -839,7 +841,8 @@ func sageHooksConfig(hookDirExpr string) map[string]any {
 		"UserPromptSubmit": []any{
 			map[string]any{"hooks": userPrompt},
 		},
-		// Stop / SubagentStop: silent placeholders
+		// Stop: opt-in end-of-turn check for pending unclaimed work.
+		// SubagentStop: shares the script, which refuses any non-Stop event.
 		"Stop": []any{
 			map[string]any{"hooks": stop},
 		},
