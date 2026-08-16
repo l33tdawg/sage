@@ -11,18 +11,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestClaudeChannelDefaultsOnOnlyForClaudeCode(t *testing.T) {
+func TestClaudeChannelRequiresExplicitOptInForEveryHost(t *testing.T) {
 	tests := []struct {
 		name     string
 		provider string
 		override string
 		want     bool
 	}{
-		{name: "Claude Code default", provider: "claude-code", want: true},
-		{name: "Claude Code provider is case insensitive", provider: "CLAUDE-CODE", want: true},
+		{name: "Claude Code default is off", provider: "claude-code", want: false},
+		{name: "case variant default is off", provider: "CLAUDE-CODE", want: false},
 		{name: "other hosts remain off", provider: "codex", want: false},
 		{name: "explicit Claude opt out", provider: "claude-code", override: "false", want: false},
-		{name: "explicit opt in", provider: "codex", override: "true", want: true},
+		{name: "explicit Claude opt in", provider: "claude-code", override: "true", want: true},
+		{name: "explicit other-host opt in", provider: "codex", override: "true", want: true},
 		{name: "invalid override fails closed", provider: "claude-code", override: "not-a-bool", want: false},
 	}
 

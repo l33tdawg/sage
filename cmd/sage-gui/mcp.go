@@ -221,11 +221,12 @@ func runMCP() error {
 	if projectDir, cwdErr := os.Getwd(); cwdErr == nil {
 		selfHealProject(projectDir, home, os.Getenv("SAGE_PROVIDER"), keyPath)
 	}
-	// Claude Code is the shipped consumer of the payload-free wake extension,
-	// so its project-scoped MCP sessions arm the channel by default. A failure
-	// to arm remains deliberately non-fatal: the wake channel accelerates
-	// polling, and a host that cannot open the stream must still get an ordinary
-	// working MCP session rather than no session at all.
+	// The Claude wake extension remains explicitly opt-in. The custom
+	// notifications/claude/channel method is not consumed by the shipped Claude
+	// Code host,
+	// while its REST source owns the one exact-agent wake lease. Starting it only
+	// after an operator opt-in prevents an idle adapter from excluding a useful
+	// long-running consumer. A failure to arm remains deliberately non-fatal.
 	if claudeChannelEnabled() {
 		if err := server.EnableRESTClaudeChannel(); err != nil {
 			fmt.Fprintf(os.Stderr, "SAGE MCP: claude channel disabled: %v\n", err)
@@ -234,14 +235,13 @@ func runMCP() error {
 	return server.Run(context.Background())
 }
 
-// claudeChannelEnabled arms the wake extension by default only for the shipped
-// Claude Code consumer. Other MCP hosts remain off unless explicitly enabled,
-// and an operator can explicitly disable a Claude Code session. An unparseable
-// override fails closed — envBool warns rather than guessing.
+// claudeChannelEnabled keeps the experimental wake extension opt-in for every
+// host. An unparseable override fails closed — envBool warns rather than
+// guessing.
 func claudeChannelEnabled() bool {
 	raw := os.Getenv("SAGE_CLAUDE_CHANNEL")
 	if strings.TrimSpace(raw) == "" {
-		return strings.EqualFold(strings.TrimSpace(os.Getenv("SAGE_PROVIDER")), "claude-code")
+		return false
 	}
 	enabled, ok := envBool("SAGE_CLAUDE_CHANNEL", raw)
 	return ok && enabled
