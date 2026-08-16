@@ -82,12 +82,14 @@ does not define this durable sequence contract.
 
 ## Claude wake channel enablement
 
-The Claude host adapter is the one shipped consumer of this route. It is
-**off by default** and is armed only by setting `SAGE_CLAUDE_CHANNEL` for
-`sage-gui mcp`, the stdio MCP server a Claude host launches
+The Claude host adapter is the one shipped consumer of this route. A
+project-scoped `sage-gui mcp` session whose `SAGE_PROVIDER` is `claude-code`
+arms it by default; set `SAGE_CLAUDE_CHANNEL=0` (or another accepted false
+spelling) to opt out. Other MCP hosts stay off unless explicitly enabled
 (`cmd/sage-gui/mcp.go:224`). Constructing an MCP `Server` never advertises or
-emits the experimental protocol on its own; enabling is an explicit call
-(`internal/mcp/claude_wake_source.go:84`, `internal/mcp/claude_channel.go:50`).
+emits the experimental protocol on its own; the executable still makes an
+explicit enablement call (`internal/mcp/claude_wake_source.go:84`,
+`internal/mcp/claude_channel.go:50`).
 
 When armed, the adapter subscribes to this agent's own signed wake stream and
 turns a new durable cursor into a `notifications/claude/channel` JSON-RPC
