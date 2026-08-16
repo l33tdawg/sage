@@ -948,9 +948,14 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 		messageStore, messageOK := s.store.(store.MessageStore)
 		switch {
 		case !messageOK:
-			// An alternate store cannot allocate a sequence; preserve the
-			// pre-existing behaviour rather than failing the send.
-			insertErr = pipeStore.InsertPipeline(r.Context(), msg)
+			// FAIL CLOSED. Falling back to a bare InsertPipeline here would
+			// recreate the exact invariant violation this change exists to
+			// remove, and would return 201 for work the wake contract cannot
+			// represent. Refusing before insertion is the honest answer: no row,
+			// no half-admitted state, and a caller that knows it failed.
+			writeProblem(w, http.StatusNotImplemented, "Messages unavailable",
+				"The active store does not support canonical messages.")
+			return
 		case req.IdempotencyKey != "":
 			if len(req.IdempotencyKey) > store.MaxMessageTokenBytes {
 				writeProblem(w, http.StatusBadRequest, "Invalid idempotency key", "idempotency_key is too long")
@@ -992,8 +997,16 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 	}
 	// Publish the process-local wake only AFTER the transaction committed, and
 	// only for a fresh admission: a replay already published when it was first
-	// admitted, and publishing again would invent a generation that no durable
+	// admitted, and publishing again would invent a generation no durable
 	// sequence backs.
+	//
+	// The WakeSeq>0 test is what actually enforces this today — WakeSeq is
+	// process-local return metadata (store.PipelineMessage, json:"-") that
+	// GetPipeline never populates, so a keyed replay comes back as zero. The
+	// !idempotentReplay clause is therefore redundant RIGHT NOW and is kept
+	// deliberately: it states the intent, and it is the guard that still holds
+	// if WakeSeq ever becomes a stored column. Do not read it as load-bearing
+	// on its own — a mutation removing it will not fail any test.
 	if !idempotentReplay && msg.WakeSeq > 0 {
 		s.publishMessageWake(msg.ToAgent, msg.WakeSeq)
 	}

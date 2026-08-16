@@ -339,7 +339,7 @@ func (s *SQLiteStore) SendLocalMessage(ctx context.Context, idempotencyKey strin
 //
 // It exists because the deprecated pipe route admits exact-local canonical rows
 // through a bare InsertPipeline, which allocates no wake generation. A row
-// admitted that way is real work the recipient can never be told about: the
+// admitted that way is real work no wake consumer can observe as new: the
 // wake sequence never moves, so a consumer comparing "is this newer than what I
 // last saw" answers no, forever. Adding a separate seq bump after the insert
 // would not fix it — a crash between the two leaves durable work with no

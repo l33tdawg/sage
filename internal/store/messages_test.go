@@ -935,11 +935,16 @@ func TestCanonicalMigrationRescuesRowsWrittenWithNanosecondPrecision(t *testing.
 	require.Greater(t, got, stamped, "rescue must extend, not shorten")
 }
 
-// AdmitLocalMessage must insert the row and advance the recipient's wake
-// sequence in ONE transaction. If the sequence were bumped outside it, a failed
-// insert would leave a generation with no row behind it — and a consumer that
-// trusts the sequence would wait forever for work that never landed.
-func TestAdmitLocalMessageIsAtomicWithTheWakeSequence(t *testing.T) {
+// AdmitLocalMessage must insert the row and advance the wake sequence in ONE
+// transaction. The dangerous direction is NOT a failed insert — it is an insert
+// that SUCCEEDS while the wake allocation fails, because a bare
+// InsertPipeline-then-bump would leave durable work with no generation, which
+// is the silent state this release exists to remove.
+//
+// An earlier version of this test aborted BEFORE INSERT, so the wake update was
+// never attempted and it only proved the easy half. This aborts the wake update
+// itself, with the row insert already succeeded inside the transaction.
+func TestAdmitLocalMessageRollsBackTheRowWhenWakeAllocationFails(t *testing.T) {
 	ctx := context.Background()
 	s := newMessageTestStore(t)
 
@@ -947,22 +952,27 @@ func TestAdmitLocalMessageIsAtomicWithTheWakeSequence(t *testing.T) {
 	require.NoError(t, err)
 	before, err := s.GetMessageWakeState(ctx, "bob")
 	require.NoError(t, err)
-	require.Equal(t, uint64(1), before.Seq)
+	require.Equal(t, uint64(1), before.Seq, "bob must already have a generation so the UPDATE arm is taken")
 
+	// Abort the wake allocation, NOT the insert. By the time this fires the
+	// pipeline row is already written inside the transaction.
 	_, err = s.writeExecContext(ctx,
-		`CREATE TRIGGER fail_admit BEFORE INSERT ON pipeline_messages
-		 WHEN NEW.pipe_id='msg-boom'
-		 BEGIN SELECT RAISE(ABORT,'forced'); END`)
+		`CREATE TRIGGER fail_wake_alloc BEFORE UPDATE ON message_wake_state
+		 WHEN NEW.recipient_agent_id='bob'
+		 BEGIN SELECT RAISE(ABORT,'forced wake failure'); END`)
 	require.NoError(t, err)
 
-	admitted, err := s.AdmitLocalMessage(ctx, testLocalMessage("msg-boom", "alice", "bob", "must not land"))
-	require.Error(t, err, "a forced insert failure must surface")
+	admitted, err := s.AdmitLocalMessage(ctx, testLocalMessage("msg-orphan", "alice", "bob", "must not survive"))
+	require.Error(t, err, "a failed wake allocation must fail the admission")
 	require.Nil(t, admitted)
 
 	after, err := s.GetMessageWakeState(ctx, "bob")
 	require.NoError(t, err)
-	require.Equal(t, before.Seq, after.Seq,
-		"a rolled-back admission must advance neither the row nor the sequence")
+	require.Equal(t, before.Seq, after.Seq, "the sequence must not advance")
+
+	orphan, err := s.GetPipeline(ctx, "msg-orphan")
+	require.Error(t, err, "the row must NOT survive a failed wake allocation")
+	require.Nil(t, orphan, "durable work with no generation is the exact silent state being removed")
 }
 
 // The happy path: one admission, one generation, reported back to the caller so
