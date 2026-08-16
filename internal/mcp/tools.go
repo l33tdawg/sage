@@ -162,12 +162,12 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_timeline": {
 			Name:        "sage_timeline",
-			Description: "Get memories in a time range, grouped by time buckets. Use this to see memory activity over time.",
+			Description: "Get memories in a time range, grouped by time buckets. Use this to see memory activity over time. App-v23 limits each request to a maximum span of 31 days.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"from":   map[string]any{"type": "string", "format": "date-time", "description": "Start instant (RFC3339, e.g. 2024-01-01T00:00:00Z)"},
-					"to":     map[string]any{"type": "string", "format": "date-time", "description": "End instant (RFC3339, e.g. 2024-12-31T23:59:59Z)"},
+					"from":   map[string]any{"type": "string", "format": "date-time", "description": "Start instant (RFC3339, e.g. 2026-08-01T00:00:00Z; maximum span: 31 days)"},
+					"to":     map[string]any{"type": "string", "format": "date-time", "description": "End instant (RFC3339, e.g. 2026-08-15T00:00:00Z; maximum span: 31 days)"},
 					"domain": map[string]any{"type": "string", "description": "Filter by domain tag"},
 				},
 			},

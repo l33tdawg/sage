@@ -442,13 +442,17 @@ func TestHandleToolsList(t *testing.T) {
 	assert.Contains(t, idempotencySchema["description"], "every later identical call returns that existing task")
 
 	require.NotNil(t, sageTimeline)
+	assert.Contains(t, sageTimeline["description"], "maximum span of 31 days")
 	timelineSchema := sageTimeline["inputSchema"].(map[string]any)
 	timelineProperties := timelineSchema["properties"].(map[string]any)
 	for _, name := range []string{"from", "to"} {
 		bound := timelineProperties[name].(map[string]any)
 		assert.Equal(t, "date-time", bound["format"])
 		assert.Contains(t, bound["description"], "RFC3339")
+		assert.Contains(t, bound["description"], "maximum span: 31 days")
 	}
+	assert.Contains(t, timelineProperties["from"].(map[string]any)["description"], "2026-08-01T00:00:00Z")
+	assert.Contains(t, timelineProperties["to"].(map[string]any)["description"], "2026-08-15T00:00:00Z")
 }
 
 func TestToolRegistrySchemasAreSelfContained(t *testing.T) {
