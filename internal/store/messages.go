@@ -316,7 +316,9 @@ func (s *SQLiteStore) SendLocalMessage(ctx context.Context, idempotencyKey strin
 }
 
 // GetMessageWakeState returns only the authenticated caller's exact durable
-// wake sequence and whether currently claimable canonical local work exists.
+// wake sequence and whether unfinished canonical local work exists. Claimed
+// work remains unfinished: a claimant session may crash, so claim ownership
+// alone cannot make the wake surface say the recipient has nothing to handle.
 // It never decrypts a message and does not claim, read, acknowledge, or mutate.
 func (s *SQLiteStore) GetMessageWakeState(ctx context.Context, recipientID string) (MessageWakeState, error) {
 	recipientID = strings.TrimSpace(recipientID)
@@ -339,7 +341,7 @@ func (s *SQLiteStore) GetMessageWakeState(ctx context.Context, recipientID strin
 	if err := s.conn.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM pipeline_messages
 		 WHERE source_chain_id='' AND destination_chain_id='' AND to_provider=''
-		   AND to_agent=? AND status='pending'
+		   AND to_agent=? AND status IN ('pending','claimed')
 		   AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))`, recipientID).Scan(&pending); err != nil {
 		return MessageWakeState{}, err
 	}

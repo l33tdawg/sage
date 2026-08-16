@@ -3,6 +3,7 @@ package rest
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -239,6 +240,9 @@ func TestMessageWakeSSECatchUpReconnectAndExactPayload(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, reconnected.StatusCode)
 	defer reconnected.Body.Close() //nolint:errcheck
+	id, payload = readWakeEvent(t, reconnected.Body)
+	require.Equal(t, "1", id, "reconnect replays unfinished state at the durable cursor")
+	require.Equal(t, map[string]any{"version": float64(1), "seq": float64(1), "pending": true}, payload)
 
 	secondSend := callMessageJSON(t, messageRouterAs(s, "alice", true), http.MethodPost, "/v1/messages", map[string]any{
 		"to_agent": "bob", "payload": "secret-two", "idempotency_key": "wake-sse-two",
@@ -248,6 +252,65 @@ func TestMessageWakeSSECatchUpReconnectAndExactPayload(t *testing.T) {
 	require.Equal(t, "2", id)
 	require.Equal(t, map[string]any{"version": float64(1), "seq": float64(2), "pending": true}, payload)
 	require.NotContains(t, string(mustJSON(t, payload)), "secret")
+}
+
+func TestMessageWakeReconnectReplaysUnfinishedClaimAtSameSequence(t *testing.T) {
+	s, sqlite := newPipeServer(t)
+	addMessageAgent(t, sqlite, "alice")
+	addMessageAgent(t, sqlite, "bob")
+	sent := callMessageJSON(t, messageRouterAs(s, "alice", true), http.MethodPost, "/v1/messages", map[string]any{
+		"to_agent": "bob", "payload": "stranded", "idempotency_key": "wake-stranded",
+	})
+	require.Equal(t, http.StatusCreated, sent.Code, sent.Body.String())
+	claimed := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodPost, "/v1/messages/receive", map[string]any{
+		"receive_token": "dead-claim", "claimant_session_id": "dead-session", "limit": 1,
+	})
+	require.Equal(t, http.StatusOK, claimed.Code, claimed.Body.String())
+
+	server := httptest.NewServer(messageRouterAs(s, "bob", true))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		server.URL+"/v1/messages/wake?after_seq=1&consumer_id=restarted-runtime", nil)
+	require.NoError(t, err)
+	response, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer response.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	id, payload := readWakeEvent(t, response.Body)
+	require.Equal(t, "1", id, "state catch-up reuses the durable admission sequence")
+	require.Equal(t, map[string]any{"version": float64(1), "seq": float64(1), "pending": true}, payload)
+}
+
+func TestMessageWakeStateIsLeaseFreeAndPayloadExact(t *testing.T) {
+	s, sqlite := newPipeServer(t)
+	addMessageAgent(t, sqlite, "alice")
+	addMessageAgent(t, sqlite, "bob")
+	sent := callMessageJSON(t, messageRouterAs(s, "alice", true), http.MethodPost, "/v1/messages", map[string]any{
+		"to_agent": "bob", "payload": "lease-free", "idempotency_key": "wake-state-lease-free",
+	})
+	require.Equal(t, http.StatusCreated, sent.Code, sent.Body.String())
+
+	subscription, err := s.messageWakeBroker().acquire("bob", "live-runtime")
+	require.NoError(t, err)
+	defer subscription.release()
+
+	state := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodGet,
+		"/v1/messages/wake-state", nil)
+	require.Equal(t, http.StatusOK, state.Code, state.Body.String())
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(state.Body.Bytes(), &payload))
+	require.Equal(t, map[string]any{"version": float64(1), "seq": float64(1), "pending": true}, payload)
+	require.Len(t, payload, 3, "snapshot must expose only version/seq/pending")
+	select {
+	case <-subscription.done:
+		t.Fatal("lease-free wake-state read canceled the live SSE consumer")
+	default:
+	}
+	_, err = s.messageWakeBroker().acquire("bob", "competing-runtime")
+	require.ErrorIs(t, err, errMessageWakeLeaseHeld,
+		"snapshot must not release or replace the active consumer lease")
 }
 
 func mustJSON(t *testing.T, value any) []byte {
@@ -266,6 +329,9 @@ func TestMessageWakeAuthCursorAndLeaseFailuresAreLoud(t *testing.T) {
 	unsigned := callMessageJSON(t, messageRouterAs(s, "bob", false), http.MethodGet,
 		"/v1/messages/wake?after_seq=0&consumer_id=unsigned", nil)
 	require.Equal(t, http.StatusForbidden, unsigned.Code)
+	unsignedState := callMessageJSON(t, messageRouterAs(s, "bob", false), http.MethodGet,
+		"/v1/messages/wake-state", nil)
+	require.Equal(t, http.StatusForbidden, unsignedState.Code)
 	missingConsumer := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodGet,
 		"/v1/messages/wake?after_seq=0", nil)
 	require.Equal(t, http.StatusBadRequest, missingConsumer.Code)

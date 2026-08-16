@@ -835,6 +835,7 @@ func (s *Server) setupRouter() chi.Router {
 			r.Use(s.appV23PipelineAgentBoundary)
 			r.Post("/v1/messages", s.handleMessageSend)
 			r.Get("/v1/messages/wake", s.handleMessageWake)
+			r.Get("/v1/messages/wake-state", s.handleMessageWakeState)
 			r.Get("/v1/messages/claimed-elsewhere", s.handleMessagesClaimedElsewhere)
 			r.Post("/v1/messages/receive", s.handleMessagesReceive)
 			r.Post("/v1/messages/{message_id}/reply", s.handleMessageReply)

@@ -210,6 +210,29 @@ func writeMessageWakeHeartbeat(w http.ResponseWriter) error {
 	})
 }
 
+// handleMessageWakeState exposes the same payload-free durable state as the
+// SSE catch-up route without acquiring or disturbing its exclusive consumer
+// lease. Short-lived host hooks use this snapshot to compare a monotonic cursor;
+// they must never cancel the long-running runtime that owns the live stream.
+func (s *Server) handleMessageWakeState(w http.ResponseWriter, r *http.Request) {
+	if !requireExactSignedMessageAction(w, r) {
+		return
+	}
+	messageStore, ok := canonicalMessageStore(s)
+	if !ok {
+		writeProblem(w, http.StatusNotImplemented, "Messages unavailable", "The active store does not support canonical message wakes.")
+		return
+	}
+	state, err := messageStore.GetMessageWakeState(r.Context(), middleware.ContextAgentID(r.Context()))
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Wake state unavailable", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, messageWakePayload{
+		Version: messageWakeVersion, Seq: state.Seq, Pending: state.Pending,
+	})
+}
+
 func writeMessageWakeFrame(w http.ResponseWriter, write func() error) error {
 	controller := http.NewResponseController(w)
 	// In-process/test writers may not expose transport deadlines. Retain their
@@ -279,7 +302,11 @@ func (s *Server) handleMessageWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	lastSent := afterSeq
-	if state.Seq > afterSeq {
+	// Re-emit the current sequence when unfinished work still exists. This is a
+	// state catch-up, not a new admission: it closes the restart gap where a
+	// different runtime claimed the row, died, and left seq unchanged. Without
+	// this replay, reconnecting with the last seen cursor would sleep forever.
+	if state.Seq > afterSeq || state.Pending {
 		if err := writeMessageWakeEvent(w, state); err != nil {
 			return
 		}

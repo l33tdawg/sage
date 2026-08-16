@@ -21,11 +21,14 @@ message and does not advance the sequence. A rollback advances nothing.
 {"seq": 42, "pending": true}
 ```
 
-`pending` is an exact-recipient `EXISTS` check for currently claimable canonical
-local pending rows. Reading wake state changes nothing. Claim/read/reply paths
-do not rewrite the sequence. On upgrade, a recipient that already has pending
-canonical work receives baseline sequence 1, so restart does not strand that
-work behind `after_seq=0`.
+`pending` is an exact-recipient `EXISTS` check for unfinished canonical local
+rows: both `pending` and `claimed` work count until completion or expiry. A
+claim therefore cannot make the wake surface say the recipient has nothing to
+handle merely because another runtime currently owns it. Reading wake state
+changes nothing, and claim/read/reply paths do not rewrite the admission
+sequence. On upgrade, a recipient that already has unfinished canonical work
+receives baseline sequence 1, so restart does not strand that work behind
+`after_seq=0`.
 
 ## Signed catch-up and SSE
 
@@ -53,6 +56,18 @@ The JSON payload contains **exactly** `version`, `seq`, and `pending`. It never
 contains a message ID, sender, intent, payload, count, proof, receipt, delivery,
 read, claim, result, or presence field. Heartbeat comments keep the connection
 alive without inventing an event.
+
+When `after_seq` equals the durable sequence but unfinished work remains, the
+route immediately replays that same sequence with `pending:true`. This is a
+state catch-up, not a new admission: it lets a restarted runtime rediscover a
+row claimed by a dead session without fabricating a higher cursor. Clients must
+therefore treat the cursor as monotonic rather than requiring every received
+frame to be strictly greater than the supplied cursor.
+
+`GET /v1/messages/wake-state` returns that exact three-field JSON snapshot
+without opening SSE or acquiring its exclusive consumer lease. It exists for
+short-lived host hooks that need a monotonic comparison but must not supersede,
+cancel, or compete with the long-running wake consumer.
 
 ## Broker and reconnect safety
 
@@ -90,12 +105,12 @@ emits the experimental protocol on its own; enabling is an explicit call
 (`internal/mcp/claude_wake_source.go:84`, `internal/mcp/claude_channel.go:50`).
 
 When armed, the adapter subscribes to this agent's own signed wake stream and
-turns a new durable cursor into a `notifications/claude/channel` JSON-RPC
+turns durable unfinished-work state into a `notifications/claude/channel` JSON-RPC
 notification, so the host can stop polling its inbox on a timer.
 
 The channel is **only a poll accelerator, and it is payload-free**. A wake
 carries `version`, `seq`, and `pending` and nothing else, so the host learns
-that unclaimed work exists and never learns its content, its sender, or how
+that unfinished work exists and never learns its content, its sender, or how
 many messages are waiting. The host still calls the canonical inbox operation
 to see or claim anything, and that operation remains the only thing that
 affects message lifecycle state.

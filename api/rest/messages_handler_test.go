@@ -35,6 +35,7 @@ func messageRouterAs(s *Server, callerID string, exactProof bool) http.Handler {
 	})
 	r.Post("/v1/messages", s.handleMessageSend)
 	r.Get("/v1/messages/wake", s.handleMessageWake)
+	r.Get("/v1/messages/wake-state", s.handleMessageWakeState)
 	r.Get("/v1/messages/claimed-elsewhere", s.handleMessagesClaimedElsewhere)
 	r.Post("/v1/messages/receive", s.handleMessagesReceive)
 	r.Post("/v1/messages/{message_id}/reply", s.handleMessageReply)

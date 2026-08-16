@@ -2142,7 +2142,8 @@ principal.
 | Route | Contract |
 |---|---|
 | `POST /v1/messages` | Exact-local-agent send. Requires `to_agent`, `payload`, and a 1–256-byte caller-scoped `idempotency_key`; optional `intent` and `ttl_minutes` 0–1440. Omitted/0 is durable until handled; 1–1440 requests explicit expiry. Exact retry returns the original `message_id`; same key/different request is HTTP 409. |
-| `GET /v1/messages/wake` | Exact-caller payload-free catch-up/SSE. Requires a 1–128-byte `consumer_id`; accepts `after_seq` or matching `Last-Event-ID`. Events use `id:<seq>` and data exactly `{version,seq,pending}`. One exact agent has one active consumer lease; same-consumer reconnect supersedes its stale stream, while a different live consumer receives HTTP 409. |
+| `GET /v1/messages/wake` | Exact-caller payload-free catch-up/SSE. Requires a 1–128-byte `consumer_id`; accepts `after_seq` or matching `Last-Event-ID`. Events use `id:<seq>` and data exactly `{version,seq,pending}`, where `pending` means unfinished canonical work (`pending` or `claimed`). If unfinished work remains at the supplied cursor, reconnect immediately replays that same sequence as state catch-up. One exact agent has one active consumer lease; same-consumer reconnect supersedes its stale stream, while a different live consumer receives HTTP 409. |
+| `GET /v1/messages/wake-state` | Exact-caller lease-free payload-free snapshot returning exactly `{version,seq,pending}`. It reads the same durable unfinished-work state as the wake stream without acquiring, replacing, or releasing the live consumer lease; intended for short-lived host hooks that compare a monotonic cursor. |
 | `GET /v1/messages/claimed-elsewhere` | Exact-caller payload-free coordination scalar. Requires this runtime's 1–128-byte `claimant_session_id` and returns only `claimed_elsewhere_count`: the exact number of unfinished canonical local messages currently held by a different claimant session. The store query is not bounded by history pagination and exposes no message ID, claimant ID, sender, intent, or payload. |
 | `POST /v1/messages/receive` | Requires a 1–256-byte `receive_token`; optional limit 1–20 and opaque `claimant_session_id` up to 128 bytes. Claims and persists one exact ordered batch with session attribution. Same caller/token/limit replays that batch after a lost response; a different limit is HTTP 409. Replay metadata is retained for 48 hours and capped at 4096 tokens per agent: capacity returns HTTP 429, while a purged/incomplete exact batch returns HTTP 410 instead of claiming later work. |
 | `PUT /v1/messages/{message_id}/handoff` | Exact fetched recipient only. Atomically compare-and-swaps `from_session_id` to `to_session_id` for one still-claimed local message. A stale expected session is HTTP 409; repeating an already-applied transfer is idempotent. Session IDs coordinate runtimes sharing one agent identity and confer no authorization. |
@@ -2185,7 +2186,11 @@ row and idempotency binding. Exact send replay advances nothing. The signed
 `GET /v1/messages/wake` route first catches up from that durable state, then
 uses a bounded process-local broker for new sequences. A crash between commit
 and broker publication therefore loses no wake: reconnect with `after_seq` or
-`Last-Event-ID` observes the durable sequence. Heartbeats are SSE comments;
+`Last-Event-ID` observes the durable sequence. Wake `pending` remains true for
+both claimable and claimed-but-unfinished canonical rows. When unfinished work
+still exists at an equal cursor, reconnect replays that same sequence instead
+of sleeping; the replay is state catch-up and does not invent a new admission.
+Heartbeats are SSE comments;
 slow consumers have a one-sequence coalescing buffer and bounded writes. Wake
 state reads never claim, acknowledge, read, or decrypt a message and never
 assert delivery, presence, attention, or workflow progress. See

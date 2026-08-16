@@ -959,7 +959,8 @@ type MessageStatus struct {
 
 // MessageWakeState is payload-free exact-recipient inbox wake metadata. Seq is
 // monotonic and advances only for a fresh canonical local pending insertion;
-// Pending is a current bounded queue predicate, not delivery/read/presence.
+// Pending reports unfinished recipient work, whether still claimable or held
+// by a claimant session. It is not delivery/read/presence evidence.
 type MessageWakeState struct {
 	Seq     uint64 `json:"seq"`
 	Pending bool   `json:"pending"`

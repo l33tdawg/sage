@@ -47,8 +47,16 @@ func TestMessageWakeSequenceIsExactDurableAndReplaySafe(t *testing.T) {
 	require.Len(t, claimed, 2)
 	state, err = s.GetMessageWakeState(ctx, "bob")
 	require.NoError(t, err)
+	require.Equal(t, MessageWakeState{Seq: 2, Pending: true}, state,
+		"claiming must not hide unfinished work or rewrite wake history")
+	for _, item := range claimed {
+		_, err = s.ReplyLocalMessage(ctx, "bob", item.PipeID, "done")
+		require.NoError(t, err)
+	}
+	state, err = s.GetMessageWakeState(ctx, "bob")
+	require.NoError(t, err)
 	require.Equal(t, MessageWakeState{Seq: 2, Pending: false}, state,
-		"claiming changes only the pending predicate and never rewrites wake history")
+		"pending clears only after all exact-recipient work is terminal")
 }
 
 func TestMessageWakeAdvanceRollsBackWithFailedAdmission(t *testing.T) {
