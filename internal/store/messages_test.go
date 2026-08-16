@@ -615,9 +615,15 @@ func TestCanonicalMessageUpgradeExtendsUnreadAndSkipsLegacyExpirySweep(t *testin
 
 	before, err := NewSQLiteStore(ctx, path)
 	require.NoError(t, err)
+	// A genuine v11.17.8 row: the old default stamped expires_at at exactly
+	// created_at + 24h. The fixture previously used created_at-24h with a +1h
+	// expiry, which is created_at + 25h — not the old default at all, but a
+	// bounded expiry of the shape a caller gets from ttl_minutes. The rescue
+	// now targets the old default precisely so a caller's bounded TTL is not
+	// re-stamped on every store open, so the fixture must model what it claims.
 	msg := testLocalMessage("msg-v11178-unread", "alice", "bob", "survive the upgrade")
-	msg.CreatedAt = now.Add(-24 * time.Hour)
-	msg.ExpiresAt = now.Add(time.Hour)
+	msg.CreatedAt = now.Add(-23 * time.Hour)
+	msg.ExpiresAt = msg.CreatedAt.Add(24 * time.Hour)
 	_, _, err = before.SendLocalMessage(ctx, "upgrade-send", msg)
 	require.NoError(t, err)
 	require.NoError(t, before.Close())
@@ -758,4 +764,140 @@ func TestMessageReplyFenceFollowsAnExplicitHandoff(t *testing.T) {
 	replayed, err := s.ReplyLocalMessage(ctx, "bob", "msg", "fresh", "session-b")
 	require.NoError(t, err)
 	require.False(t, replayed)
+}
+
+// migrateMessages runs on EVERY store open, not once. It exists to rescue rows
+// that v11.17.8 stamped with the old 24-hour pipeline TTL, but it used to match
+// every canonical msg-* row in pending/claimed — so a sender's deliberate
+// bounded ttl_minutes was re-stamped to +100 years on the next restart and the
+// message became permanent. ttl_minutes is a documented parameter (0 durable,
+// otherwise 1-1440), so that silently broke the contract.
+func TestCanonicalMigrationKeepsSenderChosenTTLAcrossReopen(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ttl.db")
+
+	s, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	bounded := testLocalMessage("msg-bounded", "alice", "bob", "short-lived")
+	bounded.CreatedAt = now
+	bounded.ExpiresAt = now.Add(30 * time.Minute) // a caller's ttl_minutes: 30
+	_, _, err = s.SendLocalMessage(ctx, "bounded-send", bounded)
+	require.NoError(t, err)
+
+	durable := testLocalMessage("msg-durable", "alice", "bob", "durable")
+	durable.CreatedAt = now
+	durable.ExpiresAt = now.Add(CanonicalMessageLifetime)
+	_, _, err = s.SendLocalMessage(ctx, "durable-send", durable)
+	require.NoError(t, err)
+
+	expiryOf := func(store *SQLiteStore, id string) string {
+		var got string
+		require.NoError(t, store.conn.QueryRowContext(ctx,
+			`SELECT expires_at FROM pipeline_messages WHERE pipe_id=?`, id).Scan(&got))
+		return got
+	}
+	boundedBefore := expiryOf(s, "msg-bounded")
+	durableBefore := expiryOf(s, "msg-durable")
+	require.NoError(t, s.Close())
+
+	// Reopen: this is what re-runs migrateMessages against live rows.
+	reopened, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+
+	require.Equal(t, boundedBefore, expiryOf(reopened, "msg-bounded"),
+		"a sender's bounded TTL must survive a store reopen, not be re-stamped to +100 years")
+	require.Equal(t, durableBefore, expiryOf(reopened, "msg-durable"),
+		"an already-durable row must be left alone")
+}
+
+// The rescue itself must still work: a row carrying exactly the old 24-hour
+// stamp is still extended, so an upgrade does not drop unread work.
+func TestCanonicalMigrationStillRescuesTheOldTwentyFourHourStamp(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "rescue.db")
+
+	s, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	legacy := testLocalMessage("msg-legacy", "alice", "bob", "stamped by v11.17.8")
+	legacy.CreatedAt = now
+	legacy.ExpiresAt = now.Add(CanonicalMessageLifetime)
+	_, _, err = s.SendLocalMessage(ctx, "legacy-send", legacy)
+	require.NoError(t, err)
+
+	// Reproduce exactly what v11.17.8 left behind: expires_at == created_at+24h,
+	// written through the same SQL expression the migration compares against.
+	_, err = s.writeExecContext(ctx,
+		`UPDATE pipeline_messages
+		 SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ',created_at,'+24 hours')
+		 WHERE pipe_id='msg-legacy'`)
+	require.NoError(t, err)
+	var stamped string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT expires_at FROM pipeline_messages WHERE pipe_id=?`, "msg-legacy").Scan(&stamped))
+	require.NoError(t, s.Close())
+
+	reopened, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+
+	var got string
+	require.NoError(t, reopened.conn.QueryRowContext(ctx,
+		`SELECT expires_at FROM pipeline_messages WHERE pipe_id=?`, "msg-legacy").Scan(&got))
+	require.NotEqual(t, stamped, got, "the old 24-hour stamp must still be rescued on upgrade")
+	require.Greater(t, got, stamped, "rescue must extend the expiry, not shorten it")
+}
+
+// The rescue must survive PRODUCTION timestamp precision. Production writes
+// expires_at through formatTime (RFC3339Nano), so a real row carries up to 9
+// fractional digits, while SQLite's strftime %f emits only 3. A textual
+// comparison therefore never matches a real v11.17.8 row and would rescue
+// nothing at all — silently.
+//
+// Every other fixture here goes through testLocalMessage, which truncates to
+// milliseconds and so cannot see this. This one deliberately does not.
+func TestCanonicalMigrationRescuesRowsWrittenWithNanosecondPrecision(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "nano.db")
+
+	s, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+
+	// Deliberately NOT millisecond-aligned: 123456789ns.
+	created := time.Date(2026, 3, 4, 5, 6, 7, 123456789, time.UTC)
+	require.NotEqual(t, created, created.Truncate(time.Millisecond),
+		"fixture must carry sub-millisecond precision or it cannot prove anything")
+
+	legacy := &PipelineMessage{
+		PipeID: "msg-nano", FromAgent: "alice", ToAgent: "bob",
+		Intent: "request", Payload: "v11.17.8 row at production precision",
+		Status: "pending", CreatedAt: created, ExpiresAt: created.Add(CanonicalMessageLifetime),
+	}
+	_, _, err = s.SendLocalMessage(ctx, "nano-send", legacy)
+	require.NoError(t, err)
+
+	// Reproduce the old 24-hour stamp at full precision, the way v11.17.8 left it.
+	_, err = s.writeExecContext(ctx,
+		`UPDATE pipeline_messages SET expires_at=? WHERE pipe_id='msg-nano'`,
+		formatTime(created.Add(24*time.Hour)))
+	require.NoError(t, err)
+	var stamped string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT expires_at FROM pipeline_messages WHERE pipe_id='msg-nano'`).Scan(&stamped))
+	require.Contains(t, stamped, "123456789", "the stamp must retain nanosecond digits")
+	require.NoError(t, s.Close())
+
+	reopened, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+
+	var got string
+	require.NoError(t, reopened.conn.QueryRowContext(ctx,
+		`SELECT expires_at FROM pipeline_messages WHERE pipe_id='msg-nano'`).Scan(&got))
+	require.NotEqual(t, stamped, got,
+		"a real v11.17.8 row written at RFC3339Nano precision must still be rescued")
+	require.Greater(t, got, stamped, "rescue must extend, not shorten")
 }
