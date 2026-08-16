@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -408,10 +410,14 @@ func flattenLine(s string) string {
 //     be able to wedge a session, which is also why nothing here returns an
 //     error to the dispatcher.
 const (
-	stopNudgeStateFile = "stop-nudge-state"
+	// stopNudgeStateDir holds one marker file per session. A directory rather
+	// than a shared file so concurrent Stop hook processes never contend.
+	stopNudgeStateDir = "stop-nudge-state"
 	// stopNudgeWakeVersion pins the wake payload contract this hook understands.
 	// A version bump must be an explicit decision, never a silent misparse.
 	stopNudgeWakeVersion = 1
+	// maxStopNudgeSessions bounds the per-session marker file.
+	maxStopNudgeSessions = 32
 	maxStopHookInput     = 1 << 20
 )
 
@@ -492,8 +498,7 @@ func runHookStopCheck() error {
 		return nil
 	}
 
-	lastSession, lastSeq := loadStopNudgeState()
-	if lastSession == input.SessionID && wake.Seq <= lastSeq {
+	if wake.Seq <= loadStopNudgeState(input.SessionID) {
 		// Same session, nothing newer than it was already told about. Declining
 		// to act on what it has already seen is its decision to make.
 		return nil
@@ -520,26 +525,120 @@ func runHookStopCheck() error {
 	return nil
 }
 
-// loadStopNudgeState reads the last nudged session and durable wake sequence. Any unreadable
-// or malformed state is treated as "never nudged", which can only cause one
-// extra nudge rather than a missed one.
-func loadStopNudgeState() (string, uint64) {
-	raw, err := os.ReadFile(filepath.Join(SageHome(), stopNudgeStateFile)) //nolint:gosec // path under SAGE_HOME
+// stopNudgeMarkerPath returns this session's OWN marker file.
+//
+// One file per session, never one shared file. Two earlier shapes were both
+// wrong. A single slot holding one (session, seq) pair let concurrent Claude
+// sessions evict each other, so each was re-nudged about work it had already
+// declined — falsifying this hook's own promise that declining is final. The
+// obvious repair, one shared file holding a line per session, still performs an
+// unlocked read-modify-write: two Stop hook processes are separate OS processes,
+// so both can read the same content and the last writer erases the other's
+// entry. Sequential tests cannot see that; only a concurrent one can.
+//
+// Giving each session its own path removes the contention rather than guarding
+// it: different sessions never touch the same file, and a session only ever
+// writes its own monotonically increasing sequence. No lock, no read-modify-
+// write, and nothing to get wrong on a platform without flock.
+//
+// The name is a hash so an opaque session id can never escape into a path.
+func stopNudgeMarkerPath(sessionID string) string {
+	sum := sha256.Sum256([]byte(sessionID))
+	return filepath.Join(SageHome(), stopNudgeStateDir, hex.EncodeToString(sum[:]))
+}
+
+// loadStopNudgeState returns the highest sequence this exact session has
+// already been nudged about, or 0 if it has never been nudged.
+//
+// Unreadable or malformed state is treated as "never nudged". Every failure
+// here costs at most one extra nudge and can never cause a missed one, which
+// is the direction this whole feature must fail in.
+func loadStopNudgeState(sessionID string) uint64 {
+	raw, err := os.ReadFile(stopNudgeMarkerPath(sessionID)) //nolint:gosec // hashed name under SAGE_HOME
 	if err != nil {
-		return "", 0
+		return 0
 	}
-	fields := strings.Fields(strings.TrimSpace(string(raw)))
-	if len(fields) != 2 {
-		return "", 0
+	seq, parseErr := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+	if parseErr != nil {
+		return 0
 	}
-	seq, err := strconv.ParseUint(fields[1], 10, 64)
-	if err != nil {
-		return "", 0
-	}
-	return fields[0], seq
+	return seq
 }
 
 func storeStopNudgeState(sessionID string, seq uint64) {
-	path := filepath.Join(SageHome(), stopNudgeStateFile)
-	_ = os.WriteFile(path, []byte(fmt.Sprintf("%s %d\n", sessionID, seq)), 0o600)
+	dir := filepath.Join(SageHome(), stopNudgeStateDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return
+	}
+	// Each writer gets its own temporary file. A fixed path+".tmp" is still
+	// shared by concurrent hooks for the SAME session: one writer can truncate
+	// it while the other is writing, or rename it out from under the other.
+	// Unique siblings remove that last shared write surface.
+	path := stopNudgeMarkerPath(sessionID)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-") //nolint:gosec // private directory under SAGE_HOME
+	if err != nil {
+		return
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.WriteString(strconv.FormatUint(seq, 10) + "\n"); err != nil {
+		_ = tmp.Close()
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		return
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		// Windows does not replace an existing destination. Removing it first
+		// can expose a brief missing-marker window, but that failure direction is
+		// one extra nudge, never a suppressed newer generation.
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return
+		}
+		if err := os.Rename(tmpPath, path); err != nil {
+			return
+		}
+	}
+	pruneStopNudgeMarkers(dir)
+}
+
+func isStopNudgeMarkerName(name string) bool {
+	if len(name) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(name)
+	return err == nil
+}
+
+// pruneStopNudgeMarkers keeps the marker directory bounded. Sessions are
+// ephemeral, so these accumulate; this is a hint store, not a ledger.
+//
+// Deliberately best-effort and unsynchronised: pruning the wrong entry under a
+// race costs one extra nudge for a session that had already been told, which is
+// the safe direction. It can never suppress a nudge, because a missing marker
+// reads as "never nudged".
+func pruneStopNudgeMarkers(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type aged struct {
+		name string
+		mod  time.Time
+	}
+	markers := make([]aged, 0, len(entries))
+	for _, entry := range entries {
+		info, statErr := entry.Info()
+		if statErr != nil || entry.IsDir() || !isStopNudgeMarkerName(entry.Name()) {
+			continue
+		}
+		markers = append(markers, aged{name: entry.Name(), mod: info.ModTime()})
+	}
+	if len(markers) <= maxStopNudgeSessions {
+		return
+	}
+	sort.Slice(markers, func(i, j int) bool { return markers[i].mod.Before(markers[j].mod) })
+	for i := 0; i < len(markers)-maxStopNudgeSessions; i++ {
+		_ = os.Remove(filepath.Join(dir, markers[i].name))
+	}
 }

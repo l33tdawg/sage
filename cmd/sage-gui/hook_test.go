@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -608,7 +611,7 @@ func TestHookStopCheckFailsOpenWhenSessionIDIsMissing(t *testing.T) {
 
 			stdout := captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
 			assert.Empty(t, stdout, "a payload with no usable session id must allow the stop")
-			_, statErr := os.Stat(filepath.Join(home, stopNudgeStateFile))
+			_, statErr := os.Stat(filepath.Join(home, stopNudgeStateDir))
 			assert.True(t, os.IsNotExist(statErr), "no marker may be written without a session identity")
 		})
 	}
@@ -675,4 +678,122 @@ func TestHookStopCheckIgnoresAnUnknownWakePayloadVersion(t *testing.T) {
 	t.Setenv("SAGE_STOP_NUDGE", "1")
 	withStopHookStdin(t, `{"session_id":"s1","hook_event_name":"Stop"}`)
 	assert.Empty(t, captureStdout(t, func() { require.NoError(t, runHookStopCheck()) }))
+}
+
+// The exact defect an adversarial review found: the nudge marker used to be a
+// single machine-wide slot, so two concurrent Claude sessions evicted each
+// other and each was re-nudged about work it had already declined — every
+// turn-end, forever. That made this hook's own emitted promise, "declining is
+// final", false whenever more than one session was running.
+func TestHookStopCheckDecliningStaysFinalAcrossInterleavedSessions(t *testing.T) {
+	withTestSageEnv(t, stopHookNode(t, 5, true))
+	t.Setenv("SAGE_STOP_NUDGE", "1")
+
+	nudge := func(session string) string {
+		withStopHookStdin(t, `{"session_id":"`+session+`","hook_event_name":"Stop"}`)
+		return captureStdout(t, func() { require.NoError(t, runHookStopCheck()) })
+	}
+
+	require.Contains(t, nudge("s1"), `"decision":"block"`, "s1 is told once")
+	require.Contains(t, nudge("s2"), `"decision":"block"`, "s2 has never been told, so it is told once")
+
+	// s1 already declined this exact sequence. A second session existing must
+	// not resurrect it.
+	assert.Empty(t, nudge("s1"), "declining must stay final even after another session was nudged")
+	assert.Empty(t, nudge("s2"), "and for the interleaved session too")
+
+	// Both remain settled across further alternation.
+	assert.Empty(t, nudge("s1"))
+	assert.Empty(t, nudge("s2"))
+}
+
+// The marker is a bounded hint, not a ledger. Many sessions must not grow it
+// without limit, and eviction must never resurrect a nudge for the session
+// currently being asked about.
+func TestHookStopCheckMarkerStaysBounded(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SAGE_HOME", home)
+	withTestSageEnv(t, stopHookNode(t, 3, true))
+	t.Setenv("SAGE_HOME", home)
+	t.Setenv("SAGE_STOP_NUDGE", "1")
+
+	for i := 0; i < maxStopNudgeSessions*2; i++ {
+		withStopHookStdin(t, fmt.Sprintf(`{"session_id":"s%03d","hook_event_name":"Stop"}`, i))
+		require.NotEmpty(t, captureStdout(t, func() { require.NoError(t, runHookStopCheck()) }))
+	}
+	entries, err := os.ReadDir(filepath.Join(home, stopNudgeStateDir))
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(entries), maxStopNudgeSessions, "marker directory must stay bounded")
+
+	// The most recent session is still remembered, so it is not re-nudged.
+	withStopHookStdin(t, fmt.Sprintf(`{"session_id":"s%03d","hook_event_name":"Stop"}`, maxStopNudgeSessions*2-1))
+	assert.Empty(t, captureStdout(t, func() { require.NoError(t, runHookStopCheck()) }))
+}
+
+// THE RACE THE SEQUENTIAL TESTS CANNOT SEE. An earlier repair kept one shared
+// file holding a line per session, which still required an unlocked
+// read-modify-write. Stop hooks are separate OS processes, so two can read the
+// same content and the last writer erases the other's entry — and the evicted
+// session is then re-nudged about work it already declined. Interleaving calls
+// sequentially never reproduces it, because each call sees the previous write.
+//
+// Per-session files remove the contention rather than guarding it. This drives
+// genuinely concurrent writers and requires every session's mark to survive.
+func TestHookStopCheckConcurrentSessionsDoNotEvictEachOther(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SAGE_HOME", home)
+
+	const sessions = 24
+	var wg sync.WaitGroup
+	for i := 0; i < sessions; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			storeStopNudgeState(fmt.Sprintf("session-%02d", n), uint64(n+1))
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < sessions; i++ {
+		got := loadStopNudgeState(fmt.Sprintf("session-%02d", i))
+		assert.Equal(t, uint64(i+1), got,
+			"a concurrent writer must not erase another session's mark")
+	}
+}
+
+// Same session, concurrent writers: the mark must remain readable and valid
+// rather than torn, whichever write lands last.
+func TestHookStopCheckConcurrentSameSessionWritesStayReadable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SAGE_HOME", home)
+
+	var wg sync.WaitGroup
+	for i := 1; i <= 16; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			storeStopNudgeState("same-session", uint64(n))
+		}(i)
+	}
+	wg.Wait()
+
+	got := loadStopNudgeState("same-session")
+	assert.GreaterOrEqual(t, got, uint64(1), "the mark must survive as a valid sequence")
+	assert.LessOrEqual(t, got, uint64(16), "and must be one of the values actually written")
+
+	entries, err := os.ReadDir(filepath.Join(home, stopNudgeStateDir))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "every writer must clean up its unique temporary file")
+	assert.True(t, isStopNudgeMarkerName(entries[0].Name()), "only the final marker may remain")
+}
+
+func TestHookStopCheckMarkerUsesTheFullOpaqueSessionDigest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SAGE_HOME", home)
+
+	path := stopNudgeMarkerPath("session/id that must never become a path")
+	name := filepath.Base(path)
+	assert.Len(t, name, sha256.Size*2, "the full digest avoids cross-session marker collisions")
+	assert.True(t, isStopNudgeMarkerName(name))
+	assert.NotContains(t, path, "session/id", "the opaque session id must never enter the filesystem path")
 }
