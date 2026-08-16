@@ -566,6 +566,23 @@ func (s *Server) handlePipeResolve(w http.ResponseWriter, r *http.Request) {
 	writeProblem(w, http.StatusNotFound, "Unknown target", fmt.Sprintf("no registered local or visible federated agent matches %q", target))
 }
 
+// isExactLocalAdmission reports whether this row is canonical work addressed to
+// a concrete local agent on this node, and therefore owes that recipient a
+// durable wake generation.
+//
+// Provider-addressed rows are deliberately excluded while the provider is still
+// unresolved: there is no exact recipient to allocate a sequence for. A provider
+// name that HAS resolved to a concrete local ToAgent leaves ToProvider empty and
+// so counts as exact-local, which is the intended behaviour — that agent should
+// be woken. Federated rows carry a chain id on either side and are never local.
+func isExactLocalAdmission(msg *store.PipelineMessage) bool {
+	return msg != nil &&
+		strings.TrimSpace(msg.ToAgent) != "" &&
+		msg.ToProvider == "" &&
+		msg.SourceChainID == "" &&
+		msg.DestinationChainID == ""
+}
+
 // pipelineSendActivitySummary renders the dashboard Chain Activity row for a
 // newly created pipeline message. It is deliberately metadata-only.
 //
@@ -922,6 +939,33 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 		} else {
 			insertErr = transportStore.InsertPipelineWithTransport(r.Context(), msg, event)
 		}
+	} else if isExactLocalAdmission(msg) {
+		// Exact-local canonical work must never be admitted through a bare
+		// InsertPipeline. That allocates no wake generation, so the recipient's
+		// durable sequence never moves and every "is this newer than what I last
+		// saw" consumer answers no — forever. The row is real work nobody can be
+		// told about, which is the silent state this release exists to remove.
+		messageStore, messageOK := s.store.(store.MessageStore)
+		switch {
+		case !messageOK:
+			// An alternate store cannot allocate a sequence; preserve the
+			// pre-existing behaviour rather than failing the send.
+			insertErr = pipeStore.InsertPipeline(r.Context(), msg)
+		case req.IdempotencyKey != "":
+			if len(req.IdempotencyKey) > store.MaxMessageTokenBytes {
+				writeProblem(w, http.StatusBadRequest, "Invalid idempotency key", "idempotency_key is too long")
+				return
+			}
+			// Keyed sends go through the canonical path so a replay returns the
+			// original row and advances the sequence exactly once.
+			msg, idempotentReplay, insertErr = messageStore.SendLocalMessage(r.Context(), req.IdempotencyKey, msg)
+		default:
+			var admitted *store.PipelineMessage
+			admitted, insertErr = messageStore.AdmitLocalMessage(r.Context(), msg)
+			if insertErr == nil {
+				msg = admitted
+			}
+		}
 	} else {
 		insertErr = pipeStore.InsertPipeline(r.Context(), msg)
 	}
@@ -945,6 +989,13 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 		if nudger, ok := s.federation.(federatedPipeTransportNudger); ok {
 			nudger.NudgePipelineTransport()
 		}
+	}
+	// Publish the process-local wake only AFTER the transaction committed, and
+	// only for a fresh admission: a replay already published when it was first
+	// admitted, and publishing again would invent a generation that no durable
+	// sequence backs.
+	if !idempotentReplay && msg.WakeSeq > 0 {
+		s.publishMessageWake(msg.ToAgent, msg.WakeSeq)
 	}
 
 	if s.OnEvent != nil {

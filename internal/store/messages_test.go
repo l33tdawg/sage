@@ -934,3 +934,69 @@ func TestCanonicalMigrationRescuesRowsWrittenWithNanosecondPrecision(t *testing.
 		"a real v11.17.8 row written at RFC3339Nano precision must still be rescued")
 	require.Greater(t, got, stamped, "rescue must extend, not shorten")
 }
+
+// AdmitLocalMessage must insert the row and advance the recipient's wake
+// sequence in ONE transaction. If the sequence were bumped outside it, a failed
+// insert would leave a generation with no row behind it — and a consumer that
+// trusts the sequence would wait forever for work that never landed.
+func TestAdmitLocalMessageIsAtomicWithTheWakeSequence(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+
+	_, _, err := s.SendLocalMessage(ctx, "seed", testLocalMessage("msg-seed", "alice", "bob", "seed"))
+	require.NoError(t, err)
+	before, err := s.GetMessageWakeState(ctx, "bob")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), before.Seq)
+
+	_, err = s.writeExecContext(ctx,
+		`CREATE TRIGGER fail_admit BEFORE INSERT ON pipeline_messages
+		 WHEN NEW.pipe_id='msg-boom'
+		 BEGIN SELECT RAISE(ABORT,'forced'); END`)
+	require.NoError(t, err)
+
+	admitted, err := s.AdmitLocalMessage(ctx, testLocalMessage("msg-boom", "alice", "bob", "must not land"))
+	require.Error(t, err, "a forced insert failure must surface")
+	require.Nil(t, admitted)
+
+	after, err := s.GetMessageWakeState(ctx, "bob")
+	require.NoError(t, err)
+	require.Equal(t, before.Seq, after.Seq,
+		"a rolled-back admission must advance neither the row nor the sequence")
+}
+
+// The happy path: one admission, one generation, reported back to the caller so
+// the handler can publish exactly what was durably allocated.
+func TestAdmitLocalMessageAdvancesAndReportsTheSequence(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+
+	first, err := s.AdmitLocalMessage(ctx, testLocalMessage("msg-a1", "alice", "bob", "work"))
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), first.WakeSeq)
+
+	second, err := s.AdmitLocalMessage(ctx, testLocalMessage("msg-a2", "alice", "bob", "more"))
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), second.WakeSeq, "each admission allocates the next generation")
+
+	state, err := s.GetMessageWakeState(ctx, "bob")
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), state.Seq)
+}
+
+// Federated and provider-addressed rows have no exact local recipient, so they
+// must be refused rather than silently allocating someone a sequence.
+func TestAdmitLocalMessageRefusesNonExactLocalRows(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+
+	provider := testLocalMessage("msg-p", "alice", "bob", "work")
+	provider.ToProvider = "some-provider"
+	_, err := s.AdmitLocalMessage(ctx, provider)
+	require.Error(t, err)
+
+	federated := testLocalMessage("msg-f", "alice", "bob", "work")
+	federated.DestinationChainID = "remote-chain"
+	_, err = s.AdmitLocalMessage(ctx, federated)
+	require.Error(t, err)
+}

@@ -972,6 +972,12 @@ type MessageWakeState struct {
 // not a second queue.
 type MessageStore interface {
 	SendLocalMessage(ctx context.Context, idempotencyKey string, msg *PipelineMessage) (*PipelineMessage, bool, error)
+	// AdmitLocalMessage is the unkeyed sibling of SendLocalMessage: it inserts
+	// an exact-local row and advances that recipient's wake sequence in ONE
+	// transaction. Bare InsertPipeline must not be used for exact-local
+	// canonical work, because a row with no wake generation is work the
+	// recipient can never be told about.
+	AdmitLocalMessage(ctx context.Context, msg *PipelineMessage) (*PipelineMessage, error)
 	SendFederatedMessage(ctx context.Context, idempotencyKey string, msg *PipelineMessage, event *PipelineTransportOutbox) (*PipelineMessage, bool, error)
 	ReceiveLocalMessages(ctx context.Context, agentID, provider, receiveToken string, limit int, claimantSessionID ...string) ([]*PipelineMessage, bool, error)
 	CountClaimedLocalMessagesElsewhere(ctx context.Context, receiverID, claimantSessionID string) (int, error)
