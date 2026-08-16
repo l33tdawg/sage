@@ -2720,7 +2720,8 @@ func (s *SQLiteStore) InsertCorroboration(ctx context.Context, corr *Corroborati
 func (s *SQLiteStore) GetCorroborations(ctx context.Context, memoryID string) ([]*Corroboration, error) {
 	rows, err := s.conn.QueryContext(ctx,
 		`SELECT id, memory_id, agent_id, evidence, created_at
-		FROM corroborations WHERE memory_id = ? ORDER BY created_at`, memoryID)
+		FROM corroborations INDEXED BY idx_corroborations_memory_order
+		WHERE memory_id = ? ORDER BY created_at, agent_id, id`, memoryID)
 	if err != nil {
 		return nil, fmt.Errorf("get corroborations: %w", err)
 	}
