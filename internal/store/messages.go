@@ -536,6 +536,32 @@ func (s *SQLiteStore) ReceiveLocalMessages(ctx context.Context, agentID, provide
 	return items, replayed, err
 }
 
+// CountClaimedLocalMessagesElsewhere returns only an exact-recipient scalar.
+// It deliberately queries the authoritative claim rows rather than a bounded
+// history page, so older stranded claims cannot disappear behind newer work.
+// No message identifier, sender, intent, payload, or claimant identity crosses
+// this boundary.
+func (s *SQLiteStore) CountClaimedLocalMessagesElsewhere(
+	ctx context.Context, receiverID, claimantSessionID string,
+) (int, error) {
+	receiverID = strings.TrimSpace(receiverID)
+	claimantSessionID = strings.TrimSpace(claimantSessionID)
+	if receiverID == "" || claimantSessionID == "" || len(claimantSessionID) > MaxMessageClaimantSessionBytes {
+		return 0, ErrMessageNotFound
+	}
+	var count int
+	err := s.conn.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM pipeline_messages p
+		JOIN message_fetch_receipts r
+		  ON r.message_id=p.pipe_id AND r.receiver_agent_id=?
+		WHERE p.to_agent=? AND p.to_provider=''
+		  AND p.source_chain_id='' AND p.destination_chain_id=''
+		  AND p.status='claimed' AND p.completed_at IS NULL
+		  AND r.claimant_session_id!=?`,
+		receiverID, receiverID, claimantSessionID).Scan(&count)
+	return count, err
+}
+
 // HandoffLocalMessageClaim transfers only the session-level coordination
 // marker for one already-claimed canonical message. Agent authorization and
 // workflow ownership do not change. The compare-and-swap makes concurrent or

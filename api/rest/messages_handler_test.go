@@ -35,6 +35,7 @@ func messageRouterAs(s *Server, callerID string, exactProof bool) http.Handler {
 	})
 	r.Post("/v1/messages", s.handleMessageSend)
 	r.Get("/v1/messages/wake", s.handleMessageWake)
+	r.Get("/v1/messages/claimed-elsewhere", s.handleMessagesClaimedElsewhere)
 	r.Post("/v1/messages/receive", s.handleMessagesReceive)
 	r.Post("/v1/messages/{message_id}/reply", s.handleMessageReply)
 	r.Put("/v1/messages/{message_id}/handoff", s.handleMessageHandoff)
@@ -134,6 +135,19 @@ func TestCanonicalLocalMessagesEndToEndAndAntiEnumeration(t *testing.T) {
 	require.Contains(t, receivedAgain.Body.String(), `"idempotent_replay":true`)
 	require.Contains(t, receivedAgain.Body.String(), messageID)
 	require.Contains(t, receivedAgain.Body.String(), `"claimant_session_id":"mcp-helper"`)
+	currentClaims := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodGet,
+		"/v1/messages/claimed-elsewhere?claimant_session_id=mcp-helper", nil)
+	require.Equal(t, http.StatusOK, currentClaims.Code, currentClaims.Body.String())
+	require.JSONEq(t, `{"claimed_elsewhere_count":0}`, currentClaims.Body.String())
+	otherClaims := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodGet,
+		"/v1/messages/claimed-elsewhere?claimant_session_id=mcp-supervisor", nil)
+	require.Equal(t, http.StatusOK, otherClaims.Code, otherClaims.Body.String())
+	require.JSONEq(t, `{"claimed_elsewhere_count":1}`, otherClaims.Body.String())
+	require.NotContains(t, otherClaims.Body.String(), messageID)
+	require.NotContains(t, otherClaims.Body.String(), "private request")
+	unsignedClaims := callMessageJSON(t, messageRouterAs(s, "bob", false), http.MethodGet,
+		"/v1/messages/claimed-elsewhere?claimant_session_id=mcp-supervisor", nil)
+	require.Equal(t, http.StatusForbidden, unsignedClaims.Code, unsignedClaims.Body.String())
 
 	handoff := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodPut,
 		"/v1/messages/"+messageID+"/handoff", map[string]any{

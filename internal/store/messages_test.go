@@ -487,6 +487,39 @@ func TestMessageReceiveIsNotStarvedByFederatedOrProviderQueueRows(t *testing.T) 
 	require.ErrorIs(t, err, ErrMessageNotFound)
 }
 
+func TestClaimedElsewhereCountIsExactBeyondOneHistoryPage(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	const total = 105
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("msg-stranded-%03d", i)
+		_, replayed, err := s.SendLocalMessage(ctx, "send-"+id, testLocalMessage(id, "alice", "bob", "private"))
+		require.NoError(t, err)
+		require.False(t, replayed)
+	}
+	for offset := 0; offset < total; offset += 20 {
+		limit := total - offset
+		if limit > 20 {
+			limit = 20
+		}
+		items, replayed, err := s.ReceiveLocalMessages(
+			ctx, "bob", "", fmt.Sprintf("receive-%03d", offset), limit, "dead-session")
+		require.NoError(t, err)
+		require.False(t, replayed)
+		require.Len(t, items, limit)
+	}
+	count, err := s.CountClaimedLocalMessagesElsewhere(ctx, "bob", "live-session")
+	require.NoError(t, err)
+	require.Equal(t, total, count,
+		"an older stranded claim must not disappear behind a 100-row history window")
+	count, err = s.CountClaimedLocalMessagesElsewhere(ctx, "bob", "dead-session")
+	require.NoError(t, err)
+	require.Zero(t, count, "this runtime's own claims are not claimed elsewhere")
+	count, err = s.CountClaimedLocalMessagesElsewhere(ctx, "mallory", "live-session")
+	require.NoError(t, err)
+	require.Zero(t, count, "another agent cannot use the scalar to observe Bob's claims")
+}
+
 func TestMessageReadRequiresExactRecipientFetchAndStatusIsSenderOnlyMetadata(t *testing.T) {
 	ctx := context.Background()
 	s := newMessageTestStore(t)

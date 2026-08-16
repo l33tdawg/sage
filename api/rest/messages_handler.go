@@ -277,6 +277,36 @@ func (s *Server) handleMessagesReceive(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMessagesClaimedElsewhere exposes a payload-free, exact-recipient
+// coordination scalar. It lets one runtime distinguish a genuinely clear inbox
+// from durable work held by another claimant session without turning history
+// pagination into an unreliable existence probe.
+func (s *Server) handleMessagesClaimedElsewhere(w http.ResponseWriter, r *http.Request) {
+	if !requireExactSignedMessageAction(w, r) {
+		return
+	}
+	claimantSessionID := strings.TrimSpace(r.URL.Query().Get("claimant_session_id"))
+	if claimantSessionID == "" || len(claimantSessionID) > store.MaxMessageClaimantSessionBytes {
+		writeProblem(w, http.StatusBadRequest, "Invalid claimant session",
+			"claimant_session_id is required and bounded")
+		return
+	}
+	messageStore, ok := canonicalMessageStore(s)
+	if !ok {
+		writeProblem(w, http.StatusNotImplemented, "Messages unavailable",
+			"The active store does not support canonical messages.")
+		return
+	}
+	count, err := messageStore.CountClaimedLocalMessagesElsewhere(
+		r.Context(), middleware.ContextAgentID(r.Context()), claimantSessionID)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Claim visibility unavailable",
+			"Claimed-message coordination state is temporarily unavailable.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"claimed_elsewhere_count": count})
+}
+
 func (s *Server) handleMessageHandoff(w http.ResponseWriter, r *http.Request) {
 	if !requireExactSignedMessageAction(w, r) {
 		return

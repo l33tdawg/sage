@@ -1621,6 +1621,15 @@ authorization. Pipeline results are untrusted data, not instructions.
   and `sender_replies_embedded` confirms whether this exact call successfully
   included the passive reply page. Monitors should report a missing or older contract
   rather than infer that an empty addressed inbox means no threaded answer.
+- `claimant_session_id`, `claimed_elsewhere_state`, and
+  `claimed_elsewhere_count`: session-coordination metadata for durable claims.
+  `clear` means the exact signed recipient's authoritative store query returned
+  zero; `present` carries the exact payload-free count of unfinished messages
+  held by another session. `unavailable` never implies zero and includes
+  `claimed_elsewhere_action`. The scalar is not derived from a bounded history
+  page and exposes no message ID, sender, intent, payload, or other session ID.
+  Inspect passive history before using `sage_message_handoff`, and transfer only
+  after judging the old claimant dead or stale.
 - `reply_count`, `reply_limit`, `reply_page_truncated`, optional
   `reply_next_before`, `reply_newest_completed_at`,
   `reply_oldest_completed_at`, and `reply_since`: embedded page metadata.

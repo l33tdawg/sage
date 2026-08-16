@@ -1182,6 +1182,44 @@ func TestClaimedCanonicalWorkRemainsRecoverableFromPassiveInboxHistory(t *testin
 	require.NotContains(t, messageHistoryItems[0], "pipe_id")
 }
 
+func TestInboxUsesAuthoritativeClaimedElsewhereScalar(t *testing.T) {
+	var claimantSessionID string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/pipe/results", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/messages/claimed-elsewhere", func(w http.ResponseWriter, r *http.Request) {
+		claimantSessionID = r.URL.Query().Get("claimant_session_id")
+		_ = json.NewEncoder(w).Encode(map[string]any{"claimed_elsewhere_count": 105})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+
+	result, err := NewServer(ts.URL, privateKey).toolInbox(context.Background(), map[string]any{
+		"limit": 5, "include_replies": false,
+	})
+	require.NoError(t, err)
+	inbox := result.(map[string]any)
+	require.NotEmpty(t, claimantSessionID)
+	require.Equal(t, claimantSessionID, inbox["claimant_session_id"])
+	require.Equal(t, 105, inbox["claimed_elsewhere_count"])
+	require.Equal(t, "present", inbox["claimed_elsewhere_state"])
+	require.Contains(t, inbox["message"], "105 message(s)")
+	require.NotContains(t, inbox["message"], "inbox is clear")
+	require.Contains(t, inbox["claimed_elsewhere_action"], "sage_message_handoff")
+}
+
 func TestCanonicalMessageToolsRejectOutOfContractBoundsBeforeHTTP(t *testing.T) {
 	_, privateKey, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)

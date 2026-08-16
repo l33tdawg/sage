@@ -2143,6 +2143,7 @@ principal.
 |---|---|
 | `POST /v1/messages` | Exact-local-agent send. Requires `to_agent`, `payload`, and a 1–256-byte caller-scoped `idempotency_key`; optional `intent` and `ttl_minutes` 0–1440. Omitted/0 is durable until handled; 1–1440 requests explicit expiry. Exact retry returns the original `message_id`; same key/different request is HTTP 409. |
 | `GET /v1/messages/wake` | Exact-caller payload-free catch-up/SSE. Requires a 1–128-byte `consumer_id`; accepts `after_seq` or matching `Last-Event-ID`. Events use `id:<seq>` and data exactly `{version,seq,pending}`. One exact agent has one active consumer lease; same-consumer reconnect supersedes its stale stream, while a different live consumer receives HTTP 409. |
+| `GET /v1/messages/claimed-elsewhere` | Exact-caller payload-free coordination scalar. Requires this runtime's 1–128-byte `claimant_session_id` and returns only `claimed_elsewhere_count`: the exact number of unfinished canonical local messages currently held by a different claimant session. The store query is not bounded by history pagination and exposes no message ID, claimant ID, sender, intent, or payload. |
 | `POST /v1/messages/receive` | Requires a 1–256-byte `receive_token`; optional limit 1–20 and opaque `claimant_session_id` up to 128 bytes. Claims and persists one exact ordered batch with session attribution. Same caller/token/limit replays that batch after a lost response; a different limit is HTTP 409. Replay metadata is retained for 48 hours and capped at 4096 tokens per agent: capacity returns HTTP 429, while a purged/incomplete exact batch returns HTTP 410 instead of claiming later work. |
 | `PUT /v1/messages/{message_id}/handoff` | Exact fetched recipient only. Atomically compare-and-swaps `from_session_id` to `to_session_id` for one still-claimed local message. A stale expected session is HTTP 409; repeating an already-applied transfer is idempotent. Session IDs coordinate runtimes sharing one agent identity and confer no authorization. |
 | `POST /v1/messages/{message_id}/reply` | Exact fetched recipient only. MCP supplies its opaque `claimant_session_id`, which must still own the claim after any handoff; legacy direct clients may omit it. Same result is idempotent; different second result is HTTP 409. Reply and local exact-read evidence commit atomically. |
@@ -2172,6 +2173,11 @@ sender's status. A local insert reports `transport_status:delivered` because
 the addressed inbox row is durable on the same SQLite transaction boundary.
 `read_status:confirmed` is only exact addressed-recipient evidence; it is not
 presence, comprehension, or action.
+
+The claimed-elsewhere scalar is diagnostic, not automatic lease expiry. A new
+runtime must inspect passive inbox history and use the compare-and-swap handoff
+only after deciding the prior session is dead or stale; it must not steal a
+claim from a live worker.
 
 A fresh canonical local pending insertion also advances that exact recipient's
 durable monotonic wake sequence in the **same SQLite transaction** as the inbox

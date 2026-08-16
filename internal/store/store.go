@@ -973,6 +973,7 @@ type MessageStore interface {
 	SendLocalMessage(ctx context.Context, idempotencyKey string, msg *PipelineMessage) (*PipelineMessage, bool, error)
 	SendFederatedMessage(ctx context.Context, idempotencyKey string, msg *PipelineMessage, event *PipelineTransportOutbox) (*PipelineMessage, bool, error)
 	ReceiveLocalMessages(ctx context.Context, agentID, provider, receiveToken string, limit int, claimantSessionID ...string) ([]*PipelineMessage, bool, error)
+	CountClaimedLocalMessagesElsewhere(ctx context.Context, receiverID, claimantSessionID string) (int, error)
 	HandoffLocalMessageClaim(ctx context.Context, receiverID, messageID, fromSessionID, toSessionID string) (bool, error)
 	ReplyLocalMessage(ctx context.Context, receiverID, messageID, result string, claimantSessionID ...string) (bool, error)
 	AcknowledgeLocalMessageRead(ctx context.Context, receiverID, messageID string) (bool, error)
