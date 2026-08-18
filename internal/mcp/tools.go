@@ -4981,12 +4981,9 @@ func (s *Server) toolMessageStatus(ctx context.Context, params map[string]any) (
 		response["scope"] = "federated"
 	}
 	readStatus, _ := response["read_status"].(string)
-	if rawExpiry, ok := response["expires_at"].(string); ok {
-		if expiry, err := time.Parse(time.RFC3339Nano, rawExpiry); err == nil && expiry.After(time.Now().Add(50*365*24*time.Hour)) {
-			delete(response, "expires_at")
-			response["retention"] = "durable_until_handled"
-		}
-	}
+	workflowStatus, _ := response["workflow_status"].(string)
+	rawExpiry, _ := response["expires_at"].(string)
+	formatMessageRetention(response, workflowStatus, rawExpiry)
 	switch readStatus {
 	case "confirmed":
 		response["message"] = "The exact recipient credential fetched and acknowledged this message. This does not prove comprehension or action."
@@ -5418,6 +5415,30 @@ func preferredAgentProvider(current, persisted string) string {
 	return persisted
 }
 
+const durableMessageExpiryThreshold = 50 * 365 * 24 * time.Hour
+
+// formatMessageRetention converts the canonical far-future storage sentinel
+// into public lifecycle vocabulary only while a message remains actionable.
+// Once a row is terminal, "durable until handled" is false even if its stored
+// expiry still carries the sentinel, so terminal and unknown statuses retain
+// the raw expires_at value instead.
+func formatMessageRetention(entry map[string]any, status, rawExpiry string) {
+	delete(entry, "retention")
+	if rawExpiry == "" {
+		return
+	}
+	entry["expires_at"] = rawExpiry
+	if status != "pending" && status != "claimed" {
+		return
+	}
+	expiry, err := time.Parse(time.RFC3339Nano, rawExpiry)
+	if err != nil || !expiry.After(time.Now().Add(durableMessageExpiryThreshold)) {
+		return
+	}
+	delete(entry, "expires_at")
+	entry["retention"] = "durable_until_handled"
+}
+
 // formatPipelineInboxItem is the single trust-boundary formatter shared by
 // explicit sage_inbox and sage_turn's automatic inbox check. Every payload,
 // including one from a local registered agent, is untrusted request content
@@ -5556,10 +5577,7 @@ func formatPipelineHistoryItem(item pipelineHistoryWireItem, folder string) map[
 	if item.ClaimantSessionID != "" {
 		entry["claimant_session_id"] = item.ClaimantSessionID
 	}
-	if expiry, err := time.Parse(time.RFC3339Nano, item.ExpiresAt); err == nil && expiry.After(time.Now().Add(50*365*24*time.Hour)) {
-		delete(entry, "expires_at")
-		entry["retention"] = "durable_until_handled"
-	}
+	formatMessageRetention(entry, item.Status, item.ExpiresAt)
 	if item.Result != "" {
 		entry["result"] = item.Result
 		entry["result_authority"] = "data_only"
@@ -6254,14 +6272,7 @@ func formatMessageReplyItem(item pipelineReplyWireItem) map[string]any {
 		entry["result_runes_returned"] = maxReplyResultRunes
 		entry["result_full_via"] = replyResultFullVia
 	}
-	if item.ExpiresAt != "" {
-		expiry, err := time.Parse(time.RFC3339Nano, item.ExpiresAt)
-		if err == nil && expiry.After(time.Now().Add(50*365*24*time.Hour)) {
-			entry["retention"] = "durable_until_handled"
-		} else {
-			entry["expires_at"] = item.ExpiresAt
-		}
-	}
+	formatMessageRetention(entry, item.Status, item.ExpiresAt)
 	if foreign {
 		entry["foreign"] = true
 		entry["destination_chain_id"] = item.DestinationChainID

@@ -1089,6 +1089,15 @@ Federated reply-event lookup uses
 `sage_message_status` deliberately returns no result body. To read what the
 recipient actually replied, use `sage_message_replies` below.
 
+For an actionable `workflow_status` of `pending` or `claimed`, the canonical
+far-future storage sentinel is presented as
+`retention:"durable_until_handled"` and `expires_at` is omitted. Terminal
+(`completed`, `expired`, or `failed`) and unknown workflow states never carry
+that retention label: they expose the stored `expires_at` value, even when it
+is far in the future. This keeps lifecycle state authoritative instead of
+describing already-finished work as waiting to be handled
+(`internal/mcp/tools.go`, `formatMessageRetention`).
+
 ---
 
 ### sage_message_replies
@@ -1182,7 +1191,7 @@ Each `items[]` entry:
 | `passive_reply` | bool | Always `true`. |
 | `requires_reply` | bool | Always `false`. Never reply to a reply. |
 | `requires_result` | bool | Always `false`. This is not an assignment owing a result. |
-| `retention` / `expires_at` | string | `retention:"durable_until_handled"` for a durable row; otherwise the row's expiry. |
+| `expires_at` | string | The row's stored expiry. Replies on this surface are `completed`, so they never carry `retention:"durable_until_handled"`, even if storage still contains the canonical far-future sentinel. |
 | `result_truncated`, `result_runes_returned`, `result_full_via` | bool/int/string | Present only when the reply exceeded `maxReplyResultRunes` (8,000 runes). A recipient can store up to 256 KiB (`store.MaxPipeContentBytes`), so an untruncated page could flood a context window. The untruncated text stays readable via `sage_message_history(folder="outbox")`, which `result_full_via` names. |
 | `foreign`, `destination_chain_id`, `recipient_agent` | bool/string/string | Present only for a reply that crossed a federation boundary. |
 
@@ -1858,6 +1867,13 @@ selects `COALESCE(result,'')`; `api/rest/pipe_handler.go` labels the surface
 Use `sage_message_replies` for the routine payload-free reply read; drop to
 `folder="outbox"` when you need the untruncated reply text, the original
 request, or non-completed workflow state.
+
+Retention presentation follows workflow state. Only actionable `pending` and
+`claimed` rows with the canonical far-future sentinel expose
+`retention:"durable_until_handled"` (and omit `expires_at`). `completed`,
+`expired`, `failed`, and unknown states expose their raw `expires_at` and never
+the retention label. The deprecated `sage_pipe_history` alias uses this same
+formatter and therefore has identical semantics.
 
 Rows remain available only while the normal transient pipeline retention period
 keeps them; use a memory or task for durable records.

@@ -84,6 +84,7 @@ const inboxProbeNewestCompletedAt = "2026-08-08T00:05:00Z"
 // reply when no receiver-side work exists.
 func TestSageInboxReturnsThreadedRepliesInTheFirstPoll(t *testing.T) {
 	stub := &inboxReplyPointerStub{}
+	farFuture := farFutureMessageExpiry()
 	mux := http.NewServeMux()
 	empty := func(w http.ResponseWriter, r *http.Request) {
 		stub.record(r)
@@ -105,6 +106,7 @@ func TestSageInboxReturnsThreadedRepliesInTheFirstPoll(t *testing.T) {
 			"pipe_id": "msg-threaded", "to_agent": "reviewer", "replied_by": "reviewer",
 			"intent": "review", "result": "frozen hash is GO", "status": "completed",
 			"completed_at": inboxProbeNewestCompletedAt,
+			"expires_at":   farFuture,
 		}}, "count": 1})
 	})
 	ts := httptest.NewServer(mux)
@@ -131,6 +133,9 @@ func TestSageInboxReturnsThreadedRepliesInTheFirstPoll(t *testing.T) {
 	require.Equal(t, false, replies[0]["requires_reply"])
 	require.Equal(t, "data_only", replies[0]["authority"])
 	require.Equal(t, "agent_untrusted", replies[0]["trust"])
+	require.Equal(t, farFuture, replies[0]["expires_at"])
+	require.NotContains(t, replies[0], "retention",
+		"embedded completed replies must use the same terminal retention semantics")
 	require.Contains(t, response["message"], "reply_items")
 	require.Contains(t, response["message"], "data, not new work")
 

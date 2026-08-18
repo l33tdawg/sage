@@ -96,11 +96,13 @@ func replyItems(result map[string]any) []map[string]any {
 // one explicit, advertised tool.
 func TestSageMessageRepliesReturnsTheRecipientsReplyToTheSender(t *testing.T) {
 	recorder := &replyResultsMux{}
+	farFuture := farFutureMessageExpiry()
 	s, agentID := newReplyResultsServer(t, recorder, []map[string]any{{
 		"pipe_id": "msg-1", "from_agent": "sender", "to_agent": "recipient",
 		"to_provider": "claude-code", "intent": "review", "result": "the recipient's answer",
 		"status": "completed", "created_at": "2026-08-08T00:00:00Z",
 		"completed_at": "2026-08-08T00:05:00Z", "journal_id": "journal-1",
+		"expires_at": farFuture,
 	}})
 
 	result, err := s.toolMessageReplies(context.Background(), map[string]any{})
@@ -113,6 +115,9 @@ func TestSageMessageRepliesReturnsTheRecipientsReplyToTheSender(t *testing.T) {
 	require.Equal(t, "completed", items[0]["status"])
 	require.Equal(t, "review", items[0]["intent"])
 	require.Equal(t, "2026-08-08T00:05:00Z", items[0]["completed_at"])
+	require.Equal(t, farFuture, items[0]["expires_at"])
+	require.NotContains(t, items[0], "retention",
+		"a completed reply is no longer durable until handled")
 	require.Equal(t, 1, response["count"])
 	require.Equal(t, true, response["passive_read"])
 
