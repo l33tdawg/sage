@@ -1,7 +1,11 @@
 # Joint SAGE v12 and SAGE Commons/Lantern roadmap contract
 
-**Status:** roadmap contract; implementation evidence is required per row  
-**Baseline:** SAGE v11.18.4 / app-v26  
+**Status:** roadmap contract; implementation evidence is required per row
+
+**Current SAGE core:** v11.19.0 / app-v27
+
+**Pinned Lantern beta bundle:** v11.18.4 / app-v26 pending joint baseline review
+
 **Products:** SAGE core, SAGE Commons, SAGE Lantern, Knowledge Point, Data Donkey
 
 ## Purpose
@@ -13,7 +17,7 @@ feature belongs in SAGE consensus.
 
 It distinguishes:
 
-1. behavior already available in v11.18.4;
+1. behavior available in the pinned v11.18.4 beta and preserved by v11.19.0;
 2. compatibility SAGE core must preserve and prove for v12;
 3. new SAGE-core dependencies that need their own implementation and evidence;
 4. Commons/Lantern work that stays outside SAGE core; and
@@ -75,12 +79,12 @@ passes. A boot-time state-sync receiver is not repurposed as that observer.
 
 | Capability | v11.18.4 baseline | v12/core obligation | Commons/Lantern obligation | Boundary |
 |---|---|---|---|---|
-| Personal sovereign node | Full app-v26 node, local Root, ordinary agents, recovery and upgrade-in-place | Preserve and acceptance-test on Linux/ARM64 without requiring the native shell | Package, supervise and measure it on Lantern hardware | Native app remains macOS/Windows; Linux daemon/browser/CLI stays supported |
+| Personal sovereign node | Full app-v27 node, local Root, ordinary agents, recovery and upgrade-in-place; Lantern beta remains pinned to app-v26 until reviewed | Preserve and acceptance-test on Linux/ARM64 without requiring the native shell | Package, supervise and measure it on Lantern hardware | The v12 native app targets macOS only; Lantern compatibility remains headless and must not require a desktop shell |
 | Roles and collaboration | Root separate from Member/Manager/Admin; app-v26 local Access Groups | Preserve exact semantics and publish capability/version evidence | Map product roles to least-privilege local agents and separate fleet capabilities | Remote field operators never become local members, Admin, or Root |
 | Agent messaging | Canonical messages, exact identities, sender replies, passive status/history | Preserve SDK/MCP/REST compatibility and offline/restart evidence | Use messages only for untrusted coordination and workflow notices | Message delivery never delegates memory or device-mutation authority |
 | Public proposer | Ordinary-agent signed `MemorySubmit` enters the local/public chain lifecycle; the generic v11.18.4 submit route has no request-level idempotency contract | Preserve fresh nonce/timestamp signing, exact caller identity, and exact transaction/memory evidence | Maintain encrypted offline outbox, consent and public provenance; the Commons intake owns envelope-level idempotency and performs at most one SAGE submission | Federation remote Write remains unavailable; Root is not the proposer; generic-memory idempotency is a separate possible core enhancement, not a beta dependency |
 | Public intake | Direct submission and normal validator lifecycle exist | No implicit v12 promise of a new consensus schema | Build durable intake/quarantine, schema/privacy checks, human/governance review and receipts | Beta validation is an application boundary before `MemorySubmit` |
-| Hyperlocal content validation | No active app-v26 consensus gate for the proposed hyperlocal schema | Any consensus-enforced gate requires a separately governed app-version plan | Enforce the beta schema and locality/privacy policy in intake and clients | v12 product semver does not imply app-v27 |
+| Hyperlocal content validation | App-v27 contains no consensus gate for the proposed hyperlocal schema | Any consensus-enforced gate requires a separately governed future app-version plan | Enforce the beta schema and locality/privacy policy in intake and clients | v12 product semver does not imply a hyperlocal consensus fork |
 | Public query | Signed query/recall APIs and PUBLIC classification exist | Preserve bounded authenticated query and explicit source/lifecycle metadata | Build Commons query service, cache policy, stale/expired filtering and provenance UI | Never blend private and public recall without labels |
 | Commons Snapshot Pack export | No frozen public subset export/proof API | Define and acceptance-test a deterministic committed-PUBLIC export at a frozen checkpoint, with exact source/app/version metadata | Sign, catalogue, chunk, distribute and render staleness for derived packs | Export signature/root is off-chain attestation unless native inclusion proofs exist |
 | Federation | Trust plus explicit Read/Copy; Write reserved/501 | Preserve fail-closed identity/policy generation and no-write behavior | Use only where online Read/Copy semantics are actually desired | Federation Copy changes destination canonical author and is not pack transport |
@@ -120,7 +124,7 @@ with Lantern/Commons:
    personal SAGE by filesystem copying.
 7. **Consensus compatibility.** Any new application behavior proves byte-identical
    historical replay, governed activation, full upgrade/recovery evidence, and
-   no reset of existing app-v26 chains.
+   no reset of existing app-v27 chains or the pinned app-v26 Lantern beta path.
 
 ## Commons/Lantern deliverables that do not block on new SAGE consensus
 
@@ -142,7 +146,7 @@ native desktop shell:
 Unless separately designed, implemented, reviewed, and accepted, neither v12 nor
 this contract promises:
 
-- app-v27 or a consensus-native hyperlocal schema;
+- a consensus-native hyperlocal schema or an implied future app-version fork;
 - remote federation Write;
 - a long-lived state-sync receiver as a public observer;
 - first-class multiple SAGE instances on one device;

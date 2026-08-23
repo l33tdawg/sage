@@ -4,6 +4,14 @@ These gates are release criteria, not aspirational telemetry. A native package
 is not promoted on any platform without immutable CI evidence for that platform.
 Browser CEREBRUM and the existing Go release matrix remain mandatory.
 
+The product boundary and the distinction between `native-control` and
+`web-control` are defined in [`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md).
+These gates accept bounded WebView domain controls only when their route/action
+rows carry the required accessibility, offline, recovery, security, and
+performance evidence; a successful route load alone never closes a row.
+The machine-readable release evidence contract is
+[`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md).
+
 Each gate names the release milestone that must establish it. Most begin in
 v11.11; the performance budgets beyond incremental shell RSS and the
 accessibility gates are v11.14 hardening work. Because the shell remains a
@@ -16,21 +24,22 @@ nothing that forecloses it.
 ## Current enforcement status
 
 **v11.11 distributes no native shell on any platform.** The shell is alpha; see
-"The native shell is alpha and does not gate releases" below. macOS and Windows
-are its *target* platforms — the scope for the eventual distribution at v12, and
-what CI produces release evidence for meanwhile. **Linux is not a target
-platform.** Linux users are served by browser CEREBRUM and the CLI, both fully
-supported and unaffected by this decision. Linux still compiles and runs its
-full installed-package lifecycle smoke in
-[`native-shell.yml`](../.github/workflows/native-shell.yml) so cross-platform
-regressions in the shared shell and SSCP code are still caught — it is simply
-never staged as release evidence. See [Linux re-entry](#linux-re-entry) below.
+"The native shell is alpha and does not gate releases" below. macOS is the sole
+native-product target for v12. Linux already
+compiles and runs its full installed-package lifecycle smoke in
+[`native-shell.yml`](../.github/workflows/native-shell.yml), but the current
+Tauri/Wry GTK3 dependency line is blocked from production distribution by the
+unfixed advisory below. CI regression evidence is therefore real but incomplete:
+Linux must gain a safe supported WebView path and the same production evidence
+class as macOS before any Linux native distribution could be considered. Linux
+native work is optional R&D and does not gate v12. See
+[Linux v12 blocker](#linux-v12-blocker) below.
 
 The tracked preview now enforces locked dependency compilation, Rust
 format/test/Clippy, full platform shell-control tests, isolated Codex endpoint
 acceptance tests, dependency audit, a license-bearing CycloneDX SBOM, and
-unsigned package construction on the declared macOS and Windows targets, plus
-the non-distributed Linux CI target. Each constructed package is unpacked and
+unsigned package construction on macOS, Windows, and Linux. Each constructed
+package is unpacked and
 must contain exactly one bundled daemon whose embedded Go OS/architecture
 matches the declared target
 and whose embedded version matches the version supplied to the shell package
@@ -112,17 +121,20 @@ must not be silenced.
 > release-blocking before that artifact ships. Do not treat the dismissed state
 > as a standing judgement that the advisory is harmless.
 
-### Linux re-entry
+### Linux native R&D blocker
 
-A distributed Linux native shell returns only when **upstream Wry ships
-GTK4/webkitgtk-6.0 support**, tracked in `tauri-apps/wry#1769` (open, no
-activity since 2026-07-15). That migration also clears this advisory, because
-the `gtk4` line depends on `glib ^0.22`.
+The current dependency assessment and bounded spike decision are recorded in
+[`design/v12-linux-native-path.md`](design/v12-linux-native-path.md).
 
-SAGE does not plan to fork or vendor Wry onto GTK4. Owning a fork of the web
-view layer in a security-sensitive component is a worse position than not
-shipping the platform. Until upstream moves, Linux native shell work stays out
-of scope and Linux users are served by browser CEREBRUM and the CLI.
+The preferred production path is **upstream Wry GTK4/webkitgtk-6.0 support**,
+tracked in `tauri-apps/wry#1769`. That migration also clears this advisory,
+because the `gtk4` line depends on a remediated `glib` generation.
+
+Linux native distribution is outside the v12 product commitment. Optional R&D
+may revisit the upstream path, but owning an unreviewed fork of a
+security-sensitive WebView layer remains unacceptable. Until one safe path
+passes, Linux native distribution is blocked and browser CEREBRUM plus the CLI
+remain the supported Linux product surfaces. This does not gate macOS.
 
 The install/launch/deep-link/offline, performance, assistive-technology,
 signing/notarization, update/rollback, and uninstall-preservation rows below are
@@ -184,8 +196,8 @@ everywhere else, processes are matched on absolute executable path, never name.
 Enforcement limit, stated plainly: macOS has no unprivileged per-process network
 namespace, so this harness does **not** kernel-block egress. It proves *no
 external socket was observed and startup did not require one* — not *egress was
-impossible*. The Linux `unshare -n` approach would be strictly stronger, but
-Linux is not a distributed platform for this release.
+impossible*. The Linux `unshare -n` approach is strictly stronger and remains
+useful only for optional Linux native R&D evidence.
 
 The detector is verified in both directions against a synthetic bundle: a
 deliberate outbound connection is caught and reported with the offending socket,
@@ -197,10 +209,10 @@ is not by itself evidence.
 | Platform | Build/install floor | Required package evidence |
 |---|---|---|
 | macOS | oldest Apple-supported macOS that SAGE declares for the release; Intel and Apple Silicon where distributed | signed `.app`, notarized/stapled DMG, clean install, Gatekeeper launch, rollback |
-| Windows | Windows 11 x64 and arm64 where distributed | signed NSIS installer, clean install/uninstall, SmartScreen/signature check, rollback |
-| Linux | **not distributed in v11.11** | none — build and installed-runtime smoke run in CI for regression coverage only, and are never release evidence |
+| Windows | Browser CEREBRUM support matrix; native preview CI is non-product evidence | Browser compatibility/accessibility/degraded-mode artifacts; no native package required |
+| Linux | Browser CEREBRUM support matrix; native preview CI is optional R&D | Browser compatibility/accessibility/degraded-mode artifacts; no native package required |
 
-The exact OS image identifiers, WebView versions, CPU/RAM, and artifact hashes
+The exact OS image identifiers, browser/WebView versions, CPU/RAM, and artifact hashes
 must appear in the release evidence. “Builds on a developer machine” is not a
 platform pass.
 

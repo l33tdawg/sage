@@ -130,6 +130,28 @@ test('Linux native packaging preloads a bounded verified AppImage helper cache',
   assert.match(step, /scripts\/prepare-tauri-appimage-tools\.sh/);
 });
 
+test('native-shell workflow executes and publishes the v12 capability gates', () => {
+  for (const path of [
+    'scripts/v12-native-inventory.mjs',
+    'scripts/v12-native-inventory.test.mjs',
+    'scripts/v12-native-acceptance-validate.mjs',
+    'scripts/v12-native-acceptance-validate.test.mjs',
+    'docs/v12-native-capability-ledger.md',
+    'docs/v12-native-acceptance-ledger.schema.json',
+    'docs/design/v12-linux-native-path.md',
+  ]) {
+    assert.match(nativeShellWorkflow, new RegExp(path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+      `native-shell workflow must track ${path}`);
+  }
+  assert.match(nativeShellWorkflow, /actions\/setup-node@[0-9a-f]{40} # v7\.0\.0/);
+  assert.match(nativeShellWorkflow, /node-version: '24'/);
+  assert.match(nativeShellWorkflow, /Validate v12 native capability and acceptance gates/);
+  assert.match(nativeShellWorkflow, /node --test[\s\\]+scripts\/v12-native-inventory\.test\.mjs/);
+  assert.match(nativeShellWorkflow, /scripts\/v12-native-acceptance-validate\.test\.mjs/);
+  assert.match(nativeShellWorkflow, /node scripts\/v12-native-inventory\.mjs/);
+  assert.match(nativeShellWorkflow, /v12-native-capability-inventory\.json/);
+});
+
 test('CodeQL uses the exact bundle audited by the CometBFT baseline', () => {
   const expected = `https://github.com/github/codeql-action/releases/download/codeql-bundle-v${codeqlBaseline.codeql.semanticVersion}/codeql-bundle-linux64.tar.gz`;
   const initMarkers = [...codeqlWorkflow.matchAll(/^      - name: Initialize CodeQL$/gm)];

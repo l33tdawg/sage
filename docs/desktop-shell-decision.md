@@ -1,8 +1,15 @@
 # ADR: Additive native CEREBRUM shell
 
-**Status:** Accepted for implementation; the shell is alpha and does not gate releases
+**Status:** Accepted foundation; v12 production acceptance remains conditional on macOS gates
 **Date:** 2026-07-19
 **Target:** v11.11 native foundation
+
+> **V12 boundary supersession:** The Tauri foundation decision remains valid,
+> but its meaning of “fully native” is superseded by
+> [`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md). That ADR permits only
+> a bounded WebView for authenticated domain controls, requires app-owned native
+> lifecycle/platform controls, sets macOS as the sole native v12 target, and
+> never counts a route load as native-control parity.
 
 ## Decision
 
@@ -13,19 +20,17 @@ visible startup/recovery state; it does not own consensus, storage, MCP, RBAC,
 updates, validator material, or the vault passphrase.
 
 This is a conditional implementation decision, not permission to publish an
-untested desktop product. macOS and Windows must both pass the gates in
-`native-shell-quality-gates.md` before the shell is **distributed** — which the
-roadmap places at v12.
+untested desktop product. macOS must pass the gates in
+`native-shell-quality-gates.md` before SAGE claims the v12 native-product
+capstone.
 
 **v11.11 distributes no native shell on any platform, so no shell gate blocks
-this release.** The shell is alpha: built and runtime-tested in CI, never staged
-as a public release asset. macOS and Windows are its target platforms; Linux is
-not. The Linux target still builds and runs its installed-package lifecycle
-smoke in CI for regression coverage, but produces no release evidence. Linux
-users are served by browser CEREBRUM and the CLI. A distributed Linux shell
-returns only when upstream Wry ships GTK4/webkitgtk-6.0; the reasoning and the
-conditional `RUSTSEC-2024-0429` dismissal are recorded in
-`native-shell-quality-gates.md`.
+that release.** The shell remains an undistributed alpha. macOS is the sole v12
+native product target; browser CEREBRUM is supported on Linux and Windows.
+Their preview builds may remain useful regression evidence but are not release
+commitments. Linux native R&D remains blocked from distribution by
+`RUSTSEC-2024-0429`; the project will not waive the advisory or adopt an
+unreviewed WebView fork.
 
 ## Evidence
 

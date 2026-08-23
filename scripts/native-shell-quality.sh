@@ -20,6 +20,13 @@ trap cleanup_test_binary EXIT INT TERM
 
 cd "${REPO_ROOT}"
 
+node --test \
+  scripts/v12-native-inventory.test.mjs \
+  scripts/v12-native-acceptance-validate.test.mjs
+node scripts/v12-native-inventory.mjs \
+  --root "${REPO_ROOT}" \
+  --output "${SHELL_TEST_DIR}/v12-native-capability-inventory.json"
+
 env GOCACHE="${SHELL_GOCACHE}" go test ./internal/shellcontrol -count=1
 env GOCACHE="${SHELL_GOCACHE}" go test ./cmd/sage-gui \
   -run 'Test(LocalAgentKeyResolver|ShellStartupProof)' -count=1

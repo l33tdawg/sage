@@ -9,6 +9,11 @@ on:
       - "cmd/sage-gui/**"
       - "api/**"
       - "web/**"
+      - "docs/desktop-shell-v12-adr.md"
+      - "docs/v12-native-capability-ledger.md"
+      - "docs/v12-native-acceptance-ledger.md"
+      - "docs/v12-native-acceptance-ledger.schema.json"
+      - "docs/design/v12-linux-native-path.md"
       - "go.mod"
       - "go.sum"
       - "scripts/native-shell-quality.sh"
@@ -28,6 +33,10 @@ on:
       - "scripts/native-shell-windows-runtime-smoke.ps1"
       - "scripts/native-shell-windows-runtime-smoke.test.sh"
       - "scripts/acceptance-endpoint-guard.sh"
+      - "scripts/v12-native-inventory.mjs"
+      - "scripts/v12-native-inventory.test.mjs"
+      - "scripts/v12-native-acceptance-validate.mjs"
+      - "scripts/v12-native-acceptance-validate.test.mjs"
       - ".github/workflows/native-shell.yml"
   push:
     branches: [main]
@@ -38,6 +47,11 @@ on:
       - "cmd/sage-gui/**"
       - "api/**"
       - "web/**"
+      - "docs/desktop-shell-v12-adr.md"
+      - "docs/v12-native-capability-ledger.md"
+      - "docs/v12-native-acceptance-ledger.md"
+      - "docs/v12-native-acceptance-ledger.schema.json"
+      - "docs/design/v12-linux-native-path.md"
       - "go.mod"
       - "go.sum"
       - "scripts/native-shell-quality.sh"
@@ -57,6 +71,10 @@ on:
       - "scripts/native-shell-windows-runtime-smoke.ps1"
       - "scripts/native-shell-windows-runtime-smoke.test.sh"
       - "scripts/acceptance-endpoint-guard.sh"
+      - "scripts/v12-native-inventory.mjs"
+      - "scripts/v12-native-inventory.test.mjs"
+      - "scripts/v12-native-acceptance-validate.mjs"
+      - "scripts/v12-native-acceptance-validate.test.mjs"
       - ".github/workflows/native-shell.yml"
   workflow_dispatch:
 
@@ -253,6 +271,9 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -268,6 +289,16 @@ jobs:
           go test -c ./cmd/sage-gui -o "${test_bin}"
           scripts/acceptance-endpoint-guard.sh "${test_bin}" \
             -test.run '^TestSelfHealKnownMCPConfigs_' -test.count=1
+      - name: Validate v12 native capability and acceptance gates
+        shell: bash
+        run: |
+          node --test \
+            scripts/v12-native-inventory.test.mjs \
+            scripts/v12-native-acceptance-validate.test.mjs
+          node scripts/v12-native-inventory.mjs \
+            --root "${GITHUB_WORKSPACE}" \
+            --output "${RUNNER_TEMP}/v12-native-capability-inventory.json"
+          test -s "${RUNNER_TEMP}/v12-native-capability-inventory.json"
       - name: Audit locked Rust dependencies
         run: |
           cargo install cargo-audit --version 0.22.2 --locked
@@ -290,6 +321,11 @@ jobs:
           test -s docs/desktop-shell-decision.md
           test -s docs/native-app-daemon-contract.md
           test -s docs/native-shell-quality-gates.md
+          test -s docs/desktop-shell-v12-adr.md
+          test -s docs/v12-native-capability-ledger.md
+          test -s docs/v12-native-acceptance-ledger.md
+          test -s docs/v12-native-acceptance-ledger.schema.json
+          test -s docs/design/v12-linux-native-path.md
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: native-shell-cyclonedx-sbom

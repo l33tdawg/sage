@@ -951,7 +951,7 @@ checks.
 
 ---
 
-## v11.11 – v11.15 - shipped (the productization bridge to v12)
+## v11.11 – v11.15 - shipped foundation (v12 acceptance remains open)
 
 v11.10 completes the federation and federated-agent backend/administrative experience. v12 is the **product**: a standalone native application in which every CEREBRUM function is mapped to a real app experience, with the web dashboard kept only as a still-supported fallback. The releases between them de-risk and stage that transition so v12 is an integration-and-polish capstone, not a from-scratch rewrite. Every step keeps the hard constraints — no chain reset, upgrade-in-place, the SAGE daemon and authenticated local APIs cleanly separated from any shell, and no weakening of the local trust boundary. Order and grouping are indicative; nothing here is dated.
 
@@ -962,7 +962,7 @@ Choose the desktop-shell technology through the deliberate evaluation v12 requir
 - **Desktop-shell decision record.** Compare the credible macOS, Windows, and Linux options with a weighted scorecard covering threat surface and sandboxing, signed packaging/notarization, accessibility, performance and memory cost, offline operation, cross-platform maintenance, update behavior, and long-term ownership. Build small proof-of-concept spikes for the finalists, document the threat model, and record the chosen shell plus rejected alternatives before product code commits to it.
 - **App–daemon trust and compatibility contract.** Specify authenticated bootstrap, credential/key storage, IPC versus loopback transport, origin/navigation restrictions, process and port ownership, startup readiness, crash detection and recovery, graceful drain/shutdown, version negotiation, and rollback-compatible independent updates. The shell receives no implicit validator/admin authority and cannot weaken the existing local API boundary.
 - **Single-instance lifecycle and navigation ownership.** The native app owns its window, deep links, route restoration, external-link handoff, foreground/background behavior, and daemon supervision. Reopening SAGE focuses the existing native window; it does not depend on browser tab inspection or browser-specific automation. Browser CEREBRUM remains an explicit fallback, not an accidental second primary UI.
-- **Measurable foundation gate.** Set budgets for cold/warm launch, idle CPU, memory, large-store interaction latency, and animation frame pacing on supported hardware. Use a monotonic animation clock and compositor-friendly transforms for continuous motion instead of coarse React timer rerenders; establish keyboard navigation, focus visibility, screen-reader naming, and reduced-motion architecture now even though v11.14 performs the full hardening pass. Automated packaging and smoke tests must cover clean install, daemon unavailable/recovery, app restart, deep-link routing, offline launch, and shell/daemon version skew on every supported OS.
+- **Measurable foundation gate.** Set budgets for cold/warm launch, idle CPU, memory, large-store interaction latency, and animation frame pacing on supported hardware. Use a monotonic animation clock and compositor-friendly transforms for continuous motion instead of coarse React timer rerenders; establish keyboard navigation, focus visibility, screen-reader naming, and reduced-motion architecture now even though v11.14 performs the full hardening pass. Automated packaging and smoke tests must cover clean install, daemon unavailable/recovery, app restart, deep-link routing, offline launch, and shell/daemon version skew on macOS. Existing cross-platform preview smoke may remain as regression evidence.
 
 No chain reset. The SAGE daemon and authenticated local APIs remain independently testable and operable underneath the shell.
 
@@ -970,7 +970,13 @@ The accepted framework decision, protocol boundary, and blocking release gates
 are recorded in [`desktop-shell-decision.md`](desktop-shell-decision.md),
 [`native-app-daemon-contract.md`](native-app-daemon-contract.md), and
 [`native-shell-quality-gates.md`](native-shell-quality-gates.md). The tracked
-Tauri foundation remains an opt-in preview until that full matrix passes.
+Tauri foundation remains an opt-in preview until the macOS matrix passes.
+
+The v12 meaning of **fully native** is defined by the superseding
+[`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md): bounded WebView domain
+controls are allowed, while lifecycle, platform integration, recovery,
+permissions, updates, and rollback remain app-owned. A WebView route load is
+not native-control parity evidence.
 
 **The native shell is alpha and does not gate releases.** Browser CEREBRUM is
 the product; the shell is a background track through v11.11–v11.15. It is built
@@ -981,16 +987,13 @@ the roadmap do not queue behind desktop packaging. The signing, notarization,
 update/rollback, recovery, performance, and accessibility bar applies at **first
 distribution of the shell**, which is v12.
 
-**Platform scope: macOS and Windows are the shell's target platforms; Linux is
-not.** v11.11 distributes no native shell on any platform — see the paragraph
-above — so this is scope for the eventual distribution at v12, and for what CI
-produces release evidence for in the meantime. Linux users are served by browser
-CEREBRUM and the CLI, both fully supported and unaffected: this narrows the
-native shell, not the platform. The Linux target still builds and runs its full
-installed-package lifecycle smoke in CI so cross-platform regressions in the
-shared shell and SSCP code are still caught. Linux re-enters the target set only
-when upstream Wry ships GTK4/webkitgtk-6.0 (`tauri-apps/wry#1769`); SAGE will not
-fork or vendor the web view layer to get there sooner.
+**Platform scope: macOS is the sole v12 native-product target.** The existing
+Windows and Linux preview builds are foundation experiments, not release
+commitments. Browser CEREBRUM is the supported product surface on Windows and
+Linux. Linux native investigation may continue as optional R&D, but it cannot
+gate macOS and must not ship while the selected Tauri/Wry stack resolves the
+GTK3 `glib` line affected by `RUSTSEC-2024-0429`. SAGE will not waive that
+advisory or turn an unreviewed WebView fork into production infrastructure.
 
 ### v11.12 - consumer onboarding and recovery
 
@@ -1105,11 +1108,20 @@ federated extension are in
 
 ## v12 - product roadmap capstone
 
-v12 is the planned completion milestone for the SAGE product roadmap: the fully integrated product rather than another backend-only release. It ships as a standalone desktop application in which every CEREBRUM dashboard function is mapped to a real native app experience — the same capabilities, but presented as a proper application rather than a set of web pages. The web CEREBRUM remains a supported fallback for anyone who wants it; it simply is not the primary product surface. By v12 the v11.11–v11.15 bridge has already chosen the desktop shell, proven consumer onboarding and recovery, moved lifecycle into the app, established accessibility/performance/offline gates, and made local/federated collaboration governable, so v12 is the integration-and-polish capstone that ties it into one coherent product. The app owns installation, node lifecycle, onboarding, permissions, updates, health/recovery, federation, and Sharing & Sync as one coherent native-feeling experience, while the SAGE daemon and authenticated local APIs remain cleanly separated underneath.
+v12 is the planned completion milestone for the SAGE product roadmap: the fully integrated product rather than another backend-only release. It ships as a standalone desktop application on **macOS** in which every CEREBRUM dashboard function is mapped to a real app experience — the same capabilities, but presented as a proper application rather than a set of web pages. Browser CEREBRUM remains the supported product on Windows and Linux and remains available on macOS for recovery and preference. By v12 the v11.11–v11.15 bridge has already chosen the desktop shell, proven consumer onboarding and recovery, moved lifecycle into the app, established accessibility/performance/offline gates, and made local/federated collaboration governable, so v12 is the integration-and-polish capstone that ties it into one coherent product. The macOS app owns installation, node lifecycle, onboarding, permissions, updates, health/recovery, federation, and Sharing & Sync as one coherent native-feeling experience, while the SAGE daemon and authenticated local APIs remain cleanly separated underneath.
 
 **Consumer usability is a release criterion, not polish.** A nontechnical person must be able to install SAGE, create or join a node, connect an AI tool, choose what is private or shared, recover from ordinary failures, and keep the app updated without opening a terminal or learning SAGE internals. Every choice uses plain language and safe defaults; destructive or privacy-affecting actions use consistent accessible SAGE dialogs; errors explain what happened, what remains safe, and the next recovery action. The v12 release gate includes clean-machine onboarding and recovery usability tests with people who have not used SAGE before.
 
-The desktop-shell technology is deliberately not locked here. It must be chosen through a security, packaging, accessibility, performance, offline-operation, and cross-platform evaluation; “native-feeling” must not come at the cost of weakening the local trust boundary or bundling an unmaintainable browser runtime.
+Tauri 2 is the accepted macOS foundation, subject to the security, packaging,
+accessibility, performance, and offline-operation gates in the desktop-shell
+ADR. Linux and Windows native clients are outside the v12 release scope; their
+supported product path is browser CEREBRUM. Current progress
+and the remaining release blockers are tracked in
+[`v12-native-product-status.md`](v12-native-product-status.md). The route/action
+inventory, fail-closed evidence contract, and optional Linux R&D record live in
+[`v12-native-capability-ledger.md`](v12-native-capability-ledger.md),
+[`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md), and
+[`design/v12-linux-native-path.md`](design/v12-linux-native-path.md).
 
 ---
 

@@ -1,0 +1,875 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sage.dev/schemas/v12-native-acceptance-ledger.schema.json",
+  "title": "SAGE v12 native acceptance ledger",
+  "description": "Fail-closed release evidence for declared native targets plus supported browser CEREBRUM fallbacks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "ledger_id",
+    "release_candidate",
+    "inventory",
+    "platform_ledgers",
+    "browser_fallbacks",
+    "promotion"
+  ],
+  "properties": {
+    "schema": {
+      "const": "dev.sage.v12-native-acceptance-ledger/v1"
+    },
+    "ledger_id": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "release_candidate": {
+      "$ref": "#/$defs/releaseCandidate"
+    },
+    "inventory": {
+      "$ref": "#/$defs/inventory"
+    },
+    "platform_ledgers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["macos"],
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "macos": {
+          "allOf": [
+            { "$ref": "#/$defs/platformLedger" },
+            { "properties": { "platform": { "const": "macos" } } }
+          ]
+        },
+        "windows": {
+          "allOf": [
+            { "$ref": "#/$defs/platformLedger" },
+            { "properties": { "platform": { "const": "windows" } } }
+          ]
+        },
+        "linux": {
+          "allOf": [
+            { "$ref": "#/$defs/platformLedger" },
+            { "properties": { "platform": { "const": "linux" } } }
+          ]
+        }
+      }
+    },
+    "browser_fallbacks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["linux", "windows"],
+      "minProperties": 2,
+      "maxProperties": 2,
+      "properties": {
+        "macos": {
+          "allOf": [
+            { "$ref": "#/$defs/browserFallback" },
+            { "properties": { "platform": { "const": "macos" } } }
+          ]
+        },
+        "windows": {
+          "allOf": [
+            { "$ref": "#/$defs/browserFallback" },
+            { "properties": { "platform": { "const": "windows" }, "native_status": { "const": "not-planned" } } }
+          ]
+        },
+        "linux": {
+          "allOf": [
+            { "$ref": "#/$defs/browserFallback" },
+            { "properties": { "platform": { "const": "linux" }, "native_status": { "const": "not-planned" } } }
+          ]
+        }
+      }
+    },
+    "promotion": {
+      "$ref": "#/$defs/promotion"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "promotion": {
+            "properties": { "decision": { "const": "promote" } },
+            "required": ["decision"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "promotion": {
+            "properties": {
+              "blockers": { "maxItems": 0 },
+              "inventory_complete": { "const": true },
+              "cross_product_complete": { "const": true },
+              "all_rows_passed": { "const": true },
+              "three_passes_verified": { "const": true },
+              "artifact_hashes_verified": { "const": true }
+            }
+          },
+          "platform_ledgers": {
+            "properties": {
+              "macos": { "$ref": "#/$defs/promotablePlatformLedger" },
+              "windows": { "$ref": "#/$defs/promotablePlatformLedger" },
+              "linux": { "$ref": "#/$defs/promotablePlatformLedger" }
+            }
+          },
+          "browser_fallbacks": {
+            "properties": {
+              "macos": { "$ref": "#/$defs/promotableBrowserFallback" },
+              "windows": { "$ref": "#/$defs/promotableBrowserFallback" },
+              "linux": { "$ref": "#/$defs/promotableBrowserFallback" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "uri", "media_type", "size_bytes", "sha256"],
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/nonEmptyString" },
+        "uri": { "$ref": "#/$defs/nonEmptyString" },
+        "media_type": { "$ref": "#/$defs/nonEmptyString" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "signature_uri": { "$ref": "#/$defs/nonEmptyString" },
+        "signature_sha256": { "$ref": "#/$defs/sha256" },
+        "retention_until": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "artifactList": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "releaseCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "git_commit",
+        "source_tree_sha256",
+        "build_id",
+        "release_class",
+        "native_platforms",
+        "browser_fallback_platforms",
+        "created_at"
+      ],
+      "properties": {
+        "version": { "type": "string", "pattern": "^12\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" },
+        "git_commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "source_tree_sha256": { "$ref": "#/$defs/sha256" },
+        "build_id": { "$ref": "#/$defs/nonEmptyString" },
+        "release_class": { "const": "production-candidate" },
+        "native_platforms": { "const": ["macos"] },
+        "browser_fallback_platforms": { "const": ["linux", "windows"] },
+        "created_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "apiContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["authenticated-api", "app-owned-native-contract", "none"] },
+        "method": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+        "path_template": { "$ref": "#/$defs/nonEmptyString" },
+        "auth_contract": { "$ref": "#/$defs/nonEmptyString" },
+        "expected_effect": { "$ref": "#/$defs/nonEmptyString" },
+        "none_reason": { "$ref": "#/$defs/nonEmptyString" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "mode": { "const": "authenticated-api" } }, "required": ["mode"] },
+          "then": { "required": ["method", "path_template", "auth_contract", "expected_effect"] }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "app-owned-native-contract" } }, "required": ["mode"] },
+          "then": { "required": ["expected_effect"] }
+        },
+        {
+          "if": { "properties": { "mode": { "const": "none" } }, "required": ["mode"] },
+          "then": { "required": ["none_reason"] }
+        }
+      ]
+    },
+    "inventoryEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_id",
+        "kind",
+        "workflow",
+        "label",
+        "control_owner",
+        "required_platforms",
+        "api_contract"
+      ],
+      "properties": {
+        "entry_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]+$" },
+        "kind": { "enum": ["route", "action"] },
+        "workflow": { "$ref": "#/$defs/nonEmptyString" },
+        "label": { "$ref": "#/$defs/nonEmptyString" },
+        "route_template": { "$ref": "#/$defs/nonEmptyString" },
+        "parent_route_entry_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]+$" },
+        "action_identifier": { "$ref": "#/$defs/nonEmptyString" },
+        "control_owner": { "enum": ["native-control", "web-control"] },
+        "required_platforms": { "const": ["macos"] },
+        "api_contract": { "$ref": "#/$defs/apiContract" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "route" } }, "required": ["kind"] },
+          "then": { "required": ["route_template"] }
+        },
+        {
+          "if": { "properties": { "kind": { "const": "action" } }, "required": ["kind"] },
+          "then": { "required": ["parent_route_entry_id", "action_identifier"] }
+        }
+      ]
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generated_from_git_commit",
+        "discovery_method",
+        "route_manifest_artifact",
+        "entries"
+      ],
+      "properties": {
+        "generated_from_git_commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "discovery_method": { "$ref": "#/$defs/nonEmptyString" },
+        "route_manifest_artifact": { "$ref": "#/$defs/artifact" },
+        "entries": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/inventoryEntry" }
+        }
+      }
+    },
+    "packageIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product_name",
+        "application_identifier",
+        "version",
+        "build_id",
+        "package_kind",
+        "package_sha256",
+        "shell_executable_sha256",
+        "bundled_daemon_sha256",
+        "bundled_daemon_version",
+        "production_signed",
+        "signature_verification",
+        "notarization_or_reputation",
+        "sbom",
+        "provenance"
+      ],
+      "properties": {
+        "product_name": { "$ref": "#/$defs/nonEmptyString" },
+        "application_identifier": { "$ref": "#/$defs/nonEmptyString" },
+        "version": { "$ref": "#/$defs/nonEmptyString" },
+        "build_id": { "$ref": "#/$defs/nonEmptyString" },
+        "package_kind": { "enum": ["dmg", "nsis", "msix", "deb", "rpm", "appimage", "flatpak"] },
+        "package_sha256": { "$ref": "#/$defs/sha256" },
+        "shell_executable_sha256": { "$ref": "#/$defs/sha256" },
+        "bundled_daemon_sha256": { "$ref": "#/$defs/sha256" },
+        "bundled_daemon_version": { "$ref": "#/$defs/nonEmptyString" },
+        "production_signed": { "type": "boolean" },
+        "signature_verification": { "$ref": "#/$defs/passEvidence" },
+        "notarization_or_reputation": { "$ref": "#/$defs/passEvidence" },
+        "sbom": { "$ref": "#/$defs/artifact" },
+        "provenance": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os_name",
+        "os_version",
+        "os_build",
+        "architecture",
+        "hardware_model",
+        "cpu",
+        "logical_cpu_count",
+        "ram_bytes",
+        "gpu",
+        "display",
+        "webview_engine",
+        "webview_version",
+        "environment_capture"
+      ],
+      "properties": {
+        "os_name": { "$ref": "#/$defs/nonEmptyString" },
+        "os_version": { "$ref": "#/$defs/nonEmptyString" },
+        "os_build": { "$ref": "#/$defs/nonEmptyString" },
+        "distribution": { "$ref": "#/$defs/nonEmptyString" },
+        "kernel": { "$ref": "#/$defs/nonEmptyString" },
+        "architecture": { "enum": ["x86_64", "arm64"] },
+        "hardware_model": { "$ref": "#/$defs/nonEmptyString" },
+        "cpu": { "$ref": "#/$defs/nonEmptyString" },
+        "logical_cpu_count": { "type": "integer", "minimum": 1 },
+        "ram_bytes": { "type": "integer", "minimum": 1 },
+        "gpu": { "$ref": "#/$defs/nonEmptyString" },
+        "display": { "$ref": "#/$defs/nonEmptyString" },
+        "webview_engine": { "enum": ["WKWebView", "WebView2", "WebKitGTK", "other-reviewed"] },
+        "webview_version": { "$ref": "#/$defs/nonEmptyString" },
+        "webview_runtime_sha256": { "$ref": "#/$defs/sha256" },
+        "environment_capture": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "passEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "artifacts"],
+      "properties": {
+        "result": { "const": "pass" },
+        "summary": { "$ref": "#/$defs/nonEmptyString" },
+        "artifacts": { "$ref": "#/$defs/artifactList" }
+      }
+    },
+    "checkEvidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["result", "summary", "artifacts"],
+          "properties": {
+            "result": { "enum": ["pass", "fail"] },
+            "summary": { "$ref": "#/$defs/nonEmptyString" },
+            "artifacts": { "$ref": "#/$defs/artifactList" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["result", "reason", "decision_artifacts"],
+          "properties": {
+            "result": { "const": "not-applicable" },
+            "reason": { "$ref": "#/$defs/nonEmptyString" },
+            "decision_artifacts": { "$ref": "#/$defs/artifactList" }
+          }
+        }
+      ]
+    },
+    "apiActionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "observed_effect",
+        "authorization_result",
+        "data_integrity_result",
+        "artifacts"
+      ],
+      "properties": {
+        "result": { "enum": ["pass", "fail"] },
+        "http_status": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "application_status": { "$ref": "#/$defs/nonEmptyString" },
+        "observed_effect": { "$ref": "#/$defs/nonEmptyString" },
+        "authorization_result": { "enum": ["authorized-as-expected", "denied-as-expected", "unexpected"] },
+        "data_integrity_result": { "enum": ["preserved", "changed-as-expected", "unexpected"] },
+        "artifacts": { "$ref": "#/$defs/artifactList" }
+      }
+    },
+    "accessibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "screen_reader",
+        "keyboard_complete",
+        "focus_visible_and_logical",
+        "zoom_200_percent",
+        "contrast_and_color_modes",
+        "reduced_motion",
+        "automated_semantics"
+      ],
+      "properties": {
+        "screen_reader": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["technology", "version", "operator", "result", "artifacts"],
+          "properties": {
+            "technology": { "enum": ["VoiceOver", "Narrator", "Orca-AT-SPI"] },
+            "version": { "$ref": "#/$defs/nonEmptyString" },
+            "operator": { "$ref": "#/$defs/nonEmptyString" },
+            "result": { "enum": ["pass", "fail"] },
+            "artifacts": { "$ref": "#/$defs/artifactList" }
+          }
+        },
+        "keyboard_complete": { "$ref": "#/$defs/checkEvidence" },
+        "focus_visible_and_logical": { "$ref": "#/$defs/checkEvidence" },
+        "zoom_200_percent": { "$ref": "#/$defs/checkEvidence" },
+        "contrast_and_color_modes": { "$ref": "#/$defs/checkEvidence" },
+        "reduced_motion": { "$ref": "#/$defs/checkEvidence" },
+        "automated_semantics": { "$ref": "#/$defs/checkEvidence" }
+      }
+    },
+    "offline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "network_enforcement",
+        "external_dns_requests",
+        "external_connections",
+        "action_completed",
+        "artifacts"
+      ],
+      "properties": {
+        "result": { "enum": ["pass", "fail"] },
+        "network_enforcement": { "enum": ["kernel-blocked", "firewall-blocked", "continuous-observation"] },
+        "external_dns_requests": { "type": "integer", "minimum": 0 },
+        "external_connections": { "type": "integer", "minimum": 0 },
+        "action_completed": { "type": "boolean" },
+        "degraded_state": { "$ref": "#/$defs/nonEmptyString" },
+        "artifacts": { "$ref": "#/$defs/artifactList" }
+      }
+    },
+    "daemonRecovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "loss_injection",
+        "loss_detected_ms",
+        "recovery_shown_ms",
+        "recovery_action_completed",
+        "duplicate_daemon_started",
+        "data_safety",
+        "artifacts"
+      ],
+      "properties": {
+        "result": { "enum": ["pass", "fail"] },
+        "loss_injection": { "$ref": "#/$defs/nonEmptyString" },
+        "loss_detected_ms": { "type": "number", "minimum": 0 },
+        "recovery_shown_ms": { "type": "number", "minimum": 0 },
+        "recovery_action_completed": { "type": "boolean" },
+        "duplicate_daemon_started": { "type": "boolean" },
+        "data_safety": { "enum": ["preserved", "changed-as-expected", "lost-or-unknown"] },
+        "artifacts": { "$ref": "#/$defs/artifactList" }
+      }
+    },
+    "updateRollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result",
+        "from_version",
+        "to_version",
+        "signed_update_verified",
+        "failed_update_injected",
+        "rollback_completed",
+        "previous_version_recovered",
+        "data_hash_before",
+        "data_hash_after",
+        "artifacts"
+      ],
+      "properties": {
+        "result": { "enum": ["pass", "fail"] },
+        "from_version": { "$ref": "#/$defs/nonEmptyString" },
+        "to_version": { "$ref": "#/$defs/nonEmptyString" },
+        "signed_update_verified": { "type": "boolean" },
+        "failed_update_injected": { "type": "boolean" },
+        "rollback_completed": { "type": "boolean" },
+        "previous_version_recovered": { "type": "boolean" },
+        "data_hash_before": { "$ref": "#/$defs/sha256" },
+        "data_hash_after": { "$ref": "#/$defs/sha256" },
+        "artifacts": { "$ref": "#/$defs/artifactList" }
+      }
+    },
+    "metric": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["result", "unit", "budget", "sample_count", "p50", "p95", "raw_samples"],
+          "properties": {
+            "result": { "enum": ["pass", "fail"] },
+            "unit": { "$ref": "#/$defs/nonEmptyString" },
+            "budget": { "$ref": "#/$defs/nonEmptyString" },
+            "sample_count": { "type": "integer", "minimum": 1 },
+            "p50": { "type": "number", "minimum": 0 },
+            "p95": { "type": "number", "minimum": 0 },
+            "median": { "type": "number", "minimum": 0 },
+            "recurring_stalls_over_100ms": { "type": "integer", "minimum": 0 },
+            "regression_percent": { "type": "number" },
+            "raw_samples": { "$ref": "#/$defs/artifact" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["result", "reason", "decision_artifacts"],
+          "properties": {
+            "result": { "const": "not-applicable" },
+            "reason": { "$ref": "#/$defs/nonEmptyString" },
+            "decision_artifacts": { "$ref": "#/$defs/artifactList" }
+          }
+        }
+      ]
+    },
+    "performance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shell_rss",
+        "settled_idle_cpu",
+        "warm_reopen_to_focus",
+        "cold_launch_to_recovery_paint",
+        "ready_to_interactive",
+        "daemon_loss_to_recovery",
+        "navigation_response",
+        "native_overhead",
+        "mri_frame_pacing"
+      ],
+      "properties": {
+        "shell_rss": { "$ref": "#/$defs/metric" },
+        "settled_idle_cpu": { "$ref": "#/$defs/metric" },
+        "warm_reopen_to_focus": { "$ref": "#/$defs/metric" },
+        "cold_launch_to_recovery_paint": { "$ref": "#/$defs/metric" },
+        "ready_to_interactive": { "$ref": "#/$defs/metric" },
+        "daemon_loss_to_recovery": { "$ref": "#/$defs/metric" },
+        "navigation_response": { "$ref": "#/$defs/metric" },
+        "native_overhead": { "$ref": "#/$defs/metric" },
+        "mri_frame_pacing": { "$ref": "#/$defs/metric" }
+      }
+    },
+    "acceptancePass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pass_index",
+        "run_id",
+        "started_at",
+        "completed_at",
+        "git_commit",
+        "package_sha256",
+        "environment_sha256",
+        "result",
+        "evidence_manifest"
+      ],
+      "properties": {
+        "pass_index": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "run_id": { "$ref": "#/$defs/nonEmptyString" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "completed_at": { "$ref": "#/$defs/timestamp" },
+        "git_commit": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "package_sha256": { "$ref": "#/$defs/sha256" },
+        "environment_sha256": { "$ref": "#/$defs/sha256" },
+        "result": { "enum": ["pass", "fail"] },
+        "evidence_manifest": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "threePassRequirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "consecutive",
+        "same_build_package_environment",
+        "no_intervening_failed_or_skipped_run",
+        "passes"
+      ],
+      "properties": {
+        "consecutive": { "type": "boolean" },
+        "same_build_package_environment": { "type": "boolean" },
+        "no_intervening_failed_or_skipped_run": { "type": "boolean" },
+        "passes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "$ref": "#/$defs/acceptancePass" }
+        }
+      }
+    },
+    "rowEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inventory_entry_id",
+        "control_owner",
+        "surface_path",
+        "release_state",
+        "api_action_result",
+        "accessibility",
+        "offline",
+        "daemon_loss_recovery",
+        "update_rollback",
+        "performance",
+        "three_pass_requirement",
+        "row_artifacts"
+      ],
+      "properties": {
+        "inventory_entry_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]+$" },
+        "control_owner": { "enum": ["native-control", "web-control"] },
+        "surface_path": { "enum": ["native-application", "bounded-webview"] },
+        "release_state": { "enum": ["passed", "blocked"] },
+        "blocking_reasons": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "api_action_result": { "$ref": "#/$defs/apiActionResult" },
+        "accessibility": { "$ref": "#/$defs/accessibility" },
+        "offline": { "$ref": "#/$defs/offline" },
+        "daemon_loss_recovery": { "$ref": "#/$defs/daemonRecovery" },
+        "update_rollback": { "$ref": "#/$defs/updateRollback" },
+        "performance": { "$ref": "#/$defs/performance" },
+        "three_pass_requirement": { "$ref": "#/$defs/threePassRequirement" },
+        "row_artifacts": { "$ref": "#/$defs/artifactList" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "release_state": { "const": "blocked" } }, "required": ["release_state"] },
+          "then": { "required": ["blocking_reasons"] }
+        },
+        {
+          "if": { "properties": { "release_state": { "const": "passed" } }, "required": ["release_state"] },
+          "then": {
+            "properties": {
+              "api_action_result": { "properties": { "result": { "const": "pass" } } },
+              "accessibility": {
+                "properties": {
+                  "screen_reader": { "properties": { "result": { "const": "pass" } } },
+                  "keyboard_complete": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "focus_visible_and_logical": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "zoom_200_percent": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "contrast_and_color_modes": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "reduced_motion": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "automated_semantics": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } }
+                }
+              },
+              "offline": {
+                "properties": {
+                  "result": { "const": "pass" },
+                  "external_dns_requests": { "const": 0 },
+                  "external_connections": { "const": 0 },
+                  "action_completed": { "const": true }
+                }
+              },
+              "daemon_loss_recovery": {
+                "properties": {
+                  "result": { "const": "pass" },
+                  "recovery_action_completed": { "const": true },
+                  "duplicate_daemon_started": { "const": false },
+                  "data_safety": { "enum": ["preserved", "changed-as-expected"] }
+                }
+              },
+              "update_rollback": {
+                "properties": {
+                  "result": { "const": "pass" },
+                  "signed_update_verified": { "const": true },
+                  "failed_update_injected": { "const": true },
+                  "rollback_completed": { "const": true },
+                  "previous_version_recovered": { "const": true }
+                }
+              },
+              "performance": {
+                "properties": {
+                  "shell_rss": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "settled_idle_cpu": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "warm_reopen_to_focus": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "cold_launch_to_recovery_paint": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "ready_to_interactive": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "daemon_loss_to_recovery": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "navigation_response": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "native_overhead": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } },
+                  "mri_frame_pacing": { "not": { "properties": { "result": { "const": "fail" } }, "required": ["result"] } }
+                }
+              },
+              "three_pass_requirement": {
+                "properties": {
+                  "consecutive": { "const": true },
+                  "same_build_package_environment": { "const": true },
+                  "no_intervening_failed_or_skipped_run": { "const": true },
+                  "passes": {
+                    "items": { "properties": { "result": { "const": "pass" } } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "platformLedger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "package_identity",
+        "environment",
+        "platform_security_gate",
+        "rows"
+      ],
+      "properties": {
+        "platform": { "enum": ["macos", "windows", "linux"] },
+        "package_identity": { "$ref": "#/$defs/packageIdentity" },
+        "environment": { "$ref": "#/$defs/environment" },
+        "platform_security_gate": { "$ref": "#/$defs/checkEvidence" },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/rowEvidence" }
+        }
+      }
+    },
+    "promotablePlatformLedger": {
+      "properties": {
+        "package_identity": {
+          "properties": {
+            "production_signed": { "const": true }
+          }
+        },
+        "platform_security_gate": {
+          "properties": { "result": { "const": "pass" } }
+        },
+        "rows": {
+          "items": {
+            "properties": {
+              "release_state": { "const": "passed" }
+            }
+          }
+        }
+      }
+    },
+    "browserEnvironment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "os_name",
+        "os_version",
+        "architecture",
+        "hardware_model",
+        "browser_name",
+        "browser_version",
+        "environment_capture"
+      ],
+      "properties": {
+        "os_name": { "$ref": "#/$defs/nonEmptyString" },
+        "os_version": { "$ref": "#/$defs/nonEmptyString" },
+        "architecture": { "enum": ["x86_64", "arm64"] },
+        "hardware_model": { "$ref": "#/$defs/nonEmptyString" },
+        "browser_name": { "$ref": "#/$defs/nonEmptyString" },
+        "browser_version": { "$ref": "#/$defs/nonEmptyString" },
+        "environment_capture": { "$ref": "#/$defs/artifact" }
+      }
+    },
+    "browserFallback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform",
+        "product_path",
+        "native_status",
+        "supported",
+        "environment",
+        "compatibility",
+        "accessibility",
+        "offline_or_degraded",
+        "native_install_guidance",
+        "artifacts"
+      ],
+      "properties": {
+        "platform": { "enum": ["macos", "linux", "windows"] },
+        "product_path": { "const": "browser-cerebrum" },
+        "native_status": { "enum": ["deferred", "unsupported", "not-planned"] },
+        "supported": { "type": "boolean" },
+        "environment": { "$ref": "#/$defs/browserEnvironment" },
+        "compatibility": { "$ref": "#/$defs/checkEvidence" },
+        "accessibility": { "$ref": "#/$defs/checkEvidence" },
+        "offline_or_degraded": { "$ref": "#/$defs/checkEvidence" },
+        "native_install_guidance": { "$ref": "#/$defs/nonEmptyString" },
+        "artifacts": { "$ref": "#/$defs/artifactList" }
+      }
+    },
+    "promotableBrowserFallback": {
+      "properties": {
+        "supported": { "const": true },
+        "compatibility": { "properties": { "result": { "const": "pass" } } },
+        "accessibility": { "properties": { "result": { "const": "pass" } } },
+        "offline_or_degraded": { "properties": { "result": { "const": "pass" } } }
+      }
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blocker_id", "scope", "reason", "affected_ids"],
+      "properties": {
+        "blocker_id": { "$ref": "#/$defs/nonEmptyString" },
+        "scope": { "enum": ["inventory", "macos", "windows", "linux", "cross-platform", "artifact-integrity", "three-pass"] },
+        "reason": { "$ref": "#/$defs/nonEmptyString" },
+        "affected_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/nonEmptyString" }
+        },
+        "artifacts": { "$ref": "#/$defs/artifactList" }
+      }
+    },
+    "promotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision",
+        "evaluated_at",
+        "validator",
+        "inventory_complete",
+        "cross_product_complete",
+        "all_rows_passed",
+        "three_passes_verified",
+        "artifact_hashes_verified",
+        "blockers"
+      ],
+      "properties": {
+        "decision": { "enum": ["blocked", "promote"] },
+        "evaluated_at": { "$ref": "#/$defs/timestamp" },
+        "validator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version", "executable_sha256", "report"],
+          "properties": {
+            "name": { "$ref": "#/$defs/nonEmptyString" },
+            "version": { "$ref": "#/$defs/nonEmptyString" },
+            "executable_sha256": { "$ref": "#/$defs/sha256" },
+            "report": { "$ref": "#/$defs/artifact" }
+          }
+        },
+        "inventory_complete": { "type": "boolean" },
+        "cross_product_complete": { "type": "boolean" },
+        "all_rows_passed": { "type": "boolean" },
+        "three_passes_verified": { "type": "boolean" },
+        "artifact_hashes_verified": { "type": "boolean" },
+        "blockers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/blocker" }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "decision": { "const": "blocked" } }, "required": ["decision"] },
+          "then": { "properties": { "blockers": { "minItems": 1 } } }
+        }
+      ]
+    }
+  }
+}

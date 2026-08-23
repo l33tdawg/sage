@@ -125,14 +125,20 @@ docs/*
 !docs/ROADMAP.md
 !docs/v11.9-multiprocess-fault-harness.md
 !docs/desktop-shell-decision.md
+!docs/desktop-shell-v12-adr.md
 !docs/native-app-daemon-contract.md
 !docs/native-shell-quality-gates.md
+!docs/v12-native-product-status.md
+!docs/v12-native-capability-ledger.md
+!docs/v12-native-acceptance-ledger.md
+!docs/v12-native-acceptance-ledger.schema.json
 !docs/v11.12-clean-machine-acceptance.md
 # Planned public design contracts (not current-facing API reference)
 !docs/design/
 docs/design/*
 !docs/design/agent-message-receipts.md
 !docs/design/sage-commons-lantern-v12-support.md
+!docs/design/v12-linux-native-path.md
 scratchpad/
 # Agent-facing code reference (public)
 !docs/reference/
