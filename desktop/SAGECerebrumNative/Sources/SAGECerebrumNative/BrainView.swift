@@ -78,11 +78,6 @@ struct BrainView: View {
         .onAppear {
             if reduceMotion { scanning = false; flow = false }
         }
-        .onChange(of: model.selectedAgentID) { oldValue, newValue in
-            guard oldValue != newValue else { return }
-            model.selectedEngramID = nil
-            model.selectedConnection = nil
-        }
     }
 
     private var header: some View {
@@ -234,7 +229,10 @@ struct BrainView: View {
                 Text((model.connectome?.neurons.count ?? 0).formatted())
                     .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
             }
-            List(model.connectome?.neurons ?? [], selection: $model.selectedAgentID) { neuron in
+            List(model.connectome?.neurons ?? [], selection: Binding(
+                get: { model.selectedAgentID },
+                set: { model.selectConnectomeAgent($0) }
+            )) { neuron in
                 HStack(spacing: 9) {
                     Circle().fill(domainColor(neuron.domain ?? "unassigned")).frame(width: 8, height: 8)
                     VStack(alignment: .leading, spacing: 1) {
@@ -265,7 +263,13 @@ struct BrainView: View {
                 autoRotate: scanning && !reduceMotion,
                 flow: flow && !reduceMotion,
                 hullOpacity: currentHullOpacity,
-                onSelect: { model.selectedNodeID = $0 }
+                onPick: { pick in
+                    switch pick {
+                    case let .node(id): model.selectedNodeID = id
+                    case .edge: break
+                    case .background: model.selectedNodeID = nil
+                    }
+                }
             )
             VStack(alignment: .leading, spacing: 4) {
                 Text("CEREBRUM · MRI")
@@ -319,7 +323,13 @@ struct BrainView: View {
                 autoRotate: scanning && !reduceMotion,
                 flow: flow && !reduceMotion,
                 hullOpacity: currentHullOpacity,
-                onSelect: { model.selectConnectomeSceneNode($0) }
+                onPick: { pick in
+                    switch pick {
+                    case let .node(id): model.selectConnectomeSceneNode(id)
+                    case let .edge(edge): model.selectConnectomeSceneEdge(edge)
+                    case .background: model.selectConnectomeSceneNode(nil)
+                    }
+                }
             )
             VStack(alignment: .leading, spacing: 4) {
                 Text("CEREBRUM · CONNECTOME")

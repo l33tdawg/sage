@@ -52,7 +52,12 @@ final class BrainViewModel {
     }
     var selectedConnectionEdge: BrainEdge? {
         selectedConnection.map {
-            .init(source: Self.agentSceneID($0.fromAgent), target: Self.agentSceneID($0.toAgent), type: "synapse")
+            .init(
+                source: Self.agentSceneID($0.fromAgent),
+                target: Self.agentSceneID($0.toAgent),
+                type: "synapse",
+                lastFired: $0.lastFiredDate
+            )
         }
     }
     var selectedConnectomeSceneID: String? {
@@ -121,7 +126,7 @@ final class BrainViewModel {
         var edges = (connectome?.synapses ?? []).map {
             BrainEdge(
                 source: Self.agentSceneID($0.fromAgent), target: Self.agentSceneID($0.toAgent),
-                type: "synapse", weight: Double($0.count)
+                type: "synapse", weight: Double($0.count), lastFired: $0.lastFiredDate
             )
         }
         guard let selectedAgentID, engrams?.agentID == selectedAgentID else { return edges }
@@ -175,6 +180,25 @@ final class BrainViewModel {
             selectedEngramID = engramID
             selectedConnection = nil
         }
+    }
+
+    func selectConnectomeAgent(_ agentID: String?) {
+        guard agentID != selectedAgentID else { return }
+        selectedAgentID = agentID
+        selectedEngramID = nil
+        selectedConnectionID = nil
+    }
+
+    func selectConnectomeSceneEdge(_ edge: BrainRenderEdgeID) {
+        guard edge.type == "synapse",
+              let fromAgent = Self.rawSceneID(edge.source, prefix: "agent:"),
+              let toAgent = Self.rawSceneID(edge.target, prefix: "agent:"),
+              connectome?.synapses.contains(where: { $0.fromAgent == fromAgent && $0.toAgent == toAgent }) == true
+        else { return }
+        if selectedAgentID != fromAgent && selectedAgentID != toAgent { selectedAgentID = fromAgent }
+        selectedEngramID = nil
+        let id = DirectedSynapseID(fromAgent: fromAgent, toAgent: toAgent)
+        selectedConnectionID = selectedConnectionID == id ? nil : id
     }
 
     func refresh() async {

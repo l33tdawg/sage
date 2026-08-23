@@ -137,7 +137,8 @@ actor DesignPreviewAPI: SAGEAPI {
           {"from_agent":"codex","to_agent":"claude","count":148,"last_fired":"2026-08-23T12:00:00.123456789Z"},
           {"from_agent":"claude","to_agent":"codex","count":92,"last_fired":"2026-08-23T11:52:00Z"},
           {"from_agent":"codex","to_agent":"local","count":61,"last_fired":"2026-08-23T10:20:00Z"},
-          {"from_agent":"local","to_agent":"codex","count":47,"last_fired":"2026-08-22T22:10:00Z"}
+          {"from_agent":"local","to_agent":"codex","count":47,"last_fired":"2026-08-22T22:10:00Z"},
+          {"from_agent":"codex","to_agent":"codex","count":19,"last_fired":"2026-08-23T11:58:00Z"}
         ]}
         """#.utf8))
     }

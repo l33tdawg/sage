@@ -148,6 +148,7 @@ import Testing
     #expect(graph.nodes.first?.id == "m1")
     #expect(graph.nodes.first?.corroborationCount == 3)
     #expect(graph.edges.first?.type == "related")
+    #expect(graph.edges.first?.lastFired == nil)
     #expect(graph.total == 12_000)
     #expect(graph.continuationRequired == true)
     #expect(graph.projection?.partial == true)
@@ -165,6 +166,11 @@ import Testing
     #expect(connectome.neurons.first?.agentID == "a1")
     #expect(connectome.synapses.first?.count == 14)
     #expect(connectome.synapses.first?.lastFiredDate != nil)
+
+    let graphEdge = try decoder.decode(BrainEdge.self, from: Data(#"""
+    {"source":"a1","target":"a2","type":"synapse","weight":14,"last_fired":"2026-08-23T10:00:00.123456789Z"}
+    """#.utf8))
+    #expect(graphEdge.lastFired == connectome.synapses.first?.lastFiredDate)
 
     let engrams = try decoder.decode(AgentEngramEnvelope.self, from: Data(#"""
     {"agent_id":"a1","engrams":[{"id":"m1","content":"Visible memory","domain":"native","confidence":0.93,"status":"committed","memory_type":"fact","created_at":"2026-08-23T10:00:00Z","corroboration_count":9,"tags":["v12"],"corroborators":["a2"]}],"continuation_required":true}
@@ -247,7 +253,9 @@ import Testing
 
     #expect(Set(brain.connectomeSceneNodes.map(\.id)).contains("agent:shared-id"))
     #expect(Set(brain.connectomeSceneNodes.map(\.id)).contains("engram:shared-id"))
-    #expect(brain.connectomeSceneEdges.first { $0.type == "synapse" }?.weight == Double(Int64.max))
+    let firstSynapseEdge = brain.connectomeSceneEdges.first { $0.type == "synapse" }
+    #expect(firstSynapseEdge?.weight == Double(Int64.max))
+    #expect(firstSynapseEdge?.lastFired == connectome.synapses[0].lastFiredDate)
     #expect(BrainMetalRenderer.isSameDirectedEdge(
         brain.selectedConnectionEdge,
         .init(source: "agent:shared-id", target: "agent:a2", type: "synapse", weight: 42)
@@ -265,10 +273,21 @@ import Testing
 
     brain.selectedAgentID = "shared-id"
     brain.selectedConnection = connectome.synapses[0]
+    #expect(brain.selectedConnectionEdge?.lastFired == connectome.synapses[0].lastFiredDate)
     #expect(BrainMetalRenderer.isSameDirectedEdge(
         brain.selectedConnectionEdge,
         .init(source: "agent:shared-id", target: "agent:a2", type: "synapse", weight: 42)
     ))
+    brain.selectedConnection = nil
+    brain.selectedAgentID = nil
+    brain.selectConnectomeSceneEdge(.init(source: "agent:shared-id", target: "agent:a2", type: "synapse"))
+    #expect(brain.selectedAgentID == "shared-id")
+    #expect(brain.selectedConnectionID == .init(fromAgent: "shared-id", toAgent: "a2"))
+    brain.selectConnectomeSceneEdge(.init(source: "agent:shared-id", target: "agent:a2", type: "synapse"))
+    #expect(brain.selectedConnectionID == nil)
+    brain.selectConnectomeSceneEdge(.init(source: "engram:shared-id", target: "agent:a2", type: "corroborates"))
+    #expect(brain.selectedConnectionID == nil)
+    brain.selectedConnection = connectome.synapses[0]
     let updated = ConnectomeEnvelope(neurons: connectome.neurons, synapses: [
         .init(fromAgent: "shared-id", toAgent: "a2", count: 7, lastFired: "2026-08-23T00:05:00Z"),
     ])
@@ -298,6 +317,28 @@ import Testing
     #expect(BrainBloomTexturePlan(drawableWidth: 5, drawableHeight: 7)?.height == 4)
     #expect(BrainBloomTexturePlan(drawableWidth: 0, drawableHeight: 7) == nil)
     #expect(BrainBloomTexturePlan(drawableWidth: 7, drawableHeight: 0) == nil)
+}
+
+@Test func connectomePlasticityUsesThirtyMinuteHalfLifeAndHonestFloor() {
+    let now = Date(timeIntervalSince1970: 10_000)
+    #expect(BrainMetalRenderer.edgePlasticity(lastFired: nil, now: now) == 0.15)
+    #expect(BrainMetalRenderer.edgePlasticity(lastFired: now, now: now) == 1)
+    let halfLife = BrainMetalRenderer.edgePlasticity(lastFired: now.addingTimeInterval(-1_800), now: now)
+    #expect(abs(halfLife - 0.575) < 0.0001)
+    let old = BrainMetalRenderer.edgePlasticity(lastFired: now.addingTimeInterval(-86_400), now: now)
+    #expect(old >= 0.15 && old < 0.151)
+}
+
+@Test func ribbonLODIsBoundedDeterministicAndPreservesSelection() {
+    let edges = (0 ..< 10).map {
+        BrainEdge(source: "agent:\($0)", target: "agent:\($0 + 1)", type: "synapse", weight: Double($0))
+    }
+    let highlighted = edges[0]
+    let first = BrainMetalRenderer.selectRenderEdges(edges, highlighted: highlighted, limit: 4)
+    let second = BrainMetalRenderer.selectRenderEdges(Array(edges.reversed()), highlighted: highlighted, limit: 4)
+    #expect(first.count == 4)
+    #expect(first.contains { BrainMetalRenderer.isSameDirectedEdge(highlighted, $0) })
+    #expect(Set(first.map { "\($0.source)>\($0.target)" }) == Set(second.map { "\($0.source)>\($0.target)" }))
 }
 
 private actor MutationTestAPI: SAGEAPI {

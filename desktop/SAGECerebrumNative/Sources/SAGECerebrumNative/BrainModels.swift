@@ -46,16 +46,19 @@ struct BrainEdge: Decodable, Equatable, Hashable, Sendable {
     let target: String
     let type: String
     let weight: Double?
+    let lastFired: Date?
 
-    init(source: String, target: String, type: String, weight: Double? = nil) {
+    init(source: String, target: String, type: String, weight: Double? = nil, lastFired: Date? = nil) {
         self.source = source
         self.target = target
         self.type = type
         self.weight = weight
+        self.lastFired = lastFired
     }
 
     private enum CodingKeys: String, CodingKey {
         case source, target, type, weight
+        case lastFired = "last_fired"
     }
 
     init(from decoder: Decoder) throws {
@@ -64,6 +67,7 @@ struct BrainEdge: Decodable, Equatable, Hashable, Sendable {
         target = try values.decode(String.self, forKey: .target)
         type = try values.decode(String.self, forKey: .type)
         weight = try values.decodeIfPresent(Double.self, forKey: .weight)
+        lastFired = try values.decodeIfPresent(String.self, forKey: .lastFired).flatMap(RFC3339Timestamp.parse)
     }
 }
 

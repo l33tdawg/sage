@@ -78,9 +78,14 @@ traffic summaries. The renderer now adds time-invariant half-resolution
 offscreen extraction, separable blur, and additive bloom; retained traffic
 drives p95-normalized screen-space ribbon width; and selected cells receive a
 reduced-motion-aware camera-focus ease. Related-memory focus is not yet
-independently typed, direct Metal edge hit-testing and self-loop/reciprocal-edge
-geometry remain open, and deeper behavioral, accessibility, large-store,
-Metal-fallback, and performance evidence remains open.
+independently typed. Reciprocal synapses now occupy deterministic curved lanes,
+self-synapses render as finite loops, `last_fired` drives a truthful 30-minute
+plasticity decay with a visible floor, and direct Metal ribbon picks synchronize
+through the same directed connection identity as the accessible inspector. A
+deterministic strongest-edge cap bounds expanded ribbon geometry at 2,048 and
+always retains the focused connection. Endpoint trimming, arrowheads,
+topology-aware per-neuron LOD, and deeper behavioral,
+accessibility, Metal-fallback, and performance evidence remain open.
 
 The first arm64 application bundle was built and launch-tested on 2026-08-23 at
 `dist/v12-native/12.0.0-beta.1/SAGE CEREBRUM Native.app`. Launch Services
@@ -161,7 +166,7 @@ acceptance gaps are not counted as another route slice.
 | Primary product area | Current surface | Current classification | Acceptance status |
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
-| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, weighted ribbons, directional flow and focus easing, synchronized native tables, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, and a related-memory Train of Thought pane | `native-control` | Brain visual-parity pass implemented; pixel-level bloom evidence, typed related focus, direct Metal edge hit-testing, reciprocal/self-loop geometry, daemon lifecycle, Metal fallback, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
+| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, bounded strongest-edge LOD, direct edge picking, directional flow and focus easing, synchronized native tables, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, and a related-memory Train of Thought pane | `native-control` | Brain interaction/parity pass implemented; pixel-level bloom evidence, typed related focus, ribbon endpoint/arrow geometry, topology-aware LOD, daemon lifecycle, Metal fallback, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
 | Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; whole-domain transfer and full acceptance evidence remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |
@@ -204,9 +209,9 @@ production promotion.
   without granting implicit Root/Admin authority. The current Swift application
   attaches to an already-running loopback daemon; it does not yet own that
   daemon's lifecycle.
-- Complete the remaining Brain work: introduce reciprocal/self-loop ribbon
-  geometry, last-fired plasticity, typed related-memory focus, and direct Metal
-  edge hit-testing, then prove
+- Complete the remaining Brain work: introduce ribbon endpoint trimming,
+  direction arrowheads, topology-aware per-neuron LOD, and typed related-memory
+  focus, then prove
   Metal/Table parity, access-purge behavior, keyboard/VoiceOver operation,
   large-store performance, and graceful behavior when Metal is unavailable.
 - Convert the private tester artifact into a signed production candidate and
