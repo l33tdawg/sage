@@ -4,6 +4,9 @@
 
 **Code baseline:** SAGE v11.19.0 / app-v27
 
+**Release lines:** `11.19.x` remains stable; `v12-beta` carries experimental
+native macOS CEREBRUM builds and must not alter stable publication.
+
 **Product target:** production native application on macOS; browser CEREBRUM on Linux and Windows
 
 **Product-boundary ADR:**
@@ -120,35 +123,28 @@ the SAGE-core native application.
 
 ## Durable backlog lanes
 
-The v12 work is consolidated into these SAGE tasks:
+The v12 work is consolidated into two SAGE tasks:
 
-1. `5b2375d3-b19c-4962-a5a3-212353f0e3af` — freeze the fully-native product
-   definition and update the desktop-shell ADR;
-2. `c86b8e3b-3731-49ae-beeb-b643d5f10dc1` — deliver the macOS native product
-   capstone;
-3. `0ebed060-f1a6-4b12-aa38-1ef59336dc5d` — optional Linux native R&D; no v12
-   production commitment;
-4. `1f34e5c4-6d33-458c-9db0-184edbdaa01a` — close the capability-parity and
-   acceptance evidence ledger; and
-5. `26dee44b-4f7f-459d-a76b-91f0c2d7cdd4` — preserve and prove the separate
+1. `f3291de2-d270-4c3b-b81b-3f29bc54b83b` — deliver native macOS CEREBRUM on
+   `v12-beta`, from the first tester build through production acceptance; and
+2. `26dee44b-4f7f-459d-a76b-91f0c2d7cdd4` — preserve and prove the separate
    headless Commons/Lantern contract.
 
-Any prior multi-platform native commitment is superseded by the macOS-only
-product decision.
+The former tri-platform capstone, Linux production, and tri-platform acceptance
+tasks are dropped and linked to the consolidated macOS task for history.
 
 ## Resume order
 
-1. **Decision integration:** the fully-native definition and representative
-   workflow boundary are frozen in the superseding ADR. Close task
-   `5b2375d3-b19c-4962-a5a3-212353f0e3af` only after that definition is linked
-   into the capability and acceptance ledgers.
+1. **Tester build:** establish a beta-specific identity/version and automated
+   Apple Silicon `.app`/DMG build on `v12-beta`, preserving the bundled daemon,
+   clean install, single-instance, offline, and uninstall-data tests.
 2. **Active inventory:** use
    [`v12-native-capability-ledger.md`](v12-native-capability-ledger.md) for the
    CEREBRUM route/action inventory and validate it through the fail-closed
    [`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md). These
    produce a bounded implementation backlog, not release claims. The Linux
    spike is optional R&D and is not on the release path.
-3. **Implementation:** execute the macOS capstone from the frozen ADR and
+3. **App ownership:** execute the macOS capstone from the frozen ADR and
    route/action inventory, including app-owned lifecycle, recovery, updates, and
    rollback.
 4. **Promotion evidence:** close signing, clean-machine, offline, accessibility,
