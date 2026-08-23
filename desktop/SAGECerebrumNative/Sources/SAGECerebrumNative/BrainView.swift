@@ -258,6 +258,7 @@ struct BrainView: View {
                 nodes: graph.nodes,
                 edges: graph.edges,
                 selectedID: model.selectedNodeID,
+                topologyFocusID: nil,
                 highlightedEdge: nil,
                 layout: .memory,
                 autoRotate: scanning && !reduceMotion,
@@ -318,6 +319,7 @@ struct BrainView: View {
                 nodes: model.connectomeSceneNodes,
                 edges: model.connectomeSceneEdges,
                 selectedID: model.selectedConnectomeSceneID,
+                topologyFocusID: model.selectedAgentID.map { "agent:\($0)" },
                 highlightedEdge: model.selectedConnectionEdge,
                 layout: .connectome,
                 autoRotate: scanning && !reduceMotion,
@@ -574,6 +576,7 @@ private struct BrainDetailKey: Hashable {
 }
 
 private struct AgentNeuronInspectorView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let neuron: ConnectomeNeuron
     @Bindable var model: BrainViewModel
 
@@ -604,7 +607,7 @@ private struct AgentNeuronInspectorView: View {
                 } else {
                     ForEach(model.selectedAgentConnections, id: \.id) { connection in
                         Button {
-                            withAnimation(.snappy(duration: 0.2)) {
+                            withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
                                 model.selectedConnection = model.selectedConnection == connection ? nil : connection
                                 model.selectedEngramID = nil
                             }
@@ -629,7 +632,7 @@ private struct AgentNeuronInspectorView: View {
                     } else {
                         ForEach(engrams.engrams) { engram in
                             Button {
-                                withAnimation(.snappy(duration: 0.2)) {
+                                withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
                                     model.selectedEngramID = model.selectedEngramID == engram.id ? nil : engram.id
                                     model.selectedConnection = nil
                                 }

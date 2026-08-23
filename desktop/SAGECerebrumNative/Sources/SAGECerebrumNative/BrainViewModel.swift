@@ -129,7 +129,13 @@ final class BrainViewModel {
                 type: "synapse", weight: Double($0.count), lastFired: $0.lastFiredDate
             )
         }
-        guard let selectedAgentID, engrams?.agentID == selectedAgentID else { return edges }
+        guard let selectedAgentID, engrams?.agentID == selectedAgentID else {
+            return BrainEdgeLOD.select(
+                edges, visibleNodeIDs: Set(connectomeSceneNodes.map(\.id)),
+                highlighted: selectedConnectionEdge, selectedAgentSceneID: nil,
+                policy: .init(maximumEdges: Self.maximumSceneEdges)
+            )
+        }
         let visibleAgents = Set((connectome?.neurons ?? []).map(\.agentID))
         for engram in engrams?.engrams ?? [] {
             let engramID = Self.engramSceneID(engram.id)
@@ -138,7 +144,12 @@ final class BrainViewModel {
                 edges.append(.init(source: engramID, target: Self.agentSceneID(corroborator), type: "corroborates"))
             }
         }
-        return Array(edges.prefix(Self.maximumSceneEdges))
+        return BrainEdgeLOD.select(
+            edges, visibleNodeIDs: Set(connectomeSceneNodes.map(\.id)),
+            highlighted: selectedConnectionEdge,
+            selectedAgentSceneID: Self.agentSceneID(selectedAgentID),
+            policy: .init(maximumEdges: Self.maximumSceneEdges)
+        )
     }
 
     var selectedAgentConnections: [ConnectomeSynapse] {
@@ -183,8 +194,7 @@ final class BrainViewModel {
     }
 
     func selectConnectomeAgent(_ agentID: String?) {
-        guard agentID != selectedAgentID else { return }
-        selectedAgentID = agentID
+        if agentID != selectedAgentID { selectedAgentID = agentID }
         selectedEngramID = nil
         selectedConnectionID = nil
     }
@@ -402,12 +412,47 @@ final class BrainViewModel {
 
     private func boundedConnectome(_ response: ConnectomeEnvelope) -> ConnectomeEnvelope {
         var seen = Set<String>()
-        let neurons = response.neurons.prefix(Self.maximumCanonicalNeurons).filter { !$0.agentID.isEmpty && seen.insert($0.agentID).inserted }
+        let neurons = response.neurons
+            .filter { !$0.agentID.isEmpty }
+            .sorted {
+                if $0.agentID != $1.agentID { return $0.agentID < $1.agentID }
+                if $0.name != $1.name { return $0.name < $1.name }
+                if $0.role != $1.role { return $0.role < $1.role }
+                return ($0.domain ?? "") < ($1.domain ?? "")
+            }
+            .filter { seen.insert($0.agentID).inserted }
+            .prefix(Self.maximumCanonicalNeurons)
         let IDs = Set(neurons.map(\.agentID))
-        let synapses = response.synapses.lazy
-            .filter { IDs.contains($0.fromAgent) && IDs.contains($0.toAgent) }
+        var canonicalSynapses: [DirectedSynapseID: ConnectomeSynapse] = [:]
+        for edge in response.synapses where IDs.contains(edge.fromAgent) && IDs.contains(edge.toAgent) {
+            guard let existing = canonicalSynapses[edge.id] else {
+                canonicalSynapses[edge.id] = edge
+                continue
+            }
+            let latest = [existing, edge].max {
+                let lhs = $0.lastFiredDate ?? .distantPast
+                let rhs = $1.lastFiredDate ?? .distantPast
+                if lhs != rhs { return lhs < rhs }
+                return $0.lastFired > $1.lastFired
+            } ?? existing
+            canonicalSynapses[edge.id] = .init(
+                fromAgent: edge.fromAgent, toAgent: edge.toAgent,
+                count: max(existing.count, edge.count), lastFired: latest.lastFired
+            )
+        }
+        let synapses = canonicalSynapses.values
+            .sorted {
+                if $0.count != $1.count { return $0.count > $1.count }
+                if ($0.lastFiredDate ?? .distantPast) != ($1.lastFiredDate ?? .distantPast) {
+                    return ($0.lastFiredDate ?? .distantPast) > ($1.lastFiredDate ?? .distantPast)
+                }
+                if $0.fromAgent != $1.fromAgent { return $0.fromAgent < $1.fromAgent }
+                if $0.toAgent != $1.toAgent { return $0.toAgent < $1.toAgent }
+                return $0.lastFired < $1.lastFired
+            }
             .prefix(Self.maximumCanonicalSynapses)
-        connectomeWasTruncated = neurons.count != response.neurons.count || synapses.count != response.synapses.count
+        connectomeWasTruncated = neurons.count != response.neurons.count ||
+            canonicalSynapses.count != response.synapses.count || synapses.count != canonicalSynapses.count
         return .init(neurons: Array(neurons), synapses: Array(synapses))
     }
 

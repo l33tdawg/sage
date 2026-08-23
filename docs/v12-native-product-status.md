@@ -82,9 +82,12 @@ independently typed. Reciprocal synapses now occupy deterministic curved lanes,
 self-synapses render as finite loops, `last_fired` drives a truthful 30-minute
 plasticity decay with a visible floor, and direct Metal ribbon picks synchronize
 through the same directed connection identity as the accessible inspector. A
-deterministic strongest-edge cap bounds expanded ribbon geometry at 2,048 and
-always retains the focused connection. Endpoint trimming, arrowheads,
-topology-aware per-neuron LOD, and deeper behavioral,
+topology-aware deterministic cap bounds expanded ribbon geometry at 2,048,
+retains the focused connection, reserves the selected agent's directional
+neighborhood, and preserves useful per-neuron coverage. Ribbons now trim at
+rendered neuron surfaces, terminate in direction arrowheads, and give a focused
+connection reduced-motion-aware emphasis. Flow-particle alignment with curved
+and self-loop ribbon geometry, typed related focus, and deeper behavioral,
 accessibility, Metal-fallback, and performance evidence remain open.
 
 The first arm64 application bundle was built and launch-tested on 2026-08-23 at
@@ -166,7 +169,7 @@ acceptance gaps are not counted as another route slice.
 | Primary product area | Current surface | Current classification | Acceptance status |
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
-| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, bounded strongest-edge LOD, direct edge picking, directional flow and focus easing, synchronized native tables, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, and a related-memory Train of Thought pane | `native-control` | Brain interaction/parity pass implemented; pixel-level bloom evidence, typed related focus, ribbon endpoint/arrow geometry, topology-aware LOD, daemon lifecycle, Metal fallback, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
+| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, endpoint-to-endpoint flow particles and focus easing, synchronized native tables, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, and a related-memory Train of Thought pane | `native-control` | Brain interaction/parity pass implemented; curved/self-loop particle alignment, pixel-level bloom evidence, typed related focus, daemon lifecycle, Metal fallback, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
 | Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; whole-domain transfer and full acceptance evidence remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |
@@ -187,7 +190,7 @@ daemon lifecycle, recovery, updates, and rollback.
 
 | Platform | Evidence already present | Production blockers |
 |---|---|---|
-| macOS | Launch-tested unsigned Apple Silicon Swift application with native Overview, Search/Inspector, and Brain Memory/Connectome phase three; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility/performance and three-run evidence |
+| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Brain runtime evidence beyond the launch shell, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility/performance and three-run evidence |
 | Windows | x64 NSIS preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported |
 | Linux | x64 `.deb` and AppImage preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported; optional native R&D remains blocked by `RUSTSEC-2024-0429` |
 
@@ -209,9 +212,9 @@ production promotion.
   without granting implicit Root/Admin authority. The current Swift application
   attaches to an already-running loopback daemon; it does not yet own that
   daemon's lifecycle.
-- Complete the remaining Brain work: introduce ribbon endpoint trimming,
-  direction arrowheads, topology-aware per-neuron LOD, and typed related-memory
-  focus, then prove
+- Complete the remaining Brain work: align flow particles with the same curved
+  and self-loop geometry used by ribbons, picking, and arrowheads; add typed
+  related-memory focus; then prove
   Metal/Table parity, access-purge behavior, keyboard/VoiceOver operation,
   large-store performance, and graceful behavior when Metal is unavailable.
 - Convert the private tester artifact into a signed production candidate and

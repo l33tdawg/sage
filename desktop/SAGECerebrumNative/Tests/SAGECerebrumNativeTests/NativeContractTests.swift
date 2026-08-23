@@ -253,7 +253,9 @@ import Testing
 
     #expect(Set(brain.connectomeSceneNodes.map(\.id)).contains("agent:shared-id"))
     #expect(Set(brain.connectomeSceneNodes.map(\.id)).contains("engram:shared-id"))
-    let firstSynapseEdge = brain.connectomeSceneEdges.first { $0.type == "synapse" }
+    let firstSynapseEdge = brain.connectomeSceneEdges.first {
+        $0.source == "agent:shared-id" && $0.target == "agent:a2" && $0.type == "synapse"
+    }
     #expect(firstSynapseEdge?.weight == Double(Int64.max))
     #expect(firstSynapseEdge?.lastFired == connectome.synapses[0].lastFiredDate)
     #expect(BrainMetalRenderer.isSameDirectedEdge(
@@ -278,6 +280,9 @@ import Testing
         brain.selectedConnectionEdge,
         .init(source: "agent:shared-id", target: "agent:a2", type: "synapse", weight: 42)
     ))
+    brain.selectConnectomeAgent("shared-id")
+    #expect(brain.selectedAgentID == "shared-id")
+    #expect(brain.selectedConnectionID == nil)
     brain.selectedConnection = nil
     brain.selectedAgentID = nil
     brain.selectConnectomeSceneEdge(.init(source: "agent:shared-id", target: "agent:a2", type: "synapse"))
@@ -310,6 +315,30 @@ import Testing
     #expect(brain.hasVisibleInspector)
 }
 
+@MainActor
+@Test func connectomeCanonicalizationPrecedesCapsAndIsPermutationStable() async {
+    let neurons = [
+        ConnectomeNeuron(agentID: "a", name: "Zulu", role: "member", domain: "z"),
+        ConnectomeNeuron(agentID: "a", name: "Alpha", role: "member", domain: "a"),
+        ConnectomeNeuron(agentID: "b", name: "Beta", role: "member", domain: "b"),
+    ]
+    let synapses = [
+        ConnectomeSynapse(fromAgent: "a", toAgent: "b", count: 3, lastFired: ""),
+        ConnectomeSynapse(fromAgent: "a", toAgent: "b", count: 9, lastFired: "2026-08-23T00:05:00Z"),
+    ]
+    let api = MutationTestAPI(
+        forgetResults: [], connectome: .init(neurons: Array(neurons.reversed()), synapses: Array(synapses.reversed()))
+    )
+    let brain = BrainViewModel(api: api)
+    brain.mode = .connectome
+    await brain.refresh()
+    #expect(brain.connectome?.neurons.count == 2)
+    #expect(brain.connectome?.neurons.first { $0.agentID == "a" }?.name == "Alpha")
+    #expect(brain.connectome?.synapses.count == 1)
+    #expect(brain.connectome?.synapses.first?.count == 9)
+    #expect(brain.connectome?.synapses.first?.lastFired == "2026-08-23T00:05:00Z")
+}
+
 @Test func bloomTexturePlanRoundsUpAndRejectsEmptyDrawables() {
     #expect(BrainBloomTexturePlan(drawableWidth: 1, drawableHeight: 1) == .init(drawableWidth: 1, drawableHeight: 1))
     #expect(BrainBloomTexturePlan(drawableWidth: 5, drawableHeight: 7) == .init(drawableWidth: 6, drawableHeight: 8))
@@ -334,11 +363,84 @@ import Testing
         BrainEdge(source: "agent:\($0)", target: "agent:\($0 + 1)", type: "synapse", weight: Double($0))
     }
     let highlighted = edges[0]
-    let first = BrainMetalRenderer.selectRenderEdges(edges, highlighted: highlighted, limit: 4)
-    let second = BrainMetalRenderer.selectRenderEdges(Array(edges.reversed()), highlighted: highlighted, limit: 4)
+    let visible = Set(edges.flatMap { [$0.source, $0.target] })
+    let policy = BrainEdgeLODPolicy(maximumEdges: 4)
+    let first = BrainEdgeLOD.select(
+        edges, visibleNodeIDs: visible, highlighted: highlighted,
+        selectedAgentSceneID: nil, policy: policy
+    )
+    let second = BrainEdgeLOD.select(
+        Array(edges.reversed()), visibleNodeIDs: visible, highlighted: highlighted,
+        selectedAgentSceneID: nil, policy: policy
+    )
     #expect(first.count == 4)
     #expect(first.contains { BrainMetalRenderer.isSameDirectedEdge(highlighted, $0) })
-    #expect(Set(first.map { "\($0.source)>\($0.target)" }) == Set(second.map { "\($0.source)>\($0.target)" }))
+    #expect(first.map(edgeIdentity) == second.map(edgeIdentity))
+}
+
+@Test func ribbonLODIsStableBelowCapAndCanonicalizesDuplicateIdentities() {
+    let recent = Date(timeIntervalSince1970: 2_000)
+    let edges = [
+        BrainEdge(source: "a", target: "b", type: "synapse", weight: 3),
+        BrainEdge(source: "b", target: "c", type: "synapse", weight: 7),
+        BrainEdge(source: "a", target: "b", type: "synapse", weight: 9, lastFired: recent),
+        BrainEdge(source: "c", target: "a", type: "synapse", weight: .infinity),
+        BrainEdge(source: "hidden", target: "a", type: "synapse", weight: 100),
+    ]
+    let visible: Set<String> = ["a", "b", "c"]
+    let policy = BrainEdgeLODPolicy(maximumEdges: 20)
+    let forward = BrainEdgeLOD.select(
+        edges, visibleNodeIDs: visible, highlighted: nil,
+        selectedAgentSceneID: nil, policy: policy
+    )
+    let reversed = BrainEdgeLOD.select(
+        Array(edges.reversed()), visibleNodeIDs: visible, highlighted: nil,
+        selectedAgentSceneID: nil, policy: policy
+    )
+    #expect(forward.map(edgeIdentity) == reversed.map(edgeIdentity))
+    #expect(forward.count == 3)
+    #expect(forward.first { $0.source == "a" && $0.target == "b" }?.weight == 9)
+    #expect(forward.first { $0.source == "a" && $0.target == "b" }?.lastFired == recent)
+    #expect(!forward.contains { $0.source == "hidden" })
+
+    let unknown = BrainEdgeLOD.select(
+        [
+            BrainEdge(source: "a", target: "b", type: "engram"),
+            BrainEdge(source: "a", target: "b", type: "engram"),
+        ],
+        visibleNodeIDs: visible, highlighted: nil, selectedAgentSceneID: nil,
+        policy: policy
+    )
+    #expect(unknown.first?.lastFired == nil)
+}
+
+@Test func ribbonLODReservesSelectedDirectionsAndGeneralTopology() {
+    let selectedEdges = [
+        BrainEdge(source: "selected", target: "out-1", type: "synapse", weight: 1),
+        BrainEdge(source: "selected", target: "out-2", type: "synapse", weight: 2),
+        BrainEdge(source: "in-1", target: "selected", type: "synapse", weight: 3),
+        BrainEdge(source: "in-2", target: "selected", type: "synapse", weight: 4),
+    ]
+    let overview = (0 ..< 12).map {
+        BrainEdge(source: "hub", target: "peer-\($0)", type: "synapse", weight: Double(100 - $0))
+    }
+    let edges = selectedEdges + overview
+    let visible = Set(edges.flatMap { [$0.source, $0.target] })
+    let policy = BrainEdgeLODPolicy(
+        maximumEdges: 8, incomingPerVisibleNode: 1, outgoingPerVisibleNode: 1,
+        selectedIncoming: 2, selectedOutgoing: 2
+    )
+    let selected = BrainEdgeLOD.select(
+        edges, visibleNodeIDs: visible, highlighted: nil,
+        selectedAgentSceneID: "selected", policy: policy
+    )
+    #expect(selected.count == 8)
+    #expect(selectedEdges.allSatisfy { edge in selected.contains { edgeIdentity($0) == edgeIdentity(edge) } })
+    #expect(selected.contains { $0.source == "hub" })
+}
+
+private func edgeIdentity(_ edge: BrainEdge) -> String {
+    "\(edge.source)\u{0}\(edge.target)\u{0}\(edge.type)"
 }
 
 private actor MutationTestAPI: SAGEAPI {

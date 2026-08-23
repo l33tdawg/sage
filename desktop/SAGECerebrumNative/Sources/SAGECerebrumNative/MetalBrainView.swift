@@ -23,6 +23,7 @@ struct MetalBrainView: NSViewRepresentable {
     let nodes: [BrainNode]
     let edges: [BrainEdge]
     let selectedID: String?
+    let topologyFocusID: String?
     let highlightedEdge: BrainEdge?
     let layout: BrainMetalLayout
     let autoRotate: Bool
@@ -56,16 +57,20 @@ struct MetalBrainView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: InteractiveMetalView, context: Context) {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         context.coordinator?.onPick = onPick
-        context.coordinator?.update(nodes: nodes, edges: edges, highlightedEdge: highlightedEdge, layout: layout)
+        context.coordinator?.update(
+            nodes: nodes, edges: edges, highlightedEdge: highlightedEdge,
+            topologyFocusID: topologyFocusID, layout: layout
+        )
         context.coordinator?.setSelectedID(
             selectedID,
-            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            reduceMotion: reduceMotion
         )
         context.coordinator?.autoRotate = autoRotate
         context.coordinator?.flow = flow
         context.coordinator?.hullOpacity = Float(hullOpacity)
-        view.isPaused = !(autoRotate || flow)
+        view.isPaused = !(autoRotate || flow || (highlightedEdge != nil && !reduceMotion))
         view.setAccessibilityLabel(layout == .memory ? "Interactive memory brain MRI" : "Interactive agent connectome MRI")
         view.setAccessibilityHelp(
             layout == .memory
@@ -164,7 +169,9 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var renderedNodes: [BrainNode] = []
     private var renderedEdges: [BrainEdge] = []
     private var renderedHighlightedEdge: BrainEdge?
+    private var renderedTopologyFocusID: String?
     private var renderedLayout: BrainMetalLayout = .memory
+    private var reduceMotion = false
     private var yaw: Float = 0.72
     private var pitch: Float = -0.08
     private var cameraDistance: Float = 7.05
@@ -250,20 +257,25 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
 
     func attach(_ view: MTKView) { self.view = view }
 
-    func update(nodes: [BrainNode], edges: [BrainEdge], highlightedEdge: BrainEdge?, layout: BrainMetalLayout) {
+    func update(
+        nodes: [BrainNode], edges: [BrainEdge], highlightedEdge: BrainEdge?,
+        topologyFocusID: String?, layout: BrainMetalLayout
+    ) {
         var seenIDs = Set<String>()
         let safeNodes = nodes.prefix(4_096).filter { !$0.id.isEmpty && seenIDs.insert($0.id).inserted }
         let visibleIDs = Set(safeNodes.map(\.id))
-        let validEdges = edges.lazy
-            .filter { visibleIDs.contains($0.source) && visibleIDs.contains($0.target) }
-            .prefix(16_384)
         let boundedNodes = Array(safeNodes)
-        let boundedEdges = Self.selectRenderEdges(Array(validEdges), highlighted: highlightedEdge)
+        let boundedEdges = BrainEdgeLOD.select(
+            edges, visibleNodeIDs: visibleIDs, highlighted: highlightedEdge,
+            selectedAgentSceneID: topologyFocusID
+        )
         guard boundedNodes != renderedNodes || boundedEdges != renderedEdges ||
-              highlightedEdge != renderedHighlightedEdge || layout != renderedLayout else { return }
+              highlightedEdge != renderedHighlightedEdge || topologyFocusID != renderedTopologyFocusID ||
+              layout != renderedLayout else { return }
         renderedNodes = boundedNodes
         renderedEdges = boundedEdges
         renderedHighlightedEdge = highlightedEdge
+        renderedTopologyFocusID = topologyFocusID
         renderedLayout = layout
         lastPlasticityRefresh = .now
         let positions = Self.positions(for: boundedNodes, layout: layout)
@@ -277,6 +289,10 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         }
         nodeBillboardVertices = Self.billboards(from: nodeVertices, halo: false)
         haloBillboardVertices = Self.billboards(from: nodeVertices, halo: true)
+        let nodeRadiusByID = Dictionary(uniqueKeysWithValues: zip(
+            nodeIDs,
+            nodeVertices.map { abs($0.positionSize.w) * 0.5 + 1.5 }
+        ))
         flowSegments = []
         ribbonVertices = []
         renderedRibbonEdges = []
@@ -314,9 +330,12 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             let curvature: Float = isLoop ? 0 : (hasReverse ? 18 : 6 * stableSign)
             let loopAngle = Float(Self.stableUnit("\(edge.source)|\(edge.type)", seed: 53) * Double.pi * 2)
             let segmentCount = isLoop ? 12 : 8
+            let sourceTrim = nodeRadiusByID[edge.source] ?? 6
+            let targetTrim = nodeRadiusByID[edge.target] ?? 6
             renderedRibbonEdges.append(.init(
                 edge: edge, source: source, target: target, width: width,
-                curvature: curvature, loopAngle: loopAngle, isLoop: isLoop
+                curvature: curvature, loopAngle: loopAngle, isLoop: isLoop,
+                sourceTrim: sourceTrim, targetTrim: targetTrim
             ))
             for segment in 0 ..< segmentCount {
                 let start = Float(segment) / Float(segmentCount)
@@ -329,10 +348,23 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                     BrainRibbonVertex(
                         source: SIMD4(source, 1), target: SIMD4(target, 1), color: color,
                         corner: $0, width: width, curvature: curvature,
-                        loopAngle: loopAngle, loop: isLoop ? 1 : 0
+                        loopAngle: loopAngle, loop: isLoop ? 1 : 0,
+                        sourceTrim: sourceTrim, targetTrim: targetTrim,
+                        highlighted: isHighlighted ? 1 : 0, phase: phase, shape: 0
                     )
                 })
             }
+            ribbonVertices.append(contentsOf: [
+                SIMD2<Float>(1, 0), SIMD2<Float>(0, -1), SIMD2<Float>(0, 1),
+            ].map {
+                BrainRibbonVertex(
+                    source: SIMD4(source, 1), target: SIMD4(target, 1), color: color,
+                    corner: $0, width: width, curvature: curvature,
+                    loopAngle: loopAngle, loop: isLoop ? 1 : 0,
+                    sourceTrim: sourceTrim, targetTrim: targetTrim,
+                    highlighted: isHighlighted ? 1 : 0, phase: phase, shape: 1
+                )
+            })
         }
         nodeBillboardBuffer = makeBillboardBuffer(nodeBillboardVertices)
         haloBillboardBuffer = makeBillboardBuffer(haloBillboardVertices)
@@ -355,6 +387,7 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     }
 
     func setSelectedID(_ newSelectedID: String?, reduceMotion: Bool) {
+        self.reduceMotion = reduceMotion
         let selectionChanged = newSelectedID != selectedID
         selectedID = newSelectedID
         let now = CACurrentMediaTime()
@@ -405,7 +438,9 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
                 min($0, Self.distance(from: point, toSegmentFrom: $1.0, to: $1.1))
             }
             let tolerance = CGFloat(min(12, ribbon.width / backingScale * 0.5 + 6))
-            guard distance <= tolerance else { continue }
+            let arrowTolerance = CGFloat((4.5 + ribbon.width * 1.6) / backingScale)
+            let arrowDistance = points.last.map { hypot(point.x - $0.x, point.y - $0.y) } ?? .greatestFiniteMagnitude
+            guard distance <= tolerance || arrowDistance <= arrowTolerance else { continue }
             if bestEdge == nil || distance < bestEdge!.distance ||
                 (distance == bestEdge!.distance && Self.edgeSortKey(ribbon.edge) < Self.edgeSortKey(bestEdge!.edge)) {
                 bestEdge = (ribbon.edge, distance)
@@ -436,19 +471,29 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             let direction = CGVector(dx: CGFloat(cos(ribbon.loopAngle)), dy: CGFloat(sin(ribbon.loopAngle)))
             let radius = CGFloat((18 + ribbon.width * 2) / backingScale)
             let center = CGPoint(x: source.x + direction.dx * radius, y: source.y + direction.dy * radius)
+            let sourceTrim = CGFloat(ribbon.sourceTrim / backingScale)
+            let targetTrim = CGFloat(ribbon.targetTrim / backingScale)
+            let startAngle = 2 * asin(min(0.95, sourceTrim / max(2 * radius, 0.0001)))
+            let endAngle = 2 * asin(min(0.95, targetTrim / max(2 * radius, 0.0001)))
             return (0 ... segmentCount).map { index in
                 let t = CGFloat(index) / CGFloat(segmentCount)
-                let theta = CGFloat(ribbon.loopAngle) + .pi + 2 * .pi * t
+                let theta = CGFloat(ribbon.loopAngle) + .pi + startAngle + (2 * .pi - startAngle - endAngle) * t
                 return CGPoint(x: center.x + cos(theta) * radius, y: center.y + sin(theta) * radius)
             }
         }
         let dx = target.x - source.x
         let dy = target.y - source.y
-        let length = max(0.0001, hypot(dx, dy))
-        let normal = CGVector(dx: -dy / length, dy: dx / length)
+        let projectedLength = hypot(dx, dy)
+        let length = max(0.0001, projectedLength)
+        let normal = projectedLength > 0.0001
+            ? CGVector(dx: -dy / length, dy: dx / length)
+            : CGVector(dx: 0, dy: 1)
         let curvature = CGFloat(ribbon.curvature / backingScale)
+        let startT = min(0.42, CGFloat(ribbon.sourceTrim / backingScale) / length)
+        let endT = max(startT + 0.02, 1 - min(0.42, CGFloat(ribbon.targetTrim / backingScale) / length))
         return (0 ... segmentCount).map { index in
-            let t = CGFloat(index) / CGFloat(segmentCount)
+            let progress = CGFloat(index) / CGFloat(segmentCount)
+            let t = startT + (endT - startT) * progress
             return CGPoint(
                 x: source.x + dx * t + normal.dx * curvature * sin(.pi * t),
                 y: source.y + dy * t + normal.dy * curvature * sin(.pi * t)
@@ -481,7 +526,10 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             let highlighted = renderedHighlightedEdge
             let layout = renderedLayout
             renderedEdges = []
-            update(nodes: nodes, edges: edges, highlightedEdge: highlighted, layout: layout)
+            update(
+                nodes: nodes, edges: edges, highlightedEdge: highlighted,
+                topologyFocusID: renderedTopologyFocusID, layout: layout
+            )
         }
         guard inFlightFrames.wait(timeout: .now()) == .success else {
             if focusAnimation != nil { requestFrameIfPaused() }
@@ -516,7 +564,8 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         var uniforms = BrainUniforms(
             mvp: mvp, selectedIndex: selectedID.flatMap(nodeIDs.firstIndex(of:)).map(Float.init) ?? -1,
             opacityMultiplier: 1,
-            viewportSize: SIMD2(Float(max(view.drawableSize.width, 1)), Float(max(view.drawableSize.height, 1)))
+            viewportSize: SIMD2(Float(max(view.drawableSize.width, 1)), Float(max(view.drawableSize.height, 1))),
+            time: Float(now.truncatingRemainder(dividingBy: 4_096)), reduceMotion: reduceMotion ? 1 : 0
         )
 
         encoder.setDepthStencilState(depthState)
@@ -902,26 +951,6 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         return highlighted.source == candidate.source && highlighted.target == candidate.target && highlighted.type == candidate.type
     }
 
-    static func selectRenderEdges(
-        _ edges: [BrainEdge], highlighted: BrainEdge?, limit: Int = 2_048
-    ) -> [BrainEdge] {
-        guard limit > 0, edges.count > limit else { return limit > 0 ? edges : [] }
-        let sorted = edges.sorted {
-            if ($0.weight ?? 0) != ($1.weight ?? 0) { return ($0.weight ?? 0) > ($1.weight ?? 0) }
-            if ($0.lastFired ?? .distantPast) != ($1.lastFired ?? .distantPast) {
-                return ($0.lastFired ?? .distantPast) > ($1.lastFired ?? .distantPast)
-            }
-            return edgeSortKey($0) < edgeSortKey($1)
-        }
-        var selected = Array(sorted.prefix(limit))
-        if let highlighted,
-           !selected.contains(where: { isSameDirectedEdge(highlighted, $0) }),
-           let required = edges.first(where: { isSameDirectedEdge(highlighted, $0) }) {
-            selected[selected.count - 1] = required
-        }
-        return selected
-    }
-
     static func edgePlasticity(lastFired: Date?, now: Date = .now) -> Float {
         guard let lastFired else { return 0.15 }
         let age = max(0, now.timeIntervalSince(lastFired))
@@ -945,7 +974,10 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     #include <metal_stdlib>
     using namespace metal;
     struct VertexIn { float4 positionSize; float4 color; };
-    struct Uniforms { float4x4 mvp; float selectedIndex; float opacityMultiplier; float2 viewportSize; };
+    struct Uniforms {
+        float4x4 mvp; float selectedIndex; float opacityMultiplier; float2 viewportSize;
+        float time; float reduceMotion;
+    };
     struct VertexOut { float4 position [[position]]; float4 color; float pointSize [[point_size]]; float selected; float halo; };
     vertex VertexOut brainVertex(const device VertexIn *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]], uint id [[vertex_id]]) {
         VertexOut out;
@@ -1009,8 +1041,9 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     struct RibbonIn {
         float4 source; float4 target; float4 color; float2 corner;
         float width; float curvature; float loopAngle; float loop;
+        float sourceTrim; float targetTrim; float highlighted; float phase; float shape;
     };
-    struct RibbonOut { float4 position [[position]]; float4 color; };
+    struct RibbonOut { float4 position [[position]]; float4 color; float emphasis; };
     vertex RibbonOut ribbonVertex(
         const device RibbonIn *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]], uint id [[vertex_id]]) {
         RibbonIn ribbon = vertices[id];
@@ -1021,7 +1054,8 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         float2 targetNDC = target.xy / max(target.w, 0.0001);
         float2 sourcePixel = sourceNDC * viewport * 0.5;
         float2 targetPixel = targetNDC * viewport * 0.5;
-        float t = ribbon.corner.x;
+        float progress = ribbon.shape > 0.5 ? 1.0 : ribbon.corner.x;
+        float t = progress;
         float4 clip = mix(source, target, t);
         float2 centerPixel;
         float2 tangent;
@@ -1029,13 +1063,21 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             float2 loopDirection = float2(cos(ribbon.loopAngle), sin(ribbon.loopAngle));
             float radius = 18.0 + ribbon.width * 2.0;
             float2 loopCenter = sourcePixel + loopDirection * radius;
-            float theta = ribbon.loopAngle + M_PI_F + 2.0 * M_PI_F * t;
+            float startAngle = 2.0 * asin(min(0.95, ribbon.sourceTrim / max(2.0 * radius, 0.0001)));
+            float endAngle = 2.0 * asin(min(0.95, ribbon.targetTrim / max(2.0 * radius, 0.0001)));
+            float theta = ribbon.loopAngle + M_PI_F + startAngle
+                + (2.0 * M_PI_F - startAngle - endAngle) * progress;
             centerPixel = loopCenter + float2(cos(theta), sin(theta)) * radius;
             tangent = float2(-sin(theta), cos(theta));
             clip = source;
         } else {
             float2 projectedDelta = targetPixel - sourcePixel;
             float projectedLengthSquared = dot(projectedDelta, projectedDelta);
+            float projectedLength = sqrt(projectedLengthSquared);
+            float startT = min(0.42, ribbon.sourceTrim / max(projectedLength, 0.0001));
+            float endT = max(startT + 0.02, 1.0 - min(0.42, ribbon.targetTrim / max(projectedLength, 0.0001)));
+            t = mix(startT, endT, progress);
+            clip = mix(source, target, t);
             float2 direction = projectedLengthSquared > 0.000001
                 ? projectedDelta * rsqrt(projectedLengthSquared)
                 : float2(1.0, 0.0);
@@ -1046,15 +1088,30 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         float tangentLengthSquared = dot(tangent, tangent);
         float2 direction = tangentLengthSquared > 0.000001 ? tangent * rsqrt(tangentLengthSquared) : float2(1.0, 0.0);
         float2 normal = float2(-direction.y, direction.x);
+        float motionTime = ribbon.highlighted > 0.5 && u.reduceMotion < 0.5 ? u.time : 0.0;
+        float pulse = u.reduceMotion > 0.5 ? 0.55 : 0.5 + 0.5 * sin(motionTime * 3.2 + progress * 5.2 + ribbon.phase * 6.2831853);
+        float widthScale = 1.0 + ribbon.highlighted * (0.06 + pulse * 0.10);
+        if (ribbon.shape > 0.5) {
+            float arrowLength = 7.0 + ribbon.width * 2.4;
+            float arrowHalfWidth = 4.5 + ribbon.width * 1.6;
+            centerPixel -= direction * (1.0 - ribbon.corner.x) * arrowLength;
+            centerPixel += normal * ribbon.corner.y * arrowHalfWidth * widthScale;
+        }
         float2 desiredNDC = centerPixel * 2.0 / viewport;
-        clip.xy = (desiredNDC + normal * ribbon.corner.y * ribbon.width * 2.0 / viewport) * clip.w;
+        float ribbonOffset = ribbon.shape > 0.5 ? 0.0 : ribbon.corner.y * ribbon.width * widthScale;
+        clip.xy = (desiredNDC + normal * ribbonOffset * 2.0 / viewport) * clip.w;
         RibbonOut out;
         out.position = clip;
         out.color = float4(ribbon.color.rgb, ribbon.color.a * u.opacityMultiplier);
+        float travel = u.reduceMotion > 0.5
+            ? 0.18
+            : exp(-pow((progress - fract(motionTime * 0.24 + ribbon.phase)) / 0.16, 2.0));
+        out.emphasis = ribbon.highlighted * (0.16 + pulse * 0.20 + travel * 0.48);
         return out;
     }
     fragment float4 ribbonFragment(RibbonOut in [[stage_in]]) {
-        return in.color;
+        float3 polished = mix(in.color.rgb, float3(1.0, 0.94, 1.0), saturate(in.emphasis));
+        return float4(polished, min(1.0, in.color.a * (1.0 + in.emphasis * 0.34)));
     }
 
     struct FullscreenOut { float4 position [[position]]; float2 uv; };
@@ -1150,6 +1207,11 @@ private struct BrainRibbonVertex {
     let curvature: Float
     let loopAngle: Float
     let loop: Float
+    let sourceTrim: Float
+    let targetTrim: Float
+    let highlighted: Float
+    let phase: Float
+    let shape: Float
 }
 
 private struct BrainRenderedRibbon {
@@ -1160,6 +1222,8 @@ private struct BrainRenderedRibbon {
     let curvature: Float
     let loopAngle: Float
     let isLoop: Bool
+    let sourceTrim: Float
+    let targetTrim: Float
 }
 
 private struct BrainUniforms {
@@ -1167,6 +1231,8 @@ private struct BrainUniforms {
     var selectedIndex: Float
     var opacityMultiplier: Float
     var viewportSize: SIMD2<Float>
+    var time: Float
+    var reduceMotion: Float
 }
 
 private extension simd_float4x4 {
