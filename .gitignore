@@ -86,6 +86,8 @@ venv/
 
 # Stray test directories (real tests are in test/)
 tests/
+!desktop/SAGECerebrumNative/Tests/
+!desktop/SAGECerebrumNative/Tests/**
 
 # Protobuf generated
 internal/proto/sagepb/*.go
@@ -126,6 +128,8 @@ docs/*
 !docs/v11.9-multiprocess-fault-harness.md
 !docs/desktop-shell-decision.md
 !docs/desktop-shell-v12-adr.md
+!docs/native-cerebrum-macos-v12-adr.md
+!docs/native-cerebrum-design-system.md
 !docs/native-app-daemon-contract.md
 !docs/native-shell-quality-gates.md
 !docs/v12-native-product-status.md
@@ -189,6 +193,7 @@ integrations/levelup/paper4/
 
 # Go build cache (created when GOCACHE points into the repo)
 .gocache/
+.clang-module-cache/
 
 # Generated per machine by sage-gui healHooks (templates live in
 # cmd/sage-gui/mcp.go). They get the operator's absolute agent key path

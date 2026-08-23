@@ -10,6 +10,12 @@ for required in \
   'lsof' \
   'HTTPS_PROXY' \
   'ALL_PROXY' \
+  'read -r REST_PORT RPC_PORT P2P_PORT TLS_PORT' \
+  'for _ in range(4):' \
+  'REST_ADDR="127.0.0.1:${REST_PORT}"' \
+  'SAGE_TLS_ADDR="127.0.0.1:${TLS_PORT}"' \
+  'SAGE_CMT_RPC_ADDR="tcp://127.0.0.1:${RPC_PORT}"' \
+  'SAGE_CMT_P2P_ADDR="tcp://127.0.0.1:${P2P_PORT}"' \
   'SSCP daemon is not renderable offline' \
   'non-loopback socket' \
   'stop_exact_pid' \

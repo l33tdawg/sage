@@ -1,0 +1,4 @@
+.build/
+.clang-module-cache/
+.swiftpm-home/
+.swiftpm/

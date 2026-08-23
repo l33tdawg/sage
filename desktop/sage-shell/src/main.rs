@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_deep_link::DeepLinkExt;
 use url::Url;
@@ -18,6 +18,10 @@ const MAX_PENDING_ROUTES: usize = 32;
 const MAX_ROUTE_BYTES: usize = 2_048;
 const SHELL_STARTUP_CHALLENGE_ENV: &str = "SAGE_SHELL_STARTUP_CHALLENGE";
 const DAEMON_ALREADY_RUNNING_EXIT_CODE: i32 = 73;
+const DAEMON_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const BETA_APP_IDENTIFIER: &str = "com.sage.cerebrum.beta";
+const STABLE_SAGE_HOME_NAME: &str = ".sage";
+const BETA_SAGE_HOME_NAME: &str = ".sage-v12-beta";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct OriginPin {
@@ -76,6 +80,7 @@ struct LaunchAttempt {
     expected_proof: String,
     child: Option<Child>,
     attach_existing: bool,
+    started_at: Instant,
 }
 
 impl LaunchAttempt {
@@ -96,6 +101,17 @@ impl LaunchAttempt {
     fn allows_existing_attachment(&mut self) -> Result<bool, String> {
         self.observe_exit()?;
         Ok(self.attach_existing)
+    }
+
+    fn timed_out(&self) -> bool {
+        self.started_at.elapsed() >= DAEMON_STARTUP_TIMEOUT
+    }
+
+    fn terminate(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 
     fn hand_off(mut self) {
@@ -216,6 +232,12 @@ fn supervise<R: tauri::Runtime>(
                     if let Some(attempt) = launch_attempt.take() {
                         attempt.hand_off();
                     }
+                    // A verified ready generation proves the prior launch is
+                    // complete. Re-arm exactly one future launch so a later
+                    // daemon loss can recover automatically. The daemon's
+                    // authoritative instance lock still prevents duplicates
+                    // when an existing process is only transiently unavailable.
+                    launch_attempted = false;
                     attach_ready(&app, &session, &status);
                 } else {
                     show_recovery(&app, &session, RecoveryView::Incompatible, None);
@@ -223,7 +245,7 @@ fn supervise<R: tauri::Runtime>(
             }
             Ok(status) => {
                 if status_matches_launch_attempt(&status, &mut launch_attempt) {
-                    let view = match status.state {
+                    let mut view = match status.state {
                         control::DaemonState::Starting => RecoveryView::Starting,
                         control::DaemonState::Locked => RecoveryView::Locked,
                         control::DaemonState::Draining => RecoveryView::Draining,
@@ -232,6 +254,17 @@ fn supervise<R: tauri::Runtime>(
                             unreachable!()
                         }
                     };
+                    if status.state == control::DaemonState::Starting
+                        && launch_attempt
+                            .as_ref()
+                            .is_some_and(LaunchAttempt::timed_out)
+                    {
+                        if let Some(attempt) = launch_attempt.as_mut() {
+                            attempt.terminate();
+                        }
+                        launch_attempt = None;
+                        view = RecoveryView::Failed;
+                    }
                     show_recovery(&app, &session, view, Some(status.instance_generation));
                 } else {
                     show_recovery(&app, &session, RecoveryView::Incompatible, None);
@@ -254,7 +287,23 @@ fn supervise<R: tauri::Runtime>(
                             continue;
                         }
                     }
-                    RecoveryView::Unavailable
+                    let timed_out = launch_attempt
+                        .as_ref()
+                        .is_some_and(|attempt| attempt.child.is_some() && attempt.timed_out());
+                    if timed_out {
+                        if let Some(attempt) = launch_attempt.as_mut() {
+                            attempt.terminate();
+                        }
+                        launch_attempt = None;
+                        RecoveryView::Failed
+                    } else {
+                        match launch_attempt.as_ref() {
+                            Some(attempt) if attempt.child.is_some() => RecoveryView::Starting,
+                            Some(attempt) if attempt.attach_existing => RecoveryView::Unavailable,
+                            Some(_) => RecoveryView::Failed,
+                            None => RecoveryView::Unavailable,
+                        }
+                    }
                 };
                 if view == RecoveryView::Incompatible {
                     let browser_fallback_allowed =
@@ -327,6 +376,7 @@ fn launch_bundled_daemon<R: tauri::Runtime>(
     let expected_proof = control::startup_proof(&challenge);
     let mut child = Command::new(daemon)
         .arg("serve")
+        .env("SAGE_HOME", sage_home)
         .env("SAGE_NO_BROWSER", "1")
         .env(SHELL_STARTUP_CHALLENGE_ENV, "1")
         .stdin(Stdio::piped())
@@ -352,6 +402,7 @@ fn launch_bundled_daemon<R: tauri::Runtime>(
         expected_proof,
         child: Some(child),
         attach_existing: false,
+        started_at: Instant::now(),
     })
 }
 
@@ -525,11 +576,20 @@ fn sage_home<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
     std::env::var_os("SAGE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            app.path()
-                .home_dir()
-                .expect("home directory unavailable")
-                .join(".sage")
+            default_sage_home(
+                app.path().home_dir().expect("home directory unavailable"),
+                &app.config().identifier,
+            )
         })
+}
+
+fn default_sage_home(home_dir: PathBuf, app_identifier: &str) -> PathBuf {
+    let directory = if app_identifier == BETA_APP_IDENTIFIER {
+        BETA_SAGE_HOME_NAME
+    } else {
+        STABLE_SAGE_HOME_NAME
+    };
+    home_dir.join(directory)
 }
 
 fn navigation_allowed(url: &Url, session: &SharedSession) -> bool {
@@ -922,6 +982,7 @@ mod tests {
             expected_proof: "expected".into(),
             child: None,
             attach_existing: false,
+            started_at: Instant::now(),
         });
         assert!(launch_attempt_allows_browser_fallback(
             &matching,
@@ -937,5 +998,41 @@ mod tests {
             &missing,
             &mut spawned
         ));
+    }
+
+    #[test]
+    fn daemon_startup_attempt_has_a_bounded_deadline() {
+        let fresh = LaunchAttempt {
+            expected_proof: "expected".into(),
+            child: None,
+            attach_existing: false,
+            started_at: Instant::now(),
+        };
+        let expired = LaunchAttempt {
+            expected_proof: "expected".into(),
+            child: None,
+            attach_existing: false,
+            started_at: Instant::now() - DAEMON_STARTUP_TIMEOUT,
+        };
+
+        assert!(!fresh.timed_out());
+        assert!(expired.timed_out());
+    }
+
+    #[test]
+    fn beta_identity_has_an_isolated_default_sage_home() {
+        let home = PathBuf::from("/Users/tester");
+        assert_eq!(
+            default_sage_home(home.clone(), BETA_APP_IDENTIFIER),
+            home.join(BETA_SAGE_HOME_NAME)
+        );
+        assert_eq!(
+            default_sage_home(home.clone(), "com.sage.native-preview"),
+            home.join(STABLE_SAGE_HOME_NAME)
+        );
+        assert_eq!(
+            default_sage_home(home.clone(), "com.sage.brain"),
+            home.join(STABLE_SAGE_HOME_NAME)
+        );
     }
 }

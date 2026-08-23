@@ -1,25 +1,19 @@
 # SAGE v12 native capability ledger
 
-**Status:** Bounded source inventory; every acceptance row remains open
+**Status:** Native Swift source reconciliation; every acceptance row remains open
 
 **Baseline:** SAGE v11.19.0 / app-v27
 
-**Product boundary:** [`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md)
+**Product boundary:** [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md)
 **Evidence contract:** [`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md)
 
 ## Reading this ledger
 
-This is the source-backed starting inventory for v12, not release evidence. A
-route shown inside the authenticated WebView proves only that the surface is
-reachable. It does not prove that every action works in the native product, is
-accessible, survives daemon loss, works offline, or passes the macOS
-acceptance contract.
-
-`web-control` means authenticated CEREBRUM content in the bounded WebView.
-`native-control` means app-owned platform or trust-boundary behavior that must
-remain available when CEREBRUM cannot render. A platform handoff is recorded as
-a `native-control` because the application owns its validation and OS boundary;
-it is not a CEREBRUM widget rewrite.
+This is the source-backed starting inventory for v12, not release evidence.
+Under the current ADR, the macOS product surface is implemented with
+SwiftUI/AppKit/Metal and contains no WebView renderer. `native-control` means a
+control rendered and owned by that native application. A mapped placeholder is
+navigation coverage only; it does not count as workflow implementation.
 
 All rows below are **open**. The eventual machine inventory must split each
 action family into one stable action ID per rendered control and generate the
@@ -28,27 +22,12 @@ schema.
 
 ## Reproducible inventory method
 
-Run `node scripts/v12-native-inventory.mjs --root .` at the exact candidate
-commit. The generator fails closed when its source seams cannot be parsed and
-hashes every input. At the current baseline it discovers 9 primary SPA routes,
-168 exported API actions, and 5 exact deep-link hosts. Its emitted blind spots
-are blockers, not waivers: runtime controls and server authorization contracts
-must still be reconciled into the release inventory.
-
-The baseline ledger was derived from four source seams; the generator covers
-the first, second, and fourth directly while the third remains an explicit
-manual reconciliation step:
-
-1. `App.applyHash`, the sidebar, and page mounts in
-   `web/static/js/app.js` define the primary CEREBRUM routes.
-2. Exported calls in `web/static/js/api.js` identify user-triggerable API action
-   families.
-3. `DashboardHandler.RegisterRoutes` in `web/handler.go`, plus its delegated
-   network, governance, federation, setup, and pairing registrars, identifies
-   authenticated server contracts and gates.
-4. `parse_deep_link`, `navigation_allowed`, `attach_ready`, and recovery state
-   handling in `desktop/sage-shell/src/main.rs` identify current app-owned
-   navigation and recovery behavior.
+The current `scripts/v12-native-inventory.mjs` inventory is derived from the
+browser SPA and historical Tauri shell, so it is not authoritative for the
+Swift product. Before an RC, replace or extend it to discover `AppRoute`,
+`RootView`, native views, toolbars, menus, inspectors, keyboard commands, and
+typed `SAGEAPI` calls from `desktop/SAGECerebrumNative`, while reconciling those
+calls with `DashboardHandler.RegisterRoutes` and delegated registrars.
 
 For an RC, automation must supplement this method with rendered-control, form,
 menu, context-menu, keyboard-command, feature-flag, role, empty-state, and error
@@ -59,54 +38,53 @@ exhaustive.
 
 | Entry ID | Route | Mounted UI | Owner | Current native-window path | App-owned integration still required | Status |
 |---|---|---|---|---|---|---|
-| `overview.route` | `#/overview` | `OverviewPage` | `web-control` | Bounded WebView; no direct `sage://overview` deep link | Paint/interactive marks, daemon-loss transition, complete action IDs | open |
-| `brain.route` | `#/` (fallback route) | `MriView`, `BrainView`, `MemoryDetail` | `web-control` | Bounded WebView; `sage://brain[/…]` accepted | Route restoration, MRI frame marks, accessible graph/detail operation | open |
-| `search.route` | `#/search` | `SearchPage` | `web-control` | Bounded WebView; `sage://search[/…]` accepted without query/fragment | Safe app-owned parameter handoff, action-level parity | open |
-| `tasks.route` | `#/tasks`; legacy `#/pipeline` | `TasksPage` | `web-control` | Bounded WebView; `sage://tasks` and `sage://pipeline` accepted | Notification/deep-link intent restoration, task/message action parity | open |
-| `import.route` | `#/import` | `ImportPage` | `web-control` | Bounded WebView; no direct deep link | Reviewed native file handoff and recovery-safe import progress | open |
-| `network.route` | `#/network` | `NetworkPage` | `web-control` | Bounded WebView; no direct deep link | OS key/bundle/file handoffs, permission prompts, restart-safe wizards | open |
-| `access.route` | `#/access` | `NetworkPage(accessMode=true)` | `web-control` | Bounded WebView; no direct deep link | App-owned privacy/authority confirmation boundary | open |
-| `federation.route` | `#/federation` | `FederationPage` | `web-control` | Bounded WebView; no direct deep link | Camera/clipboard/external-route permission handoffs and recovery | open |
-| `settings.route` | `#/settings` | `SettingsPage` | mixed: `web-control` plus required `native-control` lifecycle operations | Bounded WebView; `sage://settings` accepted | Native update/rollback, restart/recovery, privacy and permission controls | open |
-| `recovery.route` | bundled recovery URL | `desktop/sage-shell/ui/index.html` via `show_recovery` | `native-control` | App-owned bundled surface for starting, unavailable, locked, draining, failed, incompatible | Guided retry/update/rollback, focus semantics, nontechnical-user recovery | open |
-| `help.overlay` | in-page overlay | `HelpOverlay` | `web-control` | Bounded WebView | Offline completeness and validated external-document handoff | open |
+| `overview.route` | `overview` | `OverviewView` | `native-control` | Implemented SwiftUI dashboard | Lifecycle/offline/accessibility/performance acceptance | implemented slice; acceptance open |
+| `brain.route` | `brain` | `BrainView`, `MetalBrainView`, `BrainNodeInspectorView`, `AgentNeuronInspectorView` | `native-control` | Implemented Memory/Connectome modes with the shared anatomical CEREBRUM hull, time-invariant half-resolution Metal bloom, native spherical cells, nearest-rank p95-normalized traffic ribbons, directional flow, reduced-motion-aware focus easing, synchronized native tables, selected-agent engram bloom, directed-connection focus, and related-memory Train of Thought | Pixel-level bloom evidence, reciprocal/self-loop ribbon geometry, last-fired plasticity, typed related focus, direct Metal edge hit-testing, daemon lifecycle, Metal fallback and deeper behavioral/accessibility/performance evidence | implemented slice; acceptance open |
+| `search.route` | `search` | `SearchView`, `MemoryInspectorView` | `native-control` | Implemented SwiftUI table and inspector | Whole-domain transfer and full acceptance | implemented slice; acceptance open |
+| `tasks.route` | `tasks` | `NativePlaceholderView` | `native-control` target | Native destination mapped | Task and Messages workflows | implementation open |
+| `import.route` | `importData` | `NativePlaceholderView` | `native-control` target | Native destination mapped | File import and restore workflows | implementation open |
+| `network.route` | `network` | `NativePlaceholderView` | `native-control` target | Native destination mapped | Agents, keys, RBAC and governance workflows | implementation open |
+| `access.route` | `access` | `NativePlaceholderView` | `native-control` target | Native destination mapped | Access-control workflows | implementation open |
+| `federation.route` | `federation` | `NativePlaceholderView` | `native-control` target | Native destination mapped | Federation and Sharing & Sync workflows | implementation open |
+| `settings.route` | `settings` | `NativePlaceholderView` | `native-control` target | Native destination mapped | Settings, maintenance, update and rollback workflows | implementation open |
+| `session.route` | application state | `RootView`, `LoginView`, `NativeStateView` | `native-control` | Connecting, locked, failed and ready states implemented | Daemon launch/supervision and guided recovery | partial; acceptance open |
 
-The shell's current deep-link allowlist is exactly `brain`, `search`,
-`pipeline`, `tasks`, and `settings`. It rejects queries, fragments, credentials,
-unknown hosts, unsafe characters, and oversized routes. That is navigation
-evidence only; it does not close any action row.
+The current Swift application has no app-owned deep-link implementation. Deep
+links from the historical Tauri prototype are not evidence for this product.
 
 ## Action-family inventory
 
 | Action-family ID | Parent | User-visible capability | UI/API source anchors | Owner | Required v12 evidence or integration | Status |
 |---|---|---|---|---|---|---|
-| `session.login-lock-recover` | global/recovery | Check session, login, auto/manual lock, recover encrypted vault | `App`, `LoginScreen`; `checkAuth`, `login`, `lockSession`, `recoverVault`; dashboard auth/recovery routes | mixed | Native recovery continuity without exposing the passphrase; auth-denial and data-safety evidence | open |
-| `global.navigation-preferences` | global | Sidebar navigation, Back/Forward guard, help, text size, theme | `App.applyHash`, `createAccessControlHistoryNavigator`, sidebar/top bar | mixed | Keyboard/focus/zoom/reduced-motion evidence and safe app deep-link restoration | open |
-| `onboarding.run` | global/settings | First-run setup and explicit rerun | `OnboardingWizard`; onboarding, embeddings, provider-connect APIs | mixed | Clean-machine native flow, restart continuity, permissions, offline/degraded paths | open |
-| `overview.inspect-health` | overview | Health, memory/agent/federation/consensus summary and live activity | `OverviewPage`, `HealthBar`, `ChainActivityLog`; stats/health/validators/scopes/SSE handlers | `web-control` | Paint/interactive latency, SSE loss, stale/degraded and offline evidence | open |
-| `overview.resolve-adoption` | overview | Inspect, retry, assign, or deprecate historical adoption items | `MemoryAdoptionResolutionModal`; adoption progress/inventory/retry/assign/deprecate APIs | `web-control` | Root/operator authorization, interruption and immutable history evidence | open |
-| `brain.explore-memory` | brain | Render MRI/graph, filter timeline/domain, select memory, inspect related train of thought | `MriView`, `BrainView`, `MemoryDetail`; graph/timeline/engrams/related handlers | `web-control` | Keyboard/screen-reader graph alternative, MRI pacing, large-store and offline evidence | open |
-| `brain.mutate-memory` | brain/search | Edit metadata, tags, transfer/bulk update, forget/delete | `MemoryDetail`, `SearchPage`; update/delete/bulk/tags APIs | `web-control` | Confirmation, RBAC denial, partial-failure, history-integrity and recovery evidence | open |
-| `search.find-filter` | search | Search/list, filter by agent/domain/status/type, paginate and inspect | `SearchPage`; memory list/tags APIs | `web-control` | Query parameter restoration, large-store latency, empty/error states, accessibility | open |
-| `tasks.manage` | tasks | Create, assign, reorder, and change task status | `TasksPage`; task list/create/assign/order/status APIs | `web-control` | Exact-agent authority, concurrent updates, keyboard drag alternative and offline behavior | open |
-| `messages.manage` | tasks | List message work/stats and send agent notes | `TasksPage`; pipeline list/stats/send APIs | `web-control` | Payload/privacy boundaries, no implicit claim/read, busy/offline/error evidence | open |
-| `import.preview-confirm` | import | Select supported export, preview, confirm, and monitor import | `ImportPage`; import preview/confirm/upload handlers | mixed | Native file handoff, malicious/large file handling, cancellation, partial recovery, hashes | open |
-| `export.backup` | overview/settings | Export/backup node data where surfaced | dashboard export handler and settings/maintenance UI | mixed | Native save handoff, stopped-node contract, encryption and restore verification | open |
-| `agents.lifecycle` | network | List/create/update/remove agents, merge identities, download bundle | `NetworkPage`; `fetchAgents`, `createAgent`, `updateAgent`, `removeAgent`, `mergeAgent`, `downloadBundle` | mixed | Native file/key handling, authority prompts, audit and rollback-safe failures | open |
-| `agents.keys-pairing` | network | Create pairing code, rotate key, hand over Root credential | `NetworkPage`; pairing, rotation and Root handover APIs | mixed | OS credential storage/handoff, anti-phishing copy, recovery and exact-authority evidence | open |
-| `agents.domains-governance` | network | Domain ownership, validator/governance proposal and vote operations | `NetworkPage`; domain reassignment and governance API families/registrars | `web-control` | Consensus lifecycle, stale proposal, authorization, replay and failure evidence | open |
-| `connect.providers-network` | network/settings | Connect local/remote AI tools, network join, ChatGPT tunnel setup | provider/tunnel/network-join panels; connect, pairing and wizard registrars | mixed | App-owned subprocess/network permission prompts, restart recovery, no shell authority expansion | open |
-| `access.agent-policy` | access | Read/update agent role, profile, clearance, restrictions and domain policy | `NetworkPage(accessMode)`; app-v23 access APIs | `web-control` | Unsaved-change navigation guard, hard-deny precedence, no-authority and audit evidence | open |
-| `access.groups-linked-readers` | access | Create/update/delete Access Groups; manage linked readers and message consent | access controls UI; group, linked-reader and consent APIs | `web-control` | CAS conflict, exact remote identity, fail-closed federation and privacy evidence | open |
-| `federation.master-join` | federation | Turn federation on/off; host/guest QR or spoken-code join/abort/approve/confirm | `FederationMasterSwitch`, join wizards; federation join/settings APIs | mixed | Camera/clipboard permissions, route trust, restart/unlock, cancellation and accessibility evidence | open |
-| `federation.connection-policy` | federation | Inspect reachability; set permissions/exports/restrictions; pause or revoke | `FederationPage`; connection policy/status/revoke API families | `web-control` | Stale-route/trust-generation, mixed-version, authorization and offline recovery evidence | open |
-| `federation.sharing-sync` | federation | Configure Copy subscriptions, resend, groups, roles, domains and members | `SharingSyncGroupsPanel`; sync/group API families | `web-control` | Provenance, no remote Write, retry/idempotency, member removal and data-retention evidence | open |
-| `settings.recall-models` | settings | Recall thresholds, memory mode, reranker/embedder setup/test/re-embed | `SettingsPage`, `MemoryMode`; recall/reranker/embedding APIs | mixed | App-owned downloads/subprocess permissions, offline model path, restart/progress recovery | open |
-| `settings.security-ledger` | settings/recovery | Enable/disable ledger, change passphrase, obtain/confirm recovery key | `SettingsPage`; ledger APIs and unauthenticated recovery route | mixed | Native privacy prompts, secret-safe UI, recovery-key backup and failed-change rollback | open |
-| `settings.maintenance` | settings | Cleanup preview/run, boot instructions, autostart | `SettingsPage`; cleanup/boot/autostart APIs | mixed | Native login-item integration, destructive confirmation, audit and recovery evidence | open |
-| `settings.update-restart-rollback` | settings/recovery | Check/apply update, restart and recover failed update | `SettingsPage`, `UpdateBanner`; update/restart handlers | **`native-control` required** | Production signing, helper isolation, generation proof, failed-update rollback and data preservation | open |
-| `shell.lifecycle-recovery` | recovery | Single instance, daemon launch/attach, status polling, origin pinning, route restoration | `supervise`, `attach_ready`, `show_recovery`, `control::status` | `native-control` | macOS clean install, daemon loss, incompatible pair, no duplicate daemon, performance signals | open |
-| `shell.external-handoff` | global/recovery | Open validated HTTPS documentation/browser fallback in OS browser | `navigation_allowed`, `open_external`, recovery fallback validation | `native-control` | Scheme/origin denial, focus return, offline/error and assistive-technology evidence | open |
+| `session.login-lock-recover` | global/session | Connect, unlock and lock the local encrypted session; show native failure state | `RootView`, `AppSession`, `LoginView`, typed auth APIs | `native-control` | Daemon launch/supervision, recovery continuity, auth-denial and data-safety evidence | partial; acceptance open |
+| `global.navigation-preferences` | global | Native split-view sidebar and nine mapped destinations | `RootView`, `AppRoute` | `native-control` | Deep links, restoration, keyboard/focus/zoom/reduced-motion evidence | partial; acceptance open |
+| `onboarding.run` | global/settings | First-run setup and explicit rerun | Browser workflow and onboarding/embeddings/provider APIs are parity references | `native-control` target | Clean-machine native flow, restart continuity, permissions, offline/degraded paths | implementation open |
+| `overview.inspect-health` | overview | Health, memory/agent/federation/consensus summary and live activity | `OverviewView`, `OverviewViewModel`; health/stats/agents/validators/federation APIs and SSE | `native-control` | Paint/interactive latency, SSE loss, stale/degraded and offline evidence | implemented; acceptance open |
+| `overview.resolve-adoption` | overview | Inspect, retry, assign, or deprecate historical adoption items | Browser workflow and adoption APIs are parity references | `native-control` target | Native implementation, Root/operator authorization, interruption and immutable history evidence | implementation open |
+| `brain.explore-memory` | brain | Render Memory MRI, filter domain/status, orbit/zoom/select, inspect loaded memory, switch to the synchronized table, and preserve focus across invalidation notices | `BrainView`, `BrainViewModel`, `MetalBrainView`; memory graph API and SSE | `native-control` | Typed related focus, Metal fallback, MRI pacing, large-store/offline and deeper behavioral/accessibility evidence | implemented; acceptance open |
+| `brain.inspect-related` | brain | Fetch an exact selected memory's related results and present a resizable Train of Thought pane grouped as Do, Don't, Observations and Notes | `BrainView`, `BrainViewModel`; related-memory API | `native-control` | Separate typed anchor/related focus, focus-transition tests, keyboard/VoiceOver evidence, narrow-window behavior and failure-state acceptance | implemented; acceptance open |
+| `brain.connectome` | brain | Switch independently to Connectome; explore visible agents and directed retained local message traffic in Metal or the synchronized table; bloom a selected agent's visible engrams; inspect incoming/outgoing/peer/activity counts; and focus keyboard-selectable directed connections | `BrainView`, `BrainViewModel`, `MetalBrainView`, `AgentNeuronInspectorView`; network synapses/engrams APIs and SSE | `native-control` | Direct Metal edge hit-testing, independent per-mode presentation/camera state, larger-graph performance and complete behavioral/accessibility evidence | implemented; acceptance open |
+| `brain.mutate-memory` | brain/search | Edit tags, bulk tag and governed Forget | `SearchView`, `MemoryInspectorView`, `SearchViewModel`; bulk/tags/forget APIs | `native-control` | Whole-domain transfer, RBAC denial, partial-failure, history-integrity and recovery evidence | partial; acceptance open |
+| `search.find-filter` | search | Search/list, filter by agent/domain/status/tag/date/sort, paginate and inspect | `SearchView`, `SearchViewModel`; memory list/tags APIs | `native-control` | Large-store latency, empty/error states and complete accessibility evidence | implemented; acceptance open |
+| `tasks.manage` | tasks | Create, assign, reorder, and change task status | Browser workflow and task APIs are parity references | `native-control` target | Native implementation, exact-agent authority, concurrent updates, keyboard alternative and offline behavior | implementation open |
+| `messages.manage` | tasks | List message work/stats and send agent notes | Browser workflow and pipeline APIs are parity references | `native-control` target | Native implementation, payload/privacy boundaries, no implicit claim/read, busy/offline/error evidence | implementation open |
+| `import.preview-confirm` | import | Select supported export, preview, confirm, and monitor import | Browser workflow and import APIs are parity references | `native-control` target | Native file handoff, malicious/large file handling, cancellation, partial recovery, hashes | implementation open |
+| `export.backup` | overview/settings | Export/backup node data where surfaced | Dashboard export handler is the API reference | `native-control` target | Native save handoff, stopped-node contract, encryption and restore verification | implementation open |
+| `agents.lifecycle` | network | List/create/update/remove agents, merge identities, download bundle | Browser workflow and agent APIs are parity references | `native-control` target | Native file/key handling, authority prompts, audit and rollback-safe failures | implementation open |
+| `agents.keys-pairing` | network | Create pairing code, rotate key, hand over Root credential | Browser workflow and pairing/rotation APIs are parity references | `native-control` target | OS credential storage/handoff, anti-phishing copy, recovery and exact-authority evidence | implementation open |
+| `agents.domains-governance` | network | Domain ownership, validator/governance proposal and vote operations | Browser workflow and governance APIs are parity references | `native-control` target | Consensus lifecycle, stale proposal, authorization, replay and failure evidence | implementation open |
+| `connect.providers-network` | network/settings | Connect local/remote AI tools, network join, ChatGPT tunnel setup | Browser workflows and connect/pairing/wizard APIs are parity references | `native-control` target | App-owned subprocess/network permission prompts, restart recovery, no authority expansion | implementation open |
+| `access.agent-policy` | access | Read/update agent role, profile, clearance, restrictions and domain policy | Browser workflow and app-v23 access APIs are parity references | `native-control` target | Unsaved-change guard, hard-deny precedence, no-authority and audit evidence | implementation open |
+| `access.groups-linked-readers` | access | Create/update/delete Access Groups; manage linked readers and message consent | Browser workflow and group/reader/consent APIs are parity references | `native-control` target | CAS conflict, exact remote identity, fail-closed federation and privacy evidence | implementation open |
+| `federation.master-join` | federation | Turn federation on/off; host/guest QR or spoken-code join/abort/approve/confirm | Browser workflow and federation join/settings APIs are parity references | `native-control` target | Camera/clipboard permissions, route trust, restart/unlock, cancellation and accessibility evidence | implementation open |
+| `federation.connection-policy` | federation | Inspect reachability; set permissions/exports/restrictions; pause or revoke | Browser workflow and connection policy APIs are parity references | `native-control` target | Stale-route/trust-generation, mixed-version, authorization and offline recovery evidence | implementation open |
+| `federation.sharing-sync` | federation | Configure Copy subscriptions, resend, groups, roles, domains and members | Browser workflow and sync/group APIs are parity references | `native-control` target | Provenance, no remote Write, retry/idempotency, member removal and data-retention evidence | implementation open |
+| `settings.recall-models` | settings | Recall thresholds, memory mode, reranker/embedder setup/test/re-embed | Browser workflow and recall/model APIs are parity references | `native-control` target | App-owned downloads/subprocess permissions, offline model path, restart/progress recovery | implementation open |
+| `settings.security-ledger` | settings/recovery | Enable/disable ledger, change passphrase, obtain/confirm recovery key | Browser workflow and ledger/recovery APIs are parity references | `native-control` target | Native privacy prompts, secret-safe UI, recovery-key backup and failed-change rollback | implementation open |
+| `settings.maintenance` | settings | Cleanup preview/run, boot instructions, autostart | Browser workflow and maintenance APIs are parity references | `native-control` target | Native login-item integration, destructive confirmation, audit and recovery evidence | implementation open |
+| `settings.update-restart-rollback` | settings/recovery | Check/apply update, restart and recover failed update | Existing daemon APIs and prototype behavior are design references | `native-control` target | Production signing, helper isolation, generation proof, failed-update rollback and data preservation | implementation open |
+| `shell.lifecycle-recovery` | session/recovery | Single instance, daemon launch/attach, status polling and guided recovery | `AppSession` currently attaches; historical prototype is a design reference | `native-control` target | Native Swift ownership, clean install, daemon loss, incompatible pair, no duplicate daemon, performance signals | implementation open |
+| `shell.external-handoff` | global/recovery | Open validated HTTPS documentation/browser fallback in OS browser | Native implementation target | `native-control` target | Scheme/origin denial, focus return, offline/error and assistive-technology evidence | implementation open |
 
 ## Inventory blind spots that block promotion
 
@@ -119,9 +97,16 @@ evidence only; it does not close any action row.
 - Memory detail is an in-page state rather than a primary hash route; direct
   route restoration and deep-link semantics still need an explicit product
   decision and acceptance IDs.
-- Browser CEREBRUM and the bounded WebView share code, so tests must exercise
-  both paths and measure native overhead; browser success cannot stand in for
-  native application evidence.
+- Brain uses separate memory, agent, engram, and directed-connection focus.
+  Agent and engram scene IDs are collision-safe, and the selected agent's
+  bounded engrams render in both the inspector and Metal bloom. A selected
+  related memory is not yet an independently typed focus.
+- Brain SSE handling treats events as invalidation hints and purges graph,
+  selection, inspector, engram, and related-memory state on `access`; promotion
+  still requires behavioral tests and runtime evidence for coalescing, races,
+  authorization changes, Table/Metal parity, and large snapshots.
+- Browser CEREBRUM remains the Linux/Windows product and parity reference, but
+  browser success cannot stand in for native macOS application evidence.
 - The source generator does not prove the exact rendered UI/action cross-product
   by itself. Promotion remains blocked until runtime discovery is reconciled and
   the macOS ledger passes the semantic validator.

@@ -156,12 +156,12 @@ cleanup() {
 trap 'cleanup $?' EXIT
 trap 'exit 130' INT TERM
 
-read -r REST_PORT RPC_PORT P2P_PORT < <(python3 - <<'PY'
+read -r REST_PORT RPC_PORT P2P_PORT TLS_PORT < <(python3 - <<'PY'
 import socket
 
 sockets = []
 try:
-    for _ in range(3):
+    for _ in range(4):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
         sockets.append(listener)
@@ -178,7 +178,8 @@ EXPECTED_UI_ORIGIN="http://127.0.0.1:${REST_PORT}"
 # macOS analogue of GetNamedPipeServerProcessId. Nothing here matches on a
 # process name.
 query_status() {
-  python3 - "${SAGE_SMOKE_HOME}/run/shell-control.sock" "${EXPECTED_UI_ORIGIN}" "${EXPECTED_VERSION}" <<'PY'
+  local query_home=${1:-${SAGE_SMOKE_HOME}}
+  python3 - "${query_home}/run/shell-control.sock" "${EXPECTED_UI_ORIGIN}" "${EXPECTED_VERSION}" <<'PY'
 import json
 import re
 import socket
@@ -291,6 +292,22 @@ launch_shell() {
     SAGE_HOME="${SAGE_SMOKE_HOME}" \
     SAGE_NO_BROWSER=1 \
     REST_ADDR="127.0.0.1:${REST_PORT}" \
+    SAGE_TLS_ADDR="127.0.0.1:${TLS_PORT}" \
+    SAGE_CMT_RPC_ADDR="tcp://127.0.0.1:${RPC_PORT}" \
+    SAGE_CMT_P2P_ADDR="tcp://127.0.0.1:${P2P_PORT}" \
+    "$@" >> "${SHELL_LOG}" 2>&1 &
+  LAUNCHED_PID=$!
+  track_pid "${LAUNCHED_PID}"
+}
+
+launch_shell_with_default_home() {
+  local isolated_user_home=$1
+  shift
+  env -u SAGE_HOME \
+    HOME="${isolated_user_home}" \
+    SAGE_NO_BROWSER=1 \
+    REST_ADDR="127.0.0.1:${REST_PORT}" \
+    SAGE_TLS_ADDR="127.0.0.1:${TLS_PORT}" \
     SAGE_CMT_RPC_ADDR="tcp://127.0.0.1:${RPC_PORT}" \
     SAGE_CMT_P2P_ADDR="tcp://127.0.0.1:${P2P_PORT}" \
     "$@" >> "${SHELL_LOG}" 2>&1 &
@@ -365,6 +382,27 @@ INSTALLED_APP=$(install_from_dmg)
 INSTALLED_EXECUTABLE=$(app_executable "${INSTALLED_APP}")
 INSTALLED_DAEMON="${INSTALLED_APP}/Contents/Resources/binaries/sage-gui"
 test -x "${INSTALLED_DAEMON}"
+
+# The private v12 beta must not implicitly open or mutate the stable ~/.sage
+# profile. SAGE_HOME remains an explicit operator/test override, but the beta
+# bundle identity owns a separate default home.
+BUNDLE_IDENTIFIER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INSTALLED_APP}/Contents/Info.plist")
+if [ "${BUNDLE_IDENTIFIER}" = "com.sage.cerebrum.beta" ]; then
+  DEFAULT_USER_HOME="${SMOKE_ROOT}/default-user"
+  DEFAULT_BETA_HOME="${DEFAULT_USER_HOME}/.sage-v12-beta"
+  mkdir -p "${DEFAULT_USER_HOME}"
+  launch_shell_with_default_home "${DEFAULT_USER_HOME}" "${INSTALLED_EXECUTABLE}"
+  DEFAULT_SHELL_PID=${LAUNCHED_PID}
+  DEFAULT_STATUS=$(query_status "${DEFAULT_BETA_HOME}")
+  printf '%s\n' "${DEFAULT_STATUS}" > "${DIAGNOSTICS}/beta-default-home.json"
+  DEFAULT_DAEMON_PID=$(printf '%s\n' "${DEFAULT_STATUS}" | status_daemon_pid)
+  track_pid "${DEFAULT_DAEMON_PID}"
+  test -d "${DEFAULT_BETA_HOME}"
+  test ! -e "${DEFAULT_USER_HOME}/.sage"
+  stop_exact_pid "${DEFAULT_SHELL_PID}" "${INSTALLED_EXECUTABLE}"
+  wait "${DEFAULT_SHELL_PID}" 2>/dev/null || true
+  stop_exact_pid "${DEFAULT_DAEMON_PID}" ""
+fi
 
 # --- installed DMG copy: launch, relaunch handoff, close, daemon survival ---
 launch_shell "${INSTALLED_EXECUTABLE}"

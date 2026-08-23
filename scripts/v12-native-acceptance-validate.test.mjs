@@ -57,7 +57,7 @@ function row(entry) {
   return {
     inventory_entry_id: entry.entry_id,
     control_owner: entry.control_owner,
-    surface_path: entry.control_owner === 'native-control' ? 'native-application' : 'bounded-webview',
+    surface_path: 'native-application',
     release_state: 'passed',
     api_action_result: {
       result: 'pass',
@@ -164,7 +164,7 @@ function validLedger() {
     workflow: 'overview',
     label: 'Overview',
     route_template: '/',
-    control_owner: 'web-control',
+    control_owner: 'native-control',
     required_platforms: ['macos'],
     api_contract: {
       mode: 'authenticated-api',
@@ -213,7 +213,7 @@ function validLedger() {
         platform: 'macos',
         package_identity: {
           product_name: 'SAGE',
-          application_identifier: 'dev.sage.app',
+          application_identifier: 'com.sage.cerebrum.beta',
           version: '12.0.0',
           build_id: 'v12-build',
           package_kind: 'dmg',
@@ -238,8 +238,8 @@ function validLedger() {
           ram_bytes: 17179869184,
           gpu: 'Apple GPU',
           display: '2560x1440',
-          webview_engine: 'WKWebView',
-          webview_version: '1',
+          renderer_kind: 'SwiftUI-AppKit-Metal',
+          renderer_version: 'Swift 6 / Metal 3',
           environment_capture: artifact('environment', HASH),
         },
         platform_security_gate: passEvidence('security'),
@@ -288,7 +288,29 @@ test('minimal complete macOS-native ledger promotes', () => {
     externalInventory: { entries: ledger.inventory.entries.map(({ entry_id }) => ({ entry_id })) },
   });
   assert.equal(report.decision, 'promote');
+  assert.equal(report.valid, true);
   assert.deepEqual(report.errors, []);
+});
+
+test('schema identity envelope is fail-closed before semantic promotion', async (t) => {
+  const mutations = [
+    ['schema', (ledger) => { delete ledger.schema; }],
+    ['ledger ID', (ledger) => { delete ledger.ledger_id; }],
+    ['release class', (ledger) => { delete ledger.release_candidate.release_class; }],
+    ['application identifier', (ledger) => {
+      delete ledger.platform_ledgers.macos.package_identity.application_identifier;
+    }],
+  ];
+  for (const [name, mutate] of mutations) {
+    await t.test(name, () => {
+      const ledger = validLedger();
+      mutate(ledger);
+      const report = validateLedger(ledger);
+      assert.equal(report.decision, 'blocked');
+      assert.equal(report.valid, false);
+      assert.ok(report.errors.some(({ code }) => code.startsWith('schema.')));
+    });
+  }
 });
 
 test('schema and semantic validator share the exact macOS-only policy', () => {
@@ -303,6 +325,10 @@ test('schema and semantic validator share the exact macOS-only policy', () => {
     .properties.native_status.const, 'not-planned');
   assert.deepEqual(schema.$defs.rowEvidence.properties.surface_path.enum,
     ['native-application', 'bounded-webview']);
+  assert.deepEqual(schema.$defs.environment.properties.renderer_kind.enum,
+    ['SwiftUI-AppKit-Metal', 'legacy-bounded-webview-prototype']);
+  assert.ok(schema.$defs.environment.required.includes('renderer_kind'));
+  assert.ok(!schema.$defs.environment.required.includes('webview_engine'));
   assert.deepEqual(schema.$defs.rowEvidence.properties.release_state.enum,
     ['passed', 'blocked']);
   assert.ok(schema.$defs.browserFallback.required.includes('environment'));
@@ -346,7 +372,8 @@ test('inventory and macOS cross-product mutations block', async (t) => {
     ['duplicate row', (l) => { l.platform_ledgers.macos.rows.push(clone(l.platform_ledgers.macos.rows[0])); }, 'cross-product.row.duplicate'],
     ['unknown row', (l) => { l.platform_ledgers.macos.rows[0].inventory_entry_id = 'unknown.route'; }, 'cross-product.row.unknown'],
     ['missing row', (l) => { l.platform_ledgers.macos.rows.pop(); }, 'cross-product.row.missing'],
-    ['owner mismatch', (l) => { l.platform_ledgers.macos.rows[0].control_owner = 'native-control'; }, 'cross-product.owner.mismatch'],
+    ['legacy WebView inventory owner', (l) => { l.inventory.entries[0].control_owner = 'web-control'; l.platform_ledgers.macos.rows[0].control_owner = 'web-control'; l.platform_ledgers.macos.rows[0].surface_path = 'bounded-webview'; }, 'inventory.owner.native-required'],
+    ['owner mismatch', (l) => { l.platform_ledgers.macos.rows[0].control_owner = 'web-control'; }, 'cross-product.owner.mismatch'],
   ];
   for (const [name, mutate, code] of cases) {
     await t.test(name, () => expectBlocked(mutate, code));
@@ -386,7 +413,9 @@ test('passed rows reject contradictory evidence, including accessibility and per
     ['blocked row', (l) => { row0(l).release_state = 'blocked'; }, 'row.state.blocked'],
     ['browser fallback used as macOS row', (l) => { row0(l).surface_path = 'browser-fallback'; }, 'row.surface.invalid'],
     ['wrong macOS package kind', (l) => { l.platform_ledgers.macos.package_identity.package_kind = 'nsis'; }, 'row.package.kind'],
-    ['wrong macOS WebView', (l) => { l.platform_ledgers.macos.environment.webview_engine = 'WebView2'; }, 'row.environment.webview'],
+    ['legacy WebView renderer', (l) => { l.platform_ledgers.macos.environment.renderer_kind = 'legacy-bounded-webview-prototype'; l.platform_ledgers.macos.environment.webview_engine = 'WKWebView'; l.platform_ledgers.macos.environment.webview_version = '1'; }, 'row.environment.renderer'],
+    ['missing renderer version', (l) => { delete l.platform_ledgers.macos.environment.renderer_version; }, 'row.environment.renderer-version'],
+    ['WebView evidence on native renderer', (l) => { l.platform_ledgers.macos.environment.webview_engine = 'WKWebView'; }, 'row.environment.webview-forbidden'],
     ['failed API', (l) => { row0(l).api_action_result.result = 'fail'; }, 'row.api.failed'],
     ['unexpected authorization', (l) => { row0(l).api_action_result.authorization_result = 'unexpected'; }, 'row.api.failed'],
     ['failed accessibility under passed row', (l) => { row0(l).accessibility.keyboard_complete.result = 'fail'; }, 'row.accessibility.failed'],
@@ -403,6 +432,36 @@ test('passed rows reject contradictory evidence, including accessibility and per
   for (const [name, mutate, code] of cases) {
     await t.test(name, () => expectBlocked(mutate, code));
   }
+});
+
+test('passed performance metrics must satisfy declared numeric budgets', async (t) => {
+  const navigation = (ledger) => ledger.platform_ledgers.macos.rows[0]
+    .performance.navigation_response;
+  const mri = (ledger) => ledger.platform_ledgers.macos.rows[0]
+    .performance.mri_frame_pacing;
+
+  await t.test('upper-bound p95 at the budget promotes', () => {
+    const ledger = validLedger();
+    navigation(ledger).p95 = 100;
+    assert.equal(validateLedger(ledger).decision, 'promote');
+  });
+
+  await t.test('upper-bound p95 above the budget blocks', () => {
+    expectBlocked((ledger) => { navigation(ledger).p95 = 100.01; },
+      'row.performance.budget');
+  });
+
+  await t.test('lower-bound MRI median at the budget promotes', () => {
+    const ledger = validLedger();
+    Object.assign(mri(ledger), { budget: '>= 55 FPS', median: 55 });
+    assert.equal(validateLedger(ledger).decision, 'promote');
+  });
+
+  await t.test('lower-bound MRI median below the budget blocks', () => {
+    expectBlocked((ledger) => {
+      Object.assign(mri(ledger), { budget: '>= 55 FPS', median: 54.99 });
+    }, 'row.performance.budget');
+  });
 });
 
 test('artifact and promotion consistency mutations block', async (t) => {

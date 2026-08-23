@@ -48,6 +48,80 @@ function pushIf(issues, condition, code, path, message) {
   if (condition) issues.push(issue(code, path, message));
 }
 
+function requireFields(value, fields, path, issues) {
+  if (!object(value)) {
+    issues.push(issue('schema.type', path, `${path} must be an object`));
+    return;
+  }
+  for (const field of fields) {
+    if (!Object.hasOwn(value, field)) {
+      issues.push(issue('schema.required', `${path}.${field}`, `${path}.${field} is required`));
+    }
+  }
+}
+
+// Fail closed on the schema's release-identity envelope before semantic
+// cross-product validation. This deliberately duplicates the critical required
+// fields so the dependency-free CLI cannot promote an incomplete ledger merely
+// because absent values happen not to violate a later semantic comparison.
+function validateSchemaEnvelope(ledger, issues) {
+  requireFields(ledger, [
+    'schema', 'ledger_id', 'release_candidate', 'inventory',
+    'platform_ledgers', 'browser_fallbacks', 'promotion',
+  ], '$', issues);
+  pushIf(issues, ledger.schema !== 'dev.sage.v12-native-acceptance-ledger/v1',
+    'schema.const', '$.schema', 'schema must identify the v1 native acceptance ledger');
+  pushIf(issues, typeof ledger.ledger_id !== 'string' || !ledger.ledger_id.trim(),
+    'schema.non-empty', '$.ledger_id', 'ledger_id must be a non-empty string');
+
+  requireFields(ledger.release_candidate, [
+    'version', 'git_commit', 'source_tree_sha256', 'build_id', 'release_class',
+    'native_platforms', 'browser_fallback_platforms', 'created_at',
+  ], '$.release_candidate', issues);
+  pushIf(issues, ledger.release_candidate?.release_class !== 'production-candidate',
+    'schema.const', '$.release_candidate.release_class',
+    'release_class must be production-candidate');
+
+  requireFields(ledger.platform_ledgers?.macos?.package_identity, [
+    'product_name', 'application_identifier', 'version', 'build_id', 'package_kind',
+    'package_sha256', 'shell_executable_sha256', 'bundled_daemon_sha256',
+    'bundled_daemon_version', 'production_signed', 'signature_verification',
+    'notarization_or_reputation', 'sbom', 'provenance',
+  ], '$.platform_ledgers.macos.package_identity', issues);
+  pushIf(issues,
+    ledger.platform_ledgers?.macos?.package_identity?.application_identifier !== 'com.sage.cerebrum.beta',
+    'schema.const', '$.platform_ledgers.macos.package_identity.application_identifier',
+    'the v12 native macOS application identifier must be com.sage.cerebrum.beta');
+}
+
+function numericBudget(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^\s*(<=|>=|<|>|≤|≥)\s*(-?(?:\d+(?:\.\d*)?|\.\d+))\b/.exec(value);
+  if (!match) return null;
+  const limit = Number(match[2]);
+  return Number.isFinite(limit) ? { comparator: match[1], limit } : null;
+}
+
+function performanceBudgetValue(name, metric) {
+  if (name === 'mri_frame_pacing' && typeof metric.median === 'number') {
+    return { field: 'median', value: metric.median };
+  }
+  if (typeof metric.p95 === 'number') return { field: 'p95', value: metric.p95 };
+  return null;
+}
+
+function meetsNumericBudget(value, { comparator, limit }) {
+  switch (comparator) {
+    case '<=':
+    case '≤': return value <= limit;
+    case '<': return value < limit;
+    case '>=':
+    case '≥': return value >= limit;
+    case '>': return value > limit;
+    default: return true;
+  }
+}
+
 function validatePlatformPolicy(ledger, issues) {
   const candidate = object(ledger.release_candidate) ? ledger.release_candidate : {};
   const native = candidate.native_platforms;
@@ -168,6 +242,9 @@ function validateInventory(ledger, externalInventory, issues) {
     pushIf(issues, !sameSet(entry.required_platforms, NATIVE_PLATFORMS),
       'inventory.platforms.mismatch', `${path}.required_platforms`,
       'every v12 native inventory entry must require exactly macos');
+    pushIf(issues, entry.control_owner !== 'native-control',
+      'inventory.owner.native-required', `${path}.control_owner`,
+      'the v12 macOS deliverable requires Swift-native controls; web-control is legacy prototype evidence only');
   }
 
   for (let index = 0; index < entries.length; index += 1) {
@@ -336,9 +413,19 @@ function validatePassedRows(ledger, rows, issues) {
   pushIf(issues, platform?.package_identity?.package_kind !== 'dmg',
     'row.package.kind', 'platform_ledgers.macos.package_identity.package_kind',
     'the macOS native release package must be a DMG');
-  pushIf(issues, platform?.environment?.webview_engine !== 'WKWebView',
-    'row.environment.webview', 'platform_ledgers.macos.environment.webview_engine',
-    'the macOS native ledger must identify WKWebView');
+  pushIf(issues, platform?.environment?.renderer_kind !== 'SwiftUI-AppKit-Metal',
+    'row.environment.renderer', 'platform_ledgers.macos.environment.renderer_kind',
+    'the macOS native ledger must identify the SwiftUI-AppKit-Metal renderer');
+  pushIf(issues, typeof platform?.environment?.renderer_version !== 'string'
+      || !platform.environment.renderer_version.trim(),
+    'row.environment.renderer-version', 'platform_ledgers.macos.environment.renderer_version',
+    'the macOS native ledger must identify the renderer version');
+  pushIf(issues, platform?.environment?.renderer_kind === 'SwiftUI-AppKit-Metal'
+      && (platform.environment.webview_engine !== undefined
+        || platform.environment.webview_version !== undefined
+        || platform.environment.webview_runtime_sha256 !== undefined),
+    'row.environment.webview-forbidden', 'platform_ledgers.macos.environment',
+    'the Swift-native deliverable must not include WebView runtime evidence');
 
   for (let index = 0; index < rows.length; index += 1) {
     const row = rows[index];
@@ -349,10 +436,10 @@ function validatePassedRows(ledger, rows, issues) {
     }
     pushIf(issues, row.release_state !== 'passed', 'row.state.blocked', `${path}.release_state`,
       'every required macOS row must pass');
-    const expectedSurface = row.control_owner === 'native-control'
-      ? 'native-application' : 'bounded-webview';
-    pushIf(issues, row.surface_path !== expectedSurface, 'row.surface.invalid', `${path}.surface_path`,
-      `${row.control_owner ?? 'unknown'} rows must use ${expectedSurface}`);
+    pushIf(issues, row.control_owner !== 'native-control'
+      || row.surface_path !== 'native-application',
+    'row.surface.invalid', `${path}.surface_path`,
+    'every promoted macOS row must use a native-control on the native-application surface');
 
     const api = row.api_action_result;
     pushIf(issues, evidenceResult(api) !== 'pass'
@@ -409,6 +496,11 @@ function validatePassedRows(ledger, rows, issues) {
         && metric.regression_percent > 10,
       'row.performance.regression', `${path}.performance.${name}.regression_percent`,
       `performance evidence ${name} exceeds the 10% regression gate`);
+      const budget = result === 'pass' ? numericBudget(metric?.budget) : null;
+      const measured = budget ? performanceBudgetValue(name, metric) : null;
+      pushIf(issues, budget && measured && !meetsNumericBudget(measured.value, budget),
+        'row.performance.budget', `${path}.performance.${name}.${measured?.field}`,
+        `performance evidence ${name} ${measured?.field} ${measured?.value} does not meet ${metric?.budget}`);
       pushIf(issues, result === 'not-applicable'
         && (!Array.isArray(metric.decision_artifacts) || metric.decision_artifacts.length === 0),
       'row.performance.not-applicable', `${path}.performance.${name}`,
@@ -462,6 +554,7 @@ export function validateLedger(ledger, { externalInventory } = {}) {
     return { decision: 'blocked', valid: false, errors: [issue('ledger.invalid', '$', 'ledger must be a JSON object')] };
   }
   const issues = [];
+  validateSchemaEnvelope(ledger, issues);
   validatePlatformPolicy(ledger, issues);
   const inventory = validateInventory(ledger, externalInventory, issues);
   const rows = validateCrossProduct(ledger, inventory, issues);
@@ -500,7 +593,7 @@ export function validateLedger(ledger, { externalInventory } = {}) {
     && blockers?.length === 0;
   return {
     decision: finalPromote ? 'promote' : 'blocked',
-    valid: true,
+    valid: !issues.some((entry) => entry.code.startsWith('schema.')),
     computed,
     errors: issues,
   };

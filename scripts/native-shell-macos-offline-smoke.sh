@@ -139,12 +139,12 @@ cleanup() {
 trap 'cleanup $?' EXIT
 trap 'exit 130' INT TERM
 
-read -r REST_PORT RPC_PORT P2P_PORT < <(python3 - <<'PY'
+read -r REST_PORT RPC_PORT P2P_PORT TLS_PORT < <(python3 - <<'PY'
 import socket
 
 sockets = []
 try:
-    for _ in range(3):
+    for _ in range(4):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
         sockets.append(listener)
@@ -270,6 +270,7 @@ launch_shell() {
     SAGE_HOME="${SAGE_SMOKE_HOME}" \
     SAGE_NO_BROWSER=1 \
     REST_ADDR="127.0.0.1:${REST_PORT}" \
+    SAGE_TLS_ADDR="127.0.0.1:${TLS_PORT}" \
     SAGE_CMT_RPC_ADDR="tcp://127.0.0.1:${RPC_PORT}" \
     SAGE_CMT_P2P_ADDR="tcp://127.0.0.1:${P2P_PORT}" \
     HTTP_PROXY="http://127.0.0.1:1" HTTPS_PROXY="http://127.0.0.1:1" \

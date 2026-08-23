@@ -1,12 +1,17 @@
 # ADR: v12 native product boundary and capability parity
 
-**Status:** Accepted for v12 planning; implementation and release evidence remain open
+**Status:** Superseded on 2026-08-23 by
+[`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md)
 
 **Date:** 2026-08-23
 **Supersedes:** [`desktop-shell-decision.md`](desktop-shell-decision.md) where it
 left the meaning of “fully native” unresolved
 
 ## Decision
+
+> Historical record only. The bounded-WebView decision below no longer defines
+> the v12 macOS product. The current decision requires a fully native
+> SwiftUI/AppKit/Metal CEREBRUM surface with no WebView product renderer.
 
 SAGE v12 is a native desktop product on macOS. **Fully
 native** means that the installed application owns the platform experience and

@@ -10,7 +10,7 @@
   <body>
     <main aria-labelledby="shell-title">
       <div class="mark" aria-hidden="true">S</div>
-      <p class="eyebrow">SAGE Native Preview</p>
+      <p class="eyebrow">SAGE CEREBRUM Beta</p>
       <h1 id="shell-title">Your memory node stays in control</h1>
 
       <section class="state" id="starting" role="status" aria-live="polite" aria-labelledby="starting-title">
@@ -19,8 +19,8 @@
       </section>
       <section class="state" id="unavailable" role="alert" aria-labelledby="unavailable-title">
         <h2 id="unavailable-title">The SAGE daemon is unavailable</h2>
-        <p>SAGE could not start or attach to your node. This window keeps checking but will not launch a second daemon.</p>
-        <p>Bundled-daemon output is preserved in <code>$SAGE_HOME/logs/sage.log</code> (normally <code>~/.sage/logs/sage.log</code>).</p>
+        <p>SAGE could not start or attach to your node. The app keeps checking and can restart its bundled daemon after the instance lock permits it.</p>
+        <p>Bundled-daemon output is preserved in <code>$SAGE_HOME/logs/sage.log</code>.</p>
       </section>
       <section class="state" id="locked" role="status" aria-live="polite" aria-labelledby="locked-title">
         <h2 id="locked-title">Your vault is locked</h2>
@@ -32,7 +32,7 @@
       </section>
       <section class="state" id="failed" role="alert" aria-labelledby="failed-title">
         <h2 id="failed-title">SAGE could not finish starting</h2>
-        <p>Your data directory is left in place. Inspect <code>$SAGE_HOME/logs/sage.log</code> (normally <code>~/.sage/logs/sage.log</code>); this window will keep checking for a recovered node.</p>
+        <p>The bounded startup attempt ended safely. Restart this app to try again; your data directory remains untouched.</p>
       </section>
       <section class="state" id="incompatible" role="alert" aria-labelledby="incompatible-title">
         <h2 id="incompatible-title">This shell and daemon are incompatible</h2>
@@ -43,7 +43,7 @@
       <div class="pulse" aria-hidden="true"></div>
       <aside aria-labelledby="safe-title">
         <h2 id="safe-title">What remains safe</h2>
-        <p>Browser CEREBRUM, CLI, REST, and MCP remain independent. Closing this preview does not stop the memory node.</p>
+        <p>Browser CEREBRUM, CLI, REST, and MCP remain independent. Closing this app does not stop the memory node.</p>
         <p><a href="https://github.com/l33tdawg/sage#readme" target="_blank" rel="noopener noreferrer">Open SAGE recovery documentation in your browser</a></p>
       </aside>
     </main>

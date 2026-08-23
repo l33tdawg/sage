@@ -1,0 +1,90 @@
+name: v12 macOS native CEREBRUM beta
+
+on:
+  push:
+    branches: [v12-beta]
+    paths:
+      - "desktop/SAGECerebrumNative/**"
+      - "scripts/build-native-cerebrum-macos.sh"
+      - "scripts/v12-native-acceptance-validate.mjs"
+      - "scripts/v12-native-acceptance-validate.test.mjs"
+      - "docs/v12-native-acceptance-ledger.schema.json"
+      - "docs/v12-native-acceptance-ledger.md"
+      - "docs/v12-native-capability-ledger.md"
+      - "docs/v12-native-product-status.md"
+      - "docs/native-cerebrum-macos-v12-adr.md"
+      - ".github/workflows/v12-beta-macos.yml"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Unsigned beta validation version"
+        required: true
+        default: "12.0.0-beta.1"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v12-beta-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate-unsigned-beta:
+    name: Validate unsigned Swift-native macOS beta app
+    if: github.ref == 'refs/heads/v12-beta'
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      SAGE_NATIVE_VERSION: ${{ inputs.version || '12.0.0-beta.1' }}
+      SAGE_NATIVE_CONFIGURATION: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - name: Validate Swift-native acceptance contract
+        run: |
+          node --test scripts/v12-native-acceptance-validate.test.mjs
+          swift test --package-path desktop/SAGECerebrumNative --disable-sandbox
+      - name: Build SwiftUI/AppKit/Metal application
+        run: scripts/build-native-cerebrum-macos.sh
+      - name: Verify native application and record unsigned evidence
+        run: |
+          APP_PATH="dist/v12-native/${SAGE_NATIVE_VERSION}/SAGE CEREBRUM Native.app"
+          EXECUTABLE="${APP_PATH}/Contents/MacOS/SAGECerebrumNative"
+          EVIDENCE_DIR="dist/v12-native/${SAGE_NATIVE_VERSION}/validation"
+          test -x "${EXECUTABLE}"
+          test "$(plutil -extract CFBundleIdentifier raw "${APP_PATH}/Contents/Info.plist")" = "com.sage.cerebrum.beta"
+          test "$(plutil -extract SAGEBetaVersion raw "${APP_PATH}/Contents/Info.plist")" = "${SAGE_NATIVE_VERSION}"
+          test "$(plutil -extract CFBundleShortVersionString raw "${APP_PATH}/Contents/Info.plist")" = "${SAGE_NATIVE_VERSION%%-*}"
+          while IFS= read -r candidate; do
+            if file "${candidate}" | grep -q 'Mach-O'; then
+              if otool -L "${candidate}" | grep -E 'WebKit|JavaScriptCore'; then
+                echo "Swift-native deliverable must not link WebKit or JavaScriptCore: ${candidate}" >&2
+                exit 1
+              fi
+              if strings "${candidate}" | grep -E 'WKWebView|WebKit|JavaScriptCore'; then
+                echo "Swift-native deliverable must not dynamically reference WebKit: ${candidate}" >&2
+                exit 1
+              fi
+            fi
+          done < <(find "${APP_PATH}/Contents" -type f -print)
+          mkdir -p "${EVIDENCE_DIR}"
+          shasum -a 256 "${EXECUTABLE}" > "${EVIDENCE_DIR}/swift-native-executable.sha256"
+          otool -L "${EXECUTABLE}" > "${EVIDENCE_DIR}/linked-frameworks.txt"
+          plutil -p "${APP_PATH}/Contents/Info.plist" > "${EVIDENCE_DIR}/info-plist.txt"
+          printf '%s\n' \
+            'v12 SWIFT-NATIVE BETA VALIDATION EVIDENCE' \
+            'SWIFTUI / APPKIT / METAL APPLICATION' \
+            'NO WKWEBVIEW, WEBKIT, OR JAVASCRIPTCORE LINKAGE OR RUNTIME REFERENCES' \
+            'UNSIGNED / NOTARIZATION NOT PERFORMED' \
+            'THE APP IS DELIBERATELY NOT UPLOADED FROM THIS PUBLIC REPOSITORY' \
+            'NOT FOR DISTRIBUTION OR STABLE UPDATE CHANNELS' \
+            > "${EVIDENCE_DIR}/UNSIGNED-VALIDATION-EVIDENCE.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sage-v12-swift-native-macos-${{ env.SAGE_NATIVE_VERSION }}-validation
+          path: dist/v12-native/${{ env.SAGE_NATIVE_VERSION }}/validation/
+          if-no-files-found: error
+          retention-days: 14

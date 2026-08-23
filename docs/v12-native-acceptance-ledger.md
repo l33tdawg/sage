@@ -4,8 +4,13 @@
 
 **Schema:** [`v12-native-acceptance-ledger.schema.json`](v12-native-acceptance-ledger.schema.json)
 
-**Product boundary:** [`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md)
+**Product boundary:** [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md)
 **Release gates:** [`native-shell-quality-gates.md`](native-shell-quality-gates.md)
+
+**Current contract gap:** the linked schema and semantic validator still contain
+fields inherited from the superseded WebView prototype. They must be revised to
+require the native renderer identity before this prose contract can be used for
+promotion; until then, validation remains blocked.
 
 ## Purpose
 
@@ -16,13 +21,12 @@ Windows. It is intentionally fail-closed: absence, ambiguity,
 stale identity, an unverifiable artifact, a failed or skipped pass, or a route
 whose actions were not inventoried blocks native promotion.
 
-The current native-shell workflows provide useful implementation inputs:
-locked builds, unsigned packages, shell/daemon release-pair hashes, SBOMs,
-installed lifecycle smoke, limited macOS offline evidence, and limited macOS
-RSS/CPU evidence. They do not establish production signing, complete route and
-action parity, three consecutive passes, accessibility, update rollback, or the
-full macOS v12 matrix. They must not be copied into a v12 ledger as if
-they closed those rows.
+The current Swift implementation provides development evidence for native
+Overview, Search/Inspector, and the first Brain/Metal MRI slice. Historical
+Tauri workflows provide useful daemon-lifecycle and packaging research, but are
+prototype evidence only. Neither establishes production signing, complete
+route/action parity, app-owned daemon lifecycle, three consecutive passes,
+accessibility, update rollback, or the full macOS v12 matrix.
 
 ## Canonical inventory and cross-product
 
@@ -52,12 +56,11 @@ The repository validator is `scripts/v12-native-acceptance-validate.mjs`. It is
 fail-closed and complements, rather than replaces, Draft 2020-12 schema
 validation. Release automation must run both against the exact candidate ledger.
 
-`control_owner` uses the ADR's exact meanings:
-
-- `native-control` owns platform integration or trust-boundary management and
-  must remain usable when CEREBRUM cannot render.
-- `web-control` is an authenticated CEREBRUM domain control rendered in the
-  bounded WebView. A screenshot or successful route load is availability only.
+For the macOS inventory, `control_owner` must be `native-control`: the route or
+action is rendered and owned by the SwiftUI/AppKit/Metal application. A mapped
+placeholder or screenshot is availability only and cannot close an action row.
+`web-control` belongs only to superseded prototype evidence and is invalid for
+a v12 macOS release-candidate inventory.
 
 `browser-fallback` is the required product path on Linux and Windows. Those
 platforms have browser-continuity evidence, not native inventory rows. Each
@@ -72,9 +75,13 @@ named environment. Package identity includes product/application ID, version,
 build ID, package kind and hash, exact shell and bundled-daemon hashes, daemon
 version, production-signature verification, provenance, and SBOM. Environment
 identity includes OS/build/distro, architecture, named hardware, CPU, RAM, GPU,
-display, WebView engine/version, and an immutable capture artifact. This native
+display, native renderer identity/version, and an immutable capture artifact. This native
 platform row is macOS-only. Linux's GTK advisory remains relevant to optional
 native R&D, not this release ledger.
+
+The macOS candidate application ID is `com.sage.cerebrum.beta`. A package using
+the historical prototype identity or a development-only native preview identity
+is not the v12 beta candidate and must fail identity validation.
 
 Every route/action row records:
 
@@ -107,7 +114,7 @@ reference must retain the same content hash.
 
 Every tuple carries exactly three consecutive acceptance passes. Passes 1, 2,
 and 3 must use the same commit, package hash, named hardware/environment hash,
-WebView version, test definition, and configuration. Each pass manifest must
+native renderer version, test definition, and configuration. Each pass manifest must
 contain the row's API/action, accessibility, offline, daemon-loss/recovery,
 update/rollback, performance raw samples, and artifact hashes. A failed,
 cancelled, skipped, manually edited, or intervening run breaks consecutiveness;
@@ -129,7 +136,7 @@ The only two decisions are `blocked` and `promote`. The validator starts at
 1. The inventory was generated from the candidate commit and is complete.
 2. The exact inventory × macOS cross-product exists with no duplicate,
    unknown, or dangling row.
-3. Build, package, daemon, environment, WebView, signature, provenance, and
+3. Build, package, daemon, environment, native-renderer, signature, provenance, and
    artifact hashes verify byte-for-byte.
 4. The macOS platform security gate passes and every required row is `passed`.
    Only an individual metric or accessibility sub-check may be genuinely
@@ -185,7 +192,7 @@ satisfies anything.
         "workflow": "overview",
         "label": "Overview",
         "route_template": "/",
-        "control_owner": "web-control",
+        "control_owner": "native-control",
         "required_platforms": ["macos"],
         "api_contract": {
           "mode": "authenticated-api",

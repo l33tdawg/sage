@@ -229,7 +229,10 @@
         "route_template": { "$ref": "#/$defs/nonEmptyString" },
         "parent_route_entry_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]+$" },
         "action_identifier": { "$ref": "#/$defs/nonEmptyString" },
-        "control_owner": { "enum": ["native-control", "web-control"] },
+        "control_owner": {
+          "enum": ["native-control", "web-control"],
+          "description": "web-control is retained only for clearly identified legacy bounded-WebView prototype records; it cannot satisfy v12 macOS promotion."
+        },
         "required_platforms": { "const": ["macos"] },
         "api_contract": { "$ref": "#/$defs/apiContract" }
       },
@@ -285,7 +288,7 @@
       ],
       "properties": {
         "product_name": { "$ref": "#/$defs/nonEmptyString" },
-        "application_identifier": { "$ref": "#/$defs/nonEmptyString" },
+        "application_identifier": { "const": "com.sage.cerebrum.beta" },
         "version": { "$ref": "#/$defs/nonEmptyString" },
         "build_id": { "$ref": "#/$defs/nonEmptyString" },
         "package_kind": { "enum": ["dmg", "nsis", "msix", "deb", "rpm", "appimage", "flatpak"] },
@@ -314,8 +317,8 @@
         "ram_bytes",
         "gpu",
         "display",
-        "webview_engine",
-        "webview_version",
+        "renderer_kind",
+        "renderer_version",
         "environment_capture"
       ],
       "properties": {
@@ -331,11 +334,34 @@
         "ram_bytes": { "type": "integer", "minimum": 1 },
         "gpu": { "$ref": "#/$defs/nonEmptyString" },
         "display": { "$ref": "#/$defs/nonEmptyString" },
-        "webview_engine": { "enum": ["WKWebView", "WebView2", "WebKitGTK", "other-reviewed"] },
-        "webview_version": { "$ref": "#/$defs/nonEmptyString" },
-        "webview_runtime_sha256": { "$ref": "#/$defs/sha256" },
+        "renderer_kind": {
+          "enum": ["SwiftUI-AppKit-Metal", "legacy-bounded-webview-prototype"],
+          "description": "Only SwiftUI-AppKit-Metal is eligible for v12 macOS promotion. The legacy value preserves explicitly labeled historical prototype evidence."
+        },
+        "renderer_version": { "$ref": "#/$defs/nonEmptyString" },
+        "webview_engine": {
+          "enum": ["WKWebView", "WebView2", "WebKitGTK", "other-reviewed"],
+          "description": "Legacy bounded-WebView prototype evidence only; forbidden for a promoted Swift-native deliverable."
+        },
+        "webview_version": {
+          "allOf": [{ "$ref": "#/$defs/nonEmptyString" }],
+          "description": "Legacy bounded-WebView prototype evidence only."
+        },
+        "webview_runtime_sha256": {
+          "allOf": [{ "$ref": "#/$defs/sha256" }],
+          "description": "Legacy bounded-WebView prototype evidence only."
+        },
         "environment_capture": { "$ref": "#/$defs/artifact" }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "renderer_kind": { "const": "legacy-bounded-webview-prototype" } },
+            "required": ["renderer_kind"]
+          },
+          "then": { "required": ["webview_engine", "webview_version"] }
+        }
+      ]
     },
     "passEvidence": {
       "type": "object",
@@ -620,8 +646,14 @@
       ],
       "properties": {
         "inventory_entry_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._:-]+$" },
-        "control_owner": { "enum": ["native-control", "web-control"] },
-        "surface_path": { "enum": ["native-application", "bounded-webview"] },
+        "control_owner": {
+          "enum": ["native-control", "web-control"],
+          "description": "web-control is legacy bounded-WebView prototype evidence and cannot satisfy v12 macOS promotion."
+        },
+        "surface_path": {
+          "enum": ["native-application", "bounded-webview"],
+          "description": "bounded-webview is retained only for explicitly labeled legacy prototype records."
+        },
         "release_state": { "enum": ["passed", "blocked"] },
         "blocking_reasons": {
           "type": "array",

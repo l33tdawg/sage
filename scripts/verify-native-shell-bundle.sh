@@ -173,7 +173,9 @@ BUILD_INFO=
 if BUILD_INFO=$(go version -m "${DAEMON_PATH}" 2>/dev/null); then
   BUILD_GOOS=$(printf '%s\n' "${BUILD_INFO}" | awk '$1 == "build" && $2 ~ /^GOOS=/ { sub(/^GOOS=/, "", $2); print $2; exit }')
   BUILD_GOARCH=$(printf '%s\n' "${BUILD_INFO}" | awk '$1 == "build" && $2 ~ /^GOARCH=/ { sub(/^GOARCH=/, "", $2); print $2; exit }')
-  BUILD_VERSION=$(printf '%s\n' "${BUILD_INFO}" | sed -n 's/.*-X main\.version=\([^ "\t]*\).*/\1/p' | head -1)
+  # Do not use a literal \t escape in this character class: BSD sed treats it
+  # as the letter t, truncating prerelease versions such as 12.0.0-beta.1.
+  BUILD_VERSION=$(printf '%s\n' "${BUILD_INFO}" | sed -n 's/.*-X main\.version=\([^ "]*\).*/\1/p' | head -1)
   if [ "${BUILD_GOOS}" != "${EXPECTED_GOOS}" ] || [ "${BUILD_GOARCH}" != "${EXPECTED_GOARCH}" ]; then
     echo "bundled daemon target mismatch: expected ${EXPECTED_GOOS}/${EXPECTED_GOARCH}, got ${BUILD_GOOS:-unknown}/${BUILD_GOARCH:-unknown}" >&2
     exit 1

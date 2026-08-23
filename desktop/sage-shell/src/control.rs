@@ -189,7 +189,17 @@ fn supported_daemon_version(value: &str) -> bool {
     }
     let major = parts[0].parse::<u64>().ok();
     let minor = parts[1].parse::<u64>().ok();
-    major == Some(11) && matches!(minor, Some(10..=19))
+    match major {
+        Some(11) => matches!(minor, Some(10..=19)),
+        // v12 beta keeps the v11 SSCP/1 shell contract while the native
+        // product lane is stabilized. Do not accept an unqualified v12
+        // release until its compatibility contract is explicitly frozen.
+        Some(12) => {
+            minor == Some(0)
+                && prerelease.is_some_and(|value| value.split('.').next() == Some("beta"))
+        }
+        _ => false,
+    }
 }
 
 fn valid_semver_number(value: &str) -> bool {
@@ -659,7 +669,11 @@ mod tests {
         assert!(supported_daemon_version("11.17.0"));
         assert!(supported_daemon_version("11.18.0"));
         assert!(supported_daemon_version("11.19.0"));
+        assert!(supported_daemon_version("12.0.0-beta.1"));
+        assert!(supported_daemon_version("v12.0.1-beta.7+build.2"));
         assert!(!supported_daemon_version("11.20.0"));
+        assert!(!supported_daemon_version("12.0.0"));
+        assert!(!supported_daemon_version("12.1.0-beta.1"));
         assert!(!supported_daemon_version("eleven"));
         assert!(valid_generation(&"A".repeat(43)));
         assert!(!valid_generation(&"B".repeat(43)));
