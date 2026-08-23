@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct BrainView: View {
@@ -10,6 +11,10 @@ struct BrainView: View {
     @State private var memoryHullOpacity = 0.08
     @State private var connectomeHullOpacity = 0.03
     @State private var showsDisplayControls = false
+    @State private var announcementGeneration = 0
+    @State private var focusGeneration = 0
+    @FocusState private var keyboardFocus: BrainFocusTarget?
+    @AccessibilityFocusState private var accessibilityFocus: BrainFocusTarget?
 
     init(api: any SAGEAPI) {
         _model = State(initialValue: BrainViewModel(api: api))
@@ -46,23 +51,38 @@ struct BrainView: View {
             get: { model.hasVisibleInspector },
             set: {
                 if !$0 {
-                    if model.mode == .memory {
-                        model.selectedNodeID = nil
-                    } else {
-                        model.selectedAgentID = nil
-                        model.selectedEngramID = nil
-                        model.selectedConnection = nil
-                    }
+                    clearSelectionAndRestoreFocus()
                 }
             }
         )) {
-            if model.mode == .memory, let node = model.selectedNode {
-                BrainNodeInspectorView(node: node)
-                    .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
-            } else if model.mode == .connectome, let neuron = model.selectedNeuron {
-                AgentNeuronInspectorView(neuron: neuron, model: model)
-                    .inspectorColumnWidth(min: 340, ideal: 400, max: 540)
+            VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    Button("Close Selection", systemImage: "xmark") {
+                        clearSelectionAndRestoreFocus()
+                    }
+                    .labelStyle(.iconOnly)
+                    .help("Close selection (Escape)")
+                    .focused($keyboardFocus, equals: .inspectorClose)
+                    .accessibilityFocused($accessibilityFocus, equals: .inspectorClose)
+                    .accessibilityLabel("Close Brain selection")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+
+                Divider()
+
+                if model.mode == .memory, let node = model.selectedNode {
+                    BrainNodeInspectorView(node: node)
+                } else if model.mode == .connectome, let neuron = model.selectedNeuron {
+                    AgentNeuronInspectorView(neuron: neuron, model: model)
+                }
             }
+            .inspectorColumnWidth(
+                min: model.mode == .memory ? 320 : 340,
+                ideal: model.mode == .memory ? 380 : 400,
+                max: model.mode == .memory ? 520 : 540
+            )
         }
         .task(id: BrainRefreshKey(mode: model.mode, domain: model.selectedDomain, status: model.status)) {
             await model.refresh()
@@ -75,9 +95,16 @@ struct BrainView: View {
             guard scenePhase == .active else { return }
             await model.runLiveUpdates()
         }
-        .onAppear {
-            if reduceMotion { scanning = false; flow = false }
+        .onExitCommand {
+            guard hasSelection else { return }
+            dismissCurrentSelectionAndRestoreFocus()
         }
+        .onChange(of: model.selectedNodeID) { _, _ in scheduleSelectionAnnouncement() }
+        .onChange(of: model.selectedAgentID) { _, _ in scheduleSelectionAnnouncement() }
+        .onChange(of: model.selectedEngramID) { _, _ in scheduleSelectionAnnouncement() }
+        .onChange(of: model.selectedConnectionID) { _, _ in scheduleSelectionAnnouncement() }
+        .onChange(of: presentation) { _, _ in requestFocus(returnFocusTarget) }
+        .onChange(of: model.mode) { _, _ in requestFocus(returnFocusTarget) }
     }
 
     private var header: some View {
@@ -266,9 +293,11 @@ struct BrainView: View {
                 hullOpacity: currentHullOpacity,
                 onPick: { pick in
                     switch pick {
-                    case let .node(id): model.selectedNodeID = id
+                    case let .node(id):
+                        model.selectedNodeID = id
+                        requestFocus(.surface)
                     case .edge: break
-                    case .background: model.selectedNodeID = nil
+                    case .background: dismissCurrentSelectionAndRestoreFocus()
                     }
                 }
             )
@@ -286,10 +315,20 @@ struct BrainView: View {
             .allowsHitTesting(false)
         }
         .accessibilityElement(children: .contain)
+        .focusable()
+        .focused($keyboardFocus, equals: .surface)
+        .accessibilityFocused($accessibilityFocus, equals: .surface)
+        .accessibilityHint("Use the Accessible Table presentation for keyboard navigation and detailed selection.")
     }
 
     private func memoryTable(_ graph: BrainGraphEnvelope) -> some View {
-        Table(graph.nodes, selection: $model.selectedNodeID) {
+        Table(graph.nodes, selection: Binding(
+            get: { model.selectedNodeID },
+            set: {
+                model.selectedNodeID = $0
+                if $0 != nil { requestFocus(.table) }
+            }
+        )) {
             TableColumn("Memory") { node in
                 Text(node.content).lineLimit(2).padding(.vertical, 4)
             }
@@ -311,6 +350,8 @@ struct BrainView: View {
                 .width(min: 100, ideal: 140)
         }
         .accessibilityLabel("Memory brain table")
+        .focused($keyboardFocus, equals: .table)
+        .accessibilityFocused($accessibilityFocus, equals: .table)
     }
 
     private func connectomeMRI(_ connectome: ConnectomeEnvelope) -> some View {
@@ -327,9 +368,14 @@ struct BrainView: View {
                 hullOpacity: currentHullOpacity,
                 onPick: { pick in
                     switch pick {
-                    case let .node(id): model.selectConnectomeSceneNode(id)
-                    case let .edge(edge): model.selectConnectomeSceneEdge(edge)
-                    case .background: model.selectConnectomeSceneNode(nil)
+                    case let .node(id):
+                        model.selectConnectomeSceneNode(id)
+                        requestFocus(.surface)
+                    case let .edge(edge):
+                        model.selectConnectomeSceneEdge(edge)
+                        requestFocus(.surface)
+                    case .background:
+                        dismissCurrentSelectionAndRestoreFocus()
                     }
                 }
             )
@@ -347,10 +393,20 @@ struct BrainView: View {
             .allowsHitTesting(false)
         }
         .accessibilityLabel("Connectome MRI, \(connectome.neurons.count) visible agents, \(connectome.synapses.count) directed retained-traffic synapses. Use Accessible Table to inspect.")
+        .focusable()
+        .focused($keyboardFocus, equals: .surface)
+        .accessibilityFocused($accessibilityFocus, equals: .surface)
+        .accessibilityHint("Use the Accessible Table presentation for keyboard navigation and detailed selection.")
     }
 
     private func connectomeTable(_ connectome: ConnectomeEnvelope) -> some View {
-        Table(connectome.neurons, selection: $model.selectedAgentID) {
+        Table(connectome.neurons, selection: Binding(
+            get: { model.selectedAgentID },
+            set: {
+                model.selectConnectomeAgent($0)
+                if $0 != nil { requestFocus(.table) }
+            }
+        )) {
             TableColumn("Agent") { neuron in Text(neuron.name).fontWeight(.medium) }
                 .width(min: 150, ideal: 220)
             TableColumn("Role", value: \.role).width(90)
@@ -371,6 +427,8 @@ struct BrainView: View {
             }.width(min: 130, ideal: 170)
         }
         .accessibilityLabel("Agent connectome table")
+        .focused($keyboardFocus, equals: .table)
+        .accessibilityFocused($accessibilityFocus, equals: .table)
     }
 
     private var emptyState: some View {
@@ -410,8 +468,7 @@ struct BrainView: View {
                     Text("\(count) related").font(.caption).foregroundStyle(.secondary)
                 }
                 Button("Close", systemImage: "xmark") {
-                    model.selectedNodeID = nil
-                    model.relatedMemories = nil
+                    clearSelectionAndRestoreFocus()
                 }.labelStyle(.iconOnly)
             }
             if model.isDetailLoading {
@@ -512,10 +569,7 @@ struct BrainView: View {
             }
 
             Button {
-                model.selectedNodeID = nil
-                model.selectedAgentID = nil
-                model.selectedEngramID = nil
-                model.selectedConnection = nil
+                clearSelectionAndRestoreFocus()
                 model.selectedDomain = ""
             } label: {
                 Label("Whole Brain", systemImage: "arrow.uturn.backward.circle")
@@ -545,6 +599,96 @@ struct BrainView: View {
         model.mode == .memory ? memoryHullOpacity : connectomeHullOpacity
     }
 
+    private var hasSelection: Bool {
+        model.selectedNodeID != nil || model.selectedAgentID != nil ||
+            model.selectedEngramID != nil || model.selectedConnection != nil
+    }
+
+    private var returnFocusTarget: BrainFocusTarget {
+        presentation == .table ? .table : .surface
+    }
+
+    private func clearSelectionAndRestoreFocus() {
+        if model.mode == .memory {
+            model.selectedNodeID = nil
+            model.relatedMemories = nil
+        } else {
+            model.selectedAgentID = nil
+            model.selectedEngramID = nil
+            model.selectedConnection = nil
+        }
+        requestFocus(returnFocusTarget)
+    }
+
+    private func dismissCurrentSelectionAndRestoreFocus() {
+        if model.mode == .memory {
+            model.selectedNodeID = nil
+            model.relatedMemories = nil
+        } else {
+            model.selectConnectomeSceneNode(nil)
+        }
+        requestFocus(returnFocusTarget)
+    }
+
+    private func requestFocus(_ target: BrainFocusTarget) {
+        focusGeneration += 1
+        let generation = focusGeneration
+        Task { @MainActor in
+            await Task.yield()
+            guard generation == focusGeneration else { return }
+            keyboardFocus = target
+            accessibilityFocus = target
+        }
+    }
+
+    private func scheduleSelectionAnnouncement() {
+        announcementGeneration += 1
+        let generation = announcementGeneration
+        Task { @MainActor in
+            await Task.yield()
+            guard generation == announcementGeneration else { return }
+            postAccessibilityAnnouncement(selectionAnnouncement)
+        }
+    }
+
+    private var selectionAnnouncement: String {
+        let announcement: String
+        if model.mode == .connectome {
+            if let connection = model.selectedConnection {
+                announcement = "Directed connection selected. \(model.agentName(connection.fromAgent)) to \(model.agentName(connection.toAgent)), \(connection.count) retained messages."
+            } else if let engramID = model.selectedEngramID,
+                      let engram = model.engrams?.engrams.first(where: { $0.id == engramID }) {
+                announcement = "Engram selected in \(engram.domain), \(engram.corroborationCount) corroborations."
+            } else if let neuron = model.selectedNeuron {
+                announcement = "Agent selected. \(neuron.name), \(neuron.role), \(model.incomingTraffic(for: neuron.agentID)) incoming and \(model.outgoingTraffic(for: neuron.agentID)) outgoing retained messages."
+            } else {
+                announcement = "Brain selection cleared."
+            }
+        } else if let node = model.selectedNode {
+            announcement = "Memory selected in \(node.domain), \(node.corroborationCount) corroborations."
+        } else {
+            announcement = "Brain selection cleared."
+        }
+        return boundedAnnouncementText(announcement)
+    }
+
+    private func boundedAnnouncementText(_ text: String) -> String {
+        let collapsed = text.split(whereSeparator: \Character.isWhitespace).joined(separator: " ")
+        guard collapsed.count > 140 else { return collapsed }
+        return String(collapsed.prefix(137)) + "…"
+    }
+
+    private func postAccessibilityAnnouncement(_ message: String) {
+        NSAccessibility.post(
+            element: NSApplication.shared,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: message,
+                .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+            ]
+        )
+    }
+
     private var hullOpacityBinding: Binding<Double> {
         Binding(
             get: { currentHullOpacity },
@@ -561,6 +705,12 @@ struct BrainView: View {
         for scalar in domain.unicodeScalars { hash = (hash ^ Int(scalar.value)) &* 16_777_619 }
         return colors[abs(hash) % colors.count]
     }
+}
+
+private enum BrainFocusTarget: Hashable {
+    case surface
+    case table
+    case inspectorClose
 }
 
 private struct BrainRefreshKey: Hashable {

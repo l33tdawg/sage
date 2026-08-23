@@ -358,6 +358,29 @@ import Testing
     #expect(old >= 0.15 && old < 0.151)
 }
 
+@Test func metalFlowABIClockAndSemanticPhaseAreStable() {
+    #expect(BrainMetalRenderer.metalABIStrides["vertex"] == 32)
+    #expect(BrainMetalRenderer.metalABIStrides["ribbon"] == 96)
+    #expect(BrainMetalRenderer.metalABIStrides["flow"] == 80)
+    #expect(BrainMetalRenderer.metalABIStrides["uniforms"] == 96)
+    #expect(BrainMetalRenderer.metalABILayouts["vertex"] == [32, 32, 16])
+    #expect(BrainMetalRenderer.metalABILayouts["ribbon"] == [92, 96, 16])
+    #expect(BrainMetalRenderer.metalABILayouts["flow"] == [80, 80, 16])
+    #expect(BrainMetalRenderer.metalABILayouts["uniforms"] == [88, 96, 16])
+
+    #expect(BrainMetalRenderer.flowProgress(time: 0, phase: 0.25) == 0.25)
+    #expect(abs(BrainMetalRenderer.flowProgress(time: 10, phase: 0.2, speed: 0.1) - 0.2) < 0.0001)
+    #expect(abs(BrainMetalRenderer.flowProgress(time: -1, phase: 0, speed: 0.25) - 0.75) < 0.0001)
+    #expect(abs(BrainMetalRenderer.flowProgress(time: 100, phase: 0.37) - 0.37) < 0.0001)
+
+    let synapse = BrainEdge(source: "a", target: "b", type: "synapse")
+    let engram = BrainEdge(source: "a", target: "b", type: "engram")
+    let first = BrainMetalRenderer.flowPhase(for: synapse)
+    #expect(first >= 0 && first < 1)
+    #expect(first == BrainMetalRenderer.flowPhase(for: synapse))
+    #expect(first != BrainMetalRenderer.flowPhase(for: engram))
+}
+
 @Test func ribbonLODIsBoundedDeterministicAndPreservesSelection() {
     let edges = (0 ..< 10).map {
         BrainEdge(source: "agent:\($0)", target: "agent:\($0 + 1)", type: "synapse", weight: Double($0))
