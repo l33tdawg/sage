@@ -1,6 +1,6 @@
 # v12 native product status
 
-**Status date:** 2026-08-23
+**Status date:** 2026-08-24
 
 **Code baseline:** SAGE v11.19.0 / app-v27
 
@@ -24,7 +24,11 @@ The new implementation lives in `desktop/SAGECerebrumNative`. It currently has
 a compiling SwiftUI application, native navigation for all nine primary
 CEREBRUM routes, native login/lock states, a typed loopback API client, and
 implemented vertical slices for Overview, Search/Inspector, and the Brain
-experience. Overview consumes five independent feeds—health, stats, agents,
+experience. Those implemented routes now let the native titlebar own the route
+title and use a compact adaptive context/status bar instead of duplicating web
+page-title chrome. General titles and metrics use standard SF Pro; rounded type
+is restricted to the CEREBRUM mark and the Overview hero accent. Overview
+consumes five independent feeds—health, stats, agents,
 validators, and federation—and retains last-good data with per-feed stale state
 during partial failures.
 
@@ -75,7 +79,13 @@ pane grouped as Do, Don't, Observations, and Notes. SSE events are treated as
 invalidation hints, selected focus is preserved behind update notices, and an
 `access` event immediately purges Brain graphs, selections, inspectors,
 engrams, and related-memory state before authoritative refetch. Reduced Motion
-disables automatic scan and flow while preserving manual orbit and zoom. Brain
+disables automatic rotation and flow animation while preserving manual orbit
+and zoom. Brain
+keeps mode, presentation, inspector, View Options, and Refresh in its primary
+toolbar. View Options groups automatic rotation, flow animation, shell
+visibility, and reset to Whole Brain. Hiding the Brain inspector preserves the
+semantic selection; Escape remains the explicit clear-selection and focus-return
+command. Brain
 phase three is implemented with separate agent, engram, and directed-connection
 focus, collision-safe scene identities, reserved overlay budgets, and linear
 traffic summaries. The renderer now adds time-invariant half-resolution

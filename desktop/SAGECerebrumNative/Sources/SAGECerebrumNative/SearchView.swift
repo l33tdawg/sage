@@ -97,18 +97,8 @@ struct SearchView: View {
     }
 
     private var header: some View {
-        CerebrumPageHeader(
-            eyebrow: "Sovereign recall",
-            title: "Search",
-            subtitle: "Find, inspect, and understand memory across your local SAGE."
-        ) {
-            VStack(alignment: .trailing, spacing: 5) {
-                CerebrumDataStatusView(status: model.dataStatus)
-                Text(resultSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .contentTransition(.numericText())
-            }
+        CerebrumPageContextBar(routeTitle: "Search", context: resultSummary) {
+            CerebrumDataStatusView(status: model.dataStatus)
         }
     }
 
@@ -284,7 +274,6 @@ struct SearchView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text("Tag Selected Memories")
                     .font(.title2.weight(.bold))
-                    .fontDesign(.rounded)
                 Text("Add one normalized tag to \(model.selection.count) loaded memories.")
                     .foregroundStyle(.secondary)
             }

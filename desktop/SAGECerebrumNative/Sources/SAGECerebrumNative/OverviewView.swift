@@ -41,10 +41,9 @@ struct OverviewView: View {
     }
 
     private var pageHeader: some View {
-        CerebrumPageHeader(
-            eyebrow: "Sovereign memory",
-            title: "Overview",
-            subtitle: "Your local intelligence, consensus, and network at a glance."
+        CerebrumPageContextBar(
+            routeTitle: "Overview",
+            context: "Local intelligence, consensus, and network at a glance."
         ) {
             CerebrumDataStatusView(status: model.dataStatus)
         }

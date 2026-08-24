@@ -54,43 +54,36 @@ struct CerebrumBrandMark: View {
     }
 }
 
-struct CerebrumPageHeader<Trailing: View>: View {
-    let eyebrow: String
-    let title: String
-    let subtitle: String
+struct CerebrumPageContextBar<Trailing: View>: View {
+    let routeTitle: String
+    let context: String
     @ViewBuilder let trailing: Trailing
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
             HStack(alignment: .firstTextBaseline, spacing: 20) {
-                titleBlock
+                contextText(lineLimit: 1)
                 Spacer(minLength: 24)
                 trailing
             }
             .fixedSize(horizontal: true, vertical: false)
 
             VStack(alignment: .leading, spacing: 12) {
-                titleBlock
+                contextText(lineLimit: nil)
                 trailing
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 
-    private var titleBlock: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(eyebrow.uppercased())
-                .font(.caption.weight(.bold))
-                .tracking(1.4)
-                .foregroundStyle(CerebrumTheme.cyan)
-            Text(title)
-                .font(.largeTitle.weight(.bold))
-                .fontDesign(.rounded)
-                .accessibilityAddTraits(.isHeader)
-            Text(subtitle)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        }
+    private func contextText(lineLimit: Int?) -> some View {
+        Text(context)
+            .font(.callout)
+            .foregroundStyle(.secondary)
+            .lineLimit(lineLimit)
+            .layoutPriority(1)
+            .accessibilityLabel("\(routeTitle). \(context)")
+            .accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -227,7 +220,6 @@ struct CerebrumMetricGrid: View {
                     .foregroundStyle(.secondary)
                     Text(metric.value)
                         .font(.title3.weight(.semibold))
-                        .fontDesign(.rounded)
                         .monospacedDigit()
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)

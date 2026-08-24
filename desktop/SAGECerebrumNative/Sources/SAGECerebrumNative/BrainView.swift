@@ -11,9 +11,10 @@ struct BrainView: View {
     @State private var flow = true
     @State private var memoryHullOpacity = 0.08
     @State private var connectomeHullOpacity = 0.03
-    @State private var showsDisplayControls = false
+    @State private var showsViewOptions = false
     @State private var showsNavigator = false
     @State private var showsInspector = false
+    @State private var inspectorVisibilityIsUserControlled = false
     @State private var availableSize = CGSize(width: 1_180, height: 760)
     @State private var mountedMetalSurfaces: Set<BrainMountedSurface> = []
     @State private var pendingMetalRestorationAttemptID: UInt64?
@@ -114,20 +115,28 @@ struct BrainView: View {
         .navigationTitle("Brain")
         .toolbar { brainToolbar }
         .inspector(isPresented: Binding(
-            get: { showsInspector && model.hasVisibleInspector },
-            set: { showsInspector = $0 }
+            get: { inspectorIsPresented },
+            set: {
+                if !$0 && model.hasVisibleInspector {
+                    inspectorVisibilityIsUserControlled = true
+                }
+                showsInspector = $0
+            }
         )) {
             VStack(spacing: 0) {
                 HStack {
                     Spacer()
-                    Button("Close Selection", systemImage: "xmark") {
-                        clearSelectionAndRestoreFocus()
+                    Button("Hide Inspector", systemImage: "xmark") {
+                        inspectorVisibilityIsUserControlled = true
+                        showsInspector = false
+                        requestFocus(returnFocusTarget)
                     }
                     .labelStyle(.iconOnly)
-                    .help("Close selection (Escape)")
+                    .help("Hide Inspector")
                     .focused($keyboardFocus, equals: .inspectorClose)
                     .accessibilityFocused($accessibilityFocus, equals: .inspectorClose)
-                    .accessibilityLabel("Close Brain selection")
+                    .accessibilityLabel("Hide Brain inspector")
+                    .accessibilityIdentifier("brain-inspector-close")
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -162,17 +171,22 @@ struct BrainView: View {
             dismissCurrentSelectionAndRestoreFocus()
         }
         .onChange(of: model.selectedNodeID) { _, selected in
-            if selected != nil { showsInspector = true }
+            if selected != nil && !inspectorVisibilityIsUserControlled {
+                showsInspector = true
+            }
             scheduleSelectionAnnouncement()
         }
         .onChange(of: model.relatedMemoryFocus) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedAgentID) { _, selected in
-            if selected != nil { showsInspector = true }
+            if selected != nil && !inspectorVisibilityIsUserControlled {
+                showsInspector = true
+            }
             scheduleSelectionAnnouncement()
         }
         .onChange(of: model.selectedEngramID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedConnectionID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.mode) { _, _ in
+            showsViewOptions = false
             applyMetalEvent(.modeChanged)
         }
         .onChange(of: trainOfThoughtVisible) { _, _ in
@@ -199,20 +213,11 @@ struct BrainView: View {
     }
 
     private var header: some View {
-        CerebrumPageHeader(
-            eyebrow: model.mode == .memory ? "Memory Map · MRI" : "Agent Network · Connectome",
-            title: "Brain",
-            subtitle: model.mode == .memory
-                ? "Explore how sovereign memory forms, connects, and consolidates."
-                : "See visible authorized agents as neurons and retained local message history as directed synapses."
+        CerebrumPageContextBar(
+            routeTitle: "Brain",
+            context: "\(model.mode.title) · \(graphSummary)"
         ) {
-            VStack(alignment: .trailing, spacing: 5) {
-                CerebrumDataStatusView(status: model.dataStatus)
-                Text(graphSummary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
+            CerebrumDataStatusView(status: model.dataStatus)
         }
     }
 
@@ -792,57 +797,65 @@ struct BrainView: View {
                 .help(presentationHelp)
             }
 
-            if model.hasVisibleInspector && !showsInspector {
-                Button {
-                    showsInspector = true
-                    requestFocus(.inspectorClose)
-                } label: {
-                    Label("Show Inspector", systemImage: "sidebar.trailing")
-                }
-                .help("Show details for the current Brain selection")
+            Button {
+                inspectorVisibilityIsUserControlled = true
+                showsInspector.toggle()
+                requestFocus(showsInspector ? .inspectorClose : returnFocusTarget)
+            } label: {
+                Label(inspectorIsPresented ? "Hide Inspector" : "Show Inspector", systemImage: "sidebar.trailing")
             }
+            .help(model.hasVisibleInspector
+                ? (inspectorIsPresented ? "Hide details for the current Brain selection" : "Show details for the current Brain selection")
+                : "Select a memory or agent to inspect")
+            .disabled(!model.hasVisibleInspector)
+            .accessibilityIdentifier("brain-inspector-toggle")
 
             Button {
-                scanning.toggle()
+                showsViewOptions.toggle()
             } label: {
-                Label(scanning ? "Pause Scan" : "Resume Scan", systemImage: scanning ? "pause.circle" : "play.circle")
+                Label("View Options", systemImage: "slider.horizontal.3")
             }
-            .disabled(reduceMotion || metalRecovery.effectivePresentation == .table)
-
-            Button {
-                showsDisplayControls.toggle()
-            } label: {
-                Label("Display", systemImage: "slider.horizontal.3")
-            }
-            .popover(isPresented: $showsDisplayControls) {
+            .focused($keyboardFocus, equals: .viewOptions)
+            .accessibilityIdentifier("brain-view-options")
+            .popover(isPresented: $showsViewOptions) {
                 VStack(alignment: .leading, spacing: 16) {
-                    Toggle("Synaptic flow", isOn: $flow).disabled(reduceMotion)
+                    Text("View Options")
+                        .font(.headline)
+                        .accessibilityAddTraits(.isHeader)
+                    Toggle("Automatic rotation", isOn: effectiveScanningBinding)
+                        .disabled(!motionControlsEnabled)
+                    Toggle("Flow animation", isOn: effectiveFlowBinding)
+                        .disabled(!motionControlsEnabled)
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Brain shell opacity").font(.callout)
+                        Text("Brain shell visibility").font(.callout)
                         Slider(value: hullOpacityBinding, in: 0 ... 0.35)
+                            .accessibilityLabel("Brain shell visibility")
+                            .accessibilityValue(Text(currentHullOpacity, format: .percent.precision(.fractionLength(0))))
+                            .disabled(metalRecovery.effectivePresentation == .table)
                     }
                     if reduceMotion {
                         Label("Motion effects follow Reduce Motion.", systemImage: "figure.walk.motion")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    Divider()
+                    Button("Reset to Whole Brain", systemImage: "arrow.uturn.backward.circle") {
+                        showsViewOptions = false
+                        clearSelection()
+                        model.selectedDomain = ""
+                        requestFocus(.viewOptions)
+                    }
+                    .disabled(model.selectedNodeID == nil && model.selectedAgentID == nil && model.selectedDomain.isEmpty)
                 }
                 .padding(18)
                 .frame(width: 280)
             }
-
-            Button {
-                clearSelectionAndRestoreFocus()
-                model.selectedDomain = ""
-            } label: {
-                Label("Whole Brain", systemImage: "arrow.uturn.backward.circle")
-            }
-            .disabled(model.selectedNodeID == nil && model.selectedAgentID == nil && model.selectedDomain.isEmpty)
 
             Button { Task { await model.refreshIncludingPinnedDetail() } } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
             .keyboardShortcut("r", modifiers: .command)
             .disabled(model.isLoading)
+            .accessibilityIdentifier("brain-refresh")
         }
     }
 
@@ -936,6 +949,28 @@ struct BrainView: View {
 
     private var currentHullOpacity: Double {
         model.mode == .memory ? memoryHullOpacity : connectomeHullOpacity
+    }
+
+    private var inspectorIsPresented: Bool {
+        showsInspector && model.hasVisibleInspector
+    }
+
+    private var motionControlsEnabled: Bool {
+        !reduceMotion && metalRecovery.effectivePresentation != .table
+    }
+
+    private var effectiveScanningBinding: Binding<Bool> {
+        Binding(
+            get: { motionControlsEnabled && scanning },
+            set: { scanning = $0 }
+        )
+    }
+
+    private var effectiveFlowBinding: Binding<Bool> {
+        Binding(
+            get: { motionControlsEnabled && flow },
+            set: { flow = $0 }
+        )
     }
 
     private var hasSelection: Bool {
@@ -1079,6 +1114,11 @@ struct BrainView: View {
     }
 
     private func clearSelectionAndRestoreFocus() {
+        clearSelection()
+        requestFocus(returnFocusTarget)
+    }
+
+    private func clearSelection() {
         showsInspector = false
         if model.mode == .memory {
             model.selectedNodeID = nil
@@ -1088,7 +1128,6 @@ struct BrainView: View {
             model.selectedEngramID = nil
             model.selectedConnection = nil
         }
-        requestFocus(returnFocusTarget)
     }
 
     private func dismissCurrentSelectionAndRestoreFocus() {
@@ -1141,7 +1180,7 @@ struct BrainView: View {
             model.mode == .memory ? "brain-memory-metal-surface" : "brain-connectome-metal-surface"
         case .metalRetry:
             "brain-metal-retry"
-        case .table, .inspectorClose, .relatedMemory:
+        case .table, .inspectorClose, .viewOptions, .relatedMemory:
             nil
         }
     }
@@ -1256,6 +1295,7 @@ private enum BrainFocusTarget: Hashable {
     case surface
     case table
     case inspectorClose
+    case viewOptions
     case relatedMemory(String)
     case metalRetry
 }
@@ -1343,7 +1383,7 @@ private struct AgentNeuronInspectorView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text((neuron.domain ?? "UNASSIGNED").uppercased())
                         .font(.caption2.weight(.bold)).tracking(1).foregroundStyle(CerebrumTheme.cyan)
-                    Text(neuron.name).font(.title2.weight(.bold)).fontDesign(.rounded)
+                    Text(neuron.name).font(.title2.weight(.bold))
                     Text(neuron.agentID).font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 Text("Retained local traffic describes stored message history, not lifetime traffic or online presence.")
@@ -1490,7 +1530,7 @@ private struct BrainNodeInspectorView: View {
                     Text(node.domain.uppercased())
                         .font(.caption2.weight(.bold)).tracking(1).foregroundStyle(CerebrumTheme.cyan)
                     Text("Memory Focus")
-                        .font(.title2.weight(.bold)).fontDesign(.rounded)
+                        .font(.title2.weight(.bold))
                 }
                 Text(node.content)
                     .textSelection(.enabled)

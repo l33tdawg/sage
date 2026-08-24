@@ -103,21 +103,25 @@ another large subsystem:
    lifecycle or typed reachability evidence can prove it.
    Route-level transition coverage is implemented; real URLSession
    EOF/backoff/cancellation timing remains an acceptance item.
-2. Remove duplicated page-title chrome. Use the unified macOS titlebar for the
-   title and keep at most one concise explanation/status line in content.
-3. Simplify the Brain toolbar: keep mode, presentation, and inspector visible;
-   group Scan, Flow, shell opacity, and reset under View Options.
-4. Make inspector visibility independent of selection. Closing an inspector
-   hides details; Escape clears semantic selection and returns focus.
+2. **Implemented for Overview, Search, and Brain:** Remove duplicated page-title
+   chrome. The unified macOS titlebar owns the route title and a compact,
+   width-adaptive context/status bar remains in content.
+3. **Implemented:** Simplify the Brain toolbar: mode, presentation, inspector,
+   View Options, and Refresh remain visible; rotation, flow, shell visibility,
+   and reset are grouped under View Options.
+4. **Implemented for Brain:** Inspector hiding is independent of selection.
+   Closing the inspector preserves semantic selection; Escape clears selection
+   and returns focus. Search inspector lifecycle remains an acceptance item.
 5. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
    detail errors, safe per-feed errors on Overview, and Diagnose/drill-down
    actions on unhealthy cards.
 6. Add menu commands and discoverability for Focus Search, Refresh,
    Show/Hide Inspector, Memory Map/List View, Memory/Agent Network, Clear
    Selection, View Options, and Keyboard Shortcuts.
-7. Move general titles back to standard SF Pro. Reserve rounded typography for
-   the CEREBRUM mark and a small number of hero/MRI accents; reserve SF Mono for
-   identifiers, hashes, and diagnostics.
+7. **Implemented for the current native slices:** General titles and metrics use
+   standard SF Pro. Rounded typography is allowlisted to the CEREBRUM mark and
+   Overview hero accent; SF Mono remains reserved for identifiers, hashes, and
+   diagnostics.
 8. Replace continuous decorative SSE pulsing with brief event-linked
     highlights, a coalesced “updates available” affordance when selection would
     be disturbed, and instant transitions under Reduce Motion.

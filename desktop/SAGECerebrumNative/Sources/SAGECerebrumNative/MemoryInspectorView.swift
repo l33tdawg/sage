@@ -23,7 +23,6 @@ struct MemoryInspectorView: View {
                             .foregroundStyle(CerebrumTheme.cyan)
                         Text("Memory Inspector")
                             .font(.title2.weight(.bold))
-                            .fontDesign(.rounded)
                     }
                     Spacer()
                     CerebrumStatusPill(

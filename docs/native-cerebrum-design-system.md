@@ -13,10 +13,13 @@ website in a window, a mobile app enlarged for desktop, or a sci-fi skin.
 ## Typography
 
 - Use SF Pro through SwiftUI semantic styles. No bundled display font.
-- Page titles use `.largeTitle.bold()` with the rounded system design.
+- Route titles belong to the native macOS titlebar through `navigationTitle` and
+  use standard SF Pro. Do not repeat them inside the page.
 - Hero summaries use `.title2.bold()`; sections use `.headline`.
 - Body and explanatory copy use `.body` or `.callout`; metadata uses `.caption`.
-- Metrics use `.title3.semibold()`, rounded design and tabular digits.
+- Metrics use `.title3.semibold()` with standard SF Pro and tabular digits.
+- Rounded typography is reserved for the CEREBRUM mark and a small number of
+  deliberate hero or MRI accents.
 - SF Mono is reserved for hashes, agent IDs, ports and technical addresses.
 - Text must reflow; fixed one-line truncation is not the default.
 
@@ -67,12 +70,15 @@ website in a window, a mobile app enlarged for desktop, or a sci-fi skin.
 
 - Grouped, collapsible native sidebar with SF Symbols and text labels.
 - Unified toolbar for contextual actions, refresh, data/transport status and session lock.
-- Page header: restrained eyebrow, clear title, one-line purpose statement.
+- Page context bar: one concise explanation or scope summary plus truthful data
+  status. It stacks when the available width cannot support a single line.
 - Hero surface: one decisive operational summary, never a marketing banner.
 - Cards: semantic title, optional status, divider, adaptive metrics or native
   table/form content.
 - Detail belongs in an inspector; creation and multi-step authority changes use
   sheets; destructive actions use confirmation dialogs.
+- Hiding an inspector changes presentation only and preserves semantic
+  selection. Escape clears the current semantic selection and restores focus.
 - Empty/error states use one symbol, a direct headline, explanation and at most
   one primary recovery action.
 

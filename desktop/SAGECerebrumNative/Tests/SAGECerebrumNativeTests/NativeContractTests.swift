@@ -44,6 +44,26 @@ import Testing
     #expect(BrainPresentation.table.accessibilityTitle.contains("Accessible Table"))
 }
 
+@Test func nativeTypographyReservesRoundedDesignForBrandAndHeroAccents() throws {
+    let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let sources = packageRoot.appendingPathComponent("Sources/SAGECerebrumNative")
+    let roundedOccurrences = try FileManager.default.contentsOfDirectory(
+        at: sources,
+        includingPropertiesForKeys: nil
+    )
+    .filter { $0.pathExtension == "swift" }
+    .reduce(into: [String: Int]()) { result, file in
+        let source = try String(contentsOf: file, encoding: .utf8)
+        let count = source.components(separatedBy: ".fontDesign(.rounded)").count - 1
+        if count > 0 { result[file.lastPathComponent] = count }
+    }
+
+    #expect(roundedOccurrences == ["OverviewView.swift": 1, "RootView.swift": 1])
+}
+
 @MainActor
 @Test func overviewStatusSeparatesSnapshotCompletenessFromEventTransport() async {
     let model = OverviewViewModel(api: MutationTestAPI(forgetResults: []))
@@ -632,6 +652,29 @@ extension HostedBrainAcceptance {
     #expect(model.selectedNodeID == selected.id)
     #expect(recorder.announcements == ["Interactive MRI unavailable. Showing Accessible Table."])
 }
+}
+
+@Test func brainInspectorHideAndEscapeKeepDistinctSemantics() throws {
+    let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let source = try String(
+        contentsOf: packageRoot.appendingPathComponent("Sources/SAGECerebrumNative/BrainView.swift"),
+        encoding: .utf8
+    )
+    let closeStart = try #require(source.range(of: "Button(\"Hide Inspector\""))
+    let closeEnd = try #require(source.range(of: ".labelStyle(.iconOnly)", range: closeStart.lowerBound ..< source.endIndex))
+    let closeAction = source[closeStart.lowerBound ..< closeEnd.lowerBound]
+
+    #expect(closeAction.contains("showsInspector = false"))
+    #expect(closeAction.contains("inspectorVisibilityIsUserControlled = true"))
+    #expect(!closeAction.contains("clearSelection"))
+    #expect(!closeAction.contains("selectedNodeID"))
+    #expect(source.contains("selected != nil && !inspectorVisibilityIsUserControlled"))
+    #expect(source.contains("Label(inspectorIsPresented ? \"Hide Inspector\" : \"Show Inspector\""))
+    #expect(source.contains(".onExitCommand"))
+    #expect(source.contains("dismissCurrentSelectionAndRestoreFocus()"))
 }
 
 extension HostedBrainAcceptance {

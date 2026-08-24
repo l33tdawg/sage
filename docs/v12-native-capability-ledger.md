@@ -36,6 +36,12 @@ exhaustive.
 
 ## Primary route inventory
 
+The implemented Overview, Search, and Brain routes now use titlebar-owned route
+titles with compact adaptive context/status bars. Brain keeps mode,
+presentation, inspector, View Options, and Refresh in the primary toolbar;
+View Options owns rotation, flow, shell visibility, and Whole Brain reset.
+Hiding the Brain inspector preserves semantic selection while Escape clears it.
+
 | Entry ID | Route | Mounted UI | Owner | Current native-window path | App-owned integration still required | Status |
 |---|---|---|---|---|---|---|
 | `overview.route` | `overview` | `OverviewView` | `native-control` | Implemented SwiftUI dashboard | Lifecycle/offline/accessibility/performance acceptance | implemented slice; acceptance open |

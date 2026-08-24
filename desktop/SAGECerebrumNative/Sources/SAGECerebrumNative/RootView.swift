@@ -170,7 +170,6 @@ private struct LoginView: View {
                 VStack(spacing: 7) {
                     Text("Welcome back")
                         .font(.largeTitle.weight(.bold))
-                        .fontDesign(.rounded)
                     Text("Unlock CEREBRUM to enter your sovereign memory.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -247,7 +246,6 @@ private struct NativeStateView: View {
             CerebrumBrandMark(size: 56)
             Label(title, systemImage: systemImage)
                 .font(.title2.weight(.bold))
-                .fontDesign(.rounded)
             Text(message)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
