@@ -3,6 +3,8 @@
 **Reviewed:** 2026-08-24 against the accepted SwiftUI/AppKit/Metal ADR, roadmap,
 capability ledger, acceptance contract, current Swift source, and workflows.
 
+**Current durable task:** `b945c6bb-8d06-45c7-91d1-ad1e15e6b84d`
+
 The native foundation is genuine and the implemented Overview, Search, and
 Brain slices are strong. It is not yet a production-complete v12 product. This
 document keeps release blockers separate from ideas so useful enhancements do
@@ -89,7 +91,12 @@ three real routes retain fixed shortcuts; commands are disabled outside a ready
 session for navigation and Lock; placeholder Settings no longer owns
 `Command-,`; and Brain's primary
 mode/presentation labels lead with plain language while preserving MRI and
-Connectome as secondary technical terms. This does not complete those routes.
+Connectome as secondary technical terms. The bounded follow-up now checkmarks
+the active Overview/Brain/Search Navigate item, moves Brain mode and View Options
+off VoiceOver's Control-Option modifier space to Control-Command, gates global
+commands behind Brain popovers, and requests route focus after native Brain
+inspector dismissal. These changes and the packaged v3 gate are green locally;
+CI is pending. This does not complete those routes.
 
 The remaining design increments should improve comprehension without creating
 another large subsystem:
@@ -114,29 +121,33 @@ another large subsystem:
    independent from bulk selection, shares toolbar/View-menu action paths, and
    reconciles a removed result fail closed. Escape clears selection and requests
    the stable route surface. The app-scene gate proves Search's inspect,
-   hide/reopen, identity-preservation, and exact table/close responder lifecycle.
-   Physical keyboard delivery, system AX, and real VoiceOver remain named-Mac
+   hide/reopen, identity-preservation, and exact table/close responder lifecycle
+   through v2. Brain's native inspector dismissal now requests route focus and
+   its popovers gate global commands. CI v3 validation, physical
+   keyboard/HID and WindowServer delivery, system AX, and real VoiceOver remain
    acceptance items.
 5. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
    detail errors, safe per-feed errors on Overview, and Diagnose/drill-down
    actions on unhealthy cards.
-6. **Implemented with bounded app-scene evidence for Focus Search and Search
-   Show/Hide Inspector; source-implemented for the remaining current native
-   commands:** Add route-aware macOS commands
+6. **Implemented with bounded v2 app-scene evidence for Focus Search and Search
+   Show/Hide Inspector; v3 application-routing fixture packaged green locally
+   with CI pending:** Add route-aware macOS commands
    for Focus Search, routed Refresh, Search Show/Hide Inspector and Clear Search
    Selection, Brain Show/Hide Inspector, Brain Mode—Memory
    Map or Agent Network—Presentation—Interactive Map or List View—Clear Brain
-   Selection, View Options, and a Help-menu Keyboard Shortcuts reference. Stable
-   development action catalog, one-shot search request policy, and
-   duplicate-shortcut guards are covered. A DEBUG-only launch of the real app
-   inventories `NSApplication.mainMenu`, dispatches the unique rendered **View >
-   Focus Search** item, and proves repeated focus of the exact mounted search
-   field editor. It then invokes the production Search inspect path, dispatches
-   the rendered **Hide Inspector** and replacement **Show Inspector** items,
-   preserves the inspected memory, and proves exact results-table and native
-   close-button focus return. Remaining rendered-action dispatch, physical
-   keyboard-event routing, system-AX/VoiceOver discovery, and the RC inventory
-   remain open on the named Mac.
+   Selection, View Options, and a Help-menu Keyboard Shortcuts reference. The
+   Navigate menu now checkmarks its active Overview/Brain/Search route. Brain
+   mode and View Options use Control-Command instead of VoiceOver's
+   Control-Option modifier chord. Stable development action catalog, one-shot
+   search request policy, and duplicate-shortcut guards are covered. The v3
+   DEBUG fixture directly dispatches rendered **Navigate > Brain**, then sends
+   synthetic Command-3, Command-F, and Control-Command-I keyDown/keyUp events
+   through `NSApplication.sendEvent`; a local keyDown monitor and exact
+   route/request/focus effects provide bounded application-level routing proof.
+   It retains the v2 Search inspect, Hide/Show identity, and exact table/close
+   responder lifecycle. This remains synthetic in-process evidence, not physical
+   keyboard/HID, WindowServer, system AX, VoiceOver, installed-RC, localization,
+   or non-US-layout proof. CI and the RC inventory remain open.
 7. **Implemented for the current native slices:** General titles and metrics use
    standard SF Pro. Rounded typography is allowlisted to the CEREBRUM mark and
    Overview hero accent; SF Mono remains reserved for identifiers, hashes, and

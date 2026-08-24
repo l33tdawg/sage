@@ -38,7 +38,9 @@ test('v12 macOS CI pins a runner and Xcode compatible with the Swift package', a
     assert.match(workflow, /SAGE_NATIVE_APP_SCENE_/);
     assert.match(workflow, /SAGE_NATIVE_DESIGN_PREVIEW/);
     assert.match(workflow, /SAGE_NATIVE_PREVIEW_ROUTE/);
-    assert.match(workflow, /release executable contains DEBUG-only acceptance markers/);
+    assert.match(workflow, /release Mach-O contains DEBUG-only acceptance markers/);
+    assert.match(workflow, /sage\\\.v12\\\.native-app-scene\\\.v3/);
+    assert.match(workflow, /rendered-menu-application-keyboard-search-inspector-lifecycle/);
     assert.match(workflow, /if: always\(\)/);
     assert.match(workflow, /app-scene-validation/);
     assert.match(workflow, /v12-native-app-scene-validate\.test\.mjs/);
@@ -72,7 +74,10 @@ test('app-scene acceptance guide and validator remain release-visible', async ()
 
     assert.match(ignore, /^!docs\/v12-native-app-scene-acceptance\.md$/m);
     assert.match(guide, /system_ax_server=false/);
-    assert.match(guide, /keyboard_event_routing=false/);
-    assert.match(validatorTest, /menu path mismatch/);
+    assert.match(guide, /application_keyboard_event_routing=true/);
+    assert.match(guide, /synthetic_keyboard_events=true/);
+    assert.match(guide, /physical_keyboard_event_routing=false/);
+    assert.match(guide, /NSApplication\.sendEvent/);
+    assert.match(validatorTest, /wrong inspector menu path/);
     assert.match(validatorTest, /field_editor_matches_first_responder/);
 });

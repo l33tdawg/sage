@@ -61,9 +61,10 @@ toolbar search field before one-shot consumption. Reducer/source evidence covers
 these transitions, and real app-scene evidence covers the rendered Focus Search
 item plus repeated mounted field-editor delivery, production inspect activation,
 rendered Hide/Show Inspector dispatch, semantic identity preservation, and exact
-results-table/close-button focus return. The expanded v2 gate is green locally;
-CI for this increment is pending. Remaining
-menu actions, physical keyboard-event routing, system AX, real VoiceOver, and
+results-table/close-button focus return. The expanded v2 gate is green. The v3
+synthetic application-keyboard fixture is packaged green locally, with CI
+pending. Physical keyboard/HID and WindowServer routing, system
+AX, real VoiceOver, localization, non-US layouts, installed-RC behavior, and
 release acceptance remain open.
 
 Brain now separates native Memory and Connectome modes from the independent MRI
@@ -102,24 +103,31 @@ and zoom. Brain keeps mode, presentation, inspector, View Options, and Refresh i
 toolbar. View Options groups automatic rotation, flow animation, shell
 visibility, and reset to Whole Brain. Hiding the Brain inspector preserves the
 semantic selection; Escape remains the explicit clear-selection and focus-return
-command. The source is wired so the standard macOS View menu owns one routed
-Refresh command and a ready-gated Focus Search command that navigates to Search
-and requests presentation of its native search field. Brain contributes route-scoped mode,
-presentation, inspector, clear-selection, and View Options commands through a
-focused scene value, while Help owns the accessible keyboard-shortcut reference.
-The typed source catalog, ready/exact-route/modal routing, one-shot search
-request policy, and duplicate Command-R guard are covered. A DEBUG-only launch
-of the real executable now inventories `NSApplication.mainMenu`, dispatches the
-unique rendered **View > Focus Search** target/action, and proves both initial
-and repeated first-responder ownership by the exact mounted search field editor.
-The same gate exercises Search's production inspect path, rendered **Hide
-Inspector** and replacement **Show Inspector** actions, semantic identity
-preservation, and exact table/close focus return. This is app-scene/AppKit
-evidence, not physical-keyboard, system-AX, or VoiceOver evidence; the remaining
-rendered commands, system AX, VoiceOver discovery, and release acceptance stay
-open on the named Mac. Brain phase three is implemented with separate agent, engram, and directed-connection
-focus, collision-safe scene identities, reserved overlay budgets, and linear
-traffic summaries. The renderer now adds time-invariant half-resolution
+command. Native inspector dismissal now requests focus on the active Brain route
+surface, and compact-navigator/View Options popovers gate global commands while
+presented. Brain mode and View Options shortcuts now use Control-Command rather
+than VoiceOver's Control-Option modifier space. The source is wired so the
+standard macOS View menu owns one routed Refresh command and a ready-gated Focus
+Search command that navigates to Search and requests presentation of its native
+search field. Brain contributes route-scoped mode, presentation, inspector,
+clear-selection, and View Options commands through a focused scene value, while
+Help owns the accessible keyboard-shortcut reference.
+The separate Navigate menu now checkmarks the active Overview, Brain, or Search
+route. The typed source catalog, ready/exact-route/modal routing, one-shot search
+request policy, and duplicate Command-R guard are covered. The green v2
+app-scene gate inventories `NSApplication.mainMenu`, covers rendered Focus
+Search and Search inspector Hide/Show, and proves the existing Search lifecycle.
+The locally implemented v3 fixture additionally dispatches rendered **Navigate
+> Brain**, then routes synthetic Command-3, Command-F, and Control-Command-I
+keyDown/keyUp `NSEvent` pairs through `NSApplication.sendEvent`. Its local
+keyDown monitor and exact checked-route, request/consumption, and responder
+effects prove application-level routing in a green packaged local run; CI is
+still pending. This is synthetic in-process evidence, not physical
+keyboard/HID, WindowServer, system AX, VoiceOver, installed-RC, localization, or
+non-US-layout proof. Brain phase three is implemented with separate agent,
+engram, and directed-connection focus, collision-safe scene identities, reserved
+overlay budgets, and linear traffic summaries. The renderer now adds
+time-invariant half-resolution
 offscreen extraction, separable blur, and additive bloom; retained traffic
 drives p95-normalized screen-space ribbon width; and selected cells receive a
 reduced-motion-aware camera-focus ease. Reciprocal synapses now occupy deterministic curved lanes,
@@ -300,7 +308,12 @@ non-selectable **Coming Soon** section instead of making them look equivalent
 to working routes. Only Overview, Brain, and Search own fixed navigation
 shortcuts (`Command-1` through `Command-3`), navigation and Lock commands are
 disabled outside a ready session, and `Command-,` no longer opens placeholder
-Settings. These are product-honesty improvements, not route completion.
+Settings. Navigate now checkmarks exactly the active implemented route. Brain
+mode and View Options use Control-Command rather than the VoiceOver
+Control-Option modifier chord, Brain popovers gate global commands, and native
+Brain inspector dismissal requests route focus. These are locally implemented
+product-honesty and keyboard-safety improvements, not route completion or
+completed acceptance.
 
 Overview, Search/Inspector, and the Brain Memory/Connectome workflow are real native controls;
 they do not load the browser SPA or a WebView. The parity ledger remains open
@@ -311,7 +324,7 @@ daemon lifecycle, recovery, updates, and rollback.
 
 | Platform | Evidence already present | Production blockers |
 |---|---|---|
-| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; previous CI app-scene gate green and expanded v2 Search inspector lifecycle green locally with CI pending; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Remaining rendered-command and physical-keyboard evidence, named-Mac system AX/VoiceOver and performance evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, release acceptance, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
+| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; previous v2 packaged/CI app-scene gate green; v3 checkmarked navigation, VoiceOver-safe Brain command chords, popover/focus cleanup, and synthetic `NSApplication.sendEvent` routing packaged green locally with CI pending; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Physical keyboard/HID and WindowServer routing, localization/non-US-layout evidence, remaining rendered commands, named-Mac system AX/VoiceOver and performance evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, installed release acceptance, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
 | Windows | x64 NSIS preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported |
 | Linux | x64 `.deb` and AppImage preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported; optional native R&D remains blocked by `RUSTSEC-2024-0429` |
 
@@ -375,7 +388,7 @@ with one current native execution child:
    `v12-beta`, from the first tester build through production acceptance;
 2. `867fa87f-14b0-45ca-a11c-10dc48746257` — completed native child that delivered
    the expanded Search inspector app-scene lifecycle gate; and
-3. `c26eb8e6-ce10-452e-ba9b-25af97f85808` — current native execution child for
+3. `b945c6bb-8d06-45c7-91d1-ad1e15e6b84d` — current native execution child for
    remaining rendered commands, physical-keyboard routing, system-AX/VoiceOver,
    reflow/localization/contrast, transport timing, performance, cross-GPU,
    offline, daemon lifecycle, route parity, and release acceptance;

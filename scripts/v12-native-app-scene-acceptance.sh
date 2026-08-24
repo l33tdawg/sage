@@ -9,22 +9,31 @@ fi
 ROOT=$(cd "$(dirname "$0")/.." && pwd -P)
 VERSION=${SAGE_NATIVE_VERSION:-12.0.0-beta.1}
 COMMIT=$(git -C "${ROOT}" rev-parse HEAD)
-SOURCE_SNAPSHOT_SHA256=$(
-  {
-    git -C "${ROOT}" diff --binary HEAD
-    git -C "${ROOT}" ls-files --others --exclude-standard | while IFS= read -r candidate; do
-      printf 'untracked=%s\n' "${candidate}"
-      shasum -a 256 "${ROOT}/${candidate}"
-    done
-  } | shasum -a 256 | awk '{print $1}'
-)
-SOURCE_CLEANLINESS=clean
-if [ -n "$(git -C "${ROOT}" status --porcelain=v1 --untracked-files=all)" ]; then
-  SOURCE_CLEANLINESS=dirty
-fi
-SOURCE_STATE="${SOURCE_CLEANLINESS}:${SOURCE_SNAPSHOT_SHA256}"
 BUILD_DIR="${ROOT}/dist/v12-native/app-scene-debug/${VERSION}-$$"
 EVIDENCE_DIR="${SAGE_NATIVE_APP_SCENE_EVIDENCE_DIR:-${ROOT}/dist/v12-native/${VERSION}/app-scene-validation}"
+
+compute_source_state() {
+  local snapshot_sha cleanliness
+  snapshot_sha=$(
+    {
+      git -C "${ROOT}" diff --binary HEAD
+      git -C "${ROOT}" ls-files --others --exclude-standard | while IFS= read -r candidate; do
+        printf 'untracked=%s\n' "${candidate}"
+        shasum -a 256 "${ROOT}/${candidate}"
+      done
+    } | shasum -a 256 | awk '{print $1}'
+  )
+  cleanliness=clean
+  if [ -n "$(git -C "${ROOT}" status --porcelain=v1 --untracked-files=all)" ]; then
+    cleanliness=dirty
+  fi
+  printf '%s:%s\n' "${cleanliness}" "${snapshot_sha}"
+}
+
+mkdir -p "${EVIDENCE_DIR}"
+EVIDENCE_DIR=$(cd "${EVIDENCE_DIR}" && pwd -P)
+printf '%s\n' 'app-scene acceptance pending' >"${EVIDENCE_DIR}/STATUS.txt"
+SOURCE_STATE_BEFORE_BUILD=$(compute_source_state)
 
 SAGE_NATIVE_VERSION="${VERSION}" \
 SAGE_NATIVE_CONFIGURATION=debug \
@@ -32,13 +41,17 @@ SAGE_NATIVE_OUTPUT_DIR="${BUILD_DIR}" \
 SAGE_NATIVE_SCRATCH_PATH="${BUILD_DIR}/swiftpm" \
   bash "${ROOT}/scripts/build-native-cerebrum-macos.sh" >/dev/null
 
+SOURCE_STATE_AFTER_BUILD=$(compute_source_state)
+if [ "${SOURCE_STATE_AFTER_BUILD}" != "${SOURCE_STATE_BEFORE_BUILD}" ]; then
+  echo "source state changed during native app-scene build" >&2
+  exit 1
+fi
+SOURCE_STATE="${SOURCE_STATE_BEFORE_BUILD}"
+
 APP_PATH="${BUILD_DIR}/SAGE CEREBRUM Native.app"
 EXECUTABLE="${APP_PATH}/Contents/MacOS/SAGECerebrumNative"
 test -x "${EXECUTABLE}"
 
-mkdir -p "${EVIDENCE_DIR}"
-EVIDENCE_DIR=$(cd "${EVIDENCE_DIR}" && pwd -P)
-printf '%s\n' 'app-scene acceptance pending' >"${EVIDENCE_DIR}/STATUS.txt"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-app-scene-$$"
 RUN_DIR="${EVIDENCE_DIR}/${RUN_ID}"
 mkdir "${RUN_DIR}"
@@ -76,7 +89,7 @@ trap on_signal INT TERM
 
 SAGE_NATIVE_DESIGN_PREVIEW=1 \
 SAGE_NATIVE_PREVIEW_ROUTE=overview \
-SAGE_NATIVE_APP_SCENE_ACCEPTANCE=rendered-menu-search-inspector-focus-lifecycle \
+SAGE_NATIVE_APP_SCENE_ACCEPTANCE=rendered-menu-application-keyboard-search-inspector-lifecycle \
 SAGE_NATIVE_APP_SCENE_COMMIT="${COMMIT}" \
 SAGE_NATIVE_APP_SCENE_SOURCE_STATE="${SOURCE_STATE}" \
 SAGE_NATIVE_APP_SCENE_RUN_ID="${RUN_ID}" \
@@ -105,9 +118,9 @@ APP_PID=""
 node "${ROOT}/scripts/v12-native-app-scene-validate.mjs" "${RESULT}" "${COMMIT}" "${SOURCE_STATE}" "${RUN_ID}" "${LAUNCHED_PID}"
 
 {
-  printf 'schema=sage.v12.native-app-scene.manifest.v2\n'
+  printf 'schema=sage.v12.native-app-scene.manifest.v3\n'
   printf 'run_id=%s\n' "${RUN_ID}"
-  printf 'scenario=rendered-menu-search-inspector-focus-lifecycle\n'
+  printf 'scenario=rendered-menu-application-keyboard-search-inspector-lifecycle\n'
   printf 'commit=%s\n' "${COMMIT}"
   printf 'source_state=%s\n' "${SOURCE_STATE}"
   printf 'bundle_id=%s\n' "$(plutil -extract CFBundleIdentifier raw "${APP_PATH}/Contents/Info.plist")"

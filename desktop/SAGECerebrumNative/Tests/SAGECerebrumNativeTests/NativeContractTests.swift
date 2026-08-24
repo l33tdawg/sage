@@ -152,13 +152,16 @@ import Testing
         "search.command.clear-selection|Clear Search Selection|-|||Search",
         "brain.command.refresh|Refresh Brain|r|command|⌘R|Global",
         "brain.command.toggle-inspector|Show or Hide Inspector|i|command+control|⌃⌘I|Brain",
-        "brain.command.mode-memory-map|Memory Map|1|control+option|⌥⌃1|Brain",
-        "brain.command.mode-agent-network|Agent Network|2|control+option|⌥⌃2|Brain",
+        "brain.command.mode-memory-map|Memory Map|1|command+control|⌃⌘1|Brain",
+        "brain.command.mode-agent-network|Agent Network|2|command+control|⌃⌘2|Brain",
         "brain.command.presentation-interactive-map|Interactive Map|m|command+control|⌃⌘M|Brain",
         "brain.command.presentation-list-view|List View|l|command+control|⌃⌘L|Brain",
         "brain.command.clear-selection|Clear Brain Selection|-|||Brain",
-        "brain.command.view-options|Show or Hide View Options|v|control+option|⌥⌃V|Brain",
+        "brain.command.view-options|Show or Hide View Options|v|command+control|⌃⌘V|Brain",
     ])
+    #expect(CerebrumCommandID.allCases.allSatisfy {
+        !($0.specification.modifiers.contains(.control) && $0.specification.modifiers.contains(.option))
+    })
 }
 
 @Test func routedRefreshOwnsTheOnlyCommandRRegistration() throws {
@@ -193,6 +196,10 @@ import Testing
     )
     #expect(commands.contains("CommandGroup(after: .sidebar)"))
     #expect(commands.contains("CommandGroup(before: .help)"))
+    #expect(commands.contains("selected: session.route == route"))
+    #expect(commands.contains("select: { session.route = route }"))
+    #expect(commands.contains("NSMenu.didBeginTrackingNotification"))
+    #expect(!commands.contains("menu.delegate = self"))
     #expect(commands.contains("keyboardShortcut(KeyEquivalent(key), modifiers: command.specification.modifiers)"))
     #expect(commands.contains("Self.shortcutRow(.keyboardShortcuts)"))
     #expect(commands.contains("(\"Clear Search Selection and Details\", \"Esc\")"))
@@ -1003,6 +1010,8 @@ extension HostedBrainAcceptance {
     #expect(source.contains("Label(inspectorIsPresented ? \"Hide Inspector\" : \"Show Inspector\""))
     #expect(source.contains(".onExitCommand"))
     #expect(source.contains("dismissCurrentSelectionAndRestoreFocus()"))
+    #expect(source.contains("if !$0 { requestFocus(returnFocusTarget) }"))
+    #expect(source.contains("blocksGlobalCommands: showsNavigator || showsViewOptions"))
 }
 
 extension HostedBrainAcceptance {

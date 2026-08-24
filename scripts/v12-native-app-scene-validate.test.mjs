@@ -6,39 +6,96 @@ const commit = 'a'.repeat(40);
 const sourceState = `clean:${'b'.repeat(64)}`;
 const runID = '20260824T010203Z-app-scene-42';
 const expectedPID = 42;
+const capturedWindowNumber = 7;
 const assertionIDs = [
     'captured-real-scene-window',
+    'rendered-navigate-brain-menu',
+    'rendered-navigate-brain-dispatch',
+    'application-keyboard-navigate-search',
     'rendered-focus-search-menu',
-    'first-mounted-search-focus',
+    'application-keyboard-focus-search',
     'mounted-search-results-table',
-    'repeated-mounted-search-focus',
+    'repeated-rendered-focus-search',
     'production-inspect-path',
     'rendered-hide-inspector-menu',
     'hide-preserves-inspection-and-restores-table',
     'rendered-show-inspector-menu',
+    'application-keyboard-show-inspector',
     'show-preserves-inspection-and-restores-close',
 ];
 
+const keyboardSnapshot = ({
+    stage, key, keyCode, modifiers, menuPath, routeBefore, routeAfter, requestBefore,
+}) => ({
+    stage,
+    dispatch_surface: 'NSApplication.sendEvent',
+    event_sequence: 'keyDown,keyUp',
+    key,
+    key_code: keyCode,
+    modifiers,
+    menu_path: menuPath,
+    route_before: routeBefore,
+    route_after: routeAfter,
+    observed_effect: true,
+    local_monitor_key_down_count: 1,
+    window_number: capturedWindowNumber,
+    app_is_active: true,
+    window_is_key: true,
+    is_repeat: false,
+    ...(requestBefore === undefined ? {} : {
+        request_id_before: requestBefore,
+        request_id_after: requestBefore + 1,
+        consumed_request_id_after: requestBefore + 1,
+    }),
+});
+
 const valid = () => ({
-    schema: 'sage.v12.native-app-scene.v2',
-    scenario: 'rendered-menu-search-inspector-focus-lifecycle',
+    schema: 'sage.v12.native-app-scene.v3',
+    scenario: 'rendered-menu-application-keyboard-search-inspector-lifecycle',
     run_id: runID,
     commit,
     source_state: sourceState,
     bundle_id: 'com.sage.cerebrum.beta',
     bundle_version: '12.0.0-beta.1',
-    pid: 42,
+    pid: expectedPID,
+    captured_window_number: capturedWindowNumber,
     architecture: 'arm64',
     os_version: 'macOS test',
     started_at: '2026-08-24T00:00:00Z',
     completed_at: '2026-08-24T00:00:01Z',
     duration_ms: 1_000,
     passed: true,
+    application_keyboard_event_routing: true,
+    synthetic_keyboard_events: true,
+    physical_keyboard_event_routing: false,
     system_ax_server: false,
     voiceover_spoken_evidence: false,
-    keyboard_event_routing: false,
     assertions: assertionIDs.map((id) => ({ id, expected: 'expected proof', actual: 'actual proof', passed: true })),
-    menu_snapshot: [{ path: 'View > Focus Search', key: 'f', modifiers: 'command', enabled: true }],
+    menu_snapshot: [
+        { path: 'Navigate > Overview', key: '1', modifiers: 'command', enabled: true },
+        { path: 'Navigate > Brain', key: '2', modifiers: 'command', enabled: true },
+        { path: 'Navigate > Search', key: '3', modifiers: 'command', enabled: true },
+        { path: 'View > Focus Search', key: 'f', modifiers: 'command', enabled: true },
+    ],
+    route_lifecycle_snapshot: [
+        { stage: 'initial', route: 'overview', implemented_item_count: 3, checked_item_count: 1, checked_menu_title: 'Overview' },
+        { stage: 'rendered-brain', route: 'brain', implemented_item_count: 3, checked_item_count: 1, checked_menu_title: 'Brain' },
+        { stage: 'application-keyboard-search', route: 'search', implemented_item_count: 3, checked_item_count: 1, checked_menu_title: 'Search' },
+    ],
+    keyboard_event_snapshot: [
+        keyboardSnapshot({
+            stage: 'navigate-search', key: '3', keyCode: 20, modifiers: 'command', menuPath: 'Navigate > Search',
+            routeBefore: 'brain', routeAfter: 'search',
+        }),
+        keyboardSnapshot({
+            stage: 'focus-search', key: 'f', keyCode: 3, modifiers: 'command', menuPath: 'View > Focus Search',
+            routeBefore: 'search', routeAfter: 'search', requestBefore: 0,
+        }),
+        keyboardSnapshot({
+            stage: 'show-inspector', key: 'i', keyCode: 34, modifiers: 'control+command', menuPath: 'View > Show Inspector',
+            routeBefore: 'search', routeAfter: 'search', requestBefore: 1,
+        }),
+    ],
     menu_lifecycle_snapshot: [
         { stage: 'inspector-open', path: 'View > Hide Inspector', key: 'i', modifiers: 'control+command', enabled: true },
         { stage: 'inspector-hidden', path: 'View > Show Inspector', key: 'i', modifiers: 'control+command', enabled: true },
@@ -54,40 +111,26 @@ const valid = () => ({
             field_editor_matches_first_responder: true,
             field_owns_first_responder: true,
             first_responder_class: 'NSTextView',
+            window_number: capturedWindowNumber,
             window_title: 'Search',
         })),
         {
-            stage: 'inspector-close',
-            window_is_key: true,
-            runtime_class: 'NSButton',
-            is_ns_button: true,
-            is_ns_table_view: false,
-            identifier: 'search-inspector-close',
-            control_window_matches: true,
-            control_is_exact_first_responder: true,
-            window_title: 'Search',
+            stage: 'inspector-close', window_is_key: true, runtime_class: 'FocusableInspectorButton',
+            is_ns_button: true, is_ns_table_view: false, identifier: 'search-inspector-close',
+            control_window_matches: true, control_is_exact_first_responder: true,
+            window_number: capturedWindowNumber, window_title: 'Search',
         },
         {
-            stage: 'results-after-hide',
-            window_is_key: true,
-            runtime_class: 'SwiftUIOutlineTableView',
-            is_ns_button: false,
-            is_ns_table_view: true,
-            identifier: 'search-results-table',
-            control_window_matches: true,
-            control_is_exact_first_responder: true,
-            window_title: 'Search',
+            stage: 'results-after-hide', window_is_key: true, runtime_class: 'SwiftUIOutlineTableView',
+            is_ns_button: false, is_ns_table_view: true, identifier: 'search-results-table',
+            control_window_matches: true, control_is_exact_first_responder: true,
+            window_number: capturedWindowNumber, window_title: 'Search',
         },
         {
-            stage: 'inspector-close-reopened',
-            window_is_key: true,
-            runtime_class: 'NSButton',
-            is_ns_button: true,
-            is_ns_table_view: false,
-            identifier: 'search-inspector-close',
-            control_window_matches: true,
-            control_is_exact_first_responder: true,
-            window_title: 'Search',
+            stage: 'inspector-close-reopened', window_is_key: true, runtime_class: 'FocusableInspectorButton',
+            is_ns_button: true, is_ns_table_view: false, identifier: 'search-inspector-close',
+            control_window_matches: true, control_is_exact_first_responder: true,
+            window_number: capturedWindowNumber, window_title: 'Search',
         },
     ],
     search_lifecycle_snapshot: [
@@ -96,102 +139,175 @@ const valid = () => ({
         { stage: 'inspector-hidden', is_ready: true, inspected_memory_id: 'mem-native-001', inspector_is_presented: false, focus_target: 'results' },
         { stage: 'inspector-reopened', is_ready: true, inspected_memory_id: 'mem-native-001', inspector_is_presented: true, focus_target: 'inspectorClose' },
     ],
+    search_focus_request_id: 2,
+    consumed_search_focus_request_id: 2,
+    search_has_inspector: true,
+    session_search_inspector_is_presented: true,
+    search_inspector_toggle_request_id: 2,
+    consumed_search_inspector_toggle_request_id: 2,
+    first_responder_class: 'FocusableInspectorButton',
+    current_search_snapshot: {
+        stage: 'current', is_ready: true, inspected_memory_id: 'mem-native-001',
+        inspector_is_presented: true, focus_target: 'inspectorClose',
+    },
+    current_inspector_menu_snapshot: [
+        { path: 'View > Hide Inspector', key: 'i', modifiers: 'control+command', enabled: true },
+    ],
 });
 
-test('native app-scene v2 evidence accepts only the complete bounded lifecycle proof', () => {
+const reject = (name, mutate, expected = {}) => {
+    test(`native app-scene v3 evidence rejects ${name}`, () => {
+        const value = valid();
+        mutate(value);
+        assert.throws(() => validateNativeAppScene(
+            value,
+            expected.commit ?? commit,
+            expected.sourceState ?? sourceState,
+            expected.runID ?? runID,
+            expected.pid ?? expectedPID,
+        ));
+    });
+};
+
+test('native app-scene v3 evidence accepts only the complete routed keyboard lifecycle proof', () => {
     assert.equal(validateNativeAppScene(valid(), commit, sourceState, runID, expectedPID), true);
 });
 
-for (const [name, mutate, expected = undefined] of [
-    ['schema', (value) => { value.schema = 'sage.v12.native-app-scene.v1'; }],
-    ['scenario', (value) => { value.scenario = 'rendered-menu-mounted-search-focus'; }],
+for (const [name, mutate, expected] of [
+    ['schema downgrade', (value) => { value.schema = 'sage.v12.native-app-scene.v2'; }],
+    ['scenario mismatch', (value) => { value.scenario = 'rendered-menu-search-inspector-focus-lifecycle'; }],
+    ['legacy ambiguous keyboard_event_routing', (value) => { value.keyboard_event_routing = true; }],
     ['run-id mismatch', (value) => { value.run_id = '20260824T010203Z-app-scene-43'; }],
     ['malformed expected run-id', () => {}, { runID: 'run-42' }],
     ['commit mismatch', (value) => { value.commit = 'c'.repeat(40); }],
     ['source-state mismatch', (value) => { value.source_state = `dirty:${'d'.repeat(64)}`; }],
     ['bundle identity', (value) => { value.bundle_id = 'com.example.wrapper'; }],
     ['bundle version', (value) => { value.bundle_version = '12-beta'; }],
-    ['pid', (value) => { value.pid = 1; }],
     ['pid mismatch', (value) => { value.pid = 43; }],
+    ['missing captured window number', (value) => { delete value.captured_window_number; }],
+    ['invalid captured window number', (value) => { value.captured_window_number = 0; }],
+    ['keyboard cross-window mismatch', (value) => { value.keyboard_event_snapshot[1].window_number = 8; }],
+    ['responder cross-window mismatch', (value) => { value.responder_snapshot[3].window_number = 8; }],
     ['architecture', (value) => { value.architecture = ''; }],
+    ['OS version', (value) => { value.os_version = ''; }],
     ['invalid timestamp', (value) => { value.started_at = 'not-a-date'; }],
     ['reversed timestamps', (value) => { value.completed_at = '2026-08-23T23:59:59Z'; }],
-    ['overstated system AX', (value) => { value.system_ax_server = true; }],
     ['deadline breach', (value) => { value.duration_ms = 15_001; }],
+    ['failed result', (value) => { value.passed = false; value.failure = 'failure'; }],
+    ['missing application keyboard proof', (value) => { delete value.application_keyboard_event_routing; }],
+    ['false application keyboard proof', (value) => { value.application_keyboard_event_routing = false; }],
+    ['missing synthetic keyboard proof', (value) => { delete value.synthetic_keyboard_events; }],
+    ['false synthetic keyboard proof', (value) => { value.synthetic_keyboard_events = false; }],
+    ['missing physical keyboard boundary', (value) => { delete value.physical_keyboard_event_routing; }],
+    ['overstated physical keyboard proof', (value) => { value.physical_keyboard_event_routing = true; }],
+    ['missing system AX boundary', (value) => { delete value.system_ax_server; }],
+    ['overstated system AX', (value) => { value.system_ax_server = true; }],
+    ['missing VoiceOver boundary', (value) => { delete value.voiceover_spoken_evidence; }],
+    ['overstated VoiceOver', (value) => { value.voiceover_spoken_evidence = true; }],
+    ['unknown top-level claim', (value) => { value.window_server_event_routing = true; }],
     ['missing assertion', (value) => { value.assertions.pop(); }],
     ['extra assertion', (value) => { value.assertions.push({ id: 'extra', expected: 'x', actual: 'x', passed: true }); }],
-    ['unknown assertion replacing required assertion', (value) => { value.assertions[9].id = 'extra'; }],
-    ['duplicate assertion', (value) => { value.assertions[9].id = value.assertions[0].id; }],
+    ['reordered assertions', (value) => { [value.assertions[1], value.assertions[2]] = [value.assertions[2], value.assertions[1]]; }],
+    ['duplicate assertion', (value) => { value.assertions[13].id = value.assertions[12].id; }],
     ['failed assertion', (value) => { value.assertions[0].passed = false; }],
     ['empty assertion proof', (value) => { value.assertions[0].actual = ''; }],
-    ['menu path mismatch', (value) => { value.menu_snapshot[0].path = 'Nested > View > Focus Search'; }],
-    ['duplicate menu identity', (value) => { value.menu_snapshot.push({ ...value.menu_snapshot[0] }); }],
-    ['menu bound overflow', (value) => { value.menu_snapshot = Array.from({ length: 257 }, () => ({ path: 'Other', key: '', modifiers: '', enabled: true })); }],
+    ['oversized assertion proof', (value) => { value.assertions[0].actual = 'x'.repeat(1_025); }],
+    ['unknown assertion key', (value) => { value.assertions[0].claim = true; }],
+    ['menu bound overflow', (value) => { value.menu_snapshot = Array.from({ length: 257 }, (_, index) => ({ path: `Other > ${index}` })); }],
+    ['missing Navigate Overview', (value) => { value.menu_snapshot.splice(0, 1); }],
+    ['duplicate Navigate Brain path', (value) => { value.menu_snapshot.push({ ...value.menu_snapshot[1] }); }],
+    ['wrong Navigate Search key', (value) => { value.menu_snapshot[2].key = '2'; }],
+    ['wrong Focus Search modifiers', (value) => { value.menu_snapshot[3].modifiers = 'control+command'; }],
+    ['disabled Focus Search', (value) => { value.menu_snapshot[3].enabled = false; }],
+    ['unknown menu key', (value) => { value.menu_snapshot[3].identifier = 'global.command.focus-search'; }],
+    ['missing route lifecycle stage', (value) => { value.route_lifecycle_snapshot.pop(); }],
+    ['extra route lifecycle stage', (value) => { value.route_lifecycle_snapshot.push({ ...value.route_lifecycle_snapshot[2], stage: 'extra' }); }],
+    ['reordered route lifecycle stages', (value) => { value.route_lifecycle_snapshot.reverse(); }],
+    ['wrong initial route', (value) => { value.route_lifecycle_snapshot[0].route = 'brain'; }],
+    ['wrong rendered route title', (value) => { value.route_lifecycle_snapshot[1].checked_menu_title = 'Search'; }],
+    ['wrong implemented route count', (value) => { value.route_lifecycle_snapshot[2].implemented_item_count = 4; }],
+    ['wrong checked route count', (value) => { value.route_lifecycle_snapshot[2].checked_item_count = 0; }],
+    ['unknown route key', (value) => { value.route_lifecycle_snapshot[1].command_id = 'navigate.brain'; }],
+    ['missing keyboard event stage', (value) => { value.keyboard_event_snapshot.pop(); }],
+    ['extra keyboard event stage', (value) => { value.keyboard_event_snapshot.push({ ...value.keyboard_event_snapshot[2], stage: 'extra' }); }],
+    ['reordered keyboard event stages', (value) => { value.keyboard_event_snapshot.reverse(); }],
+    ['wrong keyboard dispatch surface', (value) => { value.keyboard_event_snapshot[0].dispatch_surface = 'NSApplication.sendAction'; }],
+    ['wrong keyboard event sequence', (value) => { value.keyboard_event_snapshot[0].event_sequence = 'keyDown'; }],
+    ['wrong navigate key', (value) => { value.keyboard_event_snapshot[0].key = '2'; }],
+    ['wrong navigate key code', (value) => { value.keyboard_event_snapshot[0].key_code = 19; }],
+    ['wrong focus modifier', (value) => { value.keyboard_event_snapshot[1].modifiers = 'control+command'; }],
+    ['wrong inspector menu path', (value) => { value.keyboard_event_snapshot[2].menu_path = 'View > Hide Inspector'; }],
+    ['wrong route before', (value) => { value.keyboard_event_snapshot[0].route_before = 'overview'; }],
+    ['wrong route after', (value) => { value.keyboard_event_snapshot[0].route_after = 'brain'; }],
+    ['unobserved keyboard effect', (value) => { value.keyboard_event_snapshot[0].observed_effect = false; }],
+    ['duplicate monitored keyDown', (value) => { value.keyboard_event_snapshot[1].local_monitor_key_down_count = 2; }],
+    ['invalid keyboard window number', (value) => { value.keyboard_event_snapshot[1].window_number = 0; }],
+    ['inactive application', (value) => { value.keyboard_event_snapshot[1].app_is_active = false; }],
+    ['non-key application window', (value) => { value.keyboard_event_snapshot[1].window_is_key = false; }],
+    ['repeated keyboard event', (value) => { value.keyboard_event_snapshot[1].is_repeat = true; }],
+    ['request fields on navigation', (value) => { value.keyboard_event_snapshot[0].request_id_before = 0; }],
+    ['missing focus request field', (value) => { delete value.keyboard_event_snapshot[1].request_id_before; }],
+    ['non-integer focus request field', (value) => { value.keyboard_event_snapshot[1].request_id_before = 0.5; }],
+    ['focus request delta greater than one', (value) => { value.keyboard_event_snapshot[1].request_id_after = 2; value.keyboard_event_snapshot[1].consumed_request_id_after = 2; }],
+    ['unconsumed focus request', (value) => { value.keyboard_event_snapshot[1].consumed_request_id_after = 0; }],
+    ['inspector request did not increment', (value) => { value.keyboard_event_snapshot[2].request_id_after = 1; value.keyboard_event_snapshot[2].consumed_request_id_after = 1; }],
+    ['unconsumed inspector request', (value) => { value.keyboard_event_snapshot[2].consumed_request_id_after = 1; }],
+    ['unknown keyboard key', (value) => { value.keyboard_event_snapshot[1].physical_keyboard = false; }],
     ['missing menu lifecycle stage', (value) => { value.menu_lifecycle_snapshot.pop(); }],
     ['extra menu lifecycle stage', (value) => { value.menu_lifecycle_snapshot.push({ ...value.menu_lifecycle_snapshot[0], stage: 'extra' }); }],
     ['reordered menu lifecycle stages', (value) => { value.menu_lifecycle_snapshot.reverse(); }],
     ['wrong hidden menu transition', (value) => { value.menu_lifecycle_snapshot[1].path = 'View > Hide Inspector'; }],
-    ['wrong menu shortcut', (value) => { value.menu_lifecycle_snapshot[0].modifiers = 'command'; }],
-    ['disabled menu transition', (value) => { value.menu_lifecycle_snapshot[2].enabled = false; }],
+    ['wrong inspector shortcut', (value) => { value.menu_lifecycle_snapshot[0].modifiers = 'command'; }],
+    ['disabled inspector transition', (value) => { value.menu_lifecycle_snapshot[2].enabled = false; }],
+    ['unknown menu lifecycle key', (value) => { value.menu_lifecycle_snapshot[1].count = 1; }],
     ['missing responder stage', (value) => { value.responder_snapshot.pop(); }],
     ['extra responder stage', (value) => { value.responder_snapshot.push({ ...value.responder_snapshot[4], stage: 'extra' }); }],
     ['reordered responder stages', (value) => { [value.responder_snapshot[2], value.responder_snapshot[3]] = [value.responder_snapshot[3], value.responder_snapshot[2]]; }],
     ['wrong results responder identity', (value) => { value.responder_snapshot[3].identifier = 'search-inspector-close'; }],
     ['wrong close responder identity', (value) => { value.responder_snapshot[4].identifier = 'search-results-table'; }],
-    ['empty responder runtime class', (value) => { value.responder_snapshot[2].runtime_class = ''; }],
+    ['non-native results responder type', (value) => { value.responder_snapshot[3].is_ns_table_view = false; value.responder_snapshot[3].is_ns_button = true; }],
+    ['unknown responder key', (value) => { value.responder_snapshot[4].ax_role = 'AXButton'; }],
     ['missing Search lifecycle stage', (value) => { value.search_lifecycle_snapshot.pop(); }],
     ['extra Search lifecycle stage', (value) => { value.search_lifecycle_snapshot.push({ ...value.search_lifecycle_snapshot[3], stage: 'extra' }); }],
     ['reordered Search lifecycle stages', (value) => { value.search_lifecycle_snapshot.reverse(); }],
     ['unready Search lifecycle stage', (value) => { value.search_lifecycle_snapshot[2].is_ready = false; }],
     ['ready lifecycle starts inspected', (value) => { value.search_lifecycle_snapshot[0].inspected_memory_id = 'mem-native-001'; }],
-    ['opened lifecycle is hidden', (value) => { value.search_lifecycle_snapshot[1].inspector_is_presented = false; }],
-    ['deterministic memory identity', (value) => {
-        for (const snapshot of value.search_lifecycle_snapshot.slice(1)) snapshot.inspected_memory_id = 'mem-native-999';
-    }],
+    ['deterministic memory identity', (value) => { value.search_lifecycle_snapshot[1].inspected_memory_id = 'mem-native-999'; }],
     ['hidden lifecycle loses semantic ID', (value) => { value.search_lifecycle_snapshot[2].inspected_memory_id = ''; }],
     ['hidden lifecycle has wrong focus', (value) => { value.search_lifecycle_snapshot[2].focus_target = 'inspectorClose'; }],
     ['reopened lifecycle changes semantic ID', (value) => { value.search_lifecycle_snapshot[3].inspected_memory_id = 'mem-native-002'; }],
     ['reopened lifecycle has wrong focus', (value) => { value.search_lifecycle_snapshot[3].focus_target = 'results'; }],
-]) {
-    test(`native app-scene v2 evidence rejects ${name}`, () => {
-        const value = valid();
-        mutate(value);
-        assert.throws(() => validateNativeAppScene(
-            value,
-            expected?.commit ?? commit,
-            expected?.sourceState ?? sourceState,
-            expected?.runID ?? runID,
-            expected?.pid ?? expectedPID,
-        ));
-    });
-}
+    ['unknown Search lifecycle key', (value) => { value.search_lifecycle_snapshot[2].selection_preserved = true; }],
+    ['missing final focus request', (value) => { delete value.search_focus_request_id; }],
+    ['missing consumed final focus request', (value) => { delete value.consumed_search_focus_request_id; }],
+    ['contradictory final focus request', (value) => { value.search_focus_request_id = 1; value.consumed_search_focus_request_id = 1; }],
+    ['unconsumed final focus request', (value) => { value.consumed_search_focus_request_id = 1; }],
+    ['missing final inspector request', (value) => { delete value.search_inspector_toggle_request_id; }],
+    ['missing consumed final inspector request', (value) => { delete value.consumed_search_inspector_toggle_request_id; }],
+    ['contradictory final inspector request', (value) => { value.search_inspector_toggle_request_id = 3; value.consumed_search_inspector_toggle_request_id = 3; }],
+    ['unconsumed final inspector request', (value) => { value.consumed_search_inspector_toggle_request_id = 1; }],
+    ['missing final inspector identity', (value) => { delete value.search_has_inspector; }],
+    ['false final inspector identity', (value) => { value.search_has_inspector = false; }],
+    ['missing final inspector presentation', (value) => { delete value.session_search_inspector_is_presented; }],
+    ['hidden final inspector presentation', (value) => { value.session_search_inspector_is_presented = false; }],
+    ['missing final responder class', (value) => { delete value.first_responder_class; }],
+    ['mismatched final responder class', (value) => { value.first_responder_class = 'NSTableView'; }],
+    ['missing current Search snapshot', (value) => { delete value.current_search_snapshot; }],
+    ['contradictory current Search snapshot', (value) => { value.current_search_snapshot.inspector_is_presented = false; }],
+    ['unknown current Search key', (value) => { value.current_search_snapshot.claim = true; }],
+    ['missing current Inspector menu field', (value) => { delete value.current_inspector_menu_snapshot; }],
+    ['empty current Inspector menu', (value) => { value.current_inspector_menu_snapshot = []; }],
+    ['contradictory current Inspector menu', (value) => { value.current_inspector_menu_snapshot[0].path = 'View > Show Inspector'; }],
+    ['unknown current Inspector menu key', (value) => { value.current_inspector_menu_snapshot[0].count = 1; }],
+]) reject(name, mutate, expected);
 
 for (const field of [
-    'window_is_key',
-    'field_is_editable',
-    'field_is_ns_search_field',
-    'field_window_matches',
-    'field_editor_matches_first_responder',
-    'field_owns_first_responder',
+    'window_is_key', 'field_is_editable', 'field_is_ns_search_field', 'field_window_matches',
+    'field_editor_matches_first_responder', 'field_owns_first_responder',
 ]) {
-    test(`native app-scene v2 evidence rejects false search-field responder ${field}`, () => {
-        const value = valid();
-        value.responder_snapshot[1][field] = false;
-        assert.throws(() => validateNativeAppScene(value, commit, sourceState, runID, expectedPID));
-    });
+    reject(`false search-field responder ${field}`, (value) => { value.responder_snapshot[1][field] = false; });
 }
 
 for (const field of ['window_is_key', 'control_window_matches', 'control_is_exact_first_responder']) {
-    test(`native app-scene v2 evidence rejects false native-control responder ${field}`, () => {
-        const value = valid();
-        value.responder_snapshot[3][field] = false;
-        assert.throws(() => validateNativeAppScene(value, commit, sourceState, runID, expectedPID));
-    });
+    reject(`false native-control responder ${field}`, (value) => { value.responder_snapshot[3][field] = false; });
 }
-
-test('native app-scene v2 evidence rejects non-native control type proof', () => {
-    const value = valid();
-    value.responder_snapshot[3].is_ns_table_view = false;
-    value.responder_snapshot[3].is_ns_button = true;
-    assert.throws(() => validateNativeAppScene(value, commit, sourceState, runID, expectedPID));
-});

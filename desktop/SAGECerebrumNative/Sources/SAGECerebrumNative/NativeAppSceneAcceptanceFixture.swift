@@ -45,7 +45,7 @@ final class NativeAppSceneSearchBridge {
 }
 
 struct NativeAppSceneAcceptanceFixture: Equatable {
-    static let scenario = "rendered-menu-search-inspector-focus-lifecycle"
+    static let scenario = "rendered-menu-application-keyboard-search-inspector-lifecycle"
     let commit: String
     let sourceState: String
     let runID: String
@@ -129,6 +129,13 @@ final class NativeAppSceneProbeView: NSView {
 
 @MainActor
 private final class NativeAppSceneAcceptanceRunner {
+    private struct KeyboardObservation {
+        let keyDownCount: Int
+        let windowNumber: Int
+        let appIsActive: Bool
+        let windowIsKey: Bool
+    }
+
     private enum FixtureError: LocalizedError {
         case assertion(String)
         case timeout(String)
@@ -154,6 +161,8 @@ private final class NativeAppSceneAcceptanceRunner {
     private var responderSnapshots: [[String: Any]] = []
     private var searchLifecycleSnapshots: [[String: Any]] = []
     private var menuLifecycleSnapshots: [[String: Any]] = []
+    private var routeLifecycleSnapshots: [[String: Any]] = []
+    private var keyboardEventSnapshots: [[String: Any]] = []
 
     init(window: NSWindow, focusSink: NSView, session: AppSession, commit: String, sourceState: String, runID: String) {
         self.window = window
@@ -192,6 +201,61 @@ private final class NativeAppSceneAcceptanceRunner {
         }
         menuSnapshot = snapshot(entries: renderedMenuEntries)
 
+        guard session.route == .overview else {
+            throw FixtureError.assertion("app-scene fixture did not start on Overview")
+        }
+        routeLifecycleSnapshots.append(routeSnapshot(stage: "initial", route: session.route, mainMenu: mainMenu))
+
+        let brainItem = try uniqueMenuItem(
+            in: mainMenu,
+            parent: "Navigate",
+            title: "Brain",
+            key: "2",
+            modifiers: [.command]
+        )
+        record("rendered-navigate-brain-menu", expected: "Navigate > Brain | command-2 | enabled", actual: menuDescription(brainItem, parent: "Navigate"))
+        guard brainItem.isEnabled else { throw FixtureError.assertion("rendered Navigate > Brain item is disabled") }
+        try dispatch(brainItem)
+        try await wait("rendered Navigate > Brain dispatch and checked menu state") {
+            self.update(menu: mainMenu)
+            return self.session.route == .brain && self.navigateMenuReflects(.brain, mainMenu: mainMenu)
+        }
+        routeLifecycleSnapshots.append(routeSnapshot(stage: "rendered-brain", route: session.route, mainMenu: mainMenu))
+        record("rendered-navigate-brain-dispatch", expected: "rendered target/action changes Overview to Brain", actual: session.route.rawValue)
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        try await wait("captured window restored as application key window") {
+            NSApp.isActive && self.window.isKeyWindow
+        }
+        update(menu: mainMenu)
+        let searchItem = try uniqueMenuItem(
+            in: mainMenu,
+            parent: "Navigate",
+            title: "Search",
+            key: "3",
+            modifiers: [.command]
+        )
+        guard searchItem.isEnabled else { throw FixtureError.assertion("rendered Navigate > Search item is disabled") }
+        let navigateRouteBefore = session.route
+        let navigateObservation = try sendKeyStroke(key: "3", keyCode: 20, modifiers: [.command])
+        try await wait("NSApplication command-3 navigation and checked Search menu state") {
+            self.update(menu: mainMenu)
+            return self.session.route == .search && self.navigateMenuReflects(.search, mainMenu: mainMenu)
+        }
+        routeLifecycleSnapshots.append(routeSnapshot(stage: "application-keyboard-search", route: session.route, mainMenu: mainMenu))
+        keyboardEventSnapshots.append(keyboardEventSnapshot(
+            stage: "navigate-search",
+            key: "3",
+            keyCode: 20,
+            modifiers: [.command],
+            menuPath: "Navigate > Search",
+            routeBefore: navigateRouteBefore,
+            routeAfter: session.route,
+            observation: navigateObservation
+        ))
+        record("application-keyboard-navigate-search", expected: "NSApplication keyDown/keyUp command-3 changes Brain to Search", actual: session.route.rawValue)
+
         let focusItem = try uniqueMenuItem(
             in: mainMenu,
             parent: "View",
@@ -202,9 +266,10 @@ private final class NativeAppSceneAcceptanceRunner {
         record("rendered-focus-search-menu", expected: "View > Focus Search | command-f | enabled", actual: menuDescription(focusItem))
         guard focusItem.isEnabled else { throw FixtureError.assertion("rendered Focus Search item is disabled") }
 
-        let firstRequest = session.searchFocusRequestID &+ 1
-        try dispatch(focusItem)
-        try await wait("first Focus Search request and mounted field-editor focus") {
+        let firstRequestBefore = session.searchFocusRequestID
+        let firstRequest = firstRequestBefore &+ 1
+        let focusObservation = try sendKeyStroke(key: "f", keyCode: 3, modifiers: [.command])
+        try await wait("application keyboard Focus Search request and mounted field-editor focus") {
             self.session.route == .search &&
                 self.session.searchFocusRequestID == firstRequest &&
                 self.session.consumedSearchFocusRequestID == firstRequest &&
@@ -214,7 +279,20 @@ private final class NativeAppSceneAcceptanceRunner {
             throw FixtureError.assertion("mounted search field did not own its window field editor")
         }
         responderSnapshots.append(responderSnapshot(stage: "first-focus", field: firstField))
-        record("first-mounted-search-focus", expected: "search field currentEditor is exact window firstResponder", actual: "matched")
+        keyboardEventSnapshots.append(keyboardEventSnapshot(
+            stage: "focus-search",
+            key: "f",
+            keyCode: 3,
+            modifiers: [.command],
+            menuPath: "View > Focus Search",
+            routeBefore: .search,
+            routeAfter: session.route,
+            observation: focusObservation,
+            requestBefore: firstRequestBefore,
+            requestAfter: session.searchFocusRequestID,
+            consumedRequestAfter: session.consumedSearchFocusRequestID
+        ))
+        record("application-keyboard-focus-search", expected: "NSApplication command-f increments and consumes one request on the exact field editor", actual: "matched")
 
         try await wait("deterministic preview Search bridge and mounted results-table readiness") {
             NativeAppSceneSearchBridge.shared.snapshot()?.isReady == true &&
@@ -254,7 +332,7 @@ private final class NativeAppSceneAcceptanceRunner {
             throw FixtureError.assertion("repeated Focus Search did not restore the exact mounted field")
         }
         responderSnapshots.append(responderSnapshot(stage: "repeated-focus", field: secondField))
-        record("repeated-mounted-search-focus", expected: "one increment, one consumption, exact mounted field-editor restored", actual: "matched")
+        record("repeated-rendered-focus-search", expected: "rendered target/action increments and consumes one request on the exact mounted field", actual: "matched")
 
         guard let inspectedMemoryID = NativeAppSceneSearchBridge.shared.inspectFirstMemory() else {
             throw FixtureError.assertion("DEBUG Search bridge could not activate the first preview memory")
@@ -323,7 +401,8 @@ private final class NativeAppSceneAcceptanceRunner {
         guard showInspector.isEnabled else { throw FixtureError.assertion("rendered Show Inspector item is disabled") }
         menuLifecycleSnapshots.append(menuLifecycleSnapshot(stage: "inspector-hidden", item: showInspector))
         record("rendered-show-inspector-menu", expected: "View > Show Inspector | control+command-i | enabled", actual: menuDescription(showInspector))
-        try dispatch(showInspector)
+        let inspectorRequestBefore = session.searchInspectorToggleRequestID
+        let inspectorObservation = try sendKeyStroke(key: "i", keyCode: 34, modifiers: [.control, .command])
         try await wait("reopened inspector and exact close-button focus") {
             guard let snapshot = NativeAppSceneSearchBridge.shared.snapshot(),
                   snapshot.inspectorIsPresented,
@@ -337,6 +416,20 @@ private final class NativeAppSceneAcceptanceRunner {
               let reopenedClose = uniqueIdentifiedControl(identifier: "search-inspector-close", type: NSButton.self)
         else { throw FixtureError.assertion("Search inspector did not remount after Show Inspector") }
         searchLifecycleSnapshots.append(searchSnapshot(stage: "inspector-reopened", snapshot: reopenedSnapshot))
+        keyboardEventSnapshots.append(keyboardEventSnapshot(
+            stage: "show-inspector",
+            key: "i",
+            keyCode: 34,
+            modifiers: [.control, .command],
+            menuPath: "View > Show Inspector",
+            routeBefore: .search,
+            routeAfter: session.route,
+            observation: inspectorObservation,
+            requestBefore: inspectorRequestBefore,
+            requestAfter: session.searchInspectorToggleRequestID,
+            consumedRequestAfter: session.consumedSearchInspectorToggleRequestID
+        ))
+        record("application-keyboard-show-inspector", expected: "NSApplication control-command-i increments and consumes one request and restores the exact close button", actual: inspectedMemoryID)
         update(menu: mainMenu)
         let reopenedHideInspector = try uniqueMenuItem(
             in: mainMenu,
@@ -359,13 +452,15 @@ private final class NativeAppSceneAcceptanceRunner {
 
     private func result(passed: Bool, failure: String?) -> [String: Any] {
         let elapsed = startedInstant.duration(to: .now).components
+        let completeKeyboardEvidence = keyboardEventSnapshots.count == 3
         var value: [String: Any] = [
-            "schema": "sage.v12.native-app-scene.v2",
+            "schema": "sage.v12.native-app-scene.v3",
             "scenario": NativeAppSceneAcceptanceFixture.scenario,
             "run_id": runID,
             "commit": commit,
             "source_state": sourceState,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
+            "captured_window_number": window.windowNumber,
             "bundle_id": Bundle.main.bundleIdentifier ?? "",
             "bundle_version": Bundle.main.object(forInfoDictionaryKey: "SAGEBetaVersion") as? String ?? "",
             "architecture": architecture,
@@ -378,9 +473,13 @@ private final class NativeAppSceneAcceptanceRunner {
             "responder_snapshot": responderSnapshots,
             "search_lifecycle_snapshot": searchLifecycleSnapshots,
             "menu_lifecycle_snapshot": menuLifecycleSnapshots,
+            "route_lifecycle_snapshot": routeLifecycleSnapshots,
+            "keyboard_event_snapshot": keyboardEventSnapshots,
             "system_ax_server": false,
             "voiceover_spoken_evidence": false,
-            "keyboard_event_routing": false,
+            "application_keyboard_event_routing": completeKeyboardEvidence,
+            "synthetic_keyboard_events": completeKeyboardEvidence,
+            "physical_keyboard_event_routing": false,
             "search_focus_request_id": Int(session.searchFocusRequestID),
             "consumed_search_focus_request_id": Int(session.consumedSearchFocusRequestID),
             "search_has_inspector": session.searchHasInspector,
@@ -433,6 +532,108 @@ private final class NativeAppSceneAcceptanceRunner {
         }
     }
 
+    private func sendKeyStroke(key: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) throws -> KeyboardObservation {
+        guard window.isKeyWindow else {
+            throw FixtureError.assertion("cannot route application keyboard event through a non-key window")
+        }
+        var observedKeyDownCount = 0
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            if event.windowNumber == self.window.windowNumber,
+               event.keyCode == keyCode,
+               event.modifierFlags.intersection(.deviceIndependentFlagsMask) == modifiers {
+                observedKeyDownCount += 1
+            }
+            return event
+        }
+        defer {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
+        for type in [NSEvent.EventType.keyDown, .keyUp] {
+            guard let event = NSEvent.keyEvent(
+                with: type,
+                location: .zero,
+                modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber,
+                context: nil,
+                characters: key,
+                charactersIgnoringModifiers: key,
+                isARepeat: false,
+                keyCode: keyCode
+            ) else {
+                throw FixtureError.assertion("could not construct application keyboard event for \(key)")
+            }
+            NSApp.sendEvent(event)
+        }
+        guard observedKeyDownCount == 1 else {
+            throw FixtureError.assertion("NSApplication local monitor observed \(observedKeyDownCount) matching keyDown events for \(key)")
+        }
+        return KeyboardObservation(
+            keyDownCount: observedKeyDownCount,
+            windowNumber: window.windowNumber,
+            appIsActive: NSApp.isActive,
+            windowIsKey: window.isKeyWindow
+        )
+    }
+
+    private func routeSnapshot(stage: String, route: AppRoute, mainMenu: NSMenu) -> [String: Any] {
+        let implementedEntries = menuEntries(in: mainMenu).filter {
+            $0.path.count == 2 && $0.path[0] == "Navigate" &&
+                AppRoute.implemented.map(\.title).contains($0.path[1])
+        }
+        let checked = implementedEntries.filter { $0.item.state == .on }
+        return [
+            "stage": stage,
+            "route": route.rawValue,
+            "implemented_item_count": implementedEntries.count,
+            "checked_item_count": checked.count,
+            "checked_menu_title": checked.first?.item.title ?? "",
+        ]
+    }
+
+    private func navigateMenuReflects(_ route: AppRoute, mainMenu: NSMenu) -> Bool {
+        let snapshot = routeSnapshot(stage: "probe", route: route, mainMenu: mainMenu)
+        return snapshot["implemented_item_count"] as? Int == AppRoute.implemented.count &&
+            snapshot["checked_item_count"] as? Int == 1 &&
+            snapshot["checked_menu_title"] as? String == route.title
+    }
+
+    private func keyboardEventSnapshot(
+        stage: String,
+        key: String,
+        keyCode: UInt16,
+        modifiers: NSEvent.ModifierFlags,
+        menuPath: String,
+        routeBefore: AppRoute,
+        routeAfter: AppRoute,
+        observation: KeyboardObservation,
+        requestBefore: UInt64? = nil,
+        requestAfter: UInt64? = nil,
+        consumedRequestAfter: UInt64? = nil
+    ) -> [String: Any] {
+        var snapshot: [String: Any] = [
+            "stage": stage,
+            "dispatch_surface": "NSApplication.sendEvent",
+            "event_sequence": "keyDown,keyUp",
+            "key": key,
+            "key_code": Int(keyCode),
+            "modifiers": modifierNames(modifiers),
+            "menu_path": menuPath,
+            "route_before": routeBefore.rawValue,
+            "route_after": routeAfter.rawValue,
+            "observed_effect": true,
+            "local_monitor_key_down_count": observation.keyDownCount,
+            "window_number": observation.windowNumber,
+            "app_is_active": observation.appIsActive,
+            "window_is_key": observation.windowIsKey,
+            "is_repeat": false,
+        ]
+        if let requestBefore { snapshot["request_id_before"] = Int(requestBefore) }
+        if let requestAfter { snapshot["request_id_after"] = Int(requestAfter) }
+        if let consumedRequestAfter { snapshot["consumed_request_id_after"] = Int(consumedRequestAfter) }
+        return snapshot
+    }
+
     private func focusedSearchField() -> NSSearchField? {
         guard window.isKeyWindow, let toolbar = window.toolbar else { return nil }
         let candidates = toolbar.items.compactMap { $0 as? NSSearchToolbarItem }
@@ -461,6 +662,7 @@ private final class NativeAppSceneAcceptanceRunner {
     private func responderSnapshot(stage: String, field: NSSearchField) -> [String: Any] {
         [
             "stage": stage,
+            "window_number": window.windowNumber,
             "window_title": window.title,
             "window_is_key": window.isKeyWindow,
             "field_is_editable": field.isEditable,
@@ -475,6 +677,7 @@ private final class NativeAppSceneAcceptanceRunner {
     private func controlResponderSnapshot(stage: String, control: NSView) -> [String: Any] {
         [
             "stage": stage,
+            "window_number": window.windowNumber,
             "window_title": window.title,
             "window_is_key": window.isKeyWindow,
             "runtime_class": NSStringFromClass(type(of: control)),
@@ -553,6 +756,7 @@ private final class NativeAppSceneAcceptanceRunner {
         for item in menu.items {
             if let submenu = item.submenu { update(menu: submenu) }
         }
+        if menu === NSApp.mainMenu { CerebrumNativeMenuCoordinator.shared.refresh() }
     }
 
     private func uniqueMenuItem(
@@ -573,8 +777,8 @@ private final class NativeAppSceneAcceptanceRunner {
         return match.item
     }
 
-    private func menuDescription(_ item: NSMenuItem) -> String {
-        "View > \(item.title) | \(modifierNames(item.keyEquivalentModifierMask))-\(item.keyEquivalent) | \(item.isEnabled ? "enabled" : "disabled")"
+    private func menuDescription(_ item: NSMenuItem, parent: String = "View") -> String {
+        "\(parent) > \(item.title) | \(modifierNames(item.keyEquivalentModifierMask))-\(item.keyEquivalent) | \(item.isEnabled ? "enabled" : "disabled")"
     }
 
     private func snapshot(entries: [(path: [String], item: NSMenuItem)]) -> [[String: Any]] {

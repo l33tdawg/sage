@@ -122,6 +122,7 @@ struct BrainView: View {
                     inspectorVisibilityIsUserControlled = true
                 }
                 showsInspector = $0
+                if !$0 { requestFocus(returnFocusTarget) }
             }
         )) {
             VStack(spacing: 0) {
@@ -957,6 +958,7 @@ struct BrainView: View {
             route: .brain,
             isRefreshing: model.isLoading,
             refresh: refreshBrain,
+            blocksGlobalCommands: showsNavigator || showsViewOptions,
             brain: .init(
                 mode: model.mode,
                 presentation: metalRecovery.effectivePresentation,

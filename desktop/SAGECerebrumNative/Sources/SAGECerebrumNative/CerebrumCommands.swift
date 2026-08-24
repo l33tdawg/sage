@@ -4,8 +4,9 @@ import SwiftUI
 @MainActor
 final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
     static let shared = CerebrumNativeMenuCoordinator()
-    private static let inspectorIdentifier = NSUserInterfaceItemIdentifier("sage.search-inspector-command")
+    private static let inspectorIdentifier = NSUserInterfaceItemIdentifier(CerebrumCommandID.searchToggleInspector.rawValue)
     private weak var session: AppSession?
+    private weak var navigationMenu: NSMenu?
 
     func install(session: AppSession) {
         self.session = session
@@ -33,7 +34,12 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
     @discardableResult
     func refresh() -> Bool {
         guard let session else { return false }
-        guard let viewMenu = NSApp.mainMenu?.items.first(where: { $0.title == "View" })?.submenu else { return false }
+        guard let mainMenu = NSApp.mainMenu else { return false }
+        if let menu = mainMenu.items.first(where: { $0.title == "Navigate" })?.submenu {
+            installNavigationTracking(for: menu)
+            updateNavigationItems(in: menu, session: session)
+        }
+        guard let viewMenu = mainMenu.items.first(where: { $0.title == "View" })?.submenu else { return false }
         let existing = viewMenu.items.first { $0.identifier == Self.inspectorIdentifier }
         guard session.route == .search else {
             if let existing { viewMenu.removeItem(existing) }
@@ -55,6 +61,41 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
         item.title = session.searchInspectorIsPresented ? "Hide Inspector" : "Show Inspector"
         item.isEnabled = validateMenuItem(item)
         return true
+    }
+
+    private func installNavigationTracking(for menu: NSMenu) {
+        guard navigationMenu !== menu else { return }
+        if let navigationMenu {
+            NotificationCenter.default.removeObserver(
+                self,
+                name: NSMenu.didBeginTrackingNotification,
+                object: navigationMenu
+            )
+        }
+        navigationMenu = menu
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(navigationMenuDidBeginTracking(_:)),
+            name: NSMenu.didBeginTrackingNotification,
+            object: menu
+        )
+    }
+
+    @objc private func navigationMenuDidBeginTracking(_ notification: Notification) {
+        guard let menu = notification.object as? NSMenu, menu === navigationMenu, let session else { return }
+        updateNavigationItems(in: menu, session: session)
+    }
+
+    private func updateNavigationItems(in menu: NSMenu, session: AppSession) {
+        for route in AppRoute.implemented {
+            guard let shortcut = route.navigationShortcut else { continue }
+            let matches = menu.items.filter {
+                $0.keyEquivalent == String(shortcut) &&
+                    $0.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask) == [.command]
+            }
+            guard matches.count == 1, let item = matches.first else { continue }
+            item.state = session.route == route ? .on : .off
+        }
     }
 }
 
@@ -101,12 +142,12 @@ enum CerebrumCommandID: String, CaseIterable {
         case .searchClearSelection: .init(label: "Clear Search Selection", key: nil, modifiers: [], display: "", section: "Search")
         case .brainRefresh: .init(label: "Refresh Brain", key: "r", modifiers: .command, display: "⌘R", section: "Global")
         case .brainToggleInspector: .init(label: "Show or Hide Inspector", key: "i", modifiers: [.control, .command], display: "⌃⌘I", section: "Brain")
-        case .brainModeMemory: .init(label: "Memory Map", key: "1", modifiers: [.control, .option], display: "⌥⌃1", section: "Brain")
-        case .brainModeAgent: .init(label: "Agent Network", key: "2", modifiers: [.control, .option], display: "⌥⌃2", section: "Brain")
+        case .brainModeMemory: .init(label: "Memory Map", key: "1", modifiers: [.control, .command], display: "⌃⌘1", section: "Brain")
+        case .brainModeAgent: .init(label: "Agent Network", key: "2", modifiers: [.control, .command], display: "⌃⌘2", section: "Brain")
         case .brainPresentationInteractive: .init(label: "Interactive Map", key: "m", modifiers: [.control, .command], display: "⌃⌘M", section: "Brain")
         case .brainPresentationList: .init(label: "List View", key: "l", modifiers: [.control, .command], display: "⌃⌘L", section: "Brain")
         case .brainClearSelection: .init(label: "Clear Brain Selection", key: nil, modifiers: [], display: "", section: "Brain")
-        case .brainViewOptions: .init(label: "Show or Hide View Options", key: "v", modifiers: [.control, .option], display: "⌥⌃V", section: "Brain")
+        case .brainViewOptions: .init(label: "Show or Hide View Options", key: "v", modifiers: [.control, .command], display: "⌃⌘V", section: "Brain")
         }
     }
 }
@@ -153,7 +194,13 @@ struct CerebrumViewCommands: Commands {
         CommandMenu("Navigate") {
             ForEach(AppRoute.implemented) { route in
                 if let shortcut = route.navigationShortcut {
-                    Button(route.title) { session.route = route }
+                    Toggle(
+                        route.title,
+                        isOn: commandToggle(
+                            selected: session.route == route,
+                            select: { session.route = route }
+                        )
+                    )
                         .keyboardShortcut(KeyEquivalent(shortcut), modifiers: .command)
                         .disabled(!routeCommandsAreEnabled)
                 }
