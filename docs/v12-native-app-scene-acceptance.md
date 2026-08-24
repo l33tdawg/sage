@@ -1,7 +1,7 @@
 # v12 native app-scene acceptance
 
-**Status:** v3 packaged DEBUG fixture and CI green. The v4 Brain-plus-Search
-increment is packaged-local green; CI and release acceptance remain open.
+**Status:** v3 and v4 packaged DEBUG fixtures and CI green. Installed-release
+acceptance remains open.
 
 **Current durable task:** `7779c211-07e6-466c-8c31-aede68e12357`
 

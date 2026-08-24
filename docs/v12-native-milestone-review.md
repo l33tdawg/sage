@@ -124,7 +124,7 @@ another large subsystem:
    hide/reopen, identity-preservation, and exact table/close responder lifecycle
    through v2. Brain's native inspector dismissal now requests route focus and
    its popovers gate global commands. v3 CI is green. The v4 exact Brain
-   table/inspector responder lifecycle is packaged-local green; physical keyboard/HID
+   table/inspector responder lifecycle is packaged and CI green; physical keyboard/HID
    and WindowServer delivery, system AX, and real VoiceOver remain acceptance
    items.
 5. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
@@ -132,7 +132,7 @@ another large subsystem:
    actions on unhealthy cards.
 6. **Implemented with bounded v2 app-scene evidence for Focus Search and Search
    Show/Hide Inspector; v3 application-routing fixture packaged and CI green;
-   v4 Brain responder extension packaged-local green:** Add route-aware macOS commands
+   v4 Brain responder extension packaged and CI green:** Add route-aware macOS commands
    for Focus Search, routed Refresh, Search Show/Hide Inspector and Clear Search
    Selection, Brain Show/Hide Inspector, Brain Mode—Memory
    Map or Agent Network—Presentation—Interactive Map or List View—Clear Brain
@@ -158,7 +158,7 @@ another large subsystem:
    and requires the exact currently mounted table in the same window to regain
    first responder with class, rows, identifier, and selection preserved before
    continuing through Search. Backing-object reuse/replacement is recorded.
-   The packaged local v4 gate is green; CI is pending. Focused Brain View command
+   The packaged local and CI v4 gates are green. Focused Brain View command
    materialization/routing after programmatic navigation remains open. This
    remains synthetic in-process evidence, not physical keyboard/HID,
    WindowServer, system AX, VoiceOver spoken output, installed-RC, localization,

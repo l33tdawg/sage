@@ -133,8 +133,8 @@ ownership by the real AppKit inspector-close `NSButton`, `NSButton.performClick`
 dismissal with zero remaining close controls and truthful bridge state, and restoration
 to the exact currently mounted table in the same window without losing class,
 rows, identifier, or selection before the Search sequence. Backing-object
-reuse/replacement is recorded. The packaged local v4 gate is green; CI and
-focused Brain View command routing remain open. This is synthetic in-process evidence, not physical
+reuse/replacement is recorded. The packaged local and CI v4 gates are green;
+focused Brain View command routing remains open. This is synthetic in-process evidence, not physical
 keyboard/HID, WindowServer, system AX, VoiceOver spoken output, installed-RC, localization, or
 non-US-layout proof. Brain phase three is implemented with separate agent,
 engram, and directed-connection focus, collision-safe scene identities, reserved
@@ -336,7 +336,7 @@ daemon lifecycle, recovery, updates, and rollback.
 
 | Platform | Evidence already present | Production blockers |
 |---|---|---|
-| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; previous v2 packaged/CI app-scene gate green; v3 checkmarked navigation, Brain command chords that avoid VoiceOver's default Control-Option chord, popover/focus cleanup, and synthetic `NSApplication.sendEvent` routing packaged and CI green; v4 exact Brain backing-table/inspector responder lifecycle packaged-local green; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Physical keyboard/HID and WindowServer routing, localization/non-US-layout evidence, focused Brain View and remaining rendered commands, named-Mac system AX/VoiceOver spoken and focus evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, installed release acceptance, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
+| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; previous v2 packaged/CI app-scene gate green; v3 checkmarked navigation, Brain command chords that avoid VoiceOver's default Control-Option chord, popover/focus cleanup, and synthetic `NSApplication.sendEvent` routing packaged and CI green; v4 exact current Brain/Search backing-table and inspector responder lifecycle packaged and CI green across SwiftUI backing replacement; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Physical keyboard/HID and WindowServer routing, localization/non-US-layout evidence, focused Brain View and remaining rendered commands, named-Mac system AX/VoiceOver spoken and focus evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, installed release acceptance, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
 | Windows | x64 NSIS preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported |
 | Linux | x64 `.deb` and AppImage preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported; optional native R&D remains blocked by `RUSTSEC-2024-0429` |
 
@@ -401,7 +401,7 @@ with one current native execution child:
 2. `867fa87f-14b0-45ca-a11c-10dc48746257` — completed native child that delivered
    the expanded Search inspector app-scene lifecycle gate; and
 3. `b945c6bb-8d06-45c7-91d1-ad1e15e6b84d` — completed native child that delivered
-   packaged-local-green v4 exact Brain table/inspector focus restoration; and
+   packaged-and-CI-green v4 exact current Brain/Search table and inspector focus restoration; and
 4. `7779c211-07e6-466c-8c31-aede68e12357` — current native execution child for
    focused Brain command routing, Connectome focus, remaining rendered commands,
    physical-keyboard routing, system-AX/VoiceOver,
