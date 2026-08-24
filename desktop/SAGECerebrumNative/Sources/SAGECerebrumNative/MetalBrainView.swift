@@ -19,6 +19,50 @@ enum BrainMetalPick: Equatable, Sendable {
     case background
 }
 
+struct BrainMetalOffscreenResult: Equatable, Sendable {
+    let width: Int
+    let height: Int
+    let bloomEncoded: Bool
+    let nonBackgroundPixelCount: Int
+    let pixels: [UInt8]
+
+    var rgbEnergy: UInt64 {
+        var energy: UInt64 = 0
+        for offset in stride(from: 0, to: pixels.count, by: 4) {
+            energy += UInt64(pixels[offset])
+            energy += UInt64(pixels[offset + 1])
+            energy += UInt64(pixels[offset + 2])
+        }
+        return energy
+    }
+
+    func changedPixelCount(comparedTo other: Self, tolerance: UInt8 = 3) -> Int {
+        guard width == other.width, height == other.height, pixels.count == other.pixels.count else { return 0 }
+        return stride(from: 0, to: pixels.count, by: 4).reduce(into: 0) { count, offset in
+            let changed = (0 ..< 3).contains { channel in
+                abs(Int(pixels[offset + channel]) - Int(other.pixels[offset + channel])) > Int(tolerance)
+            }
+            if changed { count += 1 }
+        }
+    }
+}
+
+enum BrainMetalOffscreenError: LocalizedError {
+    case invalidDimensions
+    case resourceAllocation
+    case commandEncoding
+    case commandFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidDimensions: "Offscreen Metal dimensions must be between 1 and 2048 pixels."
+        case .resourceAllocation: "Metal could not allocate the offscreen frame resources."
+        case .commandEncoding: "Metal could not encode the offscreen frame."
+        case let .commandFailed(message): "The offscreen Metal command failed: \(message)"
+        }
+    }
+}
+
 struct MetalBrainView: NSViewRepresentable {
     let nodes: [BrainNode]
     let edges: [BrainEdge]
@@ -128,7 +172,8 @@ final class InteractiveMetalView: MTKView {
     }
 }
 
-final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
+@MainActor
+final class BrainMetalRenderer: NSObject, MTKViewDelegate {
     var onPick: (BrainMetalPick) -> Void
     private(set) var selectedID: String?
     var autoRotate = true
@@ -180,7 +225,7 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
     private var lastFrame = CACurrentMediaTime()
     private let animationEpoch = CACurrentMediaTime()
     private var lastPlasticityRefresh = Date.distantPast
-    private var plasticityRefreshTimer: Timer?
+    nonisolated(unsafe) private var plasticityRefreshTimer: Timer?
     private var lastMVP = matrix_identity_float4x4
 
     init?(onPick: @escaping (BrainMetalPick) -> Void) {
@@ -557,23 +602,50 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             return
         }
         let frameSemaphore = inFlightFrames
-        let now = CACurrentMediaTime()
-        let delta = min(0.05, now - lastFrame)
-        lastFrame = now
-        if autoRotate { yaw += Float(delta) * 0.12 }
-        cameraFocus = currentFocus(at: now)
-        let aspect = Float(max(view.drawableSize.width, 1) / max(view.drawableSize.height, 1))
+        encodeScene(
+            in: encoder,
+            drawableSize: view.drawableSize,
+            now: CACurrentMediaTime(),
+            advancesAnimation: true
+        )
+        encoder.endEncoding()
+        _ = encodeBloom(source: drawable.texture, command: command)
+        command.addCompletedHandler { [weak self] _ in
+            frameSemaphore.signal()
+            Task { @MainActor [weak self] in
+                guard let self, self.focusAnimation != nil,
+                      let view = self.view, view.isPaused else { return }
+                view.setNeedsDisplay(view.bounds)
+            }
+        }
+        command.present(drawable)
+        command.commit()
+    }
+
+    private func encodeScene(
+        in encoder: MTLRenderCommandEncoder,
+        drawableSize: CGSize,
+        now: CFTimeInterval,
+        advancesAnimation: Bool
+    ) {
+        if advancesAnimation {
+            let delta = min(0.05, now - lastFrame)
+            lastFrame = now
+            if autoRotate { yaw += Float(delta) * 0.12 }
+            cameraFocus = currentFocus(at: now)
+        }
+        let aspect = Float(max(drawableSize.width, 1) / max(drawableSize.height, 1))
         let projection = simd_float4x4.perspective(fovY: 0.72, aspect: aspect, near: 0.1, far: 50)
         let model = simd_float4x4.translation(0, 0, -cameraDistance)
             * .rotationX(pitch)
             * .rotationY(yaw)
             * .translation(-cameraFocus.x, -cameraFocus.y, -cameraFocus.z)
         let mvp = projection * model
-        lastMVP = mvp
+        if advancesAnimation { lastMVP = mvp }
         var uniforms = BrainUniforms(
             mvp: mvp, selectedIndex: selectedID.flatMap(nodeIDs.firstIndex(of:)).map(Float.init) ?? -1,
             opacityMultiplier: 1,
-            viewportSize: SIMD2(Float(max(view.drawableSize.width, 1)), Float(max(view.drawableSize.height, 1))),
+            viewportSize: SIMD2(Float(max(drawableSize.width, 1)), Float(max(drawableSize.height, 1))),
             time: Float(now - animationEpoch), reduceMotion: reduceMotion ? 1 : 0
         )
 
@@ -592,18 +664,114 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         drawRibbon(opacity: 1, encoder: encoder, uniforms: &uniforms)
         encoder.setRenderPipelineState(billboardPipeline)
         draw(buffer: nodeBillboardBuffer, count: nodeBillboardVertices.count, primitive: .triangle, opacity: 1, encoder: encoder, uniforms: &uniforms)
+    }
+
+    @MainActor
+    func renderOffscreenProbe(
+        width: Int = 128,
+        height: Int = 128,
+        bloomEnabled: Bool = true
+    ) throws -> BrainMetalOffscreenResult {
+        guard (1 ... 2_048).contains(width), (1 ... 2_048).contains(height) else {
+            throw BrainMetalOffscreenError.invalidDimensions
+        }
+
+        let multisampleDescriptor = MTLTextureDescriptor()
+        multisampleDescriptor.textureType = .type2DMultisample
+        multisampleDescriptor.pixelFormat = .bgra8Unorm_srgb
+        multisampleDescriptor.width = width
+        multisampleDescriptor.height = height
+        multisampleDescriptor.sampleCount = 4
+        multisampleDescriptor.storageMode = .private
+        multisampleDescriptor.usage = .renderTarget
+
+        let outputDescriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .bgra8Unorm_srgb, width: width, height: height, mipmapped: false
+        )
+        outputDescriptor.storageMode = .private
+        outputDescriptor.usage = [.renderTarget, .shaderRead]
+
+        let depthDescriptor = MTLTextureDescriptor()
+        depthDescriptor.textureType = .type2DMultisample
+        depthDescriptor.pixelFormat = .depth32Float
+        depthDescriptor.width = width
+        depthDescriptor.height = height
+        depthDescriptor.sampleCount = 4
+        depthDescriptor.storageMode = .private
+        depthDescriptor.usage = .renderTarget
+
+        guard let multisample = metalDevice.makeTexture(descriptor: multisampleDescriptor),
+              let output = metalDevice.makeTexture(descriptor: outputDescriptor),
+              let depth = metalDevice.makeTexture(descriptor: depthDescriptor),
+              let command = queue.makeCommandBuffer()
+        else { throw BrainMetalOffscreenError.resourceAllocation }
+
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = multisample
+        pass.colorAttachments[0].resolveTexture = output
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .multisampleResolve
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.004, green: 0.004, blue: 0.008, alpha: 1)
+        pass.depthAttachment.texture = depth
+        pass.depthAttachment.loadAction = .clear
+        pass.depthAttachment.storeAction = .dontCare
+        pass.depthAttachment.clearDepth = 1
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+            throw BrainMetalOffscreenError.commandEncoding
+        }
+        encodeScene(
+            in: encoder,
+            drawableSize: CGSize(width: width, height: height),
+            now: animationEpoch,
+            advancesAnimation: false
+        )
         encoder.endEncoding()
-        _ = encodeBloom(source: drawable.texture, command: command)
-        command.addCompletedHandler { [weak self] _ in
-            frameSemaphore.signal()
-            Task { @MainActor [weak self] in
-                guard let self, self.focusAnimation != nil,
-                      let view = self.view, view.isPaused else { return }
-                view.setNeedsDisplay(view.bounds)
+        let localBloomTargets = bloomEnabled ? makeBloomTargets(for: output) : nil
+        let bloomEncoded = bloomEnabled && localBloomTargets != nil &&
+            encodeBloom(source: output, targets: localBloomTargets, command: command) != nil
+        let unalignedBytesPerRow = width * 4
+        let alignment = max(metalDevice.minimumLinearTextureAlignment(for: .bgra8Unorm_srgb), 1)
+        let bytesPerRow = ((unalignedBytesPerRow + alignment - 1) / alignment) * alignment
+        guard let readback = metalDevice.makeBuffer(length: bytesPerRow * height, options: .storageModeShared),
+              let blit = command.makeBlitCommandEncoder()
+        else { throw BrainMetalOffscreenError.resourceAllocation }
+        blit.copy(
+            from: output,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: .init(x: 0, y: 0, z: 0),
+            sourceSize: .init(width: width, height: height, depth: 1),
+            to: readback,
+            destinationOffset: 0,
+            destinationBytesPerRow: bytesPerRow,
+            destinationBytesPerImage: bytesPerRow * height
+        )
+        blit.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        guard command.status == .completed, command.error == nil else {
+            throw BrainMetalOffscreenError.commandFailed(command.error?.localizedDescription ?? "unknown GPU error")
+        }
+
+        let source = readback.contents().assumingMemoryBound(to: UInt8.self)
+        var pixels = [UInt8](repeating: 0, count: unalignedBytesPerRow * height)
+        for row in 0 ..< height {
+            pixels.withUnsafeMutableBytes { destination in
+                destination.baseAddress?.advanced(by: row * unalignedBytesPerRow).copyMemory(
+                    from: source.advanced(by: row * bytesPerRow), byteCount: unalignedBytesPerRow
+                )
             }
         }
-        command.present(drawable)
-        command.commit()
+        let nonBackgroundPixelCount = stride(from: 0, to: pixels.count, by: 4).reduce(into: 0) { count, offset in
+            if max(max(pixels[offset], pixels[offset + 1]), pixels[offset + 2]) > 32 { count += 1 }
+        }
+        return .init(
+            width: width,
+            height: height,
+            bloomEncoded: bloomEncoded,
+            nonBackgroundPixelCount: nonBackgroundPixelCount,
+            pixels: pixels
+        )
     }
 
     private func draw(
@@ -625,12 +793,16 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: ribbonVertices.count)
     }
 
-    private func encodeBloom(source: MTLTexture, command: MTLCommandBuffer) -> BrainBloomTargets? {
+    private func encodeBloom(
+        source: MTLTexture,
+        targets suppliedTargets: BrainBloomTargets? = nil,
+        command: MTLCommandBuffer
+    ) -> BrainBloomTargets? {
         guard let extract = bloomExtractPipeline,
               let blur = bloomBlurPipeline,
               let composite = bloomCompositePipeline,
               let sampler = bloomSampler,
-              let targets = bloomTargets(for: source)
+              let targets = suppliedTargets ?? bloomTargets(for: source)
         else { return nil }
 
         guard encodeFullscreen(
@@ -675,6 +847,15 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
             return nil
         }
         if let bloomTargets, bloomTargets.plan == plan { return bloomTargets }
+        guard let targets = makeBloomTargets(for: drawable) else { return nil }
+        bloomTargets = targets
+        return targets
+    }
+
+    private func makeBloomTargets(for drawable: MTLTexture) -> BrainBloomTargets? {
+        guard let plan = BrainBloomTexturePlan(drawableWidth: drawable.width, drawableHeight: drawable.height) else {
+            return nil
+        }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .rgba16Float, width: plan.width, height: plan.height, mipmapped: false
         )
@@ -682,9 +863,7 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         descriptor.storageMode = .private
         guard let bright = metalDevice.makeTexture(descriptor: descriptor),
               let scratch = metalDevice.makeTexture(descriptor: descriptor) else { return nil }
-        let targets = BrainBloomTargets(plan: plan, bright: bright, scratch: scratch)
-        bloomTargets = targets
-        return targets
+        return BrainBloomTargets(plan: plan, bright: bright, scratch: scratch)
     }
 
     private func makeBuffer(_ vertices: [BrainMetalVertex]) -> MTLBuffer? {
@@ -922,7 +1101,7 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         return nodes.map { positions[$0.id] ?? .zero }
     }
 
-    private static func stableUnit(_ value: String, seed: UInt32) -> Double {
+    nonisolated private static func stableUnit(_ value: String, seed: UInt32) -> Double {
         var hash = seed == 0 ? UInt32(1) : seed
         for byte in value.utf8 { hash = (hash ^ UInt32(byte)) &* 16_777_619 }
         return Double(hash % 10_000) / 10_000
@@ -957,27 +1136,27 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         return palette[Int(stableUnit(domain, seed: 7) * Double(palette.count)) % palette.count]
     }
 
-    static func isSameDirectedEdge(_ highlighted: BrainEdge?, _ candidate: BrainEdge) -> Bool {
+    nonisolated static func isSameDirectedEdge(_ highlighted: BrainEdge?, _ candidate: BrainEdge) -> Bool {
         guard let highlighted else { return false }
         return highlighted.source == candidate.source && highlighted.target == candidate.target && highlighted.type == candidate.type
     }
 
-    static func edgePlasticity(lastFired: Date?, now: Date = .now) -> Float {
+    nonisolated static func edgePlasticity(lastFired: Date?, now: Date = .now) -> Float {
         guard let lastFired else { return 0.15 }
         let age = max(0, now.timeIntervalSince(lastFired))
         return 0.15 + 0.85 * pow(2, Float(-age / 1_800))
     }
 
-    static func flowPhase(for edge: BrainEdge) -> Float {
+    nonisolated static func flowPhase(for edge: BrainEdge) -> Float {
         Float(stableUnit("\(edge.source)>\(edge.target)|\(edge.type)", seed: 29))
     }
 
-    static func flowProgress(time: Float, phase: Float, speed: Float = 0.13) -> Float {
+    nonisolated static func flowProgress(time: Float, phase: Float, speed: Float = 0.13) -> Float {
         let raw = (time * speed + phase).truncatingRemainder(dividingBy: 1)
         return raw < 0 ? raw + 1 : raw
     }
 
-    static var metalABIStrides: [String: Int] {
+    nonisolated static var metalABIStrides: [String: Int] {
         [
             "vertex": MemoryLayout<BrainMetalVertex>.stride,
             "ribbon": MemoryLayout<BrainRibbonVertex>.stride,
@@ -986,7 +1165,7 @@ final class BrainMetalRenderer: NSObject, MTKViewDelegate, @unchecked Sendable {
         ]
     }
 
-    static var metalABILayouts: [String: [Int]] {
+    nonisolated static var metalABILayouts: [String: [Int]] {
         [
             "vertex": [MemoryLayout<BrainMetalVertex>.size, MemoryLayout<BrainMetalVertex>.stride, MemoryLayout<BrainMetalVertex>.alignment],
             "ribbon": [MemoryLayout<BrainRibbonVertex>.size, MemoryLayout<BrainRibbonVertex>.stride, MemoryLayout<BrainRibbonVertex>.alignment],

@@ -33,6 +33,36 @@ import Testing
 @Test func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     let renderer = try #require(BrainMetalRenderer(onPick: { _ in }))
     #expect(!renderer.metalDevice.name.isEmpty)
+
+    renderer.hullOpacity = 0
+    renderer.update(nodes: [], edges: [], highlightedEdge: nil, topologyFocusID: nil, layout: .memory)
+    let clear = try renderer.renderOffscreenProbe(width: 160, height: 120, bloomEnabled: false)
+    renderer.update(
+        nodes: [
+            .init(
+                id: "probe", content: "Probe", domain: "native", confidence: 1,
+                status: "committed", memoryType: "fact", createdAt: .now,
+                agent: "test", agentLabel: nil, agentIsRoot: false,
+                tags: nil, corroborationCount: 1
+            ),
+        ],
+        edges: [], highlightedEdge: nil, topologyFocusID: nil, layout: .memory
+    )
+    let scene = try renderer.renderOffscreenProbe(width: 160, height: 120, bloomEnabled: false)
+    let probe = try renderer.renderOffscreenProbe(width: 160, height: 120)
+    #expect(probe.width == 160)
+    #expect(probe.height == 120)
+    #expect(probe.bloomEncoded)
+    #expect(probe.nonBackgroundPixelCount > 64)
+    #expect(scene.changedPixelCount(comparedTo: clear) > 16)
+    #expect(probe.changedPixelCount(comparedTo: scene, tolerance: 2) > 16)
+    #expect(probe.rgbEnergy > scene.rgbEnergy)
+    #expect(throws: BrainMetalOffscreenError.self) {
+        try renderer.renderOffscreenProbe(width: 0, height: 120)
+    }
+    #expect(throws: BrainMetalOffscreenError.self) {
+        try renderer.renderOffscreenProbe(width: 2_049, height: 120)
+    }
 }
 
 @Test func APIBaseURLRejectsRemoteAndCredentialedOrigins() {

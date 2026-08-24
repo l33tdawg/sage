@@ -94,7 +94,11 @@ surface, synchronized table, inspector close control, and independently typed
 related-memory cards. Related focus preserves its primary anchor, reconciles
 against refreshed payloads, and clears before the anchor on Escape. A hosted
 AppKit test now proves the production Metal surface can join a hosted native
-responder chain, while a hardware runtime test compiles its required Metal pipeline family.
+responder chain. A hardware runtime test now compiles the required Metal pipeline
+family, renders the shared production scene encoder into a 4× MSAA offscreen
+target, resolves it, executes the bloom chain, waits for successful GPU
+completion, and verifies relative scene and bloom pixel changes without relying
+on cross-GPU golden hashes.
 Real VoiceOver evidence, full SwiftUI focus-return evidence, and deeper behavioral,
 accessibility, Metal-fallback, and performance evidence remain open.
 
@@ -177,7 +181,7 @@ acceptance gaps are not counted as another route slice.
 | Primary product area | Current surface | Current classification | Acceptance status |
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
-| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, and an independently typed related-memory Train of Thought pane | `native-control` | Brain interaction/parity pass implemented; real VoiceOver and full SwiftUI focus-return proof, offscreen GPU/pixel-level bloom evidence, daemon lifecycle, Metal fallback, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
+| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity pass implemented; real VoiceOver and full SwiftUI focus-return proof, cross-GPU/offline behavior, daemon lifecycle, Metal fallback, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
 | Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; whole-domain transfer and full acceptance evidence remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |
