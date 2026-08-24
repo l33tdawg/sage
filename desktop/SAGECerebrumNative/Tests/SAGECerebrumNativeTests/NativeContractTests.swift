@@ -16,6 +16,60 @@ import Testing
 @Suite(.serialized)
 struct HostedBrainAcceptance {}
 
+#if DEBUG
+@Test func nativeAXAcceptanceFixtureIsExplicitAndBounded() {
+    #expect(NativeAXAcceptanceFixture(environment: [:]) == nil)
+    #expect(NativeAXAcceptanceFixture(environment: [
+        "SAGE_NATIVE_AX_METAL": "unavailable",
+        "SAGE_NATIVE_AX_RETRY_RESULT": "fail",
+    ]) == nil)
+    #expect(NativeAXAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+        "SAGE_NATIVE_AX_METAL": "available",
+        "SAGE_NATIVE_AX_RETRY_RESULT": "fail",
+    ]) == nil)
+    #expect(NativeAXAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+        "SAGE_NATIVE_AX_METAL": "unavailable",
+        "SAGE_NATIVE_AX_RETRY_RESULT": "unknown",
+    ]) == nil)
+    #expect(NativeAXAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+        "SAGE_NATIVE_AX_METAL": "unavailable",
+        "SAGE_NATIVE_AX_RETRY_RESULT": "restore",
+        "SAGE_NATIVE_AX_RETRY_DELAY_MS": "99",
+    ]) == nil)
+
+    let fixture = NativeAXAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+        "SAGE_NATIVE_AX_METAL": "unavailable",
+        "SAGE_NATIVE_AX_RETRY_RESULT": "fail",
+        "SAGE_NATIVE_AX_RETRY_DELAY_MS": "800",
+    ])
+    #expect(fixture?.retryResult == .fail)
+    #expect(fixture?.retryDelay == .milliseconds(800))
+    #expect(NativeAXAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+        "SAGE_NATIVE_AX_METAL": "unavailable",
+        "SAGE_NATIVE_AX_RETRY_RESULT": "restore",
+    ])?.retryDelay == .milliseconds(750))
+    for boundary in [100, 5_000] {
+        #expect(NativeAXAcceptanceFixture(environment: [
+            "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+            "SAGE_NATIVE_AX_METAL": "unavailable",
+            "SAGE_NATIVE_AX_RETRY_RESULT": "fail",
+            "SAGE_NATIVE_AX_RETRY_DELAY_MS": String(boundary),
+        ]) != nil)
+    }
+    #expect(NativeAXAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+        "SAGE_NATIVE_AX_METAL": "unavailable",
+        "SAGE_NATIVE_AX_RETRY_RESULT": "fail",
+        "SAGE_NATIVE_AX_RETRY_DELAY_MS": "5001",
+    ]) == nil)
+}
+#endif
+
 @MainActor
 @Test(.enabled(if: ProcessInfo.processInfo.environment["SAGE_REQUIRE_METAL_HARDWARE"] == "1"))
 func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {

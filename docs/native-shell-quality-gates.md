@@ -323,8 +323,10 @@ Automated semantic checks supplement, never replace, the OS smoke matrix:
   recover from daemon loss;
 - camera denial/revocation and every permission error remain operable without a
   pointer or camera;
-- no severity-critical axe violations and no unresolved serious violation in
-  the native and browser surfaces.
+- no unresolved serious or critical findings from system AX inspection,
+  Accessibility Inspector, or the named-Mac VoiceOver pass on native surfaces;
+  and no severity-critical axe violations or unresolved serious axe violations
+  in browser CEREBRUM.
 
 ## Recovery sign-off
 

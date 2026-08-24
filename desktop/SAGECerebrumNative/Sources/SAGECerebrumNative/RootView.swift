@@ -124,7 +124,16 @@ struct RootView: View {
     private func destination(for route: AppRoute, api: any SAGEAPI) -> some View {
         switch route {
         case .overview: OverviewView(api: api)
-        case .brain: BrainView(api: api)
+        case .brain:
+            #if DEBUG
+            if let fixture = NativeAXAcceptanceFixture() {
+                fixture.makeBrainView(api: api)
+            } else {
+                BrainView(api: api)
+            }
+            #else
+            BrainView(api: api)
+            #endif
         case .search: SearchView(api: api)
         default: NativePlaceholderView(route: route)
         }

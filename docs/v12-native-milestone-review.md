@@ -1,0 +1,125 @@
+# v12 native milestone and product-opportunity review
+
+**Reviewed:** 2026-08-24 against the accepted SwiftUI/AppKit/Metal ADR, roadmap,
+capability ledger, acceptance contract, current Swift source, and workflows.
+
+The native foundation is genuine and the implemented Overview, Search, and
+Brain slices are strong. It is not yet a production-complete v12 product. This
+document keeps release blockers separate from ideas so useful enhancements do
+not obscure the critical path.
+
+## Must ship before production acceptance
+
+### P0 — product completeness and trust
+
+1. Replace the six placeholder destinations—Tasks & Messages, Import, Agents,
+   Access Controls, Federation, and Settings—with complete native workflows.
+2. Give the application ownership of daemon installation, single-instance
+   launch, supervision, readiness, drain, restart, diagnostics, and safe
+   recovery. It currently attaches to an already-running node.
+3. Implement the native session trust bootstrap: bind a one-use session to the
+   validated daemon generation, startup proof, endpoint, and application
+   identity without granting implicit Root/Admin authority.
+4. Replace the browser/Tauri inventory producer with an exact Swift-native
+   route/action/menu/shortcut/API inventory and validate a real candidate
+   ledger—not only validator unit tests.
+5. Deliver clean-machine onboarding and recovery: create or join a node,
+   connect an AI tool, explain privacy choices, create and verify recovery
+   material, restore safely, and recover from a forgotten passphrase without a
+   terminal.
+6. After the product surface is complete, pass the signed/notarized update,
+   rollback, offline, clean-machine, provenance, and three-run named-Mac gates.
+
+### P1 — acceptance completeness
+
+- Add typed native deep links, route/workspace restoration, external-link
+  handoff, file panels, and normal macOS lifecycle integration.
+- Replace the generic unavailable screen with state-specific starting,
+  degraded, incompatible, disk-full, daemon-loss, and update-recovery journeys.
+  Every error must say what happened, what remains safe, and what to do next.
+- Complete 200% text/reflow, keyboard, VoiceOver, contrast, reduced-motion, and
+  narrow-window acceptance; remove fixed-size clipping risks.
+- Freeze and exercise the macOS/architecture/GPU/display support matrix.
+- Bind Windows/Linux browser-continuity evidence to the exact same v12
+  candidate identity.
+- Make global connection/degraded/offline state authoritative. The sidebar must
+  not claim “connected” when SSE or required projections are stale.
+
+## User-life improvements
+
+These are ordered by user impact rather than novelty.
+
+### Immediate v12 UX priorities
+
+1. **Guided home and health.** Turn Overview into an actionable “what needs my
+   attention” surface. Health cards should deep-link to the exact recovery or
+   stale subsystem instead of merely displaying telemetry.
+2. **Plain-language recovery model.** Use one consistent pattern for cause,
+   safety, next action, diagnostics, and browser fallback across every screen.
+3. **Global activity center.** Show imports, updates, synchronization,
+   governance confirmations, and recoverable failures in one bounded history;
+   do not make users hunt through routes for background work.
+4. **Progressive onboarding.** Introduce node, memory, agents, federation, and
+   governance only when relevant. Start with safe defaults and reveal advanced
+   protocol language behind contextual help.
+5. **Authoritative live-state language.** Distinguish live, reconnecting,
+   verified snapshot, stale, partial, offline, and permission-limited states
+   consistently, with subtle SSE motion that respects Reduce Motion.
+6. **Safe action consistency.** Destructive/privacy-affecting actions use the
+   same review sheet, consequence summary, exact scope, confirmation language,
+   indeterminate-commit handling, and focus return.
+
+### High-value enhancements after blockers
+
+- Command palette across routes, memories, agents, settings, and help.
+- Saved searches, pinned filters, recent items, and resumable workspaces.
+- Shortcut discovery overlay plus a task-oriented native Help menu.
+- Contextual “why this matters” explanations for governance and security.
+- Optional multi-window memory and agent inspectors.
+- Brain quality/performance presets with honest frame and data-density status.
+- Explicitly safe Spotlight/Quick Look integration for approved local metadata.
+
+## First UI/UX implementation slice
+
+The next design increment should improve comprehension without creating another
+large subsystem:
+
+1. Mark unfinished destinations as Preview/Coming Soon and remove their route
+   shortcuts until they are real; `Command-,` must not open placeholder Settings.
+2. Replace binary Live/Polling labels and the permanently green sidebar footer
+   with authoritative Live, Reconnecting, Updated N seconds ago, and
+   Offline—showing snapshot from… states.
+3. Put plain-language names first in Brain: **Memory Map** (MRI), **Agent
+   Network** (Connectome), **List View**, **Memory Groups**, and **Related
+   Memories**. Keep protocol terms in help and advanced disclosures.
+4. Remove duplicated page-title chrome. Use the unified macOS titlebar for the
+   title and keep at most one concise explanation/status line in content.
+5. Simplify the Brain toolbar: keep mode, presentation, and inspector visible;
+   group Scan, Flow, shell opacity, and reset under View Options.
+6. Make inspector visibility independent of selection. Closing an inspector
+   hides details; Escape clears semantic selection and returns focus.
+7. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
+   detail errors, safe per-feed errors on Overview, and Diagnose/drill-down
+   actions on unhealthy cards.
+8. Add menu commands and discoverability for Focus Search, Refresh,
+   Show/Hide Inspector, Memory Map/List View, Memory/Agent Network, Clear
+   Selection, View Options, and Keyboard Shortcuts.
+9. Move general titles back to standard SF Pro. Reserve rounded typography for
+   the CEREBRUM mark and a small number of hero/MRI accents; reserve SF Mono for
+   identifiers, hashes, and diagnostics.
+10. Replace continuous decorative SSE pulsing with brief event-linked
+    highlights, a coalesced “updates available” affordance when selection would
+    be disturbed, and instant transitions under Reduce Motion.
+
+The desired result is a calm macOS instrument: native and quiet by default,
+dense when needed, immediately understandable, and fast for keyboard users.
+
+## Delivery order
+
+1. Finish the system-AX/VoiceOver and native-inventory foundations.
+2. Implement daemon lifecycle and the session trust bootstrap.
+3. Build onboarding, recovery, global status, and activity-center primitives.
+4. Port the six missing destinations using those shared primitives.
+5. Complete accessibility, offline, performance, and candidate-bound evidence.
+6. Resume signing/notarization only when the complete product can be tested as
+   a coherent user journey.

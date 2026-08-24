@@ -9,7 +9,7 @@ The central documentation resource for **SAGE** — Sovereign Agent Governed Exp
 ## Start here
 
 The native-product boundary is recorded in
-[`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md); it supersedes the
+[`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md); it supersedes the
 older foundation record where the meaning of “fully native” was unresolved.
 
 | If you want to… | Read |
@@ -21,7 +21,7 @@ older foundation record where the meaning of “fully native” was unresolved.
 | Read + navigate the CEREBRUM brain view (MRI, node encoding, train of thought) | [`BRAIN.md`](BRAIN.md) |
 | Bootstrap an admin / org / clearance setup | [`ADMIN_BOOTSTRAP.md`](ADMIN_BOOTSTRAP.md) |
 | Configure lifecycle hooks | [`HOOKS.md`](HOOKS.md) |
-| Review the native desktop architecture | [`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md), [`desktop-shell-decision.md`](desktop-shell-decision.md), [`native-app-daemon-contract.md`](native-app-daemon-contract.md), [`native-shell-quality-gates.md`](native-shell-quality-gates.md), [`v12-native-capability-ledger.md`](v12-native-capability-ledger.md), [`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md), [`design/v12-linux-native-path.md`](design/v12-linux-native-path.md) |
+| Review the native desktop architecture | [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md), [`desktop-shell-decision.md`](desktop-shell-decision.md), [`native-app-daemon-contract.md`](native-app-daemon-contract.md), [`native-shell-quality-gates.md`](native-shell-quality-gates.md), [`v12-native-capability-ledger.md`](v12-native-capability-ledger.md), [`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md), [`v12-native-milestone-review.md`](v12-native-milestone-review.md) |
 
 ---
 

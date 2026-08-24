@@ -28,4 +28,24 @@ test('v12 macOS CI pins a runner and Xcode compatible with the Swift package', a
         workflow,
         /SAGE_REQUIRE_METAL_HARDWARE=1 swift test --package-path desktop\/SAGECerebrumNative --disable-sandbox/,
     );
+    assert.match(workflow, /bash scripts\/v12-native-system-ax\.test\.sh/);
+    assert.match(workflow, /release executable contains DEBUG-only AX fixture markers/);
+});
+
+test('named-Mac system AX acceptance is manual, protected, and locally retained', async () => {
+    const workflow = await readFile(
+        resolve(REPO_ROOT, '.github/workflows/v12-native-ax-named-mac.yml'),
+        'utf8',
+    );
+
+    assert.match(workflow, /^\s+workflow_dispatch:$/m);
+    assert.doesNotMatch(workflow, /^\s+(push|pull_request):$/m);
+    assert.match(workflow, /^\s+cancel-in-progress: false$/m);
+    assert.match(workflow, /^\s+if: github\.ref == 'refs\/heads\/v12-beta'$/m);
+    assert.match(workflow, /^\s+environment: v12-native-ax$/m);
+    assert.match(workflow, /^\s+runs-on: \[self-hosted, macOS, sage-v12-ax\]$/m);
+    assert.match(workflow, /SAGE_AX_EVIDENCE_ROOT/);
+    assert.match(workflow, /\/usr\/bin\/stat -f '%Su' \/dev\/console \| grep -Fvx root/);
+    assert.match(workflow, /scripts\/v12-native-system-ax\.sh --preflight/);
+    assert.doesNotMatch(workflow, /actions\/upload-artifact/);
 });

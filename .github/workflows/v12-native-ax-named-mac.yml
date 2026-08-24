@@ -1,0 +1,58 @@
+name: v12 named-Mac system AX acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: Native system AX scenario
+        required: true
+        default: both
+        type: choice
+        options: [both, retry-fail, retry-restore]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v12-native-ax-named-mac
+  cancel-in-progress: false
+
+jobs:
+  system-ax:
+    if: github.ref == 'refs/heads/v12-beta'
+    environment: v12-native-ax
+    runs-on: [self-hosted, macOS, sage-v12-ax]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require logged-in named-Mac evidence store
+        env:
+          EVIDENCE_ROOT: ${{ vars.SAGE_AX_EVIDENCE_ROOT }}
+        run: |
+          test -n "${EVIDENCE_ROOT}"
+          case "${EVIDENCE_ROOT}" in /*) ;; *) exit 1 ;; esac
+          test -d "${EVIDENCE_ROOT}"
+          test -w "${EVIDENCE_ROOT}"
+          /usr/bin/stat -f '%Su' /dev/console | grep -Fvx root
+      - name: Verify stable AX probe trust
+        run: scripts/v12-native-system-ax.sh --preflight
+      - name: Run selected system AX scenarios
+        env:
+          EVIDENCE_ROOT: ${{ vars.SAGE_AX_EVIDENCE_ROOT }}
+          SELECTED_SCENARIO: ${{ inputs.scenario }}
+        run: |
+          RUN_ROOT="${EVIDENCE_ROOT}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}"
+          mkdir -p "${RUN_ROOT}"
+          if [ "${SELECTED_SCENARIO}" = both ] || [ "${SELECTED_SCENARIO}" = retry-fail ]; then
+            scripts/v12-native-system-ax.sh --scenario retry-fail --evidence "${RUN_ROOT}"
+          fi
+          if [ "${SELECTED_SCENARIO}" = both ] || [ "${SELECTED_SCENARIO}" = retry-restore ]; then
+            scripts/v12-native-system-ax.sh --scenario retry-restore --evidence "${RUN_ROOT}"
+          fi
+          HASH_LIST="${RUN_ROOT}.sha256s"
+          find "${RUN_ROOT}" -maxdepth 3 -type f -print0 | sort -z | xargs -0 shasum -a 256 > "${HASH_LIST}"
+          mv "${HASH_LIST}" "${RUN_ROOT}/ALL-SHA256SUMS"
+          printf 'Named-Mac system AX evidence retained locally at %s\n' "${RUN_ROOT}" >> "${GITHUB_STEP_SUMMARY}"

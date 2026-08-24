@@ -973,9 +973,9 @@ are recorded in [`desktop-shell-decision.md`](desktop-shell-decision.md),
 Tauri foundation remains an opt-in preview until the macOS matrix passes.
 
 The v12 meaning of **fully native** is defined by the superseding
-[`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md): bounded WebView domain
-controls are allowed, while lifecycle, platform integration, recovery,
-permissions, updates, and rollback remain app-owned. A WebView route load is
+[`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md): the
+macOS product uses SwiftUI, AppKit, and Metal with no embedded WebView. The
+Tauri shell remains historical prototype evidence and a WebView route load is
 not native-control parity evidence.
 
 **The native shell is alpha and does not gate releases.** Browser CEREBRUM is
@@ -1112,9 +1112,9 @@ v12 is the planned completion milestone for the SAGE product roadmap: the fully 
 
 **Consumer usability is a release criterion, not polish.** A nontechnical person must be able to install SAGE, create or join a node, connect an AI tool, choose what is private or shared, recover from ordinary failures, and keep the app updated without opening a terminal or learning SAGE internals. Every choice uses plain language and safe defaults; destructive or privacy-affecting actions use consistent accessible SAGE dialogs; errors explain what happened, what remains safe, and the next recovery action. The v12 release gate includes clean-machine onboarding and recovery usability tests with people who have not used SAGE before.
 
-Tauri 2 is the accepted macOS foundation, subject to the security, packaging,
-accessibility, performance, and offline-operation gates in the desktop-shell
-ADR. Linux and Windows native clients are outside the v12 release scope; their
+The accepted macOS product is the SwiftUI/AppKit/Metal application defined by
+the native CEREBRUM ADR. Earlier Tauri work is prototype evidence only. Linux
+and Windows native clients are outside the v12 release scope; their
 supported product path is browser CEREBRUM. Current progress
 and the remaining release blockers are tracked in
 [`v12-native-product-status.md`](v12-native-product-status.md). The route/action

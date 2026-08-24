@@ -139,6 +139,17 @@ evidence, system-AX discovery, table/inspector/related-card focus-return evidenc
 cross-GPU/offline behavior, and deeper behavioral, accessibility, large-store,
 and performance evidence remain open.
 
+The named-Mac system-AX gate now has a direct `AXUIElement` harness and a
+DEBUG-only deterministic failure/restoration fixture. It validates the target
+process and application identity, pages a bounded children-only AX traversal,
+performs one external retry press, and requires exact application/system focus
+equality for the retry or Metal surface. The fixture is fail-closed outside
+design preview and release CI rejects all fixture markers. See
+[`v12-native-system-ax-acceptance.md`](v12-native-system-ax-acceptance.md).
+Execution evidence is still open because the probe does not yet have macOS
+Accessibility trust on this named Mac; audible VoiceOver remains a separate
+operator gate.
+
 The first arm64 application bundle was built and launch-tested on 2026-08-23 at
 `dist/v12-native/12.0.0-beta.1/SAGE CEREBRUM Native.app`. Launch Services
 created a visible AppKit window, SSCP attached it to the running local daemon,

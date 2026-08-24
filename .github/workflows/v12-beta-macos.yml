@@ -54,6 +54,7 @@ jobs:
       - name: Validate Swift-native acceptance contract
         run: |
           node --test scripts/v12-native-acceptance-validate.test.mjs scripts/v12-native-workflow.test.mjs
+          bash scripts/v12-native-system-ax.test.sh
           SAGE_REQUIRE_METAL_HARDWARE=1 swift test --package-path desktop/SAGECerebrumNative --disable-sandbox
       - name: Build SwiftUI/AppKit/Metal application
         run: scripts/build-native-cerebrum-macos.sh
@@ -78,6 +79,10 @@ jobs:
               fi
             fi
           done < <(find "${APP_PATH}/Contents" -type f -print)
+          if strings "${EXECUTABLE}" | grep -E 'NativeAXAcceptanceFixture|SAGE_NATIVE_AX_|SAGE_NATIVE_DESIGN_PREVIEW|SAGE_NATIVE_PREVIEW_ROUTE'; then
+            echo "release executable contains DEBUG-only AX fixture markers" >&2
+            exit 1
+          fi
           mkdir -p "${EVIDENCE_DIR}"
           shasum -a 256 "${EXECUTABLE}" > "${EVIDENCE_DIR}/swift-native-executable.sha256"
           otool -L "${EXECUTABLE}" > "${EVIDENCE_DIR}/linked-frameworks.txt"
