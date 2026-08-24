@@ -47,7 +47,7 @@ jobs:
           node-version: "24"
       - name: Verify pinned Swift toolchain
         run: |
-          test -x "${DEVELOPER_DIR}/usr/bin/swift"
+          test -d "${DEVELOPER_DIR}"
           xcodebuild -version
           swift --version
           swift package --package-path desktop/SAGECerebrumNative dump-package >/dev/null

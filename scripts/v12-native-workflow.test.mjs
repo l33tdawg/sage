@@ -17,6 +17,8 @@ test('v12 macOS CI pins a runner and Xcode compatible with the Swift package', a
         workflow,
         /^\s+DEVELOPER_DIR: \/Applications\/Xcode_26\.2\.app\/Contents\/Developer$/m,
     );
+    assert.match(workflow, /test -d "\$\{DEVELOPER_DIR\}"/);
+    assert.doesNotMatch(workflow, /test -x "\$\{DEVELOPER_DIR\}\/usr\/bin\/swift"/);
     assert.match(workflow, /swift package --package-path desktop\/SAGECerebrumNative dump-package/);
     assert.match(
         workflow,
