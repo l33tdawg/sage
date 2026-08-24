@@ -15,6 +15,8 @@ struct BrainView: View {
     @State private var showsNavigator = false
     @State private var showsInspector = false
     @State private var availableSize = CGSize(width: 1_180, height: 760)
+    @State private var mountedMetalSurfaces: Set<BrainMountedSurface> = []
+    @State private var pendingMetalRestorationAttemptID: UInt64?
     @State private var announcementGeneration = 0
     @State private var keyboardFocusGeneration = 0
     @State private var accessibilityFocusGeneration = 0
@@ -284,16 +286,8 @@ struct BrainView: View {
     }
 
     private var metalRetryButton: some View {
-        Button(action: retryMetal) {
-                    if metalRecovery.retryInFlight {
-                        Label("Trying MRI…", systemImage: "arrow.clockwise")
-                    } else {
-                        Text("Try MRI Again")
-                    }
-        }
-        .buttonStyle(.bordered)
-        .disabled(metalRecovery.retryInFlight)
-        .accessibilityIdentifier("brain-metal-retry")
+        BrainMetalRetryButton(inFlight: metalRecovery.retryInFlight, action: retryMetal)
+        .fixedSize()
         .onAppear { surfaceObserver(.metalRetryButton, true) }
         .onDisappear { surfaceObserver(.metalRetryButton, false) }
         .focused($keyboardFocus, equals: .metalRetry)
@@ -473,8 +467,8 @@ struct BrainView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("brain-memory-mri")
-        .onAppear { surfaceObserver(.memoryMRI, true) }
-        .onDisappear { surfaceObserver(.memoryMRI, false) }
+        .onAppear { reportMetalSurface(.memoryMRI, mounted: true) }
+        .onDisappear { reportMetalSurface(.memoryMRI, mounted: false) }
         .focusable()
         .focused($keyboardFocus, equals: .surface)
         .accessibilityFocused($accessibilityFocus, equals: .surface)
@@ -560,8 +554,8 @@ struct BrainView: View {
         }
         .accessibilityLabel("Connectome MRI, \(connectome.neurons.count) visible agents, \(connectome.synapses.count) directed retained-traffic synapses. Use Accessible Table to inspect.")
         .accessibilityIdentifier("brain-connectome-mri")
-        .onAppear { surfaceObserver(.connectomeMRI, true) }
-        .onDisappear { surfaceObserver(.connectomeMRI, false) }
+        .onAppear { reportMetalSurface(.connectomeMRI, mounted: true) }
+        .onDisappear { reportMetalSurface(.connectomeMRI, mounted: false) }
         .focusable()
         .focused($keyboardFocus, equals: .surface)
         .accessibilityFocused($accessibilityFocus, equals: .surface)
@@ -942,6 +936,32 @@ struct BrainView: View {
             keyboardSurfaceOwned: keyboardFocus == .surface,
             accessibilitySurfaceOwned: accessibilityFocus == .surface
         ))
+        if capability == .available, attemptID == pendingMetalRestorationAttemptID {
+            preparedMetalRenderer = nil
+        }
+        completePendingMetalRestorationIfReady()
+    }
+
+    private func reportMetalSurface(_ surface: BrainMountedSurface, mounted: Bool) {
+        if mounted {
+            guard mountedMetalSurfaces.insert(surface).inserted else { return }
+        } else {
+            guard mountedMetalSurfaces.remove(surface) != nil else { return }
+        }
+        surfaceObserver(surface, mounted)
+        completePendingMetalRestorationIfReady()
+    }
+
+    private func completePendingMetalRestorationIfReady() {
+        guard let pendingAttemptID = pendingMetalRestorationAttemptID,
+              pendingAttemptID == metalRecovery.attemptID,
+              metalRecovery.capability == .available else { return }
+        let expectedSurface: BrainMountedSurface = model.mode == .memory ? .memoryMRI : .connectomeMRI
+        guard mountedMetalSurfaces.contains(expectedSurface) else { return }
+        pendingMetalRestorationAttemptID = nil
+        requestKeyboardFocus(.surface)
+        requestAccessibilityFocus(.surface)
+        postAccessibilityAnnouncement(announcementText(.restored))
     }
 
     private func retryMetal() {
@@ -965,7 +985,10 @@ struct BrainView: View {
 
     private var metalRendererFactory: BrainMetalRendererFactory {
         { onPick in
-            if let renderer = preparedMetalRenderer?.take(onPick: onPick) {
+            if let preparedMetalRenderer {
+                guard let renderer = preparedMetalRenderer.take(onPick: onPick) else {
+                    return .failure(.rendererInitialization)
+                }
                 return .success(renderer)
             }
             return rendererBootstrap(onPick)
@@ -980,18 +1003,22 @@ struct BrainView: View {
         let effects = transition.effects
 
         if effects.discardPreparedRenderer { preparedMetalRenderer = nil }
+        if effects.discardPreparedRenderer { pendingMetalRestorationAttemptID = nil }
         if effects.acceptPreparedRenderer, let preparedRenderer {
             preparedMetalRenderer = BrainMetalRendererHandoff(preparedRenderer)
         }
         metalRecovery = transition.state
 
-        if let announcement = effects.announcement {
+        let defersRestoration = effects.announcement == .restored
+        if defersRestoration {
+            pendingMetalRestorationAttemptID = transition.state.attemptID
+        } else if let announcement = effects.announcement {
             postAccessibilityAnnouncement(announcementText(announcement))
         }
-        if let focus = effects.keyboardFocus {
+        if !defersRestoration, let focus = effects.keyboardFocus {
             requestKeyboardFocus(focusTarget(focus))
         }
-        if let focus = effects.accessibilityFocus {
+        if !defersRestoration, let focus = effects.accessibilityFocus {
             requestAccessibilityFocus(focusTarget(focus))
         }
         if let attemptID = effects.beginRetryAttempt {
@@ -1150,6 +1177,63 @@ private enum BrainFocusTarget: Hashable {
     case inspectorClose
     case relatedMemory(String)
     case metalRetry
+}
+
+private struct BrainMetalRetryButton: NSViewRepresentable {
+    let inFlight: Bool
+    let action: @MainActor () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> BrainRetryNSButton {
+        let button = BrainRetryNSButton(
+            title: "Try MRI Again",
+            target: context.coordinator,
+            action: #selector(Coordinator.performAction)
+        )
+        button.bezelStyle = .rounded
+        button.setButtonType(.momentaryPushIn)
+        button.identifier = NSUserInterfaceItemIdentifier("brain-metal-retry")
+        button.setAccessibilityIdentifier("brain-metal-retry")
+        button.setAccessibilityHelp("Attempts to restore the interactive Metal MRI while preserving the accessible table and current selection.")
+        update(button)
+        return button
+    }
+
+    func updateNSView(_ button: BrainRetryNSButton, context: Context) {
+        context.coordinator.action = action
+        update(button)
+    }
+
+    private func update(_ button: NSButton) {
+        button.title = inFlight ? "Trying MRI…" : "Try MRI Again"
+        button.isEnabled = !inFlight
+        button.setAccessibilityLabel(inFlight ? "Trying MRI" : "Try MRI Again")
+        button.setAccessibilityValue(inFlight ? "In progress" : nil)
+    }
+
+    final class BrainRetryNSButton: NSButton {
+        override func accessibilityPerformPress() -> Bool {
+            guard isEnabled else { return false }
+            performClick(nil)
+            return true
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var action: @MainActor () -> Void
+
+        init(action: @escaping @MainActor () -> Void) {
+            self.action = action
+        }
+
+        @objc func performAction() {
+            action()
+        }
+    }
 }
 
 private struct BrainRefreshKey: Hashable {

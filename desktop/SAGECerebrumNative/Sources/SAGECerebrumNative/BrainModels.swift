@@ -408,15 +408,12 @@ enum BrainMetalRecoveryReducer {
             guard attemptID == state.attemptID, state.retryInFlight else {
                 return .init(state: current, effects: .none)
             }
-            state.retryInFlight = false
             if succeeded {
-                state.capability = .available
+                state.capability = .probing
                 state.presentation = .mri
                 effects.acceptPreparedRenderer = true
-                effects.announcement = .restored
-                effects.keyboardFocus = .surface
-                effects.accessibilityFocus = .surface
             } else {
+                state.retryInFlight = false
                 state.capability = .unavailable(.rendererInitialization)
                 state.presentation = .table
                 effects.announcement = .stillUnavailable

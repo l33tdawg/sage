@@ -229,17 +229,31 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     #expect(failed.effects.announcement == .stillUnavailable)
 
     let retryAgain = BrainMetalRecoveryReducer.reduce(failed.state, event: .retryRequested)
-    let succeeded = BrainMetalRecoveryReducer.reduce(
+    let prepared = BrainMetalRecoveryReducer.reduce(
         retryAgain.state,
         event: .retryCompleted(attemptID: 5, succeeded: true)
     )
-    #expect(succeeded.state.presentation == .mri)
-    #expect(succeeded.state.capability == .available)
-    #expect(succeeded.state.effectivePresentation == .mri)
-    #expect(succeeded.effects.acceptPreparedRenderer)
-    #expect(succeeded.effects.keyboardFocus == .surface)
-    #expect(succeeded.effects.accessibilityFocus == .surface)
-    #expect(succeeded.effects.announcement == .restored)
+    #expect(prepared.state.presentation == .mri)
+    #expect(prepared.state.capability == .probing)
+    #expect(prepared.state.retryInFlight)
+    #expect(prepared.state.effectivePresentation == .mri)
+    #expect(prepared.effects.acceptPreparedRenderer)
+    #expect(prepared.effects.keyboardFocus == nil)
+    #expect(prepared.effects.accessibilityFocus == nil)
+    #expect(prepared.effects.announcement == nil)
+
+    let mounted = BrainMetalRecoveryReducer.reduce(
+        prepared.state,
+        event: .rendererReported(
+            attemptID: 5, capability: .available,
+            keyboardSurfaceOwned: false, accessibilitySurfaceOwned: false
+        )
+    )
+    #expect(mounted.state.capability == .available)
+    #expect(!mounted.state.retryInFlight)
+    #expect(mounted.effects.keyboardFocus == .surface)
+    #expect(mounted.effects.accessibilityFocus == .surface)
+    #expect(mounted.effects.announcement == .restored)
 
     let blockedPickerMRI = BrainMetalRecoveryReducer.reduce(
         unavailable,
@@ -302,6 +316,149 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     #expect(!surfaces.contains(.memoryMRI))
     #expect(model.selectedNodeID == selected.id)
     #expect(recorder.announcements == ["Interactive MRI unavailable. Showing Accessible Table."])
+}
+
+@Suite(.serialized)
+struct HostedBrainRetryAcceptance {
+@MainActor
+@Test func hostedBrainRetryControlPerformsARealAccessibilityPressAndKeepsFallbackStable() async throws {
+    let selected = BrainNode(
+        id: "retry-memory", content: "Retry-preserved native memory", domain: "native",
+        confidence: 0.98, status: "committed", memoryType: "fact", createdAt: .now,
+        agent: "test", agentLabel: "Test Agent", agentIsRoot: false,
+        tags: ["retry"], corroborationCount: 4
+    )
+    let graph = BrainGraphEnvelope(
+        nodes: [selected], edges: [], total: 1, domainCounts: ["native": 1],
+        domainLast: nil, continuationRequired: false, projection: nil
+    )
+    let api = MutationTestAPI(forgetResults: [], graph: graph)
+    let model = BrainViewModel(api: api)
+    model.graph = graph
+    model.selectedNodeID = selected.id
+    let recorder = BrainHostRecorder()
+    let view = BrainView(
+        model: model,
+        rendererBootstrap: { _ in
+            recorder.bootstrapAttempts += 1
+            return .failure(.rendererInitialization)
+        },
+        accessibilityAnnouncer: { recorder.recordAnnouncement($0) },
+        surfaceObserver: { recorder.update($0, mounted: $1) }
+    )
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
+        styleMask: [.titled, .resizable], backing: .buffered, defer: false
+    )
+    let host = NSHostingView(rootView: view)
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    host.layoutSubtreeIfNeeded()
+    _ = try await waitForMountedSurfaces(
+        recorder,
+        required: [.metalFallbackNotice, .metalRetryButton, .memoryTable],
+        forbidden: [.memoryMRI]
+    )
+
+    let attemptsBeforeRetry = recorder.bootstrapAttempts
+    try await pressAccessibilityElement(identifier: "brain-metal-retry", in: host)
+    try await waitForRetryAttempts(recorder, count: attemptsBeforeRetry + 1)
+    try await waitForAnnouncements(recorder, count: 2)
+
+    let surfaces = try await waitForMountedSurfaces(
+        recorder,
+        required: [.metalFallbackNotice, .metalRetryButton, .memoryTable],
+        forbidden: [.memoryMRI]
+    )
+    #expect(surfaces.contains(.memoryTable))
+    #expect(model.selectedNodeID == selected.id)
+    #expect(recorder.bootstrapAttempts == attemptsBeforeRetry + 1)
+    #expect(recorder.announcements == [
+        "Interactive MRI unavailable. Showing Accessible Table.",
+        "Interactive MRI is still unavailable. Accessible Table remains active.",
+    ])
+}
+
+@MainActor
+@Test(.enabled(if: ProcessInfo.processInfo.environment["SAGE_REQUIRE_METAL_HARDWARE"] == "1"))
+func hostedBrainRetryControlRestoresMRIOnlyAfterTheRendererMounts() async throws {
+    let selected = BrainNode(
+        id: "restored-memory", content: "Renderer-restored native memory", domain: "native",
+        confidence: 0.99, status: "committed", memoryType: "fact", createdAt: .now,
+        agent: "test", agentLabel: "Test Agent", agentIsRoot: false,
+        tags: ["retry", "metal"], corroborationCount: 5
+    )
+    let graph = BrainGraphEnvelope(
+        nodes: [selected], edges: [], total: 1, domainCounts: ["native": 1],
+        domainLast: nil, continuationRequired: false, projection: nil
+    )
+    let api = MutationTestAPI(forgetResults: [], graph: graph)
+    let model = BrainViewModel(api: api)
+    model.graph = graph
+    model.selectedNodeID = selected.id
+    let recorder = BrainHostRecorder()
+    recorder.successRenderer = BrainMetalRenderer(onPick: { _ in })
+    let view = BrainView(
+        model: model,
+        rendererBootstrap: { _ in
+            recorder.bootstrapAttempts += 1
+            if recorder.servesSuccessRenderer, let renderer = recorder.successRenderer {
+                recorder.servesSuccessRenderer = false
+                recorder.successRenderer = nil
+                return .success(renderer)
+            }
+            return .failure(.rendererInitialization)
+        },
+        accessibilityAnnouncer: { recorder.recordAnnouncement($0) },
+        surfaceObserver: { recorder.update($0, mounted: $1) }
+    )
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
+        styleMask: [.titled, .resizable], backing: .buffered, defer: false
+    )
+    let host = NSHostingView(rootView: view)
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    host.layoutSubtreeIfNeeded()
+    _ = try await waitForMountedSurfaces(
+        recorder,
+        required: [.metalFallbackNotice, .metalRetryButton, .memoryTable],
+        forbidden: [.memoryMRI]
+    )
+
+    let attemptsBeforeFailure = recorder.bootstrapAttempts
+    try await pressAccessibilityElement(identifier: "brain-metal-retry", in: host)
+    try await waitForRetryAttempts(recorder, count: attemptsBeforeFailure + 1)
+    try await waitForAnnouncements(recorder, count: 2)
+    _ = try await waitForMountedSurfaces(
+        recorder,
+        required: [.metalFallbackNotice, .metalRetryButton, .memoryTable],
+        forbidden: [.memoryMRI]
+    )
+
+    recorder.servesSuccessRenderer = true
+    let attemptsBeforeSuccess = recorder.bootstrapAttempts
+    try await pressAccessibilityElement(identifier: "brain-metal-retry", in: host)
+    try await waitForRetryAttempts(recorder, count: attemptsBeforeSuccess + 1)
+    try await waitForAnnouncements(recorder, count: 3)
+    let surfaces = try await waitForMountedSurfaces(
+        recorder,
+        required: [.memoryMRI],
+        forbidden: [.metalFallbackNotice, .metalRetryButton, .memoryTable]
+    )
+
+    #expect(surfaces.contains(.memoryMRI))
+    #expect(model.selectedNodeID == selected.id)
+    #expect(recorder.bootstrapAttempts == attemptsBeforeSuccess + 1)
+    #expect(recorder.announcements == [
+        "Interactive MRI unavailable. Showing Accessible Table.",
+        "Interactive MRI is still unavailable. Accessible Table remains active.",
+        "Interactive MRI restored.",
+    ])
+    let mountedIndex = try #require(recorder.events.lastIndex(of: .surface(.memoryMRI, true)))
+    let restoredIndex = try #require(recorder.events.lastIndex(of: .announcement("Interactive MRI restored.")))
+    #expect(mountedIndex < restoredIndex)
+}
 }
 
 @MainActor
@@ -869,8 +1026,17 @@ private func edgeIdentity(_ edge: BrainEdge) -> String {
 
 @MainActor
 private final class BrainHostRecorder {
+    enum Event: Equatable {
+        case announcement(String)
+        case surface(BrainMountedSurface, Bool)
+    }
+
     var announcements: [String] = []
     var layouts: [BrainResponsiveLayoutPlan] = []
+    var bootstrapAttempts = 0
+    var servesSuccessRenderer = false
+    var successRenderer: BrainMetalRenderer?
+    var events: [Event] = []
     private var surfaceCounts: [BrainMountedSurface: Int] = [:]
 
     var surfaces: Set<BrainMountedSurface> {
@@ -879,12 +1045,107 @@ private final class BrainHostRecorder {
 
     func update(_ surface: BrainMountedSurface, mounted: Bool) {
         surfaceCounts[surface] = max(0, (surfaceCounts[surface] ?? 0) + (mounted ? 1 : -1))
+        events.append(.surface(surface, mounted))
+    }
+
+    func recordAnnouncement(_ announcement: String) {
+        announcements.append(announcement)
+        events.append(.announcement(announcement))
     }
 }
 
 private enum HostedBrainTestError: Error {
     case surfacesDidNotMount(Set<BrainMountedSurface>)
     case layoutTierDidNotMount(BrainResponsiveTier)
+    case accessibilityElementDidNotPress(String)
+    case retryAttemptsDidNotReach(Int)
+}
+
+@MainActor
+private func pressAccessibilityElement(
+    identifier: String,
+    in root: NSView,
+    timeout: Duration = .seconds(3)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+        var visited: Set<ObjectIdentifier> = []
+        if findAndPressAccessibilityElement(identifier: identifier, candidate: root, visited: &visited) {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw HostedBrainTestError.accessibilityElementDidNotPress(identifier)
+}
+
+@MainActor
+private func findAndPressAccessibilityElement(
+    identifier: String,
+    candidate: Any,
+    visited: inout Set<ObjectIdentifier>
+) -> Bool {
+    guard let object = candidate as? NSObject else { return false }
+    let identity = ObjectIdentifier(object)
+    guard visited.insert(identity).inserted else { return false }
+
+    if let view = object as? NSView {
+        if view.accessibilityIdentifier() == identifier || view.identifier?.rawValue == identifier {
+            guard view is NSButton else { return false }
+            return view.accessibilityPerformPress()
+        }
+        for child in view.subviews {
+            if findAndPressAccessibilityElement(identifier: identifier, candidate: child, visited: &visited) {
+                return true
+            }
+        }
+        for child in view.accessibilityChildren() ?? [] {
+            if findAndPressAccessibilityElement(identifier: identifier, candidate: child, visited: &visited) {
+                return true
+            }
+        }
+    } else if let element = object as? NSAccessibilityElement {
+        if element.accessibilityIdentifier() == identifier {
+            guard element.accessibilityRole() == .button else { return false }
+            return element.accessibilityPerformPress()
+        }
+        for child in element.accessibilityChildren() ?? [] {
+            if findAndPressAccessibilityElement(identifier: identifier, candidate: child, visited: &visited) {
+                return true
+            }
+        }
+    }
+    return false
+}
+
+@MainActor
+private func waitForRetryAttempts(
+    _ recorder: BrainHostRecorder,
+    count: Int,
+    timeout: Duration = .seconds(3)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+        if recorder.bootstrapAttempts >= count { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw HostedBrainTestError.retryAttemptsDidNotReach(count)
+}
+
+@MainActor
+private func waitForAnnouncements(
+    _ recorder: BrainHostRecorder,
+    count: Int,
+    timeout: Duration = .seconds(3)
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+        if recorder.announcements.count >= count { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw HostedBrainTestError.retryAttemptsDidNotReach(count)
 }
 
 @MainActor
