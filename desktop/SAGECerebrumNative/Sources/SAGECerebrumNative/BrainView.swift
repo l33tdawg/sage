@@ -200,7 +200,7 @@ struct BrainView: View {
 
     private var header: some View {
         CerebrumPageHeader(
-            eyebrow: model.mode == .memory ? "Memory MRI" : "Agent Connectome",
+            eyebrow: model.mode == .memory ? "Memory Map · MRI" : "Agent Network · Connectome",
             title: "Brain",
             subtitle: model.mode == .memory
                 ? "Explore how sovereign memory forms, connects, and consolidates."
@@ -742,10 +742,15 @@ struct BrainView: View {
             if layoutPlan.usesCompactToolbar {
                 Menu {
                     Picker("Brain mode", selection: $model.mode) {
-                        ForEach(BrainMode.allCases) { Label($0.title, systemImage: $0.systemImage).tag($0) }
+                        ForEach(BrainMode.allCases) {
+                            Label($0.title, systemImage: $0.systemImage)
+                                .accessibilityLabel($0.accessibilityTitle)
+                                .tag($0)
+                        }
                     }
                 } label: {
                     Label(model.mode.title, systemImage: model.mode.systemImage)
+                        .accessibilityLabel(model.mode.accessibilityTitle)
                 }
 
                 Menu {
@@ -754,6 +759,7 @@ struct BrainView: View {
                     }
                 } label: {
                     Label(metalRecovery.effectivePresentation.title, systemImage: metalRecovery.effectivePresentation.systemImage)
+                        .accessibilityLabel(metalRecovery.effectivePresentation.accessibilityTitle)
                 }
                 .help(presentationHelp)
 
@@ -768,7 +774,11 @@ struct BrainView: View {
                 .onDisappear { surfaceObserver(.compactNavigatorTrigger, false) }
             } else {
                 Picker("Brain mode", selection: $model.mode) {
-                    ForEach(BrainMode.allCases) { Label($0.title, systemImage: $0.systemImage).tag($0) }
+                    ForEach(BrainMode.allCases) {
+                        Label($0.title, systemImage: $0.systemImage)
+                            .accessibilityLabel($0.accessibilityTitle)
+                            .tag($0)
+                    }
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 210)
@@ -839,6 +849,7 @@ struct BrainView: View {
     private var presentationOptions: some View {
         ForEach(BrainPresentation.allCases) { option in
             Label(option.title, systemImage: option.systemImage)
+                .accessibilityLabel(option.accessibilityTitle)
                 .tag(option)
                 .disabled(option == .mri && !BrainPresentationPolicy.resolve(
                     requested: option, capability: metalRecovery.capability

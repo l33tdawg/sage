@@ -241,6 +241,13 @@ acceptance gaps are not counted as another route slice.
 Current count: **9/9 native destinations mapped; 3/9 have implemented vertical
 slices; 0/9 has complete route/action acceptance evidence**.
 
+The shell now presents the six unimplemented destinations in a separate,
+non-selectable **Coming Soon** section instead of making them look equivalent
+to working routes. Only Overview, Brain, and Search own fixed navigation
+shortcuts (`Command-1` through `Command-3`), navigation and Lock commands are
+disabled outside a ready session, and `Command-,` no longer opens placeholder
+Settings. These are product-honesty improvements, not route completion.
+
 Overview, Search/Inspector, and the Brain Memory/Connectome workflow are real native controls;
 they do not load the browser SPA or a WebView. The parity ledger remains open
 until every route/action has an acceptance row and the native application owns

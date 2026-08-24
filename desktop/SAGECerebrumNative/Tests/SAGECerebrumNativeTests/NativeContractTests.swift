@@ -5,12 +5,43 @@ import SwiftUI
 import Testing
 @testable import SAGECerebrumNative
 
-@Test func everyPrimaryCerebrumRouteHasANativeDestination() {
+@Test func routeInventoryAndAvailabilityStayExplicit() {
     #expect(AppRoute.allCases.map(\.rawValue) == [
         "overview", "brain", "search", "tasks", "import",
         "network", "access", "federation", "settings",
     ])
     #expect(Set(AppRoute.allCases.map(\.cerebrumHash)).count == 9)
+    #expect(AppRoute.implemented == [.overview, .brain, .search])
+    #expect(AppRoute.implemented.compactMap(\.navigationShortcut) == ["1", "2", "3"])
+    #expect(Set(AppRoute.implemented.compactMap(\.navigationShortcut)).count == 3)
+    #expect(AppRoute.allCases.filter { !$0.isImplemented }.allSatisfy { $0.navigationShortcut == nil })
+    #expect(AppRoute.settings.isImplemented == false)
+}
+
+@MainActor
+@Test func nativeCommandsAreAvailableOnlyForAReadySession() {
+    let session = AppSession()
+    for phase in [
+        AppSession.Phase.connecting,
+        .locked,
+        .failed("Unavailable"),
+    ] {
+        session.phase = phase
+        #expect(session.acceptsReadyCommands == false)
+    }
+    session.phase = .ready
+    #expect(session.acceptsReadyCommands)
+}
+
+@Test func brainUsesPlainLanguageAliasesForPrimaryControls() {
+    #expect(BrainMode.memory.title == "Memory Map")
+    #expect(BrainMode.connectome.title == "Agent Network")
+    #expect(BrainPresentation.mri.title == "Interactive Map")
+    #expect(BrainPresentation.table.title == "List View")
+    #expect(BrainMode.memory.accessibilityTitle.contains("MRI"))
+    #expect(BrainMode.connectome.accessibilityTitle.contains("Connectome"))
+    #expect(BrainPresentation.mri.accessibilityTitle.contains("MRI"))
+    #expect(BrainPresentation.table.accessibilityTitle.contains("Accessible Table"))
 }
 
 @Suite(.serialized)

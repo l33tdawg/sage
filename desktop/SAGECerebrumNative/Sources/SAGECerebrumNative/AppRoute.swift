@@ -13,6 +13,24 @@ enum AppRoute: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    var isImplemented: Bool {
+        switch self {
+        case .overview, .brain, .search: true
+        default: false
+        }
+    }
+
+    static var implemented: [AppRoute] { allCases.filter(\.isImplemented) }
+
+    var navigationShortcut: Character? {
+        switch self {
+        case .overview: "1"
+        case .brain: "2"
+        case .search: "3"
+        default: nil
+        }
+    }
+
     var title: String {
         switch self {
         case .overview: "Overview"

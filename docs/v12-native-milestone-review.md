@@ -42,8 +42,9 @@ not obscure the critical path.
 - Freeze and exercise the macOS/architecture/GPU/display support matrix.
 - Bind Windows/Linux browser-continuity evidence to the exact same v12
   candidate identity.
-- Make global connection/degraded/offline state authoritative. The sidebar must
-  not claim “connected” when SSE or required projections are stale.
+- Make global snapshot and event-stream state authoritative. The sidebar is
+  now neutral, but each implemented route must still separate fetched-data age,
+  partial/stale results, pending updates, and SSE reconnect state.
 
 ## User-life improvements
 
@@ -81,33 +82,38 @@ These are ordered by user impact rather than novelty.
 
 ## First UI/UX implementation slice
 
-The next design increment should improve comprehension without creating another
-large subsystem:
+The first bounded navigation-honesty increment is implemented: unfinished
+destinations are visibly grouped as non-selectable Coming Soon work; only the
+three real routes retain fixed shortcuts; commands are disabled outside a ready
+session for navigation and Lock; placeholder Settings no longer owns
+`Command-,`; and Brain's primary
+mode/presentation labels lead with plain language while preserving MRI and
+Connectome as secondary technical terms. This does not complete those routes.
 
-1. Mark unfinished destinations as Preview/Coming Soon and remove their route
-   shortcuts until they are real; `Command-,` must not open placeholder Settings.
-2. Replace binary Live/Polling labels and the permanently green sidebar footer
-   with authoritative Live, Reconnecting, Updated N seconds ago, and
-   Offline—showing snapshot from… states.
-3. Put plain-language names first in Brain: **Memory Map** (MRI), **Agent
-   Network** (Connectome), **List View**, **Memory Groups**, and **Related
-   Memories**. Keep protocol terms in help and advanced disclosures.
-4. Remove duplicated page-title chrome. Use the unified macOS titlebar for the
+The remaining design increments should improve comprehension without creating
+another large subsystem:
+
+1. Replace binary Live/Polling labels with separate snapshot and event-stream
+   states: Loading, Updated N seconds ago, Partially Updated, Refresh Failed,
+   Update Available, and Event Updates Connecting/Connected/Reconnecting. The
+   sidebar footer is already neutral. Do not claim Offline until daemon
+   lifecycle or typed reachability evidence can prove it.
+2. Remove duplicated page-title chrome. Use the unified macOS titlebar for the
    title and keep at most one concise explanation/status line in content.
-5. Simplify the Brain toolbar: keep mode, presentation, and inspector visible;
+3. Simplify the Brain toolbar: keep mode, presentation, and inspector visible;
    group Scan, Flow, shell opacity, and reset under View Options.
-6. Make inspector visibility independent of selection. Closing an inspector
+4. Make inspector visibility independent of selection. Closing an inspector
    hides details; Escape clears semantic selection and returns focus.
-7. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
+5. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
    detail errors, safe per-feed errors on Overview, and Diagnose/drill-down
    actions on unhealthy cards.
-8. Add menu commands and discoverability for Focus Search, Refresh,
+6. Add menu commands and discoverability for Focus Search, Refresh,
    Show/Hide Inspector, Memory Map/List View, Memory/Agent Network, Clear
    Selection, View Options, and Keyboard Shortcuts.
-9. Move general titles back to standard SF Pro. Reserve rounded typography for
+7. Move general titles back to standard SF Pro. Reserve rounded typography for
    the CEREBRUM mark and a small number of hero/MRI accents; reserve SF Mono for
    identifiers, hashes, and diagnostics.
-10. Replace continuous decorative SSE pulsing with brief event-linked
+8. Replace continuous decorative SSE pulsing with brief event-linked
     highlights, a coalesced “updates available” affordance when selection would
     be disturbed, and instant transitions under Reduce Motion.
 

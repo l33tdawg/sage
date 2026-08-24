@@ -19,6 +19,8 @@ final class AppSession {
     var loginFailureID = 0
     var api: (any SAGEAPI)?
 
+    var acceptsReadyCommands: Bool { phase == .ready }
+
     init() {}
 
     init(previewAPI: any SAGEAPI) {

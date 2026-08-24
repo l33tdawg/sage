@@ -45,10 +45,8 @@ struct RootView: View {
             VStack(spacing: 0) {
                 sidebarBrand
                 List(selection: $session.route) {
-                    sidebarSection("Intelligence", routes: [.overview, .brain, .search])
-                    sidebarSection("Workflow", routes: [.tasks, .importData])
-                    sidebarSection("Network", routes: [.network, .access, .federation])
-                    sidebarSection("System", routes: [.settings])
+                    sidebarSection("Explore", routes: AppRoute.implemented)
+                    comingSoonSection(routes: AppRoute.allCases.filter { !$0.isImplemented })
                 }
                 .listStyle(.sidebar)
                 sidebarFooter
@@ -64,7 +62,6 @@ struct RootView: View {
                     Button("Lock CEREBRUM", systemImage: "lock") {
                         Task { await session.lock() }
                     }
-                    .keyboardShortcut("l", modifiers: .command)
                     Divider()
                     Text("Local session")
                 } label: {
@@ -103,13 +100,33 @@ struct RootView: View {
         }
     }
 
+    private func comingSoonSection(routes: [AppRoute]) -> some View {
+        Section("Coming Soon") {
+            ForEach(routes) { route in
+                Button(action: {}) {
+                    HStack(spacing: 8) {
+                        Label(route.title, systemImage: route.systemImage)
+                        Spacer(minLength: 4)
+                        Text("SOON")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(true)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("\(route.title), coming soon and unavailable")
+                .accessibilityIdentifier("sidebar-coming-soon-\(route.rawValue)")
+            }
+        }
+    }
+
     private var sidebarFooter: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(CerebrumTheme.green)
-                .frame(width: 7, height: 7)
+            Image(systemName: "desktopcomputer")
+                .font(.caption)
                 .accessibilityHidden(true)
-            Text("Local SAGE connected")
+            Text("Local SAGE session")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -135,7 +152,8 @@ struct RootView: View {
             BrainView(api: api)
             #endif
         case .search: SearchView(api: api)
-        default: NativePlaceholderView(route: route)
+        case .tasks, .importData, .network, .access, .federation, .settings:
+            NativePlaceholderView(route: route)
         }
     }
 }
@@ -256,7 +274,7 @@ private struct NativePlaceholderView: View {
             ContentUnavailableView {
                 Label(route.title, systemImage: route.systemImage)
             } description: {
-                Text("The native \(route.title) surface is mapped and queued for its 1:1 CEREBRUM implementation.")
+                Text("Coming soon in the v12 native beta. This destination is not available yet.")
             }
         }
         .navigationTitle(route.title)

@@ -88,7 +88,10 @@ enum BrainPresentation: String, CaseIterable, Identifiable, Sendable {
     case mri
     case table
     var id: String { rawValue }
-    var title: String { self == .mri ? "MRI" : "Accessible Table" }
+    var title: String { self == .mri ? "Interactive Map" : "List View" }
+    var accessibilityTitle: String {
+        self == .mri ? "Interactive Map, MRI" : "List View, Accessible Table"
+    }
     var systemImage: String { self == .mri ? "brain" : "tablecells" }
 }
 
@@ -439,7 +442,10 @@ enum BrainMode: String, CaseIterable, Identifiable, Sendable {
     case memory
     case connectome
     var id: String { rawValue }
-    var title: String { self == .memory ? "Memory" : "Connectome" }
+    var title: String { self == .memory ? "Memory Map" : "Agent Network" }
+    var accessibilityTitle: String {
+        self == .memory ? "Memory Map, MRI" : "Agent Network, Connectome"
+    }
     var systemImage: String { self == .memory ? "brain" : "point.3.connected.trianglepath.dotted" }
 }
 
