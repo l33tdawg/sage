@@ -74,9 +74,10 @@ The packaged-local-green v4 successor is schema `sage.v12.native-app-scene.v4`, 
 Its contract adds stable identity for the exact backing `NSTableView` in both
 Brain table presentations, production **List View** reducer dispatch through a
 focus-incapable DEBUG action bridge, deterministic `g1`
-selection, production Brain inspector action dispatch through that bridge,
-exact first-responder ownership by the real AppKit inspector-close `NSButton`,
-`performClick` dismissal, and exact-current-table/same-window responder
+selection, production app-owned resizable `HSplitView` inspector dispatch through
+that bridge, exact first-responder ownership by the real AppKit inspector-close
+`NSButton`, `performClick` dismissal with zero remaining close controls and
+truthful bridge state, and exact-current-table/same-window responder
 restoration with selection preservation before the existing Search sequence.
 SwiftUI backing-object reuse/replacement is recorded honestly. Local v4 is
 green; CI remains pending, and focused Brain View command routing is still open.

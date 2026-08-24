@@ -90,6 +90,7 @@ const valid = () => ({
     brain_inspector_dismissal_snapshot: {
         dispatch_surface: 'NSButton.performClick', control_identifier: 'brain-inspector-close',
         window_number: windowNumber, selected_memory_id_before: 'g1', selected_memory_id_after: 'g1',
+        close_control_match_count_after: 0,
         table_object_identity_before: '0x1000', table_object_identity_after: '0x1000', same_table_object: true,
     },
     keyboard_event_snapshot: [
@@ -204,6 +205,7 @@ const mutations = [
     ['dismissal wrong identifier', v => { v.brain_inspector_dismissal_snapshot.control_identifier = 'brain-close-wrapper'; }],
     ['dismissal cross-window', v => { v.brain_inspector_dismissal_snapshot.window_number = 8; }],
     ['dismissal loses selection', v => { v.brain_inspector_dismissal_snapshot.selected_memory_id_after = ''; }],
+    ['dismissal leaves close control mounted', v => { v.brain_inspector_dismissal_snapshot.close_control_match_count_after = 1; }],
     ['dismissal denies same table object', v => { v.brain_inspector_dismissal_snapshot.same_table_object = false; }],
     ['dismissal identity changes', v => { v.brain_inspector_dismissal_snapshot.table_object_identity_after = '0x3000'; }],
     ['dismissal unknown key', v => { v.brain_inspector_dismissal_snapshot.clicked = true; }],

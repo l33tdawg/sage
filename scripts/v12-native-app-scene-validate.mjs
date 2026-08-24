@@ -93,7 +93,7 @@ const brainLifecycleKeys = [
     'selected_memory_id', 'stage',
 ];
 const brainDismissalKeys = [
-    'control_identifier', 'dispatch_surface', 'selected_memory_id_after', 'selected_memory_id_before',
+    'close_control_match_count_after', 'control_identifier', 'dispatch_surface', 'selected_memory_id_after', 'selected_memory_id_before',
     'same_table_object', 'table_object_identity_after', 'table_object_identity_before', 'window_number',
 ];
 const searchLifecycleKeys = ['focus_target', 'inspected_memory_id', 'inspector_is_presented', 'is_ready', 'stage'];
@@ -253,7 +253,8 @@ export function validateNativeAppScene(result, expectedCommit, expectedSourceSta
     const dismissal = result.brain_inspector_dismissal_snapshot;
     if (dismissal.dispatch_surface !== 'NSButton.performClick' || dismissal.control_identifier !== 'brain-inspector-close' ||
         dismissal.window_number !== result.captured_window_number || dismissal.selected_memory_id_before !== 'g1' ||
-        dismissal.selected_memory_id_after !== 'g1' || typeof dismissal.same_table_object !== 'boolean') {
+        dismissal.selected_memory_id_after !== 'g1' || dismissal.close_control_match_count_after !== 0 ||
+        typeof dismissal.same_table_object !== 'boolean') {
         throw new Error('invalid Brain inspector dismissal proof');
     }
     requireNonEmptyString(dismissal.table_object_identity_before, 'Brain table identity before dismissal');

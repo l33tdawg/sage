@@ -61,10 +61,12 @@ It retains every v3 Search assertion and adds a fail-closed Brain lifecycle:
 3. require the mounted Memory `NSTableView` to own the captured key window's
    exact first responder while `g1` remains selected;
 4. invoke the production Brain inspector action through the same focus-incapable
-   DEBUG bridge and require the real AppKit inspector-close `NSButton` to become
-   the exact first responder;
+   DEBUG bridge, mount the app-owned resizable `HSplitView` inspector, and require
+   its real AppKit inspector-close `NSButton` to become the exact first responder;
 5. dismiss through that rendered control using `NSButton.performClick`; and
-6. require the exact currently mounted table in the same window to regain
+6. require production bridge state to report the inspector dismissed and table
+   focus, require zero remaining close controls, and require the exact currently
+   mounted table in the same window to regain
    responder ownership with the same class, rows, identifier, `g1`, and row-0
    selection. The evidence records whether SwiftUI reused or replaced the
    backing object during inspector layout.

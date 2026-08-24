@@ -75,87 +75,82 @@ struct BrainView: View {
 
     var body: some View {
         let presentedInspector = inspectorIsPresented
-        return GeometryReader { proxy in
-            ZStack {
-                CerebrumBackdrop()
-                if layoutPlan.tier == .compact {
-                    ScrollView {
+        return HSplitView {
+            GeometryReader { proxy in
+                ZStack {
+                    CerebrumBackdrop()
+                    if layoutPlan.tier == .compact {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 16) {
+                                header
+                                notices
+                                brainSurface.frame(height: layoutPlan.surfaceMinimumHeight)
+                                if trainOfThoughtVisible {
+                                    trainOfThoughtPane.frame(minHeight: layoutPlan.trainIdealHeight)
+                                }
+                            }
+                            .padding(layoutPlan.pagePadding)
+                        }
+                    } else {
                         VStack(alignment: .leading, spacing: 16) {
                             header
                             notices
-                            brainSurface.frame(height: layoutPlan.surfaceMinimumHeight)
                             if trainOfThoughtVisible {
-                                trainOfThoughtPane.frame(minHeight: layoutPlan.trainIdealHeight)
+                                VSplitView {
+                                    brainSurface.frame(minHeight: layoutPlan.surfaceMinimumHeight)
+                                    trainOfThoughtPane
+                                        .frame(
+                                            minHeight: layoutPlan.trainMinimumHeight,
+                                            idealHeight: layoutPlan.trainIdealHeight,
+                                            maxHeight: layoutPlan.trainMaximumHeight
+                                        )
+                                }
+                            } else {
+                                brainSurface
                             }
                         }
                         .padding(layoutPlan.pagePadding)
                     }
-                } else {
-                    VStack(alignment: .leading, spacing: 16) {
-                        header
-                        notices
-                        if trainOfThoughtVisible {
-                            VSplitView {
-                                brainSurface.frame(minHeight: layoutPlan.surfaceMinimumHeight)
-                                trainOfThoughtPane
-                                    .frame(
-                                        minHeight: layoutPlan.trainMinimumHeight,
-                                        idealHeight: layoutPlan.trainIdealHeight,
-                                        maxHeight: layoutPlan.trainMaximumHeight
-                                    )
-                            }
-                        } else {
-                            brainSurface
-                        }
-                    }
-                    .padding(layoutPlan.pagePadding)
                 }
+                .onAppear { updateAvailableSize(proxy.size) }
+                .onChange(of: proxy.size) { _, size in updateAvailableSize(size) }
             }
-            .onAppear { updateAvailableSize(proxy.size) }
-            .onChange(of: proxy.size) { _, size in updateAvailableSize(size) }
+            if presentedInspector {
+                VStack(spacing: 0) {
+                    HStack {
+                        Spacer()
+                        BrainInspectorCloseButton(model: model) {
+                            requestFocus(returnFocusTarget)
+                        }
+                        .help("Hide Inspector")
+                        .focused($keyboardFocus, equals: .inspectorClose)
+                        .accessibilityFocused($accessibilityFocus, equals: .inspectorClose)
+                        .accessibilityLabel("Hide Brain inspector")
+                        .accessibilityIdentifier("brain-inspector-close")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+
+                    Divider()
+
+                    if model.mode == .memory, let node = model.selectedNode {
+                        BrainNodeInspectorView(node: node)
+                    } else if model.mode == .connectome, let neuron = model.selectedNeuron {
+                        AgentNeuronInspectorView(neuron: neuron, model: model)
+                    }
+                }
+                .frame(
+                    minWidth: layoutPlan.inspectorMinimumWidth,
+                    idealWidth: layoutPlan.inspectorIdealWidth,
+                    maxWidth: layoutPlan.inspectorMaximumWidth
+                )
+                .background(.regularMaterial)
+                .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         }
         .navigationTitle("Brain")
         .focusedSceneValue(\.cerebrumRouteCommandActions, routeCommandActions)
         .toolbar { brainToolbar }
-        .inspector(isPresented: Binding(
-            get: { presentedInspector },
-            set: {
-                if !$0 && model.hasVisibleInspector {
-                    model.inspectorVisibilityIsUserControlled = true
-                }
-                model.inspectorIsPresented = $0
-                if !$0 { requestFocus(returnFocusTarget) }
-            }
-        )) {
-            VStack(spacing: 0) {
-                HStack {
-                    Spacer()
-                    BrainInspectorCloseButton(model: model) {
-                        requestFocus(returnFocusTarget)
-                    }
-                    .help("Hide Inspector")
-                    .focused($keyboardFocus, equals: .inspectorClose)
-                    .accessibilityFocused($accessibilityFocus, equals: .inspectorClose)
-                    .accessibilityLabel("Hide Brain inspector")
-                    .accessibilityIdentifier("brain-inspector-close")
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-
-                Divider()
-
-                if model.mode == .memory, let node = model.selectedNode {
-                    BrainNodeInspectorView(node: node)
-                } else if model.mode == .connectome, let neuron = model.selectedNeuron {
-                    AgentNeuronInspectorView(neuron: neuron, model: model)
-                }
-            }
-            .inspectorColumnWidth(
-                min: layoutPlan.inspectorMinimumWidth,
-                ideal: layoutPlan.inspectorIdealWidth,
-                max: layoutPlan.inspectorMaximumWidth
-            )
-        }
         .task(id: BrainRefreshKey(mode: model.mode, domain: model.selectedDomain, status: model.status)) {
             await model.refresh()
         }

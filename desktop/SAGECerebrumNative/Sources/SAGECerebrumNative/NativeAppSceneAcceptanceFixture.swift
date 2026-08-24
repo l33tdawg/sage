@@ -301,7 +301,10 @@ private final class NativeAppSceneAcceptanceRunner {
 
         NativeAppSceneBrainBridge.shared.selectListPresentation()
         try await wait("production List View action and exact Brain table first responder") {
+            self.restoreCapturedKeyWindow()
             guard let snapshot = NativeAppSceneBrainBridge.shared.snapshot(),
+                  NSApp.isActive,
+                  self.window.isKeyWindow,
                   snapshot.selectedMemoryID == selectedMemoryID,
                   !snapshot.inspectorIsPresented,
                   snapshot.focusTarget == "table",
@@ -331,7 +334,10 @@ private final class NativeAppSceneAcceptanceRunner {
 
         NativeAppSceneBrainBridge.shared.showInspector()
         try await wait("production Brain inspector action and exact close-button first responder") {
+            self.restoreCapturedKeyWindow()
             guard let snapshot = NativeAppSceneBrainBridge.shared.snapshot(),
+                  NSApp.isActive,
+                  self.window.isKeyWindow,
                   snapshot.selectedMemoryID == selectedMemoryID,
                   snapshot.inspectorIsPresented,
                   snapshot.focusTarget == "inspectorClose",
@@ -351,27 +357,33 @@ private final class NativeAppSceneAcceptanceRunner {
         let selectedMemoryIDBeforeDismissal = brainInspectorSnapshot.selectedMemoryID ?? ""
         brainInspectorClose.performClick(nil)
         try await wait("Brain inspector button dismissal and exact mounted table focus restoration") {
-            guard let currentClose = self.uniqueIdentifiedControl(
-                    identifier: "brain-inspector-close",
-                    type: NSButton.self
-                  ),
+            self.restoreCapturedKeyWindow()
+            let currentCloseControls = self.identifiedControls(
+                identifier: "brain-inspector-close",
+                type: NSButton.self
+            )
+            guard let snapshot = NativeAppSceneBrainBridge.shared.snapshot(),
+                  NSApp.isActive,
+                  self.window.isKeyWindow,
+                  !snapshot.inspectorIsPresented,
+                  snapshot.focusTarget == "table",
+                  currentCloseControls.isEmpty,
                   let restoredTable = self.uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self)
             else { return false }
-            return currentClose.isHiddenOrHasHiddenAncestor &&
-                !restoredTable.isHiddenOrHasHiddenAncestor &&
+            return !restoredTable.isHiddenOrHasHiddenAncestor &&
                 restoredTable.window === self.window &&
                 self.window.firstResponder === restoredTable && restoredTable.numberOfSelectedRows == 1 &&
                 restoredTable.selectedRow == 0
         }
         guard let restoredBrainSnapshot = NativeAppSceneBrainBridge.shared.snapshot(),
+              !restoredBrainSnapshot.inspectorIsPresented,
+              restoredBrainSnapshot.focusTarget == "table",
               let restoredBrainTable = uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self)
         else { throw FixtureError.assertion("Brain table disappeared after inspector dismissal") }
-        var restoredLifecycleSnapshot = brainSnapshot(
+        let restoredLifecycleSnapshot = brainSnapshot(
             stage: "table-focused-after-dismissal",
             snapshot: restoredBrainSnapshot
         )
-        restoredLifecycleSnapshot["inspector_is_presented"] = false
-        restoredLifecycleSnapshot["focus_target"] = "table"
         brainLifecycleSnapshots.append(restoredLifecycleSnapshot)
         responderSnapshots.append(brainResponderSnapshot(
             stage: "brain-table-after-dismissal",
@@ -384,6 +396,10 @@ private final class NativeAppSceneAcceptanceRunner {
             "window_number": window.windowNumber,
             "selected_memory_id_before": selectedMemoryIDBeforeDismissal,
             "selected_memory_id_after": restoredBrainSnapshot.selectedMemoryID ?? "",
+            "close_control_match_count_after": identifiedControls(
+                identifier: "brain-inspector-close",
+                type: NSButton.self
+            ).count,
             "table_object_identity_before": brainTableIdentity,
             "table_object_identity_after": objectIdentity(restoredBrainTable),
             "same_table_object": restoredBrainTable === brainTable,

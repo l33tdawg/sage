@@ -151,9 +151,10 @@ another large subsystem:
    `rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle`.
    It identifies the exact backing `NSTableView` for both Brain tables, prepares
    deterministic `g1`, invokes the production **List View** reducer through a
-   focus-incapable DEBUG action bridge, invokes the production Brain inspector
-   action through that bridge, proves exact focus on a real AppKit
-   inspector-close `NSButton`, dismisses it through `NSButton.performClick`,
+   focus-incapable DEBUG action bridge, invokes the production app-owned resizable
+   `HSplitView` Brain inspector through that bridge, proves exact focus on a real
+   AppKit inspector-close `NSButton`, dismisses it through `NSButton.performClick`
+   with truthful bridge state and zero remaining close controls,
    and requires the exact currently mounted table in the same window to regain
    first responder with class, rows, identifier, and selection preserved before
    continuing through Search. Backing-object reuse/replacement is recorded.

@@ -127,9 +127,10 @@ scenario
 `rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle`.
 Its fail-closed contract adds exact backing `NSTableView` identity for both
 Brain tables, deterministic `g1` selection, production **List View** reducer
-dispatch through a focus-incapable DEBUG action bridge, production Brain
-inspector-action dispatch through that bridge, exact responder ownership by the real AppKit
-inspector-close `NSButton`, `NSButton.performClick` dismissal, and restoration
+dispatch through a focus-incapable DEBUG action bridge, production app-owned
+resizable `HSplitView` inspector dispatch through that bridge, exact responder
+ownership by the real AppKit inspector-close `NSButton`, `NSButton.performClick`
+dismissal with zero remaining close controls and truthful bridge state, and restoration
 to the exact currently mounted table in the same window without losing class,
 rows, identifier, or selection before the Search sequence. Backing-object
 reuse/replacement is recorded. The packaged local v4 gate is green; CI and
