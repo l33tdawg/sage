@@ -7,10 +7,12 @@
 **Product boundary:** [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md)
 **Release gates:** [`native-shell-quality-gates.md`](native-shell-quality-gates.md)
 
-**Current contract gap:** the linked schema and semantic validator still contain
-fields inherited from the superseded WebView prototype. They must be revised to
-require the native renderer identity before this prose contract can be used for
-promotion; until then, validation remains blocked.
+**Current contract gap:** the semantic validator already rejects `web-control`
+for the macOS native product. The schema deliberately retains legacy fields so
+historical prototype evidence can still be parsed, but the canonical inventory
+producer still scans the browser/Tauri sources rather than the Swift-native
+application. Promotion remains blocked until that producer inventories and
+reconciles the exact Swift release candidate.
 
 ## Purpose
 

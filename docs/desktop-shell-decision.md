@@ -6,10 +6,9 @@
 
 > **V12 boundary supersession:** The Tauri foundation decision remains valid,
 > but its meaning of “fully native” is superseded by
-> [`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md). That ADR permits only
-> a bounded WebView for authenticated domain controls, requires app-owned native
-> lifecycle/platform controls, sets macOS as the sole native v12 target, and
-> never counts a route load as native-control parity.
+> [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md). The
+> accepted v12 product is SwiftUI/AppKit/Metal with no WebView, sets macOS as the
+> sole native target, and treats the Tauri shell as historical prototype work.
 
 ## Decision
 

@@ -97,7 +97,11 @@ surface, synchronized table, inspector close control, and independently typed
 related-memory cards. Related focus preserves its primary anchor, reconciles
 against refreshed payloads, and clears before the anchor on Escape. A hosted
 AppKit test now proves the production Metal surface can join a hosted native
-responder chain. A hardware runtime test now compiles the required Metal pipeline
+responder chain. The production focus target now sits on the concrete Metal
+representable rather than its decorative container; native identifiers and a
+generation-fenced AppKit handoff prove failed retry returns first responder to
+the retry button and successful restoration returns it to the mounted Metal
+surface. A hardware runtime test now compiles the required Metal pipeline
 family, renders the shared production scene encoder into a 4× MSAA offscreen
 target, resolves it, executes the bloom chain, waits for successful GPU
 completion, and verifies relative scene and bloom pixel changes without relying
@@ -119,7 +123,7 @@ value; rejects a duplicate accessibility press; and leaves the fallback table
 and selection mounted. Switching to Connectome cancels that task, restores the
 enabled retry control beside the Connectome table, and releases a delayed stale
 success without mounting either MRI or announcing restoration. Restoration
-focus intent and its bounded announcement are withheld until both the MRI
+focus delivery and its bounded announcement are withheld until both the MRI
 surface has mounted and that attempt reports renderer availability;
 duplicate consumption of the one-shot handoff fails closed. The required macOS
 CI lane explicitly enables the separate hardware probe. Brain now also resolves
@@ -130,8 +134,8 @@ semantic selection, and Train of Thought minimums stay inside the available
 vertical budget. A hosted 620×540-to-expanded resize contract proves the
 fallback table, retry control, navigator transition, selected memory, and
 related-memory payload survive that presentation-only change. The hosted control
-tests do not establish discovery through SwiftUI’s accessibility tree or the
-system AX server. Real VoiceOver evidence, full SwiftUI focus-return evidence,
+tests do not establish discovery through the system AX server. Real VoiceOver
+evidence, system-AX discovery, table/inspector/related-card focus-return evidence,
 cross-GPU/offline behavior, and deeper behavioral, accessibility, large-store,
 and performance evidence remain open.
 
@@ -214,7 +218,7 @@ acceptance gaps are not counted as another route slice.
 | Primary product area | Current surface | Current classification | Acceptance status |
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
-| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, responsive route-width policy and native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector presentation, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, accessibility-pressable native retry with held-progress state, cancellation/fencing and mount-gated restoration, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity, hosted narrow-window transition, immediate retry failure, held stale-success cancellation, and successful restoration passes implemented; real VoiceOver and full SwiftUI focus-return proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
+| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, responsive route-width policy and native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector presentation, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, native AppKit retry/Metal focus return, synchronized native tables, accessibility-pressable native retry with held-progress state, cancellation/fencing and mount-gated restoration, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity, hosted narrow-window transition, immediate retry failure, held stale-success cancellation, successful restoration, and retry/Metal first-responder delivery implemented; real VoiceOver/system-AX plus table/inspector/related focus proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
 | Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; whole-domain transfer and full acceptance evidence remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |
@@ -235,7 +239,7 @@ daemon lifecycle, recovery, updates, and rollback.
 
 | Platform | Evidence already present | Production blockers |
 |---|---|---|
-| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Brain runtime evidence beyond the launch shell, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility/performance and three-run evidence |
+| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Named-Mac system AX/VoiceOver and performance evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
 | Windows | x64 NSIS preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported |
 | Linux | x64 `.deb` and AppImage preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported; optional native R&D remains blocked by `RUSTSEC-2024-0429` |
 
@@ -257,8 +261,8 @@ production promotion.
   without granting implicit Root/Admin authority. The current Swift application
   attaches to an already-running loopback daemon; it does not yet own that
   daemon's lifecycle.
-- Complete the remaining Brain work: prove real VoiceOver announcements and full
-  SwiftUI focus return, Metal/Table parity,
+- Complete the remaining Brain work: prove real VoiceOver/system-AX discovery
+  and table/inspector/related-card focus return, Metal/Table parity,
   access-purge behavior, broader keyboard operation,
   cross-GPU/offline behavior, and large-store performance.
 - Convert the private tester artifact into a signed production candidate and
@@ -292,14 +296,17 @@ the SAGE-core native application.
 
 ## Durable backlog lanes
 
-The active program is consolidated into three linked, non-overlapping SAGE
-tasks rather than per-feature fragments:
+The active program is consolidated into three non-overlapping program lanes,
+with one focused Brain acceptance child under the native lane:
 
 1. `f3291de2-d270-4c3b-b81b-3f29bc54b83b` — deliver native macOS CEREBRUM on
-   `v12-beta`, from the first tester build through production acceptance; and
-2. `26dee44b-4f7f-459d-a76b-91f0c2d7cdd4` — preserve and prove the separate
+   `v12-beta`, from the first tester build through production acceptance;
+2. `e80b1ea4-4752-4e2e-8485-af40f11bf060` — focused child of the native lane
+   for the remaining Brain system-AX/VoiceOver, focus, performance, cross-GPU,
+   and offline gates;
+3. `26dee44b-4f7f-459d-a76b-91f0c2d7cdd4` — preserve and prove the separate
    headless Commons/Lantern contract; and
-3. `b6d9bade-92fa-4d74-a8c4-9b0cc35d280d` — finish the pre-v12 automatic
+4. `b6d9bade-92fa-4d74-a8c4-9b0cc35d280d` — finish the pre-v12 automatic
    host-wake and stranded-claim recovery carryover without folding it into the
    native product scope.
 

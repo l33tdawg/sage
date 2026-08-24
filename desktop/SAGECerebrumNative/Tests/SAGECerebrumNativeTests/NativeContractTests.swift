@@ -370,11 +370,16 @@ extension HostedBrainAcceptance {
         required: [.metalFallbackNotice, .metalRetryButton, .memoryTable],
         forbidden: [.memoryMRI]
     )
-
     let attemptsBeforeRetry = recorder.bootstrapAttempts
     try await pressAccessibilityElement(identifier: "brain-metal-retry", in: host)
     try await waitForRetryAttempts(recorder, count: attemptsBeforeRetry + 1)
     try await waitForAnnouncements(recorder, count: 2)
+    let retryButton = try await waitForNativeAccessibilityButton(
+        identifier: "brain-metal-retry",
+        in: host,
+        where: { $0.isEnabled }
+    )
+    try await waitUntil { window.firstResponder === retryButton }
 
     let surfaces = try await waitForMountedSurfaces(
         recorder,
@@ -564,6 +569,11 @@ func hostedBrainRetryControlRestoresMRIOnlyAfterTheRendererMounts() async throws
         required: [.memoryMRI],
         forbidden: [.metalFallbackNotice, .metalRetryButton, .memoryTable]
     )
+    let metalSurface = try await waitForNativeMetalSurface(
+        identifier: "brain-memory-metal-surface",
+        in: host
+    )
+    try await waitUntil { window.firstResponder === metalSurface }
 
     #expect(surfaces.contains(.memoryMRI))
     #expect(model.selectedNodeID == selected.id)
@@ -1219,7 +1229,9 @@ private enum HostedBrainTestError: Error {
     case layoutTierDidNotMount(BrainResponsiveTier)
     case accessibilityElementDidNotPress(String)
     case retryAttemptsDidNotReach(Int)
+    case announcementCountDidNotReach(Int)
     case nativeAccessibilityButtonDidNotAppear(String)
+    case nativeMetalSurfaceDidNotAppear(String)
     case conditionDidNotBecomeTrue
 }
 
@@ -1331,6 +1343,40 @@ private func findNativeAccessibilityButton(identifier: String, in root: NSView) 
 }
 
 @MainActor
+private func waitForNativeMetalSurface(
+    identifier: String,
+    in root: NSView,
+    timeout: Duration = .seconds(6)
+) async throws -> InteractiveMetalView {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+        if let surface = findNativeMetalSurface(identifier: identifier, in: root) {
+            return surface
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    if let surface = findNativeMetalSurface(identifier: identifier, in: root) {
+        return surface
+    }
+    throw HostedBrainTestError.nativeMetalSurfaceDidNotAppear(identifier)
+}
+
+@MainActor
+private func findNativeMetalSurface(identifier: String, in root: NSView) -> InteractiveMetalView? {
+    if let surface = root as? InteractiveMetalView,
+       surface.accessibilityIdentifier() == identifier || surface.identifier?.rawValue == identifier {
+        return surface
+    }
+    for child in root.subviews {
+        if let surface = findNativeMetalSurface(identifier: identifier, in: child) {
+            return surface
+        }
+    }
+    return nil
+}
+
+@MainActor
 private func waitForRetryAttempts(
     _ recorder: BrainHostRecorder,
     count: Int,
@@ -1357,7 +1403,7 @@ private func waitForAnnouncements(
         if recorder.announcements.count >= count { return }
         try await Task.sleep(for: .milliseconds(10))
     }
-    throw HostedBrainTestError.retryAttemptsDidNotReach(count)
+    throw HostedBrainTestError.announcementCountDidNotReach(count)
 }
 
 @MainActor

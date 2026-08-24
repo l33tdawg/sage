@@ -4,11 +4,12 @@ These gates are release criteria, not aspirational telemetry. A native package
 is not promoted on any platform without immutable CI evidence for that platform.
 Browser CEREBRUM and the existing Go release matrix remain mandatory.
 
-The product boundary and the distinction between `native-control` and
-`web-control` are defined in [`desktop-shell-v12-adr.md`](desktop-shell-v12-adr.md).
-These gates accept bounded WebView domain controls only when their route/action
-rows carry the required accessibility, offline, recovery, security, and
-performance evidence; a successful route load alone never closes a row.
+The current product boundary and the distinction between `native-control` and
+`web-control` are defined in
+[`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md).
+The macOS v12 product accepts only native SwiftUI/AppKit/Metal controls;
+Tauri/WebView rows are historical prototype evidence and cannot close a native
+route/action row.
 The machine-readable release evidence contract is
 [`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md).
 

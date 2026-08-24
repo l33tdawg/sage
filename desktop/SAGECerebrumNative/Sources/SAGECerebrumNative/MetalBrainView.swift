@@ -208,6 +208,12 @@ struct MetalBrainView: NSViewRepresentable {
         for view: InteractiveMetalView,
         rendererAvailable: Bool
     ) {
+        let identifier = layout == .memory
+            ? "brain-memory-metal-surface"
+            : "brain-connectome-metal-surface"
+        view.identifier = NSUserInterfaceItemIdentifier(identifier)
+        view.setAccessibilityIdentifier(identifier)
+        view.setAccessibilityRole(.group)
         if rendererAvailable {
             view.setAccessibilityLabel(
                 layout == .memory ? "Interactive memory brain MRI" : "Interactive agent connectome MRI"

@@ -465,6 +465,9 @@ struct BrainView: View {
                 onCapabilityChange: { handleMetalCapability($1, attemptID: $0) },
                 rendererFactory: metalRendererFactory
             )
+            .focusable()
+            .focused($keyboardFocus, equals: .surface)
+            .accessibilityFocused($accessibilityFocus, equals: .surface)
             VStack(alignment: .leading, spacing: 4) {
                 Text("CEREBRUM · MRI")
                     .font(.system(.caption, design: .monospaced).weight(.bold))
@@ -482,9 +485,6 @@ struct BrainView: View {
         .accessibilityIdentifier("brain-memory-mri")
         .onAppear { reportMetalSurface(.memoryMRI, mounted: true) }
         .onDisappear { reportMetalSurface(.memoryMRI, mounted: false) }
-        .focusable()
-        .focused($keyboardFocus, equals: .surface)
-        .accessibilityFocused($accessibilityFocus, equals: .surface)
         .accessibilityHint("Use the Accessible Table presentation for keyboard navigation and detailed selection.")
     }
 
@@ -552,6 +552,9 @@ struct BrainView: View {
                 onCapabilityChange: { handleMetalCapability($1, attemptID: $0) },
                 rendererFactory: metalRendererFactory
             )
+            .focusable()
+            .focused($keyboardFocus, equals: .surface)
+            .accessibilityFocused($accessibilityFocus, equals: .surface)
             VStack(alignment: .leading, spacing: 4) {
                 Text("CEREBRUM · CONNECTOME")
                     .font(.system(.caption, design: .monospaced).weight(.bold))
@@ -569,9 +572,6 @@ struct BrainView: View {
         .accessibilityIdentifier("brain-connectome-mri")
         .onAppear { reportMetalSurface(.connectomeMRI, mounted: true) }
         .onDisappear { reportMetalSurface(.connectomeMRI, mounted: false) }
-        .focusable()
-        .focused($keyboardFocus, equals: .surface)
-        .accessibilityFocused($accessibilityFocus, equals: .surface)
         .accessibilityHint("Use the Accessible Table presentation for keyboard navigation and detailed selection.")
     }
 
@@ -1110,7 +1110,52 @@ struct BrainView: View {
             await Task.yield()
             guard generation == keyboardFocusGeneration else { return }
             keyboardFocus = target
+            guard let identifier = nativeFocusIdentifier(target) else { return }
+            for _ in 0..<50 {
+                await Task.yield()
+                guard generation == keyboardFocusGeneration else { return }
+                if let view = nativeFocusView(identifier: identifier),
+                   view.window?.makeFirstResponder(view) == true {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
         }
+    }
+
+    private func nativeFocusIdentifier(_ target: BrainFocusTarget) -> String? {
+        switch target {
+        case .surface:
+            model.mode == .memory ? "brain-memory-metal-surface" : "brain-connectome-metal-surface"
+        case .metalRetry:
+            "brain-metal-retry"
+        case .table, .inspectorClose, .relatedMemory:
+            nil
+        }
+    }
+
+    private func nativeFocusView(identifier: String) -> NSView? {
+        let windows = [NSApplication.shared.keyWindow].compactMap { $0 } +
+            NSApplication.shared.orderedWindows.filter { $0 !== NSApplication.shared.keyWindow }
+        for window in windows {
+            if let contentView = window.contentView,
+               let match = nativeFocusView(identifier: identifier, in: contentView) {
+                return match
+            }
+        }
+        return nil
+    }
+
+    private func nativeFocusView(identifier: String, in root: NSView) -> NSView? {
+        if root.identifier?.rawValue == identifier || root.accessibilityIdentifier() == identifier {
+            return root
+        }
+        for child in root.subviews {
+            if let match = nativeFocusView(identifier: identifier, in: child) {
+                return match
+            }
+        }
+        return nil
     }
 
     private func requestAccessibilityFocus(_ target: BrainFocusTarget) {
@@ -1240,6 +1285,8 @@ private struct BrainMetalRetryButton: NSViewRepresentable {
     }
 
     final class BrainRetryNSButton: NSButton {
+        override var acceptsFirstResponder: Bool { true }
+
         override func accessibilityPerformPress() -> Bool {
             guard isEnabled else { return false }
             performClick(nil)
