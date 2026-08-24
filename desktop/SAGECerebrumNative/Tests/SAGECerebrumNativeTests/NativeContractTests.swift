@@ -58,6 +58,39 @@ import Testing
 }
 
 @MainActor
+@Test func searchInspectorToggleIsRouteAndStateGatedAndConsumedExactlyOnce() {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    session.updateSearchInspectorCommandState(hasInspector: true, isPresented: true, commandsBlocked: false)
+
+    session.requestSearchInspectorToggle()
+    #expect(session.searchInspectorToggleRequestID == 0)
+
+    session.route = .search
+    session.requestSearchInspectorToggle()
+    #expect(session.searchInspectorToggleRequestID == 1)
+    session.requestSearchInspectorToggle()
+    #expect(session.searchInspectorToggleRequestID == 1)
+    session.consumeSearchInspectorToggleRequest(0)
+    #expect(session.consumedSearchInspectorToggleRequestID == 0)
+    session.consumeSearchInspectorToggleRequest(1)
+    #expect(session.consumedSearchInspectorToggleRequestID == 1)
+
+    session.updateSearchInspectorCommandState(hasInspector: true, isPresented: false, commandsBlocked: true)
+    session.requestSearchInspectorToggle()
+    #expect(session.searchInspectorToggleRequestID == 1)
+
+    session.updateSearchInspectorCommandState(hasInspector: false, isPresented: true, commandsBlocked: false)
+    #expect(session.searchInspectorIsPresented == false)
+    session.requestSearchInspectorToggle()
+    #expect(session.searchInspectorToggleRequestID == 1)
+
+    session.updateSearchInspectorCommandState(hasInspector: true, isPresented: true, commandsBlocked: false)
+    session.route = .brain
+    #expect(session.searchHasInspector == false)
+    #expect(session.searchInspectorIsPresented == false)
+}
+
+@MainActor
 @Test func routeCommandsRejectMissingAPINonReadyAndStaleFocusedRoutes() {
     let session = AppSession()
     session.phase = .ready
@@ -538,6 +571,7 @@ struct HostedBrainAcceptance {}
 @Test func nativeAppSceneAcceptanceFixtureRequiresExactPreviewGate() {
     let commit = String(repeating: "a", count: 40)
     let sourceState = "clean:" + String(repeating: "b", count: 64)
+    let runID = "20260824T180000Z-app-scene-42"
     #expect(NativeAppSceneAcceptanceFixture(environment: [:]) == nil)
     #expect(NativeAppSceneAcceptanceFixture(environment: [
         "SAGE_NATIVE_DESIGN_PREVIEW": "1",
@@ -546,33 +580,39 @@ struct HostedBrainAcceptance {}
         "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": NativeAppSceneAcceptanceFixture.scenario,
         "SAGE_NATIVE_APP_SCENE_COMMIT": commit,
         "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+        "SAGE_NATIVE_APP_SCENE_RUN_ID": runID,
     ]) == nil)
     #expect(NativeAppSceneAcceptanceFixture(environment: [
         "SAGE_NATIVE_DESIGN_PREVIEW": "0",
         "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": NativeAppSceneAcceptanceFixture.scenario,
         "SAGE_NATIVE_APP_SCENE_COMMIT": commit,
         "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+        "SAGE_NATIVE_APP_SCENE_RUN_ID": runID,
     ]) == nil)
     #expect(NativeAppSceneAcceptanceFixture(environment: [
         "SAGE_NATIVE_DESIGN_PREVIEW": "1",
         "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": "unknown",
         "SAGE_NATIVE_APP_SCENE_COMMIT": commit,
         "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+        "SAGE_NATIVE_APP_SCENE_RUN_ID": runID,
     ]) == nil)
     #expect(NativeAppSceneAcceptanceFixture(environment: [
         "SAGE_NATIVE_DESIGN_PREVIEW": "1",
         "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": NativeAppSceneAcceptanceFixture.scenario,
         "SAGE_NATIVE_APP_SCENE_COMMIT": "not-a-commit",
         "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+        "SAGE_NATIVE_APP_SCENE_RUN_ID": runID,
     ]) == nil)
     let fixture = NativeAppSceneAcceptanceFixture(environment: [
         "SAGE_NATIVE_DESIGN_PREVIEW": "1",
         "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": NativeAppSceneAcceptanceFixture.scenario,
         "SAGE_NATIVE_APP_SCENE_COMMIT": commit,
         "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+        "SAGE_NATIVE_APP_SCENE_RUN_ID": runID,
     ])
     #expect(fixture?.commit == commit)
     #expect(fixture?.sourceState == sourceState)
+    #expect(fixture?.runID == runID)
 }
 
 @Test func nativeAXAcceptanceFixtureIsExplicitAndBounded() {

@@ -113,13 +113,16 @@ another large subsystem:
    of semantic selection. Search also keeps its one-memory inspector target
    independent from bulk selection, shares toolbar/View-menu action paths, and
    reconciles a removed result fail closed. Escape clears selection and requests
-   the stable route surface. Rendered responder delivery, system AX, and real
-   VoiceOver remain named-Mac acceptance items.
+   the stable route surface. The app-scene gate proves Search's inspect,
+   hide/reopen, identity-preservation, and exact table/close responder lifecycle.
+   Physical keyboard delivery, system AX, and real VoiceOver remain named-Mac
+   acceptance items.
 5. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
    detail errors, safe per-feed errors on Overview, and Diagnose/drill-down
    actions on unhealthy cards.
-6. **Implemented with bounded app-scene evidence for Focus Search; source-implemented
-   for the remaining current native commands:** Add route-aware macOS commands
+6. **Implemented with bounded app-scene evidence for Focus Search and Search
+   Show/Hide Inspector; source-implemented for the remaining current native
+   commands:** Add route-aware macOS commands
    for Focus Search, routed Refresh, Search Show/Hide Inspector and Clear Search
    Selection, Brain Show/Hide Inspector, Brain Mode—Memory
    Map or Agent Network—Presentation—Interactive Map or List View—Clear Brain
@@ -128,9 +131,12 @@ another large subsystem:
    duplicate-shortcut guards are covered. A DEBUG-only launch of the real app
    inventories `NSApplication.mainMenu`, dispatches the unique rendered **View >
    Focus Search** item, and proves repeated focus of the exact mounted search
-   field editor. Remaining rendered-action dispatch, real keyboard-event routing,
-   system-AX/VoiceOver discovery, route focus return, and the RC inventory remain
-   open on the named Mac.
+   field editor. It then invokes the production Search inspect path, dispatches
+   the rendered **Hide Inspector** and replacement **Show Inspector** items,
+   preserves the inspected memory, and proves exact results-table and native
+   close-button focus return. Remaining rendered-action dispatch, physical
+   keyboard-event routing, system-AX/VoiceOver discovery, and the RC inventory
+   remain open on the named Mac.
 7. **Implemented for the current native slices:** General titles and metrics use
    standard SF Pro. Rounded typography is allowlisted to the CEREBRUM mark and
    Overview hero accent; SF Mono remains reserved for identifiers, hashes, and

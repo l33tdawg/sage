@@ -38,6 +38,7 @@ test -x "${EXECUTABLE}"
 
 mkdir -p "${EVIDENCE_DIR}"
 EVIDENCE_DIR=$(cd "${EVIDENCE_DIR}" && pwd -P)
+printf '%s\n' 'app-scene acceptance pending' >"${EVIDENCE_DIR}/STATUS.txt"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-app-scene-$$"
 RUN_DIR="${EVIDENCE_DIR}/${RUN_ID}"
 mkdir "${RUN_DIR}"
@@ -45,6 +46,7 @@ RESULT="${RUN_DIR}/app-scene.json"
 APP_LOG="${RUN_DIR}/app.log"
 MANIFEST="${RUN_DIR}/manifest.txt"
 APP_PID=""
+LAUNCHED_PID=""
 
 cleanup() {
   original_status=$?
@@ -74,11 +76,13 @@ trap on_signal INT TERM
 
 SAGE_NATIVE_DESIGN_PREVIEW=1 \
 SAGE_NATIVE_PREVIEW_ROUTE=overview \
-SAGE_NATIVE_APP_SCENE_ACCEPTANCE=rendered-menu-mounted-search-focus \
+SAGE_NATIVE_APP_SCENE_ACCEPTANCE=rendered-menu-search-inspector-focus-lifecycle \
 SAGE_NATIVE_APP_SCENE_COMMIT="${COMMIT}" \
 SAGE_NATIVE_APP_SCENE_SOURCE_STATE="${SOURCE_STATE}" \
+SAGE_NATIVE_APP_SCENE_RUN_ID="${RUN_ID}" \
   "${EXECUTABLE}" >"${RESULT}" 2>"${APP_LOG}" &
 APP_PID=$!
+LAUNCHED_PID="${APP_PID}"
 
 deadline=$((SECONDS + 30))
 while kill -0 "${APP_PID}" 2>/dev/null && [ "${SECONDS}" -lt "${deadline}" ]; do
@@ -98,12 +102,12 @@ APP_PID=""
   exit "${status}"
 }
 
-node "${ROOT}/scripts/v12-native-app-scene-validate.mjs" "${RESULT}" "${COMMIT}" "${SOURCE_STATE}"
+node "${ROOT}/scripts/v12-native-app-scene-validate.mjs" "${RESULT}" "${COMMIT}" "${SOURCE_STATE}" "${RUN_ID}" "${LAUNCHED_PID}"
 
 {
-  printf 'schema=sage.v12.native-app-scene.manifest.v1\n'
+  printf 'schema=sage.v12.native-app-scene.manifest.v2\n'
   printf 'run_id=%s\n' "${RUN_ID}"
-  printf 'scenario=rendered-menu-mounted-search-focus\n'
+  printf 'scenario=rendered-menu-search-inspector-focus-lifecycle\n'
   printf 'commit=%s\n' "${COMMIT}"
   printf 'source_state=%s\n' "${SOURCE_STATE}"
   printf 'bundle_id=%s\n' "$(plutil -extract CFBundleIdentifier raw "${APP_PATH}/Contents/Info.plist")"
@@ -113,5 +117,7 @@ node "${ROOT}/scripts/v12-native-app-scene-validate.mjs" "${RESULT}" "${COMMIT}"
   shasum -a 256 "${EXECUTABLE}" "${RESULT}" "${APP_LOG}"
 } >"${MANIFEST}"
 shasum -a 256 "${RESULT}" "${APP_LOG}" "${MANIFEST}" >"${RUN_DIR}/SHA256SUMS"
-printf '%s\n' 'app-scene acceptance passed' >"${EVIDENCE_DIR}/STATUS.txt"
+STATUS_TMP="${EVIDENCE_DIR}/.STATUS.txt.$$"
+printf '%s\n' 'app-scene acceptance passed' >"${STATUS_TMP}"
+mv "${STATUS_TMP}" "${EVIDENCE_DIR}/STATUS.txt"
 printf '%s\n' "${RESULT}"

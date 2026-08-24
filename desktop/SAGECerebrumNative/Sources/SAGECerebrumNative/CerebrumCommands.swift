@@ -1,4 +1,62 @@
+import AppKit
 import SwiftUI
+
+@MainActor
+final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
+    static let shared = CerebrumNativeMenuCoordinator()
+    private static let inspectorIdentifier = NSUserInterfaceItemIdentifier("sage.search-inspector-command")
+    private weak var session: AppSession?
+
+    func install(session: AppSession) {
+        self.session = session
+        Task { @MainActor [weak self] in
+            for _ in 0..<100 {
+                if self?.refresh() == true { return }
+                await Task.yield()
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
+    }
+
+    @objc private func toggleSearchInspector(_ sender: NSMenuItem) {
+        session?.requestSearchInspectorToggle()
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(toggleSearchInspector(_:)), let session else { return false }
+        menuItem.title = session.searchInspectorIsPresented ? "Hide Inspector" : "Show Inspector"
+        return session.searchHasInspector && !session.searchInspectorCommandsBlocked &&
+            session.searchInspectorToggleRequestID == session.consumedSearchInspectorToggleRequestID &&
+            session.acceptsRouteCommands(for: .search) && !session.showsKeyboardShortcuts
+    }
+
+    @discardableResult
+    func refresh() -> Bool {
+        guard let session else { return false }
+        guard let viewMenu = NSApp.mainMenu?.items.first(where: { $0.title == "View" })?.submenu else { return false }
+        let existing = viewMenu.items.first { $0.identifier == Self.inspectorIdentifier }
+        guard session.route == .search else {
+            if let existing { viewMenu.removeItem(existing) }
+            return true
+        }
+        let item = existing ?? NSMenuItem(
+            title: "Show Inspector",
+            action: #selector(toggleSearchInspector(_:)),
+            keyEquivalent: "i"
+        )
+        item.identifier = Self.inspectorIdentifier
+        item.target = self
+        item.action = #selector(toggleSearchInspector(_:))
+        item.keyEquivalentModifierMask = [.control, .command]
+        if existing == nil {
+            let focusIndex = viewMenu.items.firstIndex { $0.title == CerebrumCommandID.focusSearch.specification.label }
+            viewMenu.insertItem(item, at: min((focusIndex ?? viewMenu.items.count - 1) + 1, viewMenu.items.count))
+        }
+        item.title = session.searchInspectorIsPresented ? "Hide Inspector" : "Show Inspector"
+        item.isEnabled = validateMenuItem(item)
+        return true
+    }
+}
 
 struct CerebrumRouteCommandActions {
     let route: AppRoute
@@ -116,14 +174,6 @@ struct CerebrumViewCommands: Commands {
             }
 
             if let search = activeRouteActions?.search {
-                Divider()
-                Button(search.inspectorIsPresented ? "Hide Inspector" : "Show Inspector") {
-                    search.toggleInspector()
-                }
-                .cerebrumShortcut(CerebrumCommandID.searchToggleInspector)
-                .disabled(!search.hasInspector)
-                .accessibilityIdentifier(CerebrumCommandID.searchToggleInspector.rawValue)
-
                 Button("Clear Search Selection") { search.clearSelection() }
                     .disabled(!search.hasSelection)
                     .accessibilityIdentifier(CerebrumCommandID.searchClearSelection.rawValue)

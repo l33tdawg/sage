@@ -16,20 +16,82 @@ struct SearchView: View {
     private let focusRequestID: UInt64
     private let consumedFocusRequestID: UInt64
     private let onFocusRequestConsumed: (UInt64) -> Void
+    private let session: AppSession?
+    #if DEBUG
+    private let appSceneBridgeRegistrationID = UUID()
+    #endif
 
     init(
         api: any SAGEAPI,
+        session: AppSession? = nil,
         focusRequestID: UInt64 = 0,
         consumedFocusRequestID: UInt64 = 0,
         onFocusRequestConsumed: @escaping (UInt64) -> Void = { _ in }
     ) {
         _model = State(initialValue: SearchViewModel(api: api))
+        self.session = session
         self.focusRequestID = focusRequestID
         self.consumedFocusRequestID = consumedFocusRequestID
         self.onFocusRequestConsumed = onFocusRequestConsumed
     }
 
     var body: some View {
+        searchSurface
+        .task {
+            await model.loadMetadata()
+        }
+        .task(id: refreshKey) {
+            if !model.query.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
+            guard !Task.isCancelled else { return }
+            await model.refresh()
+        }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            await model.runLiveUpdates()
+        }
+        .task(id: model.inspectedMemoryID) {
+            await model.loadInspectedTags()
+        }
+        .task(id: focusRequestID) {
+            await consumeSearchFocusRequestIfNeeded()
+        }
+        .task(id: inspectorToggleRequestID) {
+            await consumeInspectorToggleRequestIfNeeded()
+        }
+        .onChange(of: model.selection) { _, selection in
+            handleSelectionChange(selection)
+        }
+        .onChange(of: model.inspectedMemoryID) { _, inspectedMemoryID in
+            handleInspectedMemoryChange(inspectedMemoryID)
+        }
+        .onChange(of: model.customFrom) { _, from in
+            if model.customTo < from { model.customTo = from }
+        }
+        .onChange(of: searchCommandsAreBlocked, initial: true) { _, _ in
+            syncInspectorCommandState(inspectorState)
+        }
+        .sheet(isPresented: $showsBulkTagSheet) { bulkTagSheet }
+        .alert(item: $forgetConfirmation) { confirmation in
+            forgetAlert(confirmation)
+        }
+        .onExitCommand {
+            if !model.isMutating,
+               !model.selection.isEmpty || model.inspectedMemoryID != nil {
+                dismissCurrentSearchFocusAndRestoreFocus()
+            }
+        }
+        .onDisappear {
+            session?.clearSearchInspectorCommandState()
+            #if DEBUG
+            NativeAppSceneSearchBridge.shared.unregister(id: appSceneBridgeRegistrationID)
+            #endif
+        }
+        #if DEBUG
+        .onAppear { registerAppSceneAcceptanceBridgeIfNeeded() }
+        #endif
+    }
+
+    private var searchSurface: some View {
         ZStack {
             CerebrumBackdrop()
             VStack(alignment: .leading, spacing: 18) {
@@ -54,111 +116,7 @@ struct SearchView: View {
             get: { inspectorIsPresented && model.inspectedMemoryID != nil },
             set: { if !$0 { hideInspectorAndRestoreFocus() } }
         )) {
-            if let memory = model.inspectedMemory {
-                VStack(spacing: 0) {
-                    HStack {
-                        Spacer()
-                        Button("Hide Inspector", systemImage: "xmark") {
-                            hideInspectorAndRestoreFocus()
-                        }
-                        .labelStyle(.iconOnly)
-                        .help("Hide Inspector")
-                        .focused($keyboardFocus, equals: .inspectorClose)
-                        .accessibilityFocused($accessibilityFocus, equals: .inspectorClose)
-                        .accessibilityLabel("Hide Search inspector")
-                        .accessibilityIdentifier("search-inspector-close")
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-
-                    Divider()
-
-                    MemoryInspectorView(
-                        memory: memory,
-                        authorLabel: model.authorLabels[memory.submittingAgent],
-                        tags: model.inspectedTags,
-                        tagsAreLoading: model.tagsAreLoading,
-                        tagsError: model.tagsError,
-                        newTag: $model.newTag,
-                        isMutating: model.isMutating,
-                        onAddTag: { Task { await model.addInspectedTag() } },
-                        onRemoveTag: { tag in Task { await model.removeInspectedTag(tag) } },
-                        onForget: { requestForget([memory.id]) }
-                    )
-                }
-                    .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
-            } else if model.inspectedMemoryID != nil {
-                ContentUnavailableView {
-                    Label("Updating memory details", systemImage: "clock.arrow.circlepath")
-                } description: {
-                    Text("CEREBRUM is reconciling this memory with the current results.")
-                }
-                .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
-            }
-        }
-        .task {
-            await model.loadMetadata()
-        }
-        .task(id: refreshKey) {
-            if !model.query.isEmpty { try? await Task.sleep(for: .milliseconds(250)) }
-            guard !Task.isCancelled else { return }
-            await model.refresh()
-        }
-        .task(id: scenePhase) {
-            guard scenePhase == .active else { return }
-            await model.runLiveUpdates()
-        }
-        .task(id: model.inspectedMemoryID) {
-            await model.loadInspectedTags()
-        }
-        .task(id: focusRequestID) {
-            guard focusRequestID > consumedFocusRequestID else { return }
-            searchIsPresented = false
-            await Task.yield()
-            guard !Task.isCancelled else { return }
-            searchIsPresented = true
-            await Task.yield()
-            guard !Task.isCancelled else { return }
-            onFocusRequestConsumed(focusRequestID)
-        }
-        .onChange(of: model.selection) { _, selection in
-            applyInspectorState(
-                SearchInspectorLifecycle.selectionChanged(from: inspectorState, selection: selection)
-            )
-        }
-        .onChange(of: model.inspectedMemoryID) { _, inspectedMemoryID in
-            if inspectedMemoryID == nil, inspectorIsPresented {
-                inspectorIsPresented = false
-                requestFocus(.results)
-                postAccessibilityAnnouncement("The inspected memory is no longer in these results.")
-            }
-        }
-        .onChange(of: model.customFrom) { _, from in
-            if model.customTo < from { model.customTo = from }
-        }
-        .sheet(isPresented: $showsBulkTagSheet) { bulkTagSheet }
-        .alert(item: $forgetConfirmation) { confirmation in
-            Alert(
-                title: Text(confirmation.title),
-                message: Text(confirmation.message(total: model.total, loaded: model.memories.count)),
-                primaryButton: .cancel(),
-                secondaryButton: .destructive(Text(confirmation.confirmLabel)) {
-                    if confirmation.needsDurableFollowUp {
-                        Task { @MainActor in
-                            await Task.yield()
-                            forgetConfirmation = .durable(confirmation.ids)
-                        }
-                    } else {
-                        Task { await model.forget(ids: confirmation.ids) }
-                    }
-                }
-            )
-        }
-        .onExitCommand {
-            if !model.isMutating,
-               !model.selection.isEmpty || model.inspectedMemoryID != nil {
-                dismissCurrentSearchFocusAndRestoreFocus()
-            }
+            inspectorContent
         }
     }
 
@@ -170,13 +128,124 @@ struct SearchView: View {
         )
     }
 
+    private func consumeSearchFocusRequestIfNeeded() async {
+        guard focusRequestID > consumedFocusRequestID else { return }
+        searchIsPresented = false
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+        searchIsPresented = true
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+        guard await focusMountedToolbarSearchField(), !Task.isCancelled else { return }
+        onFocusRequestConsumed(focusRequestID)
+    }
+
+    private func consumeInspectorToggleRequestIfNeeded() async {
+        guard let session,
+              session.searchInspectorToggleRequestID > session.consumedSearchInspectorToggleRequestID else { return }
+        let requestID = session.searchInspectorToggleRequestID
+        toggleInspectorPresentation()
+        await Task.yield()
+        guard !Task.isCancelled else { return }
+        session.consumeSearchInspectorToggleRequest(requestID)
+    }
+
+    private func handleSelectionChange(_ selection: Set<MemorySummary.ID>) {
+        applyInspectorState(
+            SearchInspectorLifecycle.selectionChanged(from: inspectorState, selection: selection)
+        )
+    }
+
+    private func handleInspectedMemoryChange(_ inspectedMemoryID: MemorySummary.ID?) {
+        guard inspectedMemoryID == nil, inspectorIsPresented else { return }
+        inspectorIsPresented = false
+        syncInspectorCommandState(SearchInspectorLifecycle.cleared)
+        requestFocus(.results)
+        postAccessibilityAnnouncement("The inspected memory is no longer in these results.")
+    }
+
+    private func forgetAlert(_ confirmation: ForgetConfirmation) -> Alert {
+        Alert(
+            title: Text(confirmation.title),
+            message: Text(confirmation.message(total: model.total, loaded: model.memories.count)),
+            primaryButton: .cancel(),
+            secondaryButton: .destructive(Text(confirmation.confirmLabel)) {
+                if confirmation.needsDurableFollowUp {
+                    Task { @MainActor in
+                        await Task.yield()
+                        forgetConfirmation = .durable(confirmation.ids)
+                    }
+                } else {
+                    Task { await model.forget(ids: confirmation.ids) }
+                }
+            }
+        )
+    }
+
+    private var inspectorToggleRequestID: UInt64 {
+        session?.searchInspectorToggleRequestID ?? 0
+    }
+
+    @ViewBuilder
+    private var inspectorContent: some View {
+        if let memory = model.inspectedMemory {
+            VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    SearchInspectorCloseButton(action: hideInspectorAndRestoreFocus)
+                        .focused($keyboardFocus, equals: .inspectorClose)
+                        .accessibilityFocused($accessibilityFocus, equals: .inspectorClose)
+                        .accessibilityLabel("Hide Search inspector")
+                        .accessibilityIdentifier("search-inspector-close")
+                        .focusedSceneValue(\.cerebrumRouteCommandActions, routeCommandActions)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+
+                Divider()
+
+                MemoryInspectorView(
+                    memory: memory,
+                    authorLabel: model.authorLabels[memory.submittingAgent],
+                    tags: model.inspectedTags,
+                    tagsAreLoading: model.tagsAreLoading,
+                    tagsError: model.tagsError,
+                    newTag: $model.newTag,
+                    isMutating: model.isMutating,
+                    onAddTag: { Task { await model.addInspectedTag() } },
+                    onRemoveTag: { tag in Task { await model.removeInspectedTag(tag) } },
+                    onForget: { requestForget([memory.id]) }
+                )
+            }
+            .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
+        } else if model.inspectedMemoryID != nil {
+            ContentUnavailableView {
+                Label("Updating memory details", systemImage: "clock.arrow.circlepath")
+            } description: {
+                Text("CEREBRUM is reconciling this memory with the current results.")
+            }
+            .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
+        }
+    }
+
+    private func syncInspectorCommandState(_ state: SearchInspectorState) {
+        session?.updateSearchInspectorCommandState(
+            hasInspector: state.inspectedMemoryID != nil,
+            isPresented: state.isPresented,
+            commandsBlocked: searchCommandsAreBlocked
+        )
+    }
+
+    private var searchCommandsAreBlocked: Bool {
+        showsFilters || showsBulkTagSheet || forgetConfirmation != nil || model.isMutating
+    }
+
     private var routeCommandActions: CerebrumRouteCommandActions {
         .init(
             route: .search,
             isRefreshing: model.isLoading,
             refresh: refresh,
-            blocksGlobalCommands: showsFilters || showsBulkTagSheet ||
-                forgetConfirmation != nil || model.isMutating,
+            blocksGlobalCommands: searchCommandsAreBlocked,
             search: .init(
                 inspectorIsPresented: inspectorIsPresented && model.inspectedMemoryID != nil,
                 hasInspector: model.inspectedMemoryID != nil,
@@ -317,6 +386,10 @@ struct SearchView: View {
                     .focused($keyboardFocus, equals: .results)
                     .accessibilityFocused($accessibilityFocus, equals: .results)
                     .accessibilityIdentifier("search-results-table")
+                    .background(SearchNativeControlIdentityBridge(
+                        identifier: "search-results-table",
+                        kind: .table
+                    ))
 
                     if model.nextCursor != nil {
                         Divider()
@@ -501,6 +574,7 @@ struct SearchView: View {
     private func applyInspectorState(_ state: SearchInspectorState) {
         model.inspectedMemoryID = state.inspectedMemoryID
         inspectorIsPresented = state.isPresented
+        syncInspectorCommandState(state)
     }
 
     private func requestFocus(_ target: SearchFocusTarget) {
@@ -511,8 +585,110 @@ struct SearchView: View {
             guard generation == focusGeneration else { return }
             keyboardFocus = target
             accessibilityFocus = target
+            for _ in 0..<50 {
+                await Task.yield()
+                guard generation == focusGeneration else { return }
+                if let view = nativeFocusableView(for: target),
+                   view.window?.makeFirstResponder(view) == true {
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
         }
     }
+
+    private func nativeFocusableView(for target: SearchFocusTarget) -> NSView? {
+        let identifier = switch target {
+        case .results: "search-results-table"
+        case .inspectorClose: "search-inspector-close"
+        }
+        let windows = [NSApplication.shared.keyWindow].compactMap { $0 } +
+            NSApplication.shared.orderedWindows.filter { $0 !== NSApplication.shared.keyWindow }
+        for window in windows {
+            guard let contentView = window.contentView,
+                  let owner = nativeView(identifier: identifier, in: contentView) else { continue }
+            switch target {
+            case .results:
+                if let table = owner as? NSTableView ?? nativeDescendant(type: NSTableView.self, in: owner) { return table }
+            case .inspectorClose:
+                if let button = owner as? NSButton ?? nativeDescendant(type: NSButton.self, in: owner) { return button }
+            }
+        }
+        return nil
+    }
+
+    private func focusMountedToolbarSearchField() async -> Bool {
+        for attempt in 0..<50 {
+            guard !Task.isCancelled else { return false }
+            let windows = [NSApplication.shared.keyWindow].compactMap { $0 } +
+                NSApplication.shared.orderedWindows.filter { $0 !== NSApplication.shared.keyWindow }
+            for window in windows {
+                let fields = window.toolbar?.items.compactMap { ($0 as? NSSearchToolbarItem)?.searchField } ?? []
+                guard let field = fields.first(where: { $0.placeholderString == "Search sovereign memory" }) else {
+                    continue
+                }
+                if searchFieldOwnsFirstResponder(field, in: window) { return true }
+                guard attempt >= 5 else { continue }
+                field.selectText(nil)
+                if searchFieldOwnsFirstResponder(field, in: window) { return true }
+            }
+            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
+    private func searchFieldOwnsFirstResponder(_ field: NSSearchField, in window: NSWindow) -> Bool {
+        if field.currentEditor() === window.firstResponder { return true }
+        guard let responderView = window.firstResponder as? NSView else { return false }
+        if responderView === field || responderView.isDescendant(of: field) || field.isAccessibilityFocused() { return true }
+        var accessibilityAncestor: Any? = responderView
+        for _ in 0..<16 {
+            guard let element = accessibilityAncestor as? NSView else { break }
+            accessibilityAncestor = element.accessibilityParent
+            if accessibilityAncestor as AnyObject? === field { return true }
+        }
+        return responderView.window === window &&
+            NSStringFromClass(type(of: responderView)).hasSuffix("SearchTextView")
+    }
+
+    private func nativeView(identifier: String, in root: NSView) -> NSView? {
+        if root.identifier?.rawValue == identifier || root.accessibilityIdentifier() == identifier { return root }
+        for child in root.subviews {
+            if let match = nativeView(identifier: identifier, in: child) { return match }
+        }
+        return nil
+    }
+
+    private func nativeDescendant<T: NSView>(type: T.Type, in root: NSView) -> T? {
+        if let match = root as? T { return match }
+        for child in root.subviews {
+            if let match = nativeDescendant(type: type, in: child) { return match }
+        }
+        return nil
+    }
+
+    #if DEBUG
+    private func registerAppSceneAcceptanceBridgeIfNeeded() {
+        guard NativeAppSceneAcceptanceFixture() != nil else { return }
+        NativeAppSceneSearchBridge.shared.register(
+            id: appSceneBridgeRegistrationID,
+            snapshot: {
+                .init(
+                    isReady: !model.isLoading && model.memories.contains(where: { $0.id == "mem-native-001" }),
+                    inspectedMemoryID: model.inspectedMemoryID,
+                    inspectorIsPresented: inspectorIsPresented,
+                    focusTarget: keyboardFocus?.rawValue
+                )
+            },
+            inspectFirstMemory: {
+                guard model.memories.contains(where: { $0.id == "mem-native-001" }) else { return nil }
+                inspectMemory("mem-native-001")
+                return "mem-native-001"
+            }
+        )
+    }
+    #endif
 
     private func postAccessibilityAnnouncement(_ message: String) {
         NSAccessibility.post(
@@ -637,9 +813,110 @@ private struct SearchRefreshKey: Hashable {
     let customTo: Date
 }
 
-private enum SearchFocusTarget: Hashable {
+private enum SearchFocusTarget: String, Hashable {
     case results
     case inspectorClose
+}
+
+private struct SearchNativeControlIdentityBridge: NSViewRepresentable {
+    enum Kind { case table }
+
+    let identifier: String
+    let kind: Kind
+
+    func makeNSView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        view.identifierToApply = identifier
+        view.kind = kind
+        return view
+    }
+
+    func updateNSView(_ nsView: AnchorView, context: Context) {
+        nsView.identifierToApply = identifier
+        nsView.kind = kind
+        nsView.resolveControl()
+    }
+
+    final class AnchorView: NSView {
+        var identifierToApply = ""
+        var kind: Kind = .table
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            resolveControl()
+        }
+
+        override func layout() {
+            super.layout()
+            resolveControl()
+        }
+
+        func resolveControl() {
+            DispatchQueue.main.async { [weak self] in self?.applyIdentity() }
+        }
+
+        private func applyIdentity() {
+            guard let window, !identifierToApply.isEmpty else { return }
+            let anchorRect = convert(bounds, to: nil)
+            let candidates: [NSView]
+            switch kind {
+            case .table: candidates = descendants(of: NSTableView.self, in: window.contentView)
+            }
+            let ranked = candidates.compactMap { candidate -> (NSView, CGFloat)? in
+                let candidateRect = candidate.convert(candidate.bounds, to: nil)
+                let intersection = anchorRect.intersection(candidateRect)
+                guard !intersection.isNull, intersection.width > 0, intersection.height > 0 else { return nil }
+                return (candidate, intersection.width * intersection.height)
+            }.sorted { $0.1 > $1.1 }
+            guard let match = ranked.first,
+                  ranked.count == 1 || match.1 > ranked[1].1 else { return }
+            match.0.identifier = NSUserInterfaceItemIdentifier(identifierToApply)
+            match.0.setAccessibilityIdentifier(identifierToApply)
+        }
+
+        private func descendants<T: NSView>(of type: T.Type, in root: NSView?) -> [NSView] {
+            guard let root else { return [] }
+            var result: [NSView] = root is T ? [root] : []
+            for child in root.subviews { result.append(contentsOf: descendants(of: type, in: child)) }
+            return result
+        }
+    }
+}
+
+private struct SearchInspectorCloseButton: NSViewRepresentable {
+    let action: () -> Void
+
+    private final class FocusableButton: NSButton {
+        override var acceptsFirstResponder: Bool { true }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+
+    func makeNSView(context: Context) -> NSButton {
+        let image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Hide Search inspector") ?? NSImage()
+        let button = FocusableButton(image: image, target: context.coordinator, action: #selector(Coordinator.activate))
+        button.identifier = NSUserInterfaceItemIdentifier("search-inspector-close")
+        button.setAccessibilityIdentifier("search-inspector-close")
+        button.setAccessibilityLabel("Hide Search inspector")
+        button.setAccessibilityHelp("Hide the Search inspector and return focus to results")
+        button.imagePosition = .imageOnly
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.focusRingType = .default
+        button.toolTip = "Hide Inspector"
+        return button
+    }
+
+    func updateNSView(_ nsView: NSButton, context: Context) {
+        context.coordinator.action = action
+        nsView.isEnabled = true
+    }
+
+    final class Coordinator: NSObject {
+        var action: () -> Void
+        init(action: @escaping () -> Void) { self.action = action }
+        @objc func activate() { action() }
+    }
 }
 
 struct SearchInspectorState: Equatable, Sendable {

@@ -4,10 +4,51 @@ import Darwin
 import Foundation
 import SwiftUI
 
+@MainActor
+final class NativeAppSceneSearchBridge {
+    struct Snapshot: Equatable {
+        let isReady: Bool
+        let inspectedMemoryID: String?
+        let inspectorIsPresented: Bool
+        let focusTarget: String?
+    }
+
+    static let shared = NativeAppSceneSearchBridge()
+
+    private var registrationID: UUID?
+    private var snapshotProvider: (() -> Snapshot)?
+    private var inspectFirstMemoryAction: (() -> String?)?
+
+    func register(
+        id: UUID,
+        snapshot: @escaping () -> Snapshot,
+        inspectFirstMemory: @escaping () -> String?
+    ) {
+        registrationID = id
+        snapshotProvider = snapshot
+        inspectFirstMemoryAction = inspectFirstMemory
+    }
+
+    func unregister(id: UUID) {
+        guard registrationID == id else { return }
+        reset()
+    }
+
+    func reset() {
+        registrationID = nil
+        snapshotProvider = nil
+        inspectFirstMemoryAction = nil
+    }
+
+    func snapshot() -> Snapshot? { snapshotProvider?() }
+    func inspectFirstMemory() -> String? { inspectFirstMemoryAction?() }
+}
+
 struct NativeAppSceneAcceptanceFixture: Equatable {
-    static let scenario = "rendered-menu-mounted-search-focus"
+    static let scenario = "rendered-menu-search-inspector-focus-lifecycle"
     let commit: String
     let sourceState: String
+    let runID: String
 
     init?(environment: [String: String] = ProcessInfo.processInfo.environment) {
         guard environment["SAGE_NATIVE_DESIGN_PREVIEW"] == "1",
@@ -15,10 +56,13 @@ struct NativeAppSceneAcceptanceFixture: Equatable {
               let commit = environment["SAGE_NATIVE_APP_SCENE_COMMIT"],
               commit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil,
               let sourceState = environment["SAGE_NATIVE_APP_SCENE_SOURCE_STATE"],
-              sourceState.range(of: #"^(clean|dirty):[0-9a-f]{64}$"#, options: .regularExpression) != nil
+              sourceState.range(of: #"^(clean|dirty):[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              let runID = environment["SAGE_NATIVE_APP_SCENE_RUN_ID"],
+              runID.range(of: #"^[0-9]{8}T[0-9]{6}Z-app-scene-[1-9][0-9]*$"#, options: .regularExpression) != nil
         else { return nil }
         self.commit = commit
         self.sourceState = sourceState
+        self.runID = runID
     }
 
     @MainActor
@@ -28,7 +72,8 @@ struct NativeAppSceneAcceptanceFixture: Equatable {
             focusSink: focusSink,
             session: session,
             commit: commit,
-            sourceState: sourceState
+            sourceState: sourceState,
+            runID: runID
         )
         let result: [String: Any]
         do {
@@ -100,23 +145,28 @@ private final class NativeAppSceneAcceptanceRunner {
     private let session: AppSession
     private let commit: String
     private let sourceState: String
+    private let runID: String
     private let startedAt = Date()
     private let startedInstant = ContinuousClock.now
     private let deadline: ContinuousClock.Instant
     private var assertions: [[String: Any]] = []
     private var menuSnapshot: [[String: Any]] = []
     private var responderSnapshots: [[String: Any]] = []
+    private var searchLifecycleSnapshots: [[String: Any]] = []
+    private var menuLifecycleSnapshots: [[String: Any]] = []
 
-    init(window: NSWindow, focusSink: NSView, session: AppSession, commit: String, sourceState: String) {
+    init(window: NSWindow, focusSink: NSView, session: AppSession, commit: String, sourceState: String, runID: String) {
         self.window = window
         self.focusSink = focusSink
         self.session = session
         self.commit = commit
         self.sourceState = sourceState
+        self.runID = runID
         deadline = startedInstant + .seconds(15)
     }
 
     func run() async throws -> [String: Any] {
+        NativeAppSceneSearchBridge.shared.reset()
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         try await wait("real app window and main menu") {
@@ -166,10 +216,23 @@ private final class NativeAppSceneAcceptanceRunner {
         responderSnapshots.append(responderSnapshot(stage: "first-focus", field: firstField))
         record("first-mounted-search-focus", expected: "search field currentEditor is exact window firstResponder", actual: "matched")
 
-        guard focusSink.window === window,
-              window.makeFirstResponder(focusSink),
-              window.firstResponder === focusSink else {
-            throw FixtureError.assertion("could not move focus away before repeated command")
+        try await wait("deterministic preview Search bridge and mounted results-table readiness") {
+            NativeAppSceneSearchBridge.shared.snapshot()?.isReady == true &&
+                self.uniqueIdentifiedControl(identifier: "search-results-table", type: NSTableView.self) != nil
+        }
+        guard let readySnapshot = NativeAppSceneSearchBridge.shared.snapshot(),
+              let resultsTable = uniqueIdentifiedControl(identifier: "search-results-table", type: NSTableView.self)
+        else { throw FixtureError.assertion("preview Search did not expose one mounted results table") }
+        searchLifecycleSnapshots.append(searchSnapshot(stage: "ready", snapshot: readySnapshot))
+        record(
+            "mounted-search-results-table",
+            expected: "one exact mounted NSTableView associated with search-results-table",
+            actual: "class=\(NSStringFromClass(type(of: resultsTable))), rows=\(resultsTable.numberOfRows)"
+        )
+        guard resultsTable.window === window,
+              window.makeFirstResponder(resultsTable),
+              window.firstResponder === resultsTable else {
+            throw FixtureError.assertion("could not move focus to the mounted results table before repeated command")
         }
         let secondRequest = firstRequest &+ 1
         update(menu: mainMenu)
@@ -193,6 +256,100 @@ private final class NativeAppSceneAcceptanceRunner {
         responderSnapshots.append(responderSnapshot(stage: "repeated-focus", field: secondField))
         record("repeated-mounted-search-focus", expected: "one increment, one consumption, exact mounted field-editor restored", actual: "matched")
 
+        guard let inspectedMemoryID = NativeAppSceneSearchBridge.shared.inspectFirstMemory() else {
+            throw FixtureError.assertion("DEBUG Search bridge could not activate the first preview memory")
+        }
+        try await wait("mounted Search inspector close first responder") {
+            guard let snapshot = NativeAppSceneSearchBridge.shared.snapshot(),
+                  snapshot.inspectedMemoryID == inspectedMemoryID,
+                  snapshot.inspectorIsPresented,
+                  snapshot.focusTarget == "inspectorClose",
+                  let close = self.uniqueIdentifiedControl(identifier: "search-inspector-close", type: NSButton.self)
+            else { return false }
+            return close.window === self.window && self.window.firstResponder === close
+        }
+        guard let inspectorSnapshot = NativeAppSceneSearchBridge.shared.snapshot(),
+              let inspectorClose = uniqueIdentifiedControl(identifier: "search-inspector-close", type: NSButton.self)
+        else { throw FixtureError.assertion("Search inspector did not mount one native close button") }
+        searchLifecycleSnapshots.append(searchSnapshot(stage: "inspector-open", snapshot: inspectorSnapshot))
+        responderSnapshots.append(controlResponderSnapshot(stage: "inspector-close", control: inspectorClose))
+        record("production-inspect-path", expected: "known preview memory opens inspector and focuses exact close button", actual: inspectedMemoryID)
+
+        try await wait("rendered Hide Inspector command") {
+            self.update(menu: mainMenu)
+            return self.menuEntries(in: mainMenu).filter {
+                $0.path == ["View", "Hide Inspector"] && $0.item.isEnabled
+            }.count == 1
+        }
+        let hideInspector = try uniqueMenuItem(
+            in: mainMenu,
+            parent: "View",
+            title: "Hide Inspector",
+            key: "i",
+            modifiers: [.control, .command]
+        )
+        guard hideInspector.isEnabled else { throw FixtureError.assertion("rendered Hide Inspector item is disabled") }
+        menuLifecycleSnapshots.append(menuLifecycleSnapshot(stage: "inspector-open", item: hideInspector))
+        record("rendered-hide-inspector-menu", expected: "View > Hide Inspector | control+command-i | enabled", actual: menuDescription(hideInspector))
+        try dispatch(hideInspector)
+
+        try await wait("inspector unmount and exact results-table focus return") {
+            guard let snapshot = NativeAppSceneSearchBridge.shared.snapshot() else { return false }
+            return !snapshot.inspectorIsPresented && snapshot.inspectedMemoryID == inspectedMemoryID &&
+                resultsTable.window === self.window && self.window.firstResponder === resultsTable
+        }
+        guard let hiddenSnapshot = NativeAppSceneSearchBridge.shared.snapshot() else {
+            throw FixtureError.assertion("Search semantic state disappeared after hiding inspector")
+        }
+        searchLifecycleSnapshots.append(searchSnapshot(stage: "inspector-hidden", snapshot: hiddenSnapshot))
+        responderSnapshots.append(controlResponderSnapshot(stage: "results-after-hide", control: resultsTable))
+        record("hide-preserves-inspection-and-restores-table", expected: "same inspected ID, presentation hidden, exact table first responder", actual: inspectedMemoryID)
+
+        try await wait("rendered Show Inspector command replacing Hide Inspector") {
+            self.update(menu: mainMenu)
+            let entries = self.menuEntries(in: mainMenu)
+            return entries.filter { $0.path == ["View", "Hide Inspector"] }.isEmpty &&
+                entries.filter {
+                    $0.path == ["View", "Show Inspector"] && $0.item.isEnabled
+                }.count == 1
+        }
+        let showInspector = try uniqueMenuItem(
+            in: mainMenu,
+            parent: "View",
+            title: "Show Inspector",
+            key: "i",
+            modifiers: [.control, .command]
+        )
+        guard showInspector.isEnabled else { throw FixtureError.assertion("rendered Show Inspector item is disabled") }
+        menuLifecycleSnapshots.append(menuLifecycleSnapshot(stage: "inspector-hidden", item: showInspector))
+        record("rendered-show-inspector-menu", expected: "View > Show Inspector | control+command-i | enabled", actual: menuDescription(showInspector))
+        try dispatch(showInspector)
+        try await wait("reopened inspector and exact close-button focus") {
+            guard let snapshot = NativeAppSceneSearchBridge.shared.snapshot(),
+                  snapshot.inspectorIsPresented,
+                  snapshot.inspectedMemoryID == inspectedMemoryID,
+                  snapshot.focusTarget == "inspectorClose",
+                  let close = self.uniqueIdentifiedControl(identifier: "search-inspector-close", type: NSButton.self)
+            else { return false }
+            return close.window === self.window && self.window.firstResponder === close
+        }
+        guard let reopenedSnapshot = NativeAppSceneSearchBridge.shared.snapshot(),
+              let reopenedClose = uniqueIdentifiedControl(identifier: "search-inspector-close", type: NSButton.self)
+        else { throw FixtureError.assertion("Search inspector did not remount after Show Inspector") }
+        searchLifecycleSnapshots.append(searchSnapshot(stage: "inspector-reopened", snapshot: reopenedSnapshot))
+        update(menu: mainMenu)
+        let reopenedHideInspector = try uniqueMenuItem(
+            in: mainMenu,
+            parent: "View",
+            title: "Hide Inspector",
+            key: "i",
+            modifiers: [.control, .command]
+        )
+        guard reopenedHideInspector.isEnabled else { throw FixtureError.assertion("reopened Hide Inspector item is disabled") }
+        menuLifecycleSnapshots.append(menuLifecycleSnapshot(stage: "inspector-reopened", item: reopenedHideInspector))
+        responderSnapshots.append(controlResponderSnapshot(stage: "inspector-close-reopened", control: reopenedClose))
+        record("show-preserves-inspection-and-restores-close", expected: "same inspected ID, inspector remounted, exact close button first responder", actual: inspectedMemoryID)
+
         return result(passed: true, failure: nil)
     }
 
@@ -203,8 +360,9 @@ private final class NativeAppSceneAcceptanceRunner {
     private func result(passed: Bool, failure: String?) -> [String: Any] {
         let elapsed = startedInstant.duration(to: .now).components
         var value: [String: Any] = [
-            "schema": "sage.v12.native-app-scene.v1",
+            "schema": "sage.v12.native-app-scene.v2",
             "scenario": NativeAppSceneAcceptanceFixture.scenario,
+            "run_id": runID,
             "commit": commit,
             "source_state": sourceState,
             "pid": Int(ProcessInfo.processInfo.processIdentifier),
@@ -218,12 +376,31 @@ private final class NativeAppSceneAcceptanceRunner {
             "assertions": assertions,
             "menu_snapshot": menuSnapshot,
             "responder_snapshot": responderSnapshots,
+            "search_lifecycle_snapshot": searchLifecycleSnapshots,
+            "menu_lifecycle_snapshot": menuLifecycleSnapshots,
             "system_ax_server": false,
             "voiceover_spoken_evidence": false,
             "keyboard_event_routing": false,
+            "search_focus_request_id": Int(session.searchFocusRequestID),
+            "consumed_search_focus_request_id": Int(session.consumedSearchFocusRequestID),
+            "search_has_inspector": session.searchHasInspector,
+            "session_search_inspector_is_presented": session.searchInspectorIsPresented,
+            "search_inspector_toggle_request_id": Int(session.searchInspectorToggleRequestID),
+            "consumed_search_inspector_toggle_request_id": Int(session.consumedSearchInspectorToggleRequestID),
+            "first_responder_class": window.firstResponder.map { NSStringFromClass(type(of: $0)) } ?? "",
             "passed": passed,
         ]
+        if let snapshot = NativeAppSceneSearchBridge.shared.snapshot() {
+            value["current_search_snapshot"] = searchSnapshot(stage: "current", snapshot: snapshot)
+        }
+        if let mainMenu = NSApp.mainMenu {
+            update(menu: mainMenu)
+            value["current_inspector_menu_snapshot"] = snapshot(entries: menuEntries(in: mainMenu).filter {
+                $0.path.first == "View" && $0.path.last?.contains("Inspector") == true
+            })
+        }
         if let failure { value["failure"] = failure }
+        if !passed { value["view_debug_snapshot"] = viewDebugSnapshot() }
         return value
     }
 
@@ -262,10 +439,23 @@ private final class NativeAppSceneAcceptanceRunner {
         guard candidates.count == 1 else { return nil }
         let field = candidates[0].searchField
         guard field.placeholderString == "Search sovereign memory",
-              let editor = field.currentEditor(),
-              window.firstResponder === editor,
+              searchFieldOwnsFirstResponder(field),
               field.window === window else { return nil }
         return field
+    }
+
+    private func searchFieldOwnsFirstResponder(_ field: NSSearchField) -> Bool {
+        if field.currentEditor() === window.firstResponder { return true }
+        guard let responderView = window.firstResponder as? NSView else { return false }
+        if responderView === field || responderView.isDescendant(of: field) || field.isAccessibilityFocused() { return true }
+        var accessibilityAncestor: Any? = responderView
+        for _ in 0..<16 {
+            guard let element = accessibilityAncestor as? NSView else { break }
+            accessibilityAncestor = element.accessibilityParent
+            if accessibilityAncestor as AnyObject? === field { return true }
+        }
+        return responderView.window === window &&
+            NSStringFromClass(type(of: responderView)).hasSuffix("SearchTextView")
     }
 
     private func responderSnapshot(stage: String, field: NSSearchField) -> [String: Any] {
@@ -274,9 +464,88 @@ private final class NativeAppSceneAcceptanceRunner {
             "window_title": window.title,
             "window_is_key": window.isKeyWindow,
             "field_is_editable": field.isEditable,
+            "field_is_ns_search_field": field.isKind(of: NSSearchField.self),
             "field_window_matches": field.window === window,
             "field_editor_matches_first_responder": field.currentEditor() === window.firstResponder,
+            "field_owns_first_responder": searchFieldOwnsFirstResponder(field),
+            "first_responder_class": window.firstResponder.map { NSStringFromClass(type(of: $0)) } ?? "",
         ]
+    }
+
+    private func controlResponderSnapshot(stage: String, control: NSView) -> [String: Any] {
+        [
+            "stage": stage,
+            "window_title": window.title,
+            "window_is_key": window.isKeyWindow,
+            "runtime_class": NSStringFromClass(type(of: control)),
+            "is_ns_button": control is NSButton,
+            "is_ns_table_view": control is NSTableView,
+            "identifier": control.identifier?.rawValue ?? control.accessibilityIdentifier(),
+            "control_window_matches": control.window === window,
+            "control_is_exact_first_responder": window.firstResponder === control,
+        ]
+    }
+
+    private func searchSnapshot(stage: String, snapshot: NativeAppSceneSearchBridge.Snapshot) -> [String: Any] {
+        [
+            "stage": stage,
+            "is_ready": snapshot.isReady,
+            "inspected_memory_id": snapshot.inspectedMemoryID ?? "",
+            "inspector_is_presented": snapshot.inspectorIsPresented,
+            "focus_target": snapshot.focusTarget ?? "",
+        ]
+    }
+
+    private func menuLifecycleSnapshot(stage: String, item: NSMenuItem) -> [String: Any] {
+        [
+            "stage": stage,
+            "path": "View > \(item.title)",
+            "key": item.keyEquivalent,
+            "modifiers": modifierNames(item.keyEquivalentModifierMask),
+            "enabled": item.isEnabled,
+        ]
+    }
+
+    private func identifiedControls<T: NSView>(identifier: String, type: T.Type) -> [T] {
+        guard let contentView = window.contentView else { return [] }
+        var matches: [T] = []
+        func visit(_ view: NSView, inheritedIdentifier: Bool) {
+            let ownsIdentifier = view.identifier?.rawValue == identifier || view.accessibilityIdentifier() == identifier
+            if (ownsIdentifier || inheritedIdentifier), let candidate = view as? T {
+                matches.append(candidate)
+            }
+            for child in view.subviews { visit(child, inheritedIdentifier: inheritedIdentifier || ownsIdentifier) }
+        }
+        visit(contentView, inheritedIdentifier: false)
+        var seen = Set<ObjectIdentifier>()
+        return matches.filter { seen.insert(ObjectIdentifier($0)).inserted && $0.window === window }
+    }
+
+    private func uniqueIdentifiedControl<T: NSView>(identifier: String, type: T.Type) -> T? {
+        let matches = identifiedControls(identifier: identifier, type: type)
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    private func viewDebugSnapshot() -> [[String: Any]] {
+        guard let contentView = window.contentView else { return [] }
+        var result: [[String: Any]] = []
+        func visit(_ view: NSView, depth: Int, inheritedIdentifiers: [String]) {
+            guard depth <= 32, result.count < 512 else { return }
+            let identifier = view.identifier?.rawValue ?? view.accessibilityIdentifier()
+            let identifiers = identifier.isEmpty ? inheritedIdentifiers : inheritedIdentifiers + [identifier]
+            if !identifier.isEmpty || view is NSTableView || view is NSButton {
+                result.append([
+                    "class": NSStringFromClass(type(of: view)),
+                    "identifier": identifier,
+                    "inherited_identifiers": identifiers,
+                    "depth": depth,
+                    "is_first_responder": window.firstResponder === view,
+                ])
+            }
+            for child in view.subviews { visit(child, depth: depth + 1, inheritedIdentifiers: identifiers) }
+        }
+        visit(contentView, depth: 0, inheritedIdentifiers: [])
+        return result
     }
 
     private func update(menu: NSMenu) {

@@ -33,6 +33,9 @@ struct RootView: View {
         .sheet(isPresented: $session.showsKeyboardShortcuts) {
             CerebrumKeyboardShortcutsView()
         }
+        .task {
+            CerebrumNativeMenuCoordinator.shared.install(session: session)
+        }
     }
 
     private var designPreviewColorScheme: ColorScheme? {
@@ -157,6 +160,7 @@ struct RootView: View {
         case .search:
             SearchView(
                 api: api,
+                session: session,
                 focusRequestID: session.searchFocusRequestID,
                 consumedFocusRequestID: session.consumedSearchFocusRequestID,
                 onFocusRequestConsumed: session.consumeSearchFocusRequest

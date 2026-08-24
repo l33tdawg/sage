@@ -11,7 +11,12 @@ final class AppSession {
         case failed(String)
     }
 
-    var route: AppRoute = .overview
+    var route: AppRoute = .overview {
+        didSet {
+            if oldValue == .search, route != .search { clearSearchInspectorCommandState() }
+            CerebrumNativeMenuCoordinator.shared.refresh()
+        }
+    }
     var phase: Phase = .connecting
     var passphrase = ""
     var loginError: String?
@@ -19,6 +24,11 @@ final class AppSession {
     var loginFailureID = 0
     var searchFocusRequestID: UInt64 = 0
     var consumedSearchFocusRequestID: UInt64 = 0
+    var searchInspectorToggleRequestID: UInt64 = 0
+    var consumedSearchInspectorToggleRequestID: UInt64 = 0
+    var searchHasInspector = false
+    var searchInspectorIsPresented = false
+    var searchInspectorCommandsBlocked = false
     var showsKeyboardShortcuts = false
     var api: (any SAGEAPI)?
 
@@ -96,6 +106,33 @@ final class AppSession {
     func consumeSearchFocusRequest(_ requestID: UInt64) {
         guard requestID == searchFocusRequestID else { return }
         consumedSearchFocusRequestID = requestID
+    }
+
+    func updateSearchInspectorCommandState(hasInspector: Bool, isPresented: Bool, commandsBlocked: Bool) {
+        searchHasInspector = hasInspector
+        searchInspectorIsPresented = hasInspector && isPresented
+        searchInspectorCommandsBlocked = commandsBlocked
+        CerebrumNativeMenuCoordinator.shared.refresh()
+    }
+
+    func clearSearchInspectorCommandState() {
+        searchHasInspector = false
+        searchInspectorIsPresented = false
+        searchInspectorCommandsBlocked = false
+        CerebrumNativeMenuCoordinator.shared.refresh()
+    }
+
+    func requestSearchInspectorToggle() {
+        guard acceptsRouteCommands(for: .search), searchHasInspector, !searchInspectorCommandsBlocked,
+              !showsKeyboardShortcuts, searchInspectorToggleRequestID == consumedSearchInspectorToggleRequestID else { return }
+        searchInspectorToggleRequestID &+= 1
+        CerebrumNativeMenuCoordinator.shared.refresh()
+    }
+
+    func consumeSearchInspectorToggleRequest(_ requestID: UInt64) {
+        guard requestID == searchInspectorToggleRequestID else { return }
+        consumedSearchInspectorToggleRequestID = requestID
+        CerebrumNativeMenuCoordinator.shared.refresh()
     }
 
     private func handleUnauthorized() {

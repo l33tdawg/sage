@@ -92,8 +92,8 @@ jobs:
               fi
             fi
           done < <(find "${APP_PATH}/Contents" -type f -print)
-          if strings "${EXECUTABLE}" | grep -E 'NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture|SAGE_NATIVE_AX_|SAGE_NATIVE_APP_SCENE_ACCEPTANCE|SAGE_NATIVE_DESIGN_PREVIEW|SAGE_NATIVE_PREVIEW_ROUTE'; then
-            echo "release executable contains DEBUG-only AX fixture markers" >&2
+          if strings "${EXECUTABLE}" | grep -E 'NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture|NativeAppSceneSearchBridge|SAGE_NATIVE_AX_|SAGE_NATIVE_APP_SCENE_|SAGE_NATIVE_DESIGN_PREVIEW|SAGE_NATIVE_PREVIEW_ROUTE'; then
+            echo "release executable contains DEBUG-only acceptance markers" >&2
             exit 1
           fi
           mkdir -p "${EVIDENCE_DIR}"

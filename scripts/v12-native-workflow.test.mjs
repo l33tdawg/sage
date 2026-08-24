@@ -32,8 +32,13 @@ test('v12 macOS CI pins a runner and Xcode compatible with the Swift package', a
     assert.match(workflow, /bash scripts\/v12-native-app-scene-acceptance\.test\.sh/);
     assert.match(workflow, /run: bash scripts\/v12-native-app-scene-acceptance\.sh/);
     assert.match(workflow, /NativeAppSceneAcceptanceFixture/);
-    assert.match(workflow, /SAGE_NATIVE_APP_SCENE_ACCEPTANCE/);
-    assert.match(workflow, /release executable contains DEBUG-only AX fixture markers/);
+    assert.match(workflow, /NativeAppSceneSearchBridge/);
+    assert.doesNotMatch(workflow, /CerebrumNativeMenuCoordinator/);
+    assert.match(workflow, /SAGE_NATIVE_AX_/);
+    assert.match(workflow, /SAGE_NATIVE_APP_SCENE_/);
+    assert.match(workflow, /SAGE_NATIVE_DESIGN_PREVIEW/);
+    assert.match(workflow, /SAGE_NATIVE_PREVIEW_ROUTE/);
+    assert.match(workflow, /release executable contains DEBUG-only acceptance markers/);
     assert.match(workflow, /if: always\(\)/);
     assert.match(workflow, /app-scene-validation/);
     assert.match(workflow, /v12-native-app-scene-validate\.test\.mjs/);
