@@ -402,7 +402,7 @@ with one current native execution child:
    the expanded Search inspector app-scene lifecycle gate; and
 3. `b945c6bb-8d06-45c7-91d1-ad1e15e6b84d` — completed native child that delivered
    packaged-and-CI-green v4 exact current Brain/Search table and inspector focus restoration; and
-4. `7779c211-07e6-466c-8c31-aede68e12357` — current native execution child for
+4. `03aebcf3-18e9-4d60-bddc-71c1b6e5ffdc` — current consolidated native execution child for
    focused Brain command routing, Connectome focus, remaining rendered commands,
    physical-keyboard routing, system-AX/VoiceOver,
    reflow/localization/contrast, transport timing, performance, cross-GPU,

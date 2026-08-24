@@ -4,7 +4,7 @@
 
 **Baseline:** SAGE v11.19.0 / app-v27
 
-**Current durable task:** `7779c211-07e6-466c-8c31-aede68e12357`
+**Current durable task:** `03aebcf3-18e9-4d60-bddc-71c1b6e5ffdc`
 
 **Product boundary:** [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md)
 **Evidence contract:** [`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md)

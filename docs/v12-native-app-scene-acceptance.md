@@ -3,7 +3,7 @@
 **Status:** v3 and v4 packaged DEBUG fixtures and CI green. Installed-release
 acceptance remains open.
 
-**Current durable task:** `7779c211-07e6-466c-8c31-aede68e12357`
+**Current durable task:** `03aebcf3-18e9-4d60-bddc-71c1b6e5ffdc`
 
 This gate launches the packaged SwiftUI/AppKit executable rather than hosting a
 view in the test runner. It therefore exercises the application's actual scene,
