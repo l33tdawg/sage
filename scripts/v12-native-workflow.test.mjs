@@ -29,7 +29,15 @@ test('v12 macOS CI pins a runner and Xcode compatible with the Swift package', a
         /SAGE_REQUIRE_METAL_HARDWARE=1 swift test --package-path desktop\/SAGECerebrumNative --disable-sandbox/,
     );
     assert.match(workflow, /bash scripts\/v12-native-system-ax\.test\.sh/);
+    assert.match(workflow, /bash scripts\/v12-native-app-scene-acceptance\.test\.sh/);
+    assert.match(workflow, /run: bash scripts\/v12-native-app-scene-acceptance\.sh/);
+    assert.match(workflow, /NativeAppSceneAcceptanceFixture/);
+    assert.match(workflow, /SAGE_NATIVE_APP_SCENE_ACCEPTANCE/);
     assert.match(workflow, /release executable contains DEBUG-only AX fixture markers/);
+    assert.match(workflow, /if: always\(\)/);
+    assert.match(workflow, /app-scene-validation/);
+    assert.match(workflow, /v12-native-app-scene-validate\.test\.mjs/);
+    assert.match(workflow, /v12-native-milestone-review\.md/);
 });
 
 test('named-Mac system AX acceptance is manual, protected, and locally retained', async () => {
@@ -48,4 +56,18 @@ test('named-Mac system AX acceptance is manual, protected, and locally retained'
     assert.match(workflow, /\/usr\/bin\/stat -f '%Su' \/dev\/console \| grep -Fvx root/);
     assert.match(workflow, /scripts\/v12-native-system-ax\.sh --preflight/);
     assert.doesNotMatch(workflow, /actions\/upload-artifact/);
+});
+
+test('app-scene acceptance guide and validator remain release-visible', async () => {
+    const [ignore, guide, validatorTest] = await Promise.all([
+        readFile(resolve(REPO_ROOT, '.gitignore'), 'utf8'),
+        readFile(resolve(REPO_ROOT, 'docs/v12-native-app-scene-acceptance.md'), 'utf8'),
+        readFile(resolve(REPO_ROOT, 'scripts/v12-native-app-scene-validate.test.mjs'), 'utf8'),
+    ]);
+
+    assert.match(ignore, /^!docs\/v12-native-app-scene-acceptance\.md$/m);
+    assert.match(guide, /system_ax_server=false/);
+    assert.match(guide, /keyboard_event_routing=false/);
+    assert.match(validatorTest, /menu path mismatch/);
+    assert.match(validatorTest, /field_editor_matches_first_responder/);
 });

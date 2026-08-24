@@ -120,6 +120,7 @@ docs/*
 !docs/ADMIN_BOOTSTRAP.md
 !docs/HOOKS.md
 !docs/ISSUE_52_RECOVERY.md
+!docs/v12-native-app-scene-acceptance.md
 !docs/UPGRADING.md
 # v11 user guides (Dhillon-approved for publication 2026-07-04; docs/README.md links them)
 !docs/BRAIN.md

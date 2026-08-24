@@ -9,10 +9,16 @@ on:
       - "scripts/v12-native-acceptance-validate.mjs"
       - "scripts/v12-native-acceptance-validate.test.mjs"
       - "scripts/v12-native-workflow.test.mjs"
+      - "scripts/v12-native-app-scene-acceptance.sh"
+      - "scripts/v12-native-app-scene-acceptance.test.sh"
+      - "scripts/v12-native-app-scene-validate.mjs"
+      - "scripts/v12-native-app-scene-validate.test.mjs"
       - "docs/v12-native-acceptance-ledger.schema.json"
       - "docs/v12-native-acceptance-ledger.md"
       - "docs/v12-native-capability-ledger.md"
       - "docs/v12-native-product-status.md"
+      - "docs/v12-native-app-scene-acceptance.md"
+      - "docs/v12-native-milestone-review.md"
       - "docs/native-cerebrum-macos-v12-adr.md"
       - ".github/workflows/v12-beta-macos.yml"
   workflow_dispatch:
@@ -45,6 +51,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
+      - name: Prepare fail-safe app-scene diagnostics
+        run: |
+          mkdir -p "dist/v12-native/${SAGE_NATIVE_VERSION}/app-scene-validation"
+          printf '%s\n' 'app-scene acceptance pending' > "dist/v12-native/${SAGE_NATIVE_VERSION}/app-scene-validation/STATUS.txt"
       - name: Verify pinned Swift toolchain
         run: |
           test -d "${DEVELOPER_DIR}"
@@ -55,7 +65,10 @@ jobs:
         run: |
           node --test scripts/v12-native-acceptance-validate.test.mjs scripts/v12-native-workflow.test.mjs
           bash scripts/v12-native-system-ax.test.sh
+          bash scripts/v12-native-app-scene-acceptance.test.sh
           SAGE_REQUIRE_METAL_HARDWARE=1 swift test --package-path desktop/SAGECerebrumNative --disable-sandbox
+      - name: Exercise rendered app-scene menus and mounted search focus
+        run: bash scripts/v12-native-app-scene-acceptance.sh
       - name: Build SwiftUI/AppKit/Metal application
         run: scripts/build-native-cerebrum-macos.sh
       - name: Verify native application and record unsigned evidence
@@ -79,7 +92,7 @@ jobs:
               fi
             fi
           done < <(find "${APP_PATH}/Contents" -type f -print)
-          if strings "${EXECUTABLE}" | grep -E 'NativeAXAcceptanceFixture|SAGE_NATIVE_AX_|SAGE_NATIVE_DESIGN_PREVIEW|SAGE_NATIVE_PREVIEW_ROUTE'; then
+          if strings "${EXECUTABLE}" | grep -E 'NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture|SAGE_NATIVE_AX_|SAGE_NATIVE_APP_SCENE_ACCEPTANCE|SAGE_NATIVE_DESIGN_PREVIEW|SAGE_NATIVE_PREVIEW_ROUTE'; then
             echo "release executable contains DEBUG-only AX fixture markers" >&2
             exit 1
           fi
@@ -96,8 +109,11 @@ jobs:
             'NOT FOR DISTRIBUTION OR STABLE UPDATE CHANNELS' \
             > "${EVIDENCE_DIR}/UNSIGNED-VALIDATION-EVIDENCE.txt"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
         with:
           name: sage-v12-swift-native-macos-${{ env.SAGE_NATIVE_VERSION }}-validation
-          path: dist/v12-native/${{ env.SAGE_NATIVE_VERSION }}/validation/
+          path: |
+            dist/v12-native/${{ env.SAGE_NATIVE_VERSION }}/validation/
+            dist/v12-native/${{ env.SAGE_NATIVE_VERSION }}/app-scene-validation/
           if-no-files-found: error
           retention-days: 14

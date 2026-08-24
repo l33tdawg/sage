@@ -18,6 +18,14 @@ struct SAGECerebrumNativeApp: App {
         Window("SAGE CEREBRUM", id: "main") {
             RootView(session: session)
                 .frame(minWidth: 820, minHeight: 600)
+                #if DEBUG
+                .background {
+                    if let fixture = NativeAppSceneAcceptanceFixture() {
+                        NativeAppSceneAcceptanceProbe(fixture: fixture, session: session)
+                            .frame(width: 0, height: 0)
+                    }
+                }
+                #endif
         }
         .defaultSize(width: 1180, height: 800)
         .commands {

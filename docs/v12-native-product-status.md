@@ -58,8 +58,10 @@ The same action path publishes stable focus/AX targets and concise announcements
 Commands fail closed during the filter popover, bulk-tag sheet, Forget dialog,
 and active mutations. Repeated Focus Search requests now re-present the native
 toolbar search field before one-shot consumption. Reducer/source evidence covers
-these transitions; rendered menu dispatch, mounted responder delivery, system
-AX, and real VoiceOver remain named-Mac acceptance items.
+these transitions, and real app-scene evidence covers the rendered Focus Search
+item plus repeated mounted field-editor delivery. Remaining menu actions,
+route-content focus return, keyboard-event routing, system AX, and real VoiceOver
+remain named-Mac acceptance items.
 
 Brain now separates native Memory and Connectome modes from the independent MRI
 and Accessible Table presentations. Memory reads
@@ -103,9 +105,13 @@ and requests presentation of its native search field. Brain contributes route-sc
 presentation, inspector, clear-selection, and View Options commands through a
 focused scene value, while Help owns the accessible keyboard-shortcut reference.
 The typed source catalog, ready/exact-route/modal routing, one-shot search
-request policy, and duplicate Command-R guard are covered. Rendered NSMenu
-dispatch, mounted search-field focus, focus return, system AX, and VoiceOver
-discovery stay acceptance-open on the named Mac. Brain phase three is implemented with separate agent, engram, and directed-connection
+request policy, and duplicate Command-R guard are covered. A DEBUG-only launch
+of the real executable now inventories `NSApplication.mainMenu`, dispatches the
+unique rendered **View > Focus Search** target/action, and proves both initial
+and repeated first-responder ownership by the exact mounted search field editor.
+This is app-scene/AppKit evidence, not keyboard-event, system-AX, or VoiceOver
+evidence; the remaining rendered commands, route focus return, system AX, and
+VoiceOver discovery stay acceptance-open on the named Mac. Brain phase three is implemented with separate agent, engram, and directed-connection
 focus, collision-safe scene identities, reserved overlay budgets, and linear
 traffic summaries. The renderer now adds time-invariant half-resolution
 offscreen extraction, separable blur, and additive bloom; retained traffic
@@ -272,7 +278,7 @@ acceptance gaps are not counted as another route slice.
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
 | Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, responsive route-width policy and native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector presentation, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, native AppKit retry/Metal focus return, synchronized native tables, accessibility-pressable native retry with held-progress state, cancellation/fencing and mount-gated restoration, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity, hosted narrow-window transition, immediate retry failure, held stale-success cancellation, successful restoration, and retry/Metal first-responder delivery implemented; real VoiceOver/system-AX plus table/inspector/related focus proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
-| Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; whole-domain transfer and full acceptance evidence remain open |
+| Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; rendered Focus Search dispatch and repeated mounted field-editor focus proven in the real app scene; whole-domain transfer and full acceptance evidence remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |
 | Agents, keys, RBAC, and governance | Native destination reserved | `native-control` target | Implementation open |
@@ -299,7 +305,7 @@ daemon lifecycle, recovery, updates, and rollback.
 
 | Platform | Evidence already present | Production blockers |
 |---|---|---|
-| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Named-Mac system AX/VoiceOver and performance evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
+| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; real app-scene rendered Focus Search dispatch and repeated mounted responder evidence; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Remaining rendered-command and keyboard-event evidence, named-Mac system AX/VoiceOver and performance evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
 | Windows | x64 NSIS preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported |
 | Linux | x64 `.deb` and AppImage preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported; optional native R&D remains blocked by `RUSTSEC-2024-0429` |
 
@@ -357,13 +363,13 @@ the SAGE-core native application.
 ## Durable backlog lanes
 
 The active program is consolidated into three non-overlapping program lanes,
-with one focused Brain acceptance child under the native lane:
+with one current native execution child:
 
 1. `f3291de2-d270-4c3b-b81b-3f29bc54b83b` — deliver native macOS CEREBRUM on
    `v12-beta`, from the first tester build through production acceptance;
-2. `e80b1ea4-4752-4e2e-8485-af40f11bf060` — focused child of the native lane
-   for the remaining Brain system-AX/VoiceOver, focus, performance, cross-GPU,
-   and offline gates;
+2. `d9ea08b1-26cb-4a6f-bf3f-d38bc8394f28` — current child of the native lane
+   for app-scene acceptance and the remaining system-AX/VoiceOver, focus,
+   performance, cross-GPU, and offline gates;
 3. `26dee44b-4f7f-459d-a76b-91f0c2d7cdd4` — preserve and prove the separate
    headless Commons/Lantern contract; and
 4. `b6d9bade-92fa-4d74-a8c4-9b0cc35d280d` — finish the pre-v12 automatic

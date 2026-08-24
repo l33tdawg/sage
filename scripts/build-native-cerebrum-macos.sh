@@ -7,6 +7,7 @@ VERSION="${SAGE_NATIVE_VERSION:-12.0.0-beta.1}"
 MARKETING_VERSION="${SAGE_NATIVE_MARKETING_VERSION:-12.0.0}"
 CONFIGURATION="${SAGE_NATIVE_CONFIGURATION:-release}"
 OUTPUT_DIR="${SAGE_NATIVE_OUTPUT_DIR:-$ROOT_DIR/dist/v12-native/$VERSION}"
+SCRATCH_PATH="${SAGE_NATIVE_SCRATCH_PATH:-$PACKAGE_DIR/.build}"
 APP_PATH="$OUTPUT_DIR/SAGE CEREBRUM Native.app"
 CONTENTS="$APP_PATH/Contents"
 EXECUTABLE="SAGECerebrumNative"
@@ -29,6 +30,7 @@ export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$PACKAGE_DIR/.clang-m
 
 swift build \
   --package-path "$PACKAGE_DIR" \
+  --scratch-path "$SCRATCH_PATH" \
   --configuration "$CONFIGURATION" \
   --product "$EXECUTABLE" \
   --disable-sandbox
@@ -39,9 +41,9 @@ if [[ -e "$APP_PATH" ]]; then
 fi
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 
-cp "$PACKAGE_DIR/.build/$CONFIGURATION/$EXECUTABLE" "$CONTENTS/MacOS/$EXECUTABLE"
+cp "$SCRATCH_PATH/$CONFIGURATION/$EXECUTABLE" "$CONTENTS/MacOS/$EXECUTABLE"
 cp "$ROOT_DIR/installer/macos/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
-RESOURCE_BUNDLE="$PACKAGE_DIR/.build/$CONFIGURATION/SAGECerebrumNative_SAGECerebrumNative.bundle"
+RESOURCE_BUNDLE="$SCRATCH_PATH/$CONFIGURATION/SAGECerebrumNative_SAGECerebrumNative.bundle"
 test -d "$RESOURCE_BUNDLE"
 cp -R "$RESOURCE_BUNDLE" "$CONTENTS/Resources/"
 PACKAGED_BRAIN="$CONTENTS/Resources/SAGECerebrumNative_SAGECerebrumNative.bundle/brain.obj"

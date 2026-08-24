@@ -535,6 +535,46 @@ import Testing
 struct HostedBrainAcceptance {}
 
 #if DEBUG
+@Test func nativeAppSceneAcceptanceFixtureRequiresExactPreviewGate() {
+    let commit = String(repeating: "a", count: 40)
+    let sourceState = "clean:" + String(repeating: "b", count: 64)
+    #expect(NativeAppSceneAcceptanceFixture(environment: [:]) == nil)
+    #expect(NativeAppSceneAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+    ]) == nil)
+    #expect(NativeAppSceneAcceptanceFixture(environment: [
+        "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": NativeAppSceneAcceptanceFixture.scenario,
+        "SAGE_NATIVE_APP_SCENE_COMMIT": commit,
+        "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+    ]) == nil)
+    #expect(NativeAppSceneAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "0",
+        "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": NativeAppSceneAcceptanceFixture.scenario,
+        "SAGE_NATIVE_APP_SCENE_COMMIT": commit,
+        "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+    ]) == nil)
+    #expect(NativeAppSceneAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+        "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": "unknown",
+        "SAGE_NATIVE_APP_SCENE_COMMIT": commit,
+        "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+    ]) == nil)
+    #expect(NativeAppSceneAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+        "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": NativeAppSceneAcceptanceFixture.scenario,
+        "SAGE_NATIVE_APP_SCENE_COMMIT": "not-a-commit",
+        "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+    ]) == nil)
+    let fixture = NativeAppSceneAcceptanceFixture(environment: [
+        "SAGE_NATIVE_DESIGN_PREVIEW": "1",
+        "SAGE_NATIVE_APP_SCENE_ACCEPTANCE": NativeAppSceneAcceptanceFixture.scenario,
+        "SAGE_NATIVE_APP_SCENE_COMMIT": commit,
+        "SAGE_NATIVE_APP_SCENE_SOURCE_STATE": sourceState,
+    ])
+    #expect(fixture?.commit == commit)
+    #expect(fixture?.sourceState == sourceState)
+}
+
 @Test func nativeAXAcceptanceFixtureIsExplicitAndBounded() {
     #expect(NativeAXAcceptanceFixture(environment: [:]) == nil)
     #expect(NativeAXAcceptanceFixture(environment: [
