@@ -180,6 +180,11 @@ struct RelatedMemoryEnvelope: Decodable, Equatable, Sendable {
     let related: [RelatedMemory]
 }
 
+struct RelatedMemoryFocus: Equatable, Hashable, Sendable {
+    let anchorMemoryID: String
+    let relatedMemoryID: String
+}
+
 struct RelatedMemory: Decodable, Equatable, Hashable, Identifiable, Sendable {
     let id: String
     let content: String

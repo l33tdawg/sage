@@ -100,6 +100,7 @@ struct BrainView: View {
             dismissCurrentSelectionAndRestoreFocus()
         }
         .onChange(of: model.selectedNodeID) { _, _ in scheduleSelectionAnnouncement() }
+        .onChange(of: model.relatedMemoryFocus) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedAgentID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedEngramID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedConnectionID) { _, _ in scheduleSelectionAnnouncement() }
@@ -284,7 +285,7 @@ struct BrainView: View {
             MetalBrainView(
                 nodes: graph.nodes,
                 edges: graph.edges,
-                selectedID: model.selectedNodeID,
+                selectedID: model.sceneFocusedMemoryID,
                 topologyFocusID: nil,
                 highlightedEdge: nil,
                 layout: .memory,
@@ -469,7 +470,10 @@ struct BrainView: View {
                 }
                 Button("Close", systemImage: "xmark") {
                     clearSelectionAndRestoreFocus()
-                }.labelStyle(.iconOnly)
+                }
+                .labelStyle(.iconOnly)
+                .help("Close Train of Thought")
+                .accessibilityLabel("Close Train of Thought")
             }
             if model.isDetailLoading {
                 ProgressView("Tracing related memory…").controlSize(.small)
@@ -479,7 +483,10 @@ struct BrainView: View {
                 ScrollView(.horizontal) {
                     HStack(alignment: .top, spacing: 12) {
                         ForEach(["do", "dont", "observation", "note"], id: \.self) { kind in
-                            trainGroup(kind: kind, memories: related.related.filter { $0.kind == kind })
+                            let memories = kind == "note"
+                                ? related.related.filter { !["do", "dont", "observation"].contains($0.kind) }
+                                : related.related.filter { $0.kind == kind }
+                            trainGroup(kind: kind, memories: memories)
                         }
                     }
                 }
@@ -497,11 +504,21 @@ struct BrainView: View {
                 Text("No visible items").font(.caption).foregroundStyle(.tertiary).frame(width: 210, alignment: .leading)
             } else {
                 ForEach(memories) { memory in
+                    let isSelected = model.relatedMemoryFocus?.relatedMemoryID == memory.id
                     Button {
                         model.selectRelatedMemory(memory)
+                        requestFocus(.relatedMemory(memory.id))
                     } label: {
                         VStack(alignment: .leading, spacing: 5) {
-                            Text(memory.content).font(.callout).lineLimit(3).multilineTextAlignment(.leading)
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(memory.content).font(.callout).lineLimit(3).multilineTextAlignment(.leading)
+                                Spacer(minLength: 0)
+                                if isSelected {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(CerebrumTheme.cyan)
+                                        .transition(.opacity)
+                                }
+                            }
                             HStack {
                                 Text(memory.relation.replacingOccurrences(of: "-", with: " ").capitalized)
                                 Spacer()
@@ -509,8 +526,24 @@ struct BrainView: View {
                             }.font(.caption2).foregroundStyle(.secondary)
                         }
                         .padding(9).frame(width: 230, alignment: .leading)
-                        .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 9))
-                    }.buttonStyle(.plain)
+                        .background(
+                            isSelected ? CerebrumTheme.cyan.opacity(0.13) : Color.secondary.opacity(0.08),
+                            in: RoundedRectangle(cornerRadius: 9)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 9)
+                                .stroke(isSelected ? CerebrumTheme.cyan.opacity(0.82) : .clear, lineWidth: 1)
+                        }
+                        .shadow(color: isSelected ? CerebrumTheme.cyan.opacity(0.14) : .clear, radius: 8, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .focused($keyboardFocus, equals: .relatedMemory(memory.id))
+                    .accessibilityFocused($accessibilityFocus, equals: .relatedMemory(memory.id))
+                    .accessibilityLabel("\(trainTitle(memory.kind)) related memory. \(memory.content)")
+                    .accessibilityValue("\(memory.relation.replacingOccurrences(of: "-", with: " ")), \(memory.confidence.formatted(.percent.precision(.fractionLength(0)))), \(memory.domain)")
+                    .accessibilityHint("Focuses this related memory while keeping the primary memory open.")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: isSelected)
                 }
             }
         }.accessibilityElement(children: .contain).accessibilityLabel(trainTitle(kind))
@@ -601,7 +634,7 @@ struct BrainView: View {
 
     private var hasSelection: Bool {
         model.selectedNodeID != nil || model.selectedAgentID != nil ||
-            model.selectedEngramID != nil || model.selectedConnection != nil
+            model.selectedEngramID != nil || model.selectedConnection != nil || model.relatedMemoryFocus != nil
     }
 
     private var returnFocusTarget: BrainFocusTarget {
@@ -622,6 +655,13 @@ struct BrainView: View {
 
     private func dismissCurrentSelectionAndRestoreFocus() {
         if model.mode == .memory {
+            if let focus = model.relatedMemoryFocus {
+                model.clearRelatedMemoryFocus()
+                let cardIsMounted = !model.isDetailLoading && model.detailErrorMessage == nil &&
+                    model.relatedMemories?.related.contains(where: { $0.id == focus.relatedMemoryID }) == true
+                requestFocus(cardIsMounted ? .relatedMemory(focus.relatedMemoryID) : returnFocusTarget)
+                return
+            }
             model.selectedNodeID = nil
             model.relatedMemories = nil
         } else {
@@ -664,6 +704,8 @@ struct BrainView: View {
             } else {
                 announcement = "Brain selection cleared."
             }
+        } else if let related = model.selectedRelatedMemory {
+            announcement = "Related memory selected. \(trainTitle(related.kind)), \(related.domain), \(related.corroborationCount) corroborations."
         } else if let node = model.selectedNode {
             announcement = "Memory selected in \(node.domain), \(node.corroborationCount) corroborations."
         } else {
@@ -711,6 +753,7 @@ private enum BrainFocusTarget: Hashable {
     case surface
     case table
     case inspectorClose
+    case relatedMemory(String)
 }
 
 private struct BrainRefreshKey: Hashable {

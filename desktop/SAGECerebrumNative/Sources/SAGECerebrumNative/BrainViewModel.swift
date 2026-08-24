@@ -8,10 +8,17 @@ final class BrainViewModel {
     var graph: BrainGraphEnvelope?
     var connectome: ConnectomeEnvelope?
     var connectomeWasTruncated = false
-    var selectedNodeID: String?
+    var selectedNodeID: String? {
+        didSet {
+            guard selectedNodeID != oldValue else { return }
+            relatedMemoryFocus = nil
+            if relatedMemories?.id != selectedNodeID { relatedMemories = nil }
+        }
+    }
     var selectedAgentID: String?
     var selectedEngramID: String?
     var selectedConnectionID: DirectedSynapseID?
+    var relatedMemoryFocus: RelatedMemoryFocus?
     var selectedDomain = ""
     var status = "all"
     var engrams: AgentEngramEnvelope?
@@ -43,6 +50,19 @@ final class BrainViewModel {
     }
 
     var selectedNode: BrainNode? { graph?.nodes.first { $0.id == selectedNodeID } }
+    var selectedRelatedMemory: RelatedMemory? {
+        guard let relatedMemoryFocus,
+              relatedMemoryFocus.anchorMemoryID == selectedNodeID,
+              relatedMemories?.id == relatedMemoryFocus.anchorMemoryID
+        else { return nil }
+        return relatedMemories?.related.first { $0.id == relatedMemoryFocus.relatedMemoryID }
+    }
+    var sceneFocusedMemoryID: String? {
+        guard let relatedMemoryFocus,
+              graph?.nodes.contains(where: { $0.id == relatedMemoryFocus.relatedMemoryID }) == true
+        else { return selectedNodeID }
+        return relatedMemoryFocus.relatedMemoryID
+    }
     var selectedNeuron: ConnectomeNeuron? { connectome?.neurons.first { $0.agentID == selectedAgentID } }
     var hasVisibleInspector: Bool { mode == .memory ? selectedNode != nil : selectedNeuron != nil }
     var selectedEngram: AgentEngram? { engrams?.engrams.first { $0.id == selectedEngramID } }
@@ -274,7 +294,10 @@ final class BrainViewModel {
             detailErrorMessage = nil
             return
         }
-        if relatedMemories?.id != selectedNodeID { relatedMemories = nil }
+        if relatedMemories?.id != selectedNodeID {
+            relatedMemories = nil
+            relatedMemoryFocus = nil
+        }
         isDetailLoading = true
         detailErrorMessage = nil
         defer { if generation == detailGeneration { isDetailLoading = false } }
@@ -282,6 +305,12 @@ final class BrainViewModel {
             let response = try await api.relatedMemories(memoryID: selectedNodeID, limit: 50)
             guard generation == detailGeneration, self.selectedNodeID == selectedNodeID, mode == .memory else { return }
             relatedMemories = response
+            if let relatedMemoryFocus,
+               relatedMemoryFocus.anchorMemoryID != selectedNodeID ||
+               response.id != relatedMemoryFocus.anchorMemoryID ||
+               !response.related.contains(where: { $0.id == relatedMemoryFocus.relatedMemoryID }) {
+                self.relatedMemoryFocus = nil
+            }
         } catch is CancellationError {
             return
         } catch {
@@ -319,9 +348,16 @@ final class BrainViewModel {
     }
 
     func selectRelatedMemory(_ memory: RelatedMemory) {
-        guard graph?.nodes.contains(where: { $0.id == memory.id }) == true else { return }
-        selectedNodeID = memory.id
+        guard mode == .memory,
+              let selectedNodeID,
+              relatedMemories?.id == selectedNodeID,
+              relatedMemories?.related.contains(where: { $0.id == memory.id }) == true
+        else { return }
+        let next = RelatedMemoryFocus(anchorMemoryID: selectedNodeID, relatedMemoryID: memory.id)
+        relatedMemoryFocus = relatedMemoryFocus == next ? nil : next
     }
+
+    func clearRelatedMemoryFocus() { relatedMemoryFocus = nil }
 
     func runLiveUpdates() async {
         async let events: Void = consumeEvents()
@@ -394,6 +430,7 @@ final class BrainViewModel {
         trafficByAgent = [:]
         engrams = nil
         relatedMemories = nil
+        relatedMemoryFocus = nil
         selectedNodeID = nil
         selectedAgentID = nil
         selectedEngramID = nil

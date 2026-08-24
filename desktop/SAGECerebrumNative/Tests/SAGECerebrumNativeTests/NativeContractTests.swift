@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import MetalKit
 import Testing
 @testable import SAGECerebrumNative
 
@@ -8,6 +10,29 @@ import Testing
         "network", "access", "federation", "settings",
     ])
     #expect(Set(AppRoute.allCases.map(\.cerebrumHash)).count == 9)
+}
+
+@MainActor
+@Test func hostedMetalSurfaceAcceptsNativeFirstResponderFocus() {
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    let surface = InteractiveMetalView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), device: nil)
+    window.contentView = surface
+
+    #expect(surface.window === window)
+    #expect(surface.acceptsFirstResponder)
+    #expect(window.makeFirstResponder(surface))
+    #expect(window.firstResponder === surface)
+}
+
+@MainActor
+@Test func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
+    let renderer = try #require(BrainMetalRenderer(onPick: { _ in }))
+    #expect(!renderer.metalDevice.name.isEmpty)
 }
 
 @Test func APIBaseURLRejectsRemoteAndCredentialedOrigins() {
@@ -208,6 +233,7 @@ import Testing
     brain.graph = .init(nodes: [], edges: [], total: 1, domainCounts: [:], domainLast: [:], continuationRequired: false, projection: nil)
     brain.connectome = .init(neurons: [], synapses: [])
     brain.selectedNodeID = "m1"
+    brain.relatedMemoryFocus = .init(anchorMemoryID: "m1", relatedMemoryID: "m2")
     brain.selectedAgentID = "a1"
     brain.selectedEngramID = "m1"
     brain.selectedConnection = .init(fromAgent: "a1", toAgent: "a2", count: 1, lastFired: "2026-08-23T00:00:00Z")
@@ -217,11 +243,58 @@ import Testing
     #expect(brain.graph == nil)
     #expect(brain.connectome == nil)
     #expect(brain.selectedNodeID == nil)
+    #expect(brain.relatedMemoryFocus == nil)
     #expect(brain.selectedAgentID == nil)
     #expect(brain.selectedEngramID == nil)
     #expect(brain.selectedConnection == nil)
     #expect(!brain.isDetailLoading)
     #expect(brain.detailErrorMessage == nil)
+}
+
+@MainActor
+@Test func relatedMemoryFocusPreservesItsTypedAnchorAndReconcilesOnRefresh() async {
+    let related = RelatedMemory(
+        id: "m2", content: "Related", domain: "native", confidence: 0.8,
+        corroborationCount: 2, status: "committed", createdAt: .now,
+        memoryType: "observation", kind: "do", relation: "same-topic", score: 4.25
+    )
+    let envelope = RelatedMemoryEnvelope(id: "m1", domain: "native", content: "Anchor", related: [related])
+    let api = MutationTestAPI(forgetResults: [], related: envelope)
+    let brain = BrainViewModel(api: api)
+    brain.graph = .init(
+        nodes: [
+            .init(id: "m1", content: "Anchor", domain: "native", confidence: 1, status: "committed", memoryType: "fact", createdAt: .now, agent: "a", agentLabel: nil, agentIsRoot: false, tags: nil, corroborationCount: 1),
+            .init(id: "m2", content: "Related", domain: "native", confidence: 0.8, status: "committed", memoryType: "observation", createdAt: .now, agent: "a", agentLabel: nil, agentIsRoot: false, tags: nil, corroborationCount: 2),
+        ],
+        edges: [], total: 2, domainCounts: ["native": 2], domainLast: nil,
+        continuationRequired: false, projection: nil
+    )
+    brain.selectedNodeID = "m1"
+    brain.relatedMemories = envelope
+
+    brain.selectRelatedMemory(related)
+    #expect(brain.selectedNodeID == "m1")
+    #expect(brain.relatedMemoryFocus == .init(anchorMemoryID: "m1", relatedMemoryID: "m2"))
+    #expect(brain.selectedRelatedMemory?.id == "m2")
+    #expect(brain.sceneFocusedMemoryID == "m2")
+
+    await brain.loadRelatedForSelection()
+    #expect(brain.relatedMemoryFocus?.relatedMemoryID == "m2")
+
+    brain.selectRelatedMemory(related)
+    #expect(brain.relatedMemoryFocus == nil)
+    #expect(brain.sceneFocusedMemoryID == "m1")
+
+    brain.selectRelatedMemory(related)
+    await api.setRelated(.init(id: "m1", domain: "native", content: "Anchor", related: []))
+    await brain.loadRelatedForSelection()
+    #expect(brain.relatedMemoryFocus == nil)
+
+    brain.relatedMemories = envelope
+    brain.selectRelatedMemory(related)
+    brain.selectedNodeID = "m2"
+    #expect(brain.relatedMemoryFocus == nil)
+    #expect(brain.relatedMemories == nil)
 }
 
 @MainActor
@@ -473,15 +546,18 @@ private actor MutationTestAPI: SAGEAPI {
     var maximumConcurrentForgetCalls = 0
     var brainConnectome: ConnectomeEnvelope
     let brainEngrams: AgentEngramEnvelope?
+    var brainRelated: RelatedMemoryEnvelope?
 
     init(
         forgetResults: [Result<MemoryMutationResponse, SAGEAPIError>],
         connectome: ConnectomeEnvelope = .init(neurons: [], synapses: []),
-        engrams: AgentEngramEnvelope? = nil
+        engrams: AgentEngramEnvelope? = nil,
+        related: RelatedMemoryEnvelope? = nil
     ) {
         self.forgetResults = forgetResults
         self.brainConnectome = connectome
         self.brainEngrams = engrams
+        self.brainRelated = related
     }
 
     func authStatus() async throws -> AuthStatus { .init(authRequired: false, authenticated: true) }
@@ -504,12 +580,14 @@ private actor MutationTestAPI: SAGEAPI {
     }
     func connectome() async throws -> ConnectomeEnvelope { brainConnectome }
     func setConnectome(_ value: ConnectomeEnvelope) { brainConnectome = value }
+    func setRelated(_ value: RelatedMemoryEnvelope?) { brainRelated = value }
     func agentEngrams(agentID: String) async throws -> AgentEngramEnvelope {
         if let brainEngrams, brainEngrams.agentID == agentID { return brainEngrams }
         return .init(agentID: agentID, engrams: [], continuationRequired: false, projection: nil)
     }
     func relatedMemories(memoryID: String, limit: Int) async throws -> RelatedMemoryEnvelope {
-        .init(id: memoryID, domain: "", content: "", related: [])
+        if let brainRelated, brainRelated.id == memoryID { return brainRelated }
+        return .init(id: memoryID, domain: "", content: "", related: [])
     }
     func forgetMemory(id: String) async throws -> MemoryMutationResponse {
         forgetCalls.append(id)

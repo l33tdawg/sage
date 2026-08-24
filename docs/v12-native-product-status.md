@@ -90,8 +90,12 @@ connection reduced-motion-aware emphasis. One bounded GPU particle per rendered
 edge now samples the same trimmed curve/self-loop function as its ribbon, with
 no per-frame CPU geometry rebuild. The Brain also implements coalesced native
 selection announcements and source-level focus targets for the summarized Metal
-surface, synchronized table, and inspector close control. Typed related focus,
-real VoiceOver/responder evidence, and deeper behavioral,
+surface, synchronized table, inspector close control, and independently typed
+related-memory cards. Related focus preserves its primary anchor, reconciles
+against refreshed payloads, and clears before the anchor on Escape. A hosted
+AppKit test now proves the production Metal surface can join a hosted native
+responder chain, while a hardware runtime test compiles its required Metal pipeline family.
+Real VoiceOver evidence, full SwiftUI focus-return evidence, and deeper behavioral,
 accessibility, Metal-fallback, and performance evidence remain open.
 
 The first arm64 application bundle was built and launch-tested on 2026-08-23 at
@@ -173,7 +177,7 @@ acceptance gaps are not counted as another route slice.
 | Primary product area | Current surface | Current classification | Acceptance status |
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
-| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, and a related-memory Train of Thought pane | `native-control` | Brain interaction/parity pass implemented; real VoiceOver/responder proof, pixel-level bloom evidence, typed related focus, daemon lifecycle, Metal fallback, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
+| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, and an independently typed related-memory Train of Thought pane | `native-control` | Brain interaction/parity pass implemented; real VoiceOver and full SwiftUI focus-return proof, offscreen GPU/pixel-level bloom evidence, daemon lifecycle, Metal fallback, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
 | Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; whole-domain transfer and full acceptance evidence remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |
@@ -216,8 +220,8 @@ production promotion.
   without granting implicit Root/Admin authority. The current Swift application
   attaches to an already-running loopback daemon; it does not yet own that
   daemon's lifecycle.
-- Complete the remaining Brain work: add typed related-memory focus, then prove
-  real VoiceOver announcements and responder return, Metal/Table parity,
+- Complete the remaining Brain work: prove real VoiceOver announcements and full
+  SwiftUI focus return, Metal/Table parity,
   access-purge behavior, broader keyboard operation,
   large-store performance, and graceful behavior when Metal is unavailable.
 - Convert the private tester artifact into a signed production candidate and
