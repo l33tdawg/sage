@@ -89,7 +89,7 @@ trap on_signal INT TERM
 
 SAGE_NATIVE_DESIGN_PREVIEW=1 \
 SAGE_NATIVE_PREVIEW_ROUTE=overview \
-SAGE_NATIVE_APP_SCENE_ACCEPTANCE=rendered-menu-application-keyboard-search-inspector-lifecycle \
+SAGE_NATIVE_APP_SCENE_ACCEPTANCE=rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle \
 SAGE_NATIVE_APP_SCENE_COMMIT="${COMMIT}" \
 SAGE_NATIVE_APP_SCENE_SOURCE_STATE="${SOURCE_STATE}" \
 SAGE_NATIVE_APP_SCENE_RUN_ID="${RUN_ID}" \
@@ -97,12 +97,12 @@ SAGE_NATIVE_APP_SCENE_RUN_ID="${RUN_ID}" \
 APP_PID=$!
 LAUNCHED_PID="${APP_PID}"
 
-deadline=$((SECONDS + 30))
+deadline=$((SECONDS + 40))
 while kill -0 "${APP_PID}" 2>/dev/null && [ "${SECONDS}" -lt "${deadline}" ]; do
   sleep 0.1
 done
 if kill -0 "${APP_PID}" 2>/dev/null; then
-  echo "native app-scene fixture exceeded its 30-second outer deadline" >&2
+  echo "native app-scene fixture exceeded its 40-second outer deadline" >&2
   exit 1
 fi
 set +e
@@ -118,9 +118,9 @@ APP_PID=""
 node "${ROOT}/scripts/v12-native-app-scene-validate.mjs" "${RESULT}" "${COMMIT}" "${SOURCE_STATE}" "${RUN_ID}" "${LAUNCHED_PID}"
 
 {
-  printf 'schema=sage.v12.native-app-scene.manifest.v3\n'
+  printf 'schema=sage.v12.native-app-scene.manifest.v4\n'
   printf 'run_id=%s\n' "${RUN_ID}"
-  printf 'scenario=rendered-menu-application-keyboard-search-inspector-lifecycle\n'
+  printf 'scenario=rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle\n'
   printf 'commit=%s\n' "${COMMIT}"
   printf 'source_state=%s\n' "${SOURCE_STATE}"
   printf 'bundle_id=%s\n' "$(plutil -extract CFBundleIdentifier raw "${APP_PATH}/Contents/Info.plist")"

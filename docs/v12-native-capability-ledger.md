@@ -4,7 +4,7 @@
 
 **Baseline:** SAGE v11.19.0 / app-v27
 
-**Current durable task:** `b945c6bb-8d06-45c7-91d1-ad1e15e6b84d`
+**Current durable task:** `7779c211-07e6-466c-8c31-aede68e12357`
 
 **Product boundary:** [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md)
 **Evidence contract:** [`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md)
@@ -56,7 +56,7 @@ exactly one active-route checkmark. Development IDs are `global.command.focus-se
 `global.command.keyboard-shortcuts`, route-specific `*.command.refresh`,
 `search.command.{toggle-inspector,clear-selection}`, and
 `brain.command.{toggle-inspector,mode-memory-map,mode-agent-network,presentation-interactive-map,presentation-list-view,clear-selection,view-options}`.
-The v3 DEBUG app-scene fixture is green in a packaged local run and awaits CI.
+The v3 DEBUG app-scene fixture is green in a packaged local run and CI.
 It launches the real executable, inventories the materialized
 `NSApplication.mainMenu`, directly dispatches rendered **Navigate > Brain**,
 and then routes synthetic Command-3, Command-F, and Control-Command-I
@@ -65,14 +65,26 @@ monitor plus exact checked-route, request/consumption, and first-responder effec
 are intended to prove application-level routing to Search, Focus Search, and
 Show Inspector. The existing Search production-inspect, Hide/Show identity, and
 table/close focus lifecycle remains in the bounded scenario. The previous v2
-packaged/CI gate is green; v3 is green locally with CI pending. This synthetic in-process
-evidence is not physical keyboard/HID, WindowServer, system AX, VoiceOver,
+packaged/CI gate is green; v3 is packaged and CI green. This synthetic in-process
+evidence is not physical keyboard/HID, WindowServer, system AX, VoiceOver spoken output,
 installed-RC, localization, or non-US-layout evidence.
+
+The packaged-local-green v4 successor is schema `sage.v12.native-app-scene.v4`, scenario
+`rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle`.
+Its contract adds stable identity for the exact backing `NSTableView` in both
+Brain table presentations, production **List View** reducer dispatch through a
+focus-incapable DEBUG action bridge, deterministic `g1`
+selection, production Brain inspector action dispatch through that bridge,
+exact first-responder ownership by the real AppKit inspector-close `NSButton`,
+`performClick` dismissal, and exact-current-table/same-window responder
+restoration with selection preservation before the existing Search sequence.
+SwiftUI backing-object reuse/replacement is recorded honestly. Local v4 is
+green; CI remains pending, and focused Brain View command routing is still open.
 
 | Entry ID | Route | Mounted UI | Owner | Current native-window path | App-owned integration still required | Status |
 |---|---|---|---|---|---|---|
 | `overview.route` | `overview` | `OverviewView` | `native-control` | Implemented SwiftUI dashboard | Lifecycle/offline/accessibility/performance acceptance | implemented slice; acceptance open |
-| `brain.route` | `brain` | `BrainView`, `MetalBrainView`, `BrainNodeInspectorView`, `AgentNeuronInspectorView` | `native-control` | Implemented Memory/Connectome modes with a pure routed-size layout policy, native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector dismissal with a route-focus request, popover command gating, VoiceOver-safe Control-Command mode/View Options shortcuts, hosted 620×540-to-expanded resize evidence, the shared anatomical CEREBRUM hull, time-invariant half-resolution Metal bloom, native spherical cells, nearest-rank p95-normalized traffic ribbons with bounded-cadence `last_fired` plasticity, deterministic reciprocal curves and self-loops, trimmed direction arrowheads, topology-aware focused-edge-preserving 2,048-ribbon LOD, direct Metal edge picking, shared-path GPU flow particles, reduced-motion-aware focus easing, coalesced selection announcements, source-level table/surface/inspector/related-card focus targets, generation-fenced native retry/Metal first-responder delivery, runtime Metal pipeline compilation, shared-encoder 4× MSAA offscreen GPU completion and relative bloom raster evidence, synchronized native tables, reducer-driven renderer-failure fallback/retry with held-progress state, mode/view cancellation, stale-attempt fencing, native accessibility-press activation and duplicate rejection, fail-closed handoff consumption, mount/capability-gated restoration, hosted immediate failure, held stale-success cancellation and successful restoration evidence, selected-agent engram bloom, directed-connection focus, and typed related-memory Train of Thought | CI v3 command/focus validation; exact Brain table/inspector focus return, real VoiceOver/system-AX discovery, cross-GPU/offline behavior, daemon lifecycle and deeper behavioral/accessibility/large-store/performance evidence | implemented and packaged locally; CI and acceptance open |
+| `brain.route` | `brain` | `BrainView`, `MetalBrainView`, `BrainNodeInspectorView`, `AgentNeuronInspectorView` | `native-control` | Implemented Memory/Connectome modes with a pure routed-size layout policy, native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector dismissal with a route-focus request, popover command gating, Control-Command mode/View Options shortcuts that avoid VoiceOver's default Control-Option chord, hosted 620×540-to-expanded resize evidence, the shared anatomical CEREBRUM hull, time-invariant half-resolution Metal bloom, native spherical cells, nearest-rank p95-normalized traffic ribbons with bounded-cadence `last_fired` plasticity, deterministic reciprocal curves and self-loops, trimmed direction arrowheads, topology-aware focused-edge-preserving 2,048-ribbon LOD, direct Metal edge picking, shared-path GPU flow particles, reduced-motion-aware focus easing, coalesced selection announcements, source-level table/surface/inspector/related-card focus targets, generation-fenced native retry/Metal first-responder delivery, runtime Metal pipeline compilation, shared-encoder 4× MSAA offscreen GPU completion and relative bloom raster evidence, synchronized native tables, reducer-driven renderer-failure fallback/retry with held-progress state, mode/view cancellation, stale-attempt fencing, native accessibility-press activation and duplicate rejection, fail-closed handoff consumption, mount/capability-gated restoration, hosted immediate failure, held stale-success cancellation and successful restoration evidence, selected-agent engram bloom, directed-connection focus, and typed related-memory Train of Thought | Focused Brain View command routing, real VoiceOver/system-AX discovery, cross-GPU/offline behavior, daemon lifecycle and deeper behavioral/accessibility/large-store/performance evidence | implemented slice; v3 CI green; v4 packaged-local green; CI/release acceptance open |
 | `search.route` | `search` | `SearchView`, `MemoryInspectorView` | `native-control` | Implemented SwiftUI table plus selection-independent trailing inspector lifecycle, toolbar/View-menu parity, Escape clear, announcements, visible-result reconciliation and modal/mutation-safe command gating; real app-scene evidence covers rendered Focus Search dispatch, repeated mounted search-field-editor focus, production inspect activation, rendered Show/Hide Inspector dispatch, semantic identity preservation, and exact table/close focus return | Whole-domain transfer; remaining rendered commands, physical keyboard-event routing, system-AX/VoiceOver, large-store and full accessibility acceptance | implemented slice; acceptance open |
 | `tasks.route` | `tasks` | `NativePlaceholderView` | `native-control` target | Native destination mapped | Task and Messages workflows | implementation open |
 | `import.route` | `importData` | `NativePlaceholderView` | `native-control` target | Native destination mapped | File import and restore workflows | implementation open |
@@ -90,7 +102,7 @@ links from the historical Tauri prototype are not evidence for this product.
 | Action-family ID | Parent | User-visible capability | UI/API source anchors | Owner | Required v12 evidence or integration | Status |
 |---|---|---|---|---|---|---|
 | `session.login-lock-recover` | global/session | Connect, unlock and lock the local encrypted session; show native failure state | `RootView`, `AppSession`, `LoginView`, typed auth APIs | `native-control` | Daemon launch/supervision, recovery continuity, auth-denial and data-safety evidence | partial; acceptance open |
-| `global.navigation-preferences` | global | Native split-view sidebar with three selectable implemented destinations, six non-selectable Coming Soon destinations, fixed ready-session route commands, and an exact active-route checkmark in Navigate | `RootView`, `AppRoute`, `SAGECerebrumNativeApp` | `native-control` | CI v3 validation; functional Settings scene, deep links, restoration, physical-keyboard/WindowServer coverage, localization, non-US layouts, zoom and reduced-motion evidence | checkmark and synthetic application routing packaged green locally; CI and acceptance open |
+| `global.navigation-preferences` | global | Native split-view sidebar with three selectable implemented destinations, six non-selectable Coming Soon destinations, fixed ready-session route commands, and an exact active-route checkmark in Navigate | `RootView`, `AppRoute`, `SAGECerebrumNativeApp` | `native-control` | Functional Settings scene, deep links, restoration, physical-keyboard/WindowServer coverage, localization, non-US layouts, zoom and reduced-motion evidence | checkmark and synthetic application routing packaged/CI green in v3; release acceptance open |
 | `onboarding.run` | global/settings | First-run setup and explicit rerun | Browser workflow and onboarding/embeddings/provider APIs are parity references | `native-control` target | Clean-machine native flow, restart continuity, permissions, offline/degraded paths | implementation open |
 | `overview.inspect-health` | overview | Health, memory/agent/federation/consensus summary with independent snapshot quality and event-transport state | `OverviewView`, `OverviewViewModel`; health/stats/agents/validators/federation APIs and typed SSE transport | `native-control` | Paint/interactive latency, prolonged SSE loss, stale/degraded and typed offline evidence | implemented; acceptance open |
 | `overview.resolve-adoption` | overview | Inspect, retry, assign, or deprecate historical adoption items | Browser workflow and adoption APIs are parity references | `native-control` target | Native implementation, Root/operator authorization, interruption and immutable history evidence | implementation open |

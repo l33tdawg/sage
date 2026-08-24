@@ -25,6 +25,8 @@ final class BrainViewModel {
     var selectedEngramID: String?
     var selectedConnectionID: DirectedSynapseID?
     var relatedMemoryFocus: RelatedMemoryFocus?
+    var inspectorIsPresented = false
+    var inspectorVisibilityIsUserControlled = false
     var selectedDomain = "" {
         didSet { if selectedDomain != oldValue { invalidateMemoryPayload() } }
     }

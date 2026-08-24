@@ -13,8 +13,6 @@ struct BrainView: View {
     @State private var connectomeHullOpacity = 0.03
     @State private var showsViewOptions = false
     @State private var showsNavigator = false
-    @State private var showsInspector = false
-    @State private var inspectorVisibilityIsUserControlled = false
     @State private var availableSize = CGSize(width: 1_180, height: 760)
     @State private var mountedMetalSurfaces: Set<BrainMountedSurface> = []
     @State private var pendingMetalRestorationAttemptID: UInt64?
@@ -29,6 +27,9 @@ struct BrainView: View {
     private let accessibilityAnnouncer: @MainActor (String) -> Void
     private let surfaceObserver: @MainActor (BrainMountedSurface, Bool) -> Void
     private let layoutObserver: @MainActor (BrainResponsiveLayoutPlan) -> Void
+    #if DEBUG
+    private let appSceneBridgeRegistrationID = UUID()
+    #endif
 
     init(
         api: any SAGEAPI,
@@ -62,7 +63,7 @@ struct BrainView: View {
         layoutObserver: @escaping @MainActor (BrainResponsiveLayoutPlan) -> Void = { _ in }
     ) {
         _model = State(initialValue: model)
-        _showsInspector = State(initialValue: model.hasVisibleInspector)
+        model.inspectorIsPresented = model.hasVisibleInspector
         self.rendererBootstrap = rendererBootstrap
         self.retryRendererBootstrap = retryRendererBootstrap ?? {
             rendererBootstrap({ _ in })
@@ -73,7 +74,8 @@ struct BrainView: View {
     }
 
     var body: some View {
-        GeometryReader { proxy in
+        let presentedInspector = inspectorIsPresented
+        return GeometryReader { proxy in
             ZStack {
                 CerebrumBackdrop()
                 if layoutPlan.tier == .compact {
@@ -116,24 +118,21 @@ struct BrainView: View {
         .focusedSceneValue(\.cerebrumRouteCommandActions, routeCommandActions)
         .toolbar { brainToolbar }
         .inspector(isPresented: Binding(
-            get: { inspectorIsPresented },
+            get: { presentedInspector },
             set: {
                 if !$0 && model.hasVisibleInspector {
-                    inspectorVisibilityIsUserControlled = true
+                    model.inspectorVisibilityIsUserControlled = true
                 }
-                showsInspector = $0
+                model.inspectorIsPresented = $0
                 if !$0 { requestFocus(returnFocusTarget) }
             }
         )) {
             VStack(spacing: 0) {
                 HStack {
                     Spacer()
-                    Button("Hide Inspector", systemImage: "xmark") {
-                        inspectorVisibilityIsUserControlled = true
-                        showsInspector = false
+                    BrainInspectorCloseButton(model: model) {
                         requestFocus(returnFocusTarget)
                     }
-                    .labelStyle(.iconOnly)
                     .help("Hide Inspector")
                     .focused($keyboardFocus, equals: .inspectorClose)
                     .accessibilityFocused($accessibilityFocus, equals: .inspectorClose)
@@ -173,20 +172,25 @@ struct BrainView: View {
             dismissCurrentSelectionAndRestoreFocus()
         }
         .onChange(of: model.selectedNodeID) { _, selected in
-            if selected != nil && !inspectorVisibilityIsUserControlled {
-                showsInspector = true
+            if selected != nil && !model.inspectorVisibilityIsUserControlled {
+                model.inspectorIsPresented = true
             }
             scheduleSelectionAnnouncement()
         }
         .onChange(of: model.relatedMemoryFocus) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedAgentID) { _, selected in
-            if selected != nil && !inspectorVisibilityIsUserControlled {
-                showsInspector = true
+            if selected != nil && !model.inspectorVisibilityIsUserControlled {
+                model.inspectorIsPresented = true
             }
             scheduleSelectionAnnouncement()
         }
         .onChange(of: model.selectedEngramID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedConnectionID) { _, _ in scheduleSelectionAnnouncement() }
+        .onChange(of: model.hasVisibleInspector) { wasVisible, isVisible in
+            guard wasVisible, !isVisible, keyboardFocus == .inspectorClose else { return }
+            model.inspectorIsPresented = false
+            requestFocus(returnFocusTarget)
+        }
         .onChange(of: model.mode) { _, _ in
             showsViewOptions = false
             applyMetalEvent(.modeChanged)
@@ -196,7 +200,13 @@ struct BrainView: View {
         }
         .onDisappear {
             applyMetalEvent(.retryCancelled)
+            #if DEBUG
+            NativeAppSceneBrainBridge.shared.unregister(id: appSceneBridgeRegistrationID)
+            #endif
         }
+        #if DEBUG
+        .onAppear { registerAppSceneAcceptanceBridgeIfNeeded() }
+        #endif
     }
 
     private var trainOfThoughtVisible: Bool {
@@ -526,6 +536,7 @@ struct BrainView: View {
         }
         .accessibilityLabel("Memory brain table")
         .accessibilityIdentifier("brain-memory-table")
+        .background(BrainNativeTableIdentityBridge(identifier: "brain-memory-table"))
         .onAppear { surfaceObserver(.memoryTable, true) }
         .onDisappear { surfaceObserver(.memoryTable, false) }
         .focused($keyboardFocus, equals: .table)
@@ -612,6 +623,7 @@ struct BrainView: View {
         }
         .accessibilityLabel("Agent connectome table")
         .accessibilityIdentifier("brain-connectome-table")
+        .background(BrainNativeTableIdentityBridge(identifier: "brain-connectome-table"))
         .onAppear { surfaceObserver(.connectomeTable, true) }
         .onDisappear { surfaceObserver(.connectomeTable, false) }
         .focused($keyboardFocus, equals: .table)
@@ -984,9 +996,15 @@ struct BrainView: View {
     }
 
     private func toggleInspectorPresentation() {
-        inspectorVisibilityIsUserControlled = true
-        showsInspector.toggle()
-        requestFocus(showsInspector ? .inspectorClose : returnFocusTarget)
+        model.inspectorVisibilityIsUserControlled = true
+        model.inspectorIsPresented.toggle()
+        requestFocus(model.inspectorIsPresented ? .inspectorClose : returnFocusTarget)
+    }
+
+    private func hideInspectorPresentation() {
+        model.inspectorVisibilityIsUserControlled = true
+        model.inspectorIsPresented = false
+        requestFocus(returnFocusTarget)
     }
 
     private func toggleViewOptionsPresentation() {
@@ -999,7 +1017,7 @@ struct BrainView: View {
     }
 
     private var inspectorIsPresented: Bool {
-        showsInspector && model.hasVisibleInspector
+        model.inspectorIsPresented && model.hasVisibleInspector
     }
 
     private var motionControlsEnabled: Bool {
@@ -1166,7 +1184,7 @@ struct BrainView: View {
     }
 
     private func clearSelection() {
-        showsInspector = false
+        model.inspectorIsPresented = false
         if model.mode == .memory {
             model.selectedNodeID = nil
             model.relatedMemories = nil
@@ -1188,10 +1206,10 @@ struct BrainView: View {
             }
             model.selectedNodeID = nil
             model.relatedMemories = nil
-            showsInspector = false
+            model.inspectorIsPresented = false
         } else {
             model.selectConnectomeSceneNode(nil)
-            showsInspector = false
+            model.inspectorIsPresented = false
         }
         requestFocus(returnFocusTarget)
     }
@@ -1199,6 +1217,48 @@ struct BrainView: View {
     private func requestFocus(_ target: BrainFocusTarget) {
         requestKeyboardFocus(target)
         requestAccessibilityFocus(target)
+    }
+
+    #if DEBUG
+    private func registerAppSceneAcceptanceBridgeIfNeeded() {
+        guard NativeAppSceneAcceptanceFixture() != nil else { return }
+        NativeAppSceneBrainBridge.shared.register(
+            id: appSceneBridgeRegistrationID,
+            snapshot: {
+                .init(
+                    isReady: model.graph?.nodes.contains(where: { $0.id == "g1" }) == true,
+                    selectedMemoryID: model.selectedNodeID,
+                    inspectorIsPresented: inspectorIsPresented,
+                    focusTarget: keyboardFocus.map(focusTargetName)
+                )
+            },
+            prepareFirstMemorySelection: {
+                guard model.graph?.nodes.contains(where: { $0.id == "g1" }) == true else { return nil }
+                model.inspectorVisibilityIsUserControlled = true
+                model.selectedNodeID = "g1"
+                model.inspectorIsPresented = false
+                return "g1"
+            },
+            selectListPresentation: {
+                applyMetalEvent(.presentationSelected(.table))
+            },
+            showInspector: {
+                guard !inspectorIsPresented else { return }
+                toggleInspectorPresentation()
+            }
+        )
+    }
+    #endif
+
+    private func focusTargetName(_ target: BrainFocusTarget) -> String {
+        switch target {
+        case .surface: "surface"
+        case .table: "table"
+        case .inspectorClose: "inspectorClose"
+        case .viewOptions: "viewOptions"
+        case let .relatedMemory(id): "relatedMemory:\(id)"
+        case .metalRetry: "metalRetry"
+        }
     }
 
     private func requestKeyboardFocus(_ target: BrainFocusTarget) {
@@ -1212,7 +1272,7 @@ struct BrainView: View {
             for _ in 0..<50 {
                 await Task.yield()
                 guard generation == keyboardFocusGeneration else { return }
-                if let view = nativeFocusView(identifier: identifier),
+                if let view = nativeFocusView(identifier: identifier, target: target),
                    view.window?.makeFirstResponder(view) == true {
                     return
                 }
@@ -1227,19 +1287,46 @@ struct BrainView: View {
             model.mode == .memory ? "brain-memory-metal-surface" : "brain-connectome-metal-surface"
         case .metalRetry:
             "brain-metal-retry"
-        case .table, .inspectorClose, .viewOptions, .relatedMemory:
+        case .table:
+            model.mode == .memory ? "brain-memory-table" : "brain-connectome-table"
+        case .inspectorClose:
+            "brain-inspector-close"
+        case .viewOptions, .relatedMemory:
             nil
         }
     }
 
-    private func nativeFocusView(identifier: String) -> NSView? {
+    private func nativeFocusView(identifier: String, target: BrainFocusTarget) -> NSView? {
         let windows = [NSApplication.shared.keyWindow].compactMap { $0 } +
             NSApplication.shared.orderedWindows.filter { $0 !== NSApplication.shared.keyWindow }
         for window in windows {
-            if let contentView = window.contentView,
-               let match = nativeFocusView(identifier: identifier, in: contentView) {
+            guard let contentView = window.contentView else { continue }
+            if target == .table {
+                if let match: NSTableView = nativeFocusView(
+                    identifier: identifier,
+                    type: NSTableView.self,
+                    in: contentView
+                ) { return match }
+            } else if target == .inspectorClose {
+                if let match: NSButton = nativeFocusView(
+                    identifier: identifier,
+                    type: NSButton.self,
+                    in: contentView
+                ) { return match }
+            } else if let match = nativeFocusView(identifier: identifier, in: contentView) {
                 return match
             }
+        }
+        return nil
+    }
+
+    private func nativeFocusView<T: NSView>(identifier: String, type: T.Type, in root: NSView) -> T? {
+        if let match = root as? T,
+           match.identifier?.rawValue == identifier || match.accessibilityIdentifier() == identifier {
+            return match
+        }
+        for child in root.subviews {
+            if let match = nativeFocusView(identifier: identifier, type: type, in: child) { return match }
         }
         return nil
     }
@@ -1345,6 +1432,126 @@ private enum BrainFocusTarget: Hashable {
     case viewOptions
     case relatedMemory(String)
     case metalRetry
+}
+
+private struct BrainNativeTableIdentityBridge: NSViewRepresentable {
+    let identifier: String
+
+    func makeNSView(context: Context) -> AnchorView {
+        let view = AnchorView()
+        view.identifierToApply = identifier
+        return view
+    }
+
+    func updateNSView(_ nsView: AnchorView, context: Context) {
+        nsView.identifierToApply = identifier
+        nsView.resolveControl()
+    }
+
+    final class AnchorView: NSView {
+        var identifierToApply = ""
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            resolveControl()
+        }
+
+        override func layout() {
+            super.layout()
+            resolveControl()
+        }
+
+        func resolveControl() {
+            DispatchQueue.main.async { [weak self] in self?.applyIdentity() }
+        }
+
+        private func applyIdentity() {
+            guard let window, !identifierToApply.isEmpty else { return }
+            let anchorRect = convert(bounds, to: nil)
+            let ranked = descendants(of: NSTableView.self, in: window.contentView).compactMap {
+                candidate -> (NSTableView, CGFloat)? in
+                let candidateRect = candidate.convert(candidate.bounds, to: nil)
+                let intersection = anchorRect.intersection(candidateRect)
+                guard !intersection.isNull, intersection.width > 0, intersection.height > 0 else { return nil }
+                return (candidate, intersection.width * intersection.height)
+            }.sorted { $0.1 > $1.1 }
+            guard let match = ranked.first,
+                  ranked.count == 1 || match.1 > ranked[1].1 else { return }
+            match.0.identifier = NSUserInterfaceItemIdentifier(identifierToApply)
+            match.0.setAccessibilityIdentifier(identifierToApply)
+        }
+
+        private func descendants<T: NSView>(of type: T.Type, in root: NSView?) -> [T] {
+            guard let root else { return [] }
+            var result = root is T ? [root as! T] : []
+            for child in root.subviews { result.append(contentsOf: descendants(of: type, in: child)) }
+            return result
+        }
+    }
+}
+
+private struct BrainInspectorCloseButton: NSViewRepresentable {
+    let model: BrainViewModel
+    let action: @MainActor () -> Void
+
+    func makeNSView(context: Context) -> NSButton {
+        let image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Hide Brain inspector") ?? NSImage()
+        let button = FocusableButton(frame: .zero)
+        button.activation = {
+            DispatchQueue.main.async {
+                model.inspectorVisibilityIsUserControlled = true
+                model.inspectorIsPresented = false
+                action()
+            }
+        }
+        button.image = image
+        button.identifier = NSUserInterfaceItemIdentifier("brain-inspector-close")
+        button.setAccessibilityIdentifier("brain-inspector-close")
+        button.setAccessibilityLabel("Hide Brain inspector")
+        button.setAccessibilityHelp("Hide the Brain inspector and return focus to the active Brain surface")
+        button.imagePosition = .imageOnly
+        button.bezelStyle = .inline
+        button.isBordered = false
+        button.focusRingType = .default
+        button.toolTip = "Hide Inspector"
+        return button
+    }
+
+    func updateNSView(_ nsView: NSButton, context: Context) {
+        if let button = nsView as? FocusableButton {
+            button.activation = {
+                DispatchQueue.main.async {
+                    model.inspectorVisibilityIsUserControlled = true
+                    model.inspectorIsPresented = false
+                    action()
+                }
+            }
+        }
+        nsView.isEnabled = true
+    }
+
+    private final class FocusableButton: NSButton {
+        var activation: (@MainActor () -> Void)?
+
+        override var acceptsFirstResponder: Bool { true }
+
+        override func performClick(_ sender: Any?) {
+            guard isEnabled else { return }
+            activation?()
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            super.mouseUp(with: event)
+            guard bounds.contains(convert(event.locationInWindow, from: nil)) else { return }
+            performClick(self)
+        }
+
+        override func accessibilityPerformPress() -> Bool {
+            guard isEnabled else { return false }
+            performClick(self)
+            return true
+        }
+    }
 }
 
 private struct BrainMetalRetryButton: NSViewRepresentable {

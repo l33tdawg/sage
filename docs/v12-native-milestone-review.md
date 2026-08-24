@@ -3,7 +3,7 @@
 **Reviewed:** 2026-08-24 against the accepted SwiftUI/AppKit/Metal ADR, roadmap,
 capability ledger, acceptance contract, current Swift source, and workflows.
 
-**Current durable task:** `b945c6bb-8d06-45c7-91d1-ad1e15e6b84d`
+**Current durable task:** `7779c211-07e6-466c-8c31-aede68e12357`
 
 The native foundation is genuine and the implemented Overview, Search, and
 Brain slices are strong. It is not yet a production-complete v12 product. This
@@ -95,8 +95,8 @@ Connectome as secondary technical terms. The bounded follow-up now checkmarks
 the active Overview/Brain/Search Navigate item, moves Brain mode and View Options
 off VoiceOver's Control-Option modifier space to Control-Command, gates global
 commands behind Brain popovers, and requests route focus after native Brain
-inspector dismissal. These changes and the packaged v3 gate are green locally;
-CI is pending. This does not complete those routes.
+inspector dismissal. These changes and the packaged v3 gate are green locally
+and in CI. This does not complete those routes.
 
 The remaining design increments should improve comprehension without creating
 another large subsystem:
@@ -123,15 +123,16 @@ another large subsystem:
    the stable route surface. The app-scene gate proves Search's inspect,
    hide/reopen, identity-preservation, and exact table/close responder lifecycle
    through v2. Brain's native inspector dismissal now requests route focus and
-   its popovers gate global commands. CI v3 validation, physical
-   keyboard/HID and WindowServer delivery, system AX, and real VoiceOver remain
-   acceptance items.
+   its popovers gate global commands. v3 CI is green. The v4 exact Brain
+   table/inspector responder lifecycle is packaged-local green; physical keyboard/HID
+   and WindowServer delivery, system AX, and real VoiceOver remain acceptance
+   items.
 5. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
    detail errors, safe per-feed errors on Overview, and Diagnose/drill-down
    actions on unhealthy cards.
 6. **Implemented with bounded v2 app-scene evidence for Focus Search and Search
-   Show/Hide Inspector; v3 application-routing fixture packaged green locally
-   with CI pending:** Add route-aware macOS commands
+   Show/Hide Inspector; v3 application-routing fixture packaged and CI green;
+   v4 Brain responder extension packaged-local green:** Add route-aware macOS commands
    for Focus Search, routed Refresh, Search Show/Hide Inspector and Clear Search
    Selection, Brain Show/Hide Inspector, Brain Mode—Memory
    Map or Agent Network—Presentation—Interactive Map or List View—Clear Brain
@@ -145,9 +146,22 @@ another large subsystem:
    through `NSApplication.sendEvent`; a local keyDown monitor and exact
    route/request/focus effects provide bounded application-level routing proof.
    It retains the v2 Search inspect, Hide/Show identity, and exact table/close
-   responder lifecycle. This remains synthetic in-process evidence, not physical
-   keyboard/HID, WindowServer, system AX, VoiceOver, installed-RC, localization,
-   or non-US-layout proof. CI and the RC inventory remain open.
+   responder lifecycle. The v4 contract uses schema
+   `sage.v12.native-app-scene.v4` and scenario
+   `rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle`.
+   It identifies the exact backing `NSTableView` for both Brain tables, prepares
+   deterministic `g1`, invokes the production **List View** reducer through a
+   focus-incapable DEBUG action bridge, invokes the production Brain inspector
+   action through that bridge, proves exact focus on a real AppKit
+   inspector-close `NSButton`, dismisses it through `NSButton.performClick`,
+   and requires the exact currently mounted table in the same window to regain
+   first responder with class, rows, identifier, and selection preserved before
+   continuing through Search. Backing-object reuse/replacement is recorded.
+   The packaged local v4 gate is green; CI is pending. Focused Brain View command
+   materialization/routing after programmatic navigation remains open. This
+   remains synthetic in-process evidence, not physical keyboard/HID,
+   WindowServer, system AX, VoiceOver spoken output, installed-RC, localization,
+   or non-US-layout proof. The RC inventory remains open.
 7. **Implemented for the current native slices:** General titles and metrics use
    standard SF Pro. Rounded typography is allowlisted to the CEREBRUM mark and
    Overview hero accent; SF Mono remains reserved for identifiers, hashes, and

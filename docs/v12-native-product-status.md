@@ -62,8 +62,8 @@ these transitions, and real app-scene evidence covers the rendered Focus Search
 item plus repeated mounted field-editor delivery, production inspect activation,
 rendered Hide/Show Inspector dispatch, semantic identity preservation, and exact
 results-table/close-button focus return. The expanded v2 gate is green. The v3
-synthetic application-keyboard fixture is packaged green locally, with CI
-pending. Physical keyboard/HID and WindowServer routing, system
+synthetic application-keyboard fixture is packaged and CI green. Physical
+keyboard/HID and WindowServer routing, system
 AX, real VoiceOver, localization, non-US layouts, installed-RC behavior, and
 release acceptance remain open.
 
@@ -121,9 +121,20 @@ The locally implemented v3 fixture additionally dispatches rendered **Navigate
 > Brain**, then routes synthetic Command-3, Command-F, and Control-Command-I
 keyDown/keyUp `NSEvent` pairs through `NSApplication.sendEvent`. Its local
 keyDown monitor and exact checked-route, request/consumption, and responder
-effects prove application-level routing in a green packaged local run; CI is
-still pending. This is synthetic in-process evidence, not physical
-keyboard/HID, WindowServer, system AX, VoiceOver, installed-RC, localization, or
+effects prove application-level routing in a green packaged local and CI run.
+The packaged-local-green successor uses schema `sage.v12.native-app-scene.v4` and
+scenario
+`rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle`.
+Its fail-closed contract adds exact backing `NSTableView` identity for both
+Brain tables, deterministic `g1` selection, production **List View** reducer
+dispatch through a focus-incapable DEBUG action bridge, production Brain
+inspector-action dispatch through that bridge, exact responder ownership by the real AppKit
+inspector-close `NSButton`, `NSButton.performClick` dismissal, and restoration
+to the exact currently mounted table in the same window without losing class,
+rows, identifier, or selection before the Search sequence. Backing-object
+reuse/replacement is recorded. The packaged local v4 gate is green; CI and
+focused Brain View command routing remain open. This is synthetic in-process evidence, not physical
+keyboard/HID, WindowServer, system AX, VoiceOver spoken output, installed-RC, localization, or
 non-US-layout proof. Brain phase three is implemented with separate agent,
 engram, and directed-connection focus, collision-safe scene identities, reserved
 overlay budgets, and linear traffic summaries. The renderer now adds
@@ -324,7 +335,7 @@ daemon lifecycle, recovery, updates, and rollback.
 
 | Platform | Evidence already present | Production blockers |
 |---|---|---|
-| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; previous v2 packaged/CI app-scene gate green; v3 checkmarked navigation, VoiceOver-safe Brain command chords, popover/focus cleanup, and synthetic `NSApplication.sendEvent` routing packaged green locally with CI pending; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Physical keyboard/HID and WindowServer routing, localization/non-US-layout evidence, remaining rendered commands, named-Mac system AX/VoiceOver and performance evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, installed release acceptance, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
+| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; previous v2 packaged/CI app-scene gate green; v3 checkmarked navigation, Brain command chords that avoid VoiceOver's default Control-Option chord, popover/focus cleanup, and synthetic `NSApplication.sendEvent` routing packaged and CI green; v4 exact Brain backing-table/inspector responder lifecycle packaged-local green; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Physical keyboard/HID and WindowServer routing, localization/non-US-layout evidence, focused Brain View and remaining rendered commands, named-Mac system AX/VoiceOver spoken and focus evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, installed release acceptance, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
 | Windows | x64 NSIS preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported |
 | Linux | x64 `.deb` and AppImage preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported; optional native R&D remains blocked by `RUSTSEC-2024-0429` |
 
@@ -388,13 +399,16 @@ with one current native execution child:
    `v12-beta`, from the first tester build through production acceptance;
 2. `867fa87f-14b0-45ca-a11c-10dc48746257` — completed native child that delivered
    the expanded Search inspector app-scene lifecycle gate; and
-3. `b945c6bb-8d06-45c7-91d1-ad1e15e6b84d` — current native execution child for
-   remaining rendered commands, physical-keyboard routing, system-AX/VoiceOver,
+3. `b945c6bb-8d06-45c7-91d1-ad1e15e6b84d` — completed native child that delivered
+   packaged-local-green v4 exact Brain table/inspector focus restoration; and
+4. `7779c211-07e6-466c-8c31-aede68e12357` — current native execution child for
+   focused Brain command routing, Connectome focus, remaining rendered commands,
+   physical-keyboard routing, system-AX/VoiceOver,
    reflow/localization/contrast, transport timing, performance, cross-GPU,
    offline, daemon lifecycle, route parity, and release acceptance;
-4. `26dee44b-4f7f-459d-a76b-91f0c2d7cdd4` — preserve and prove the separate
+5. `26dee44b-4f7f-459d-a76b-91f0c2d7cdd4` — preserve and prove the separate
    headless Commons/Lantern contract; and
-5. `b6d9bade-92fa-4d74-a8c4-9b0cc35d280d` — finish the pre-v12 automatic
+6. `b6d9bade-92fa-4d74-a8c4-9b0cc35d280d` — finish the pre-v12 automatic
    host-wake and stranded-claim recovery carryover without folding it into the
    native product scope.
 

@@ -44,8 +44,58 @@ final class NativeAppSceneSearchBridge {
     func inspectFirstMemory() -> String? { inspectFirstMemoryAction?() }
 }
 
+@MainActor
+final class NativeAppSceneBrainBridge {
+    struct Snapshot: Equatable {
+        let isReady: Bool
+        let selectedMemoryID: String?
+        let inspectorIsPresented: Bool
+        let focusTarget: String?
+    }
+
+    static let shared = NativeAppSceneBrainBridge()
+
+    private var registrationID: UUID?
+    private var snapshotProvider: (() -> Snapshot)?
+    private var prepareFirstMemorySelectionAction: (() -> String?)?
+    private var selectListPresentationAction: (() -> Void)?
+    private var showInspectorAction: (() -> Void)?
+
+    func register(
+        id: UUID,
+        snapshot: @escaping () -> Snapshot,
+        prepareFirstMemorySelection: @escaping () -> String?,
+        selectListPresentation: @escaping () -> Void,
+        showInspector: @escaping () -> Void
+    ) {
+        registrationID = id
+        snapshotProvider = snapshot
+        prepareFirstMemorySelectionAction = prepareFirstMemorySelection
+        selectListPresentationAction = selectListPresentation
+        showInspectorAction = showInspector
+    }
+
+    func unregister(id: UUID) {
+        guard registrationID == id else { return }
+        reset()
+    }
+
+    func reset() {
+        registrationID = nil
+        snapshotProvider = nil
+        prepareFirstMemorySelectionAction = nil
+        selectListPresentationAction = nil
+        showInspectorAction = nil
+    }
+
+    func snapshot() -> Snapshot? { snapshotProvider?() }
+    func prepareFirstMemorySelection() -> String? { prepareFirstMemorySelectionAction?() }
+    func selectListPresentation() { selectListPresentationAction?() }
+    func showInspector() { showInspectorAction?() }
+}
+
 struct NativeAppSceneAcceptanceFixture: Equatable {
-    static let scenario = "rendered-menu-application-keyboard-search-inspector-lifecycle"
+    static let scenario = "rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle"
     let commit: String
     let sourceState: String
     let runID: String
@@ -159,6 +209,9 @@ private final class NativeAppSceneAcceptanceRunner {
     private var assertions: [[String: Any]] = []
     private var menuSnapshot: [[String: Any]] = []
     private var responderSnapshots: [[String: Any]] = []
+    private var brainLifecycleSnapshots: [[String: Any]] = []
+    private var brainMenuLifecycleSnapshots: [[String: Any]] = []
+    private var brainInspectorDismissalSnapshot: [String: Any] = [:]
     private var searchLifecycleSnapshots: [[String: Any]] = []
     private var menuLifecycleSnapshots: [[String: Any]] = []
     private var routeLifecycleSnapshots: [[String: Any]] = []
@@ -171,15 +224,17 @@ private final class NativeAppSceneAcceptanceRunner {
         self.commit = commit
         self.sourceState = sourceState
         self.runID = runID
-        deadline = startedInstant + .seconds(15)
+        deadline = startedInstant + .seconds(25)
     }
 
     func run() async throws -> [String: Any] {
         NativeAppSceneSearchBridge.shared.reset()
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        NativeAppSceneBrainBridge.shared.reset()
+        restoreCapturedKeyWindow()
         try await wait("real app window and main menu") {
-            self.window.isVisible && self.window.contentView != nil && NSApp.mainMenu != nil
+            self.restoreCapturedKeyWindow()
+            return self.window.isVisible && self.window.contentView != nil && NSApp.mainMenu != nil &&
+                NSApp.isActive && self.window.isKeyWindow
         }
         guard NSApp.windows.contains(where: { $0 === window }),
               window.windowController?.window === window || window.windowController == nil else {
@@ -223,10 +278,126 @@ private final class NativeAppSceneAcceptanceRunner {
         routeLifecycleSnapshots.append(routeSnapshot(stage: "rendered-brain", route: session.route, mainMenu: mainMenu))
         record("rendered-navigate-brain-dispatch", expected: "rendered target/action changes Overview to Brain", actual: session.route.rawValue)
 
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        try await wait("deterministic preview Brain bridge readiness") {
+            NativeAppSceneBrainBridge.shared.snapshot()?.isReady == true
+        }
+        guard let selectedMemoryID = NativeAppSceneBrainBridge.shared.prepareFirstMemorySelection(),
+              selectedMemoryID == "g1"
+        else { throw FixtureError.assertion("DEBUG Brain bridge could not prepare deterministic g1 selection") }
+        try await wait("prepared Brain selection with hidden inspector and no manufactured table focus") {
+            guard let snapshot = NativeAppSceneBrainBridge.shared.snapshot() else { return false }
+            return snapshot.isReady && snapshot.selectedMemoryID == selectedMemoryID &&
+                !snapshot.inspectorIsPresented && snapshot.focusTarget != "table" &&
+                self.window.firstResponder !== self.uniqueIdentifiedControl(
+                    identifier: "brain-memory-table",
+                    type: NSTableView.self
+                )
+        }
+        record(
+            "brain-selection-preparation-does-not-manufacture-focus",
+            expected: "DEBUG bridge prepares g1 with inspector hidden and leaves production focus routing untouched",
+            actual: selectedMemoryID
+        )
+
+        NativeAppSceneBrainBridge.shared.selectListPresentation()
+        try await wait("production List View action and exact Brain table first responder") {
+            guard let snapshot = NativeAppSceneBrainBridge.shared.snapshot(),
+                  snapshot.selectedMemoryID == selectedMemoryID,
+                  !snapshot.inspectorIsPresented,
+                  snapshot.focusTarget == "table",
+                  let table = self.uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self)
+            else { return false }
+            return table.window === self.window && self.window.firstResponder === table &&
+                table.numberOfRows > 0 && table.numberOfSelectedRows == 1 && table.selectedRow == 0
+        }
+        guard let brainTable = uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self),
+              let tableFocusedSnapshot = NativeAppSceneBrainBridge.shared.snapshot()
+        else { throw FixtureError.assertion("Brain List View did not mount one exact identified NSTableView") }
+        let brainTableIdentity = objectIdentity(brainTable)
+        brainLifecycleSnapshots.append(brainSnapshot(
+            stage: "table-focused-before-inspector",
+            snapshot: tableFocusedSnapshot
+        ))
+        responderSnapshots.append(brainResponderSnapshot(
+            stage: "brain-table-before-inspector",
+            control: brainTable,
+            matchCount: identifiedControls(identifier: "brain-memory-table", type: NSTableView.self).count
+        ))
+        record(
+            "production-brain-list-view-focus",
+            expected: "production presentation reducer focuses exact mounted g1 NSTableView",
+            actual: "\(brainTableIdentity), rows=\(brainTable.numberOfRows), selected=\(brainTable.selectedRow)"
+        )
+
+        NativeAppSceneBrainBridge.shared.showInspector()
+        try await wait("production Brain inspector action and exact close-button first responder") {
+            guard let snapshot = NativeAppSceneBrainBridge.shared.snapshot(),
+                  snapshot.selectedMemoryID == selectedMemoryID,
+                  snapshot.inspectorIsPresented,
+                  snapshot.focusTarget == "inspectorClose",
+                  let close = self.uniqueIdentifiedControl(identifier: "brain-inspector-close", type: NSButton.self)
+            else { return false }
+            return close.window === self.window && self.window.firstResponder === close
+        }
+        guard let brainInspectorSnapshot = NativeAppSceneBrainBridge.shared.snapshot(),
+              let brainInspectorClose = uniqueIdentifiedControl(identifier: "brain-inspector-close", type: NSButton.self)
+        else { throw FixtureError.assertion("Brain inspector did not mount one exact native close button") }
+        brainLifecycleSnapshots.append(brainSnapshot(stage: "inspector-open", snapshot: brainInspectorSnapshot))
+        responderSnapshots.append(brainResponderSnapshot(
+            stage: "brain-inspector-close",
+            control: brainInspectorClose,
+            matchCount: identifiedControls(identifier: "brain-inspector-close", type: NSButton.self).count
+        ))
+        let selectedMemoryIDBeforeDismissal = brainInspectorSnapshot.selectedMemoryID ?? ""
+        brainInspectorClose.performClick(nil)
+        try await wait("Brain inspector button dismissal and exact mounted table focus restoration") {
+            guard let currentClose = self.uniqueIdentifiedControl(
+                    identifier: "brain-inspector-close",
+                    type: NSButton.self
+                  ),
+                  let restoredTable = self.uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self)
+            else { return false }
+            return currentClose.isHiddenOrHasHiddenAncestor &&
+                !restoredTable.isHiddenOrHasHiddenAncestor &&
+                restoredTable.window === self.window &&
+                self.window.firstResponder === restoredTable && restoredTable.numberOfSelectedRows == 1 &&
+                restoredTable.selectedRow == 0
+        }
+        guard let restoredBrainSnapshot = NativeAppSceneBrainBridge.shared.snapshot(),
+              let restoredBrainTable = uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self)
+        else { throw FixtureError.assertion("Brain table disappeared after inspector dismissal") }
+        var restoredLifecycleSnapshot = brainSnapshot(
+            stage: "table-focused-after-dismissal",
+            snapshot: restoredBrainSnapshot
+        )
+        restoredLifecycleSnapshot["inspector_is_presented"] = false
+        restoredLifecycleSnapshot["focus_target"] = "table"
+        brainLifecycleSnapshots.append(restoredLifecycleSnapshot)
+        responderSnapshots.append(brainResponderSnapshot(
+            stage: "brain-table-after-dismissal",
+            control: restoredBrainTable,
+            matchCount: identifiedControls(identifier: "brain-memory-table", type: NSTableView.self).count
+        ))
+        brainInspectorDismissalSnapshot = [
+            "dispatch_surface": "NSButton.performClick",
+            "control_identifier": "brain-inspector-close",
+            "window_number": window.windowNumber,
+            "selected_memory_id_before": selectedMemoryIDBeforeDismissal,
+            "selected_memory_id_after": restoredBrainSnapshot.selectedMemoryID ?? "",
+            "table_object_identity_before": brainTableIdentity,
+            "table_object_identity_after": objectIdentity(restoredBrainTable),
+            "same_table_object": restoredBrainTable === brainTable,
+        ]
+        record(
+            "brain-inspector-button-restores-table-focus",
+            expected: "NSButton.performClick preserves g1 and focuses the exact currently mounted NSTableView",
+            actual: objectIdentity(restoredBrainTable)
+        )
+
+        restoreCapturedKeyWindow()
         try await wait("captured window restored as application key window") {
-            NSApp.isActive && self.window.isKeyWindow
+            self.restoreCapturedKeyWindow()
+            return NSApp.isActive && self.window.isKeyWindow
         }
         update(menu: mainMenu)
         let searchItem = try uniqueMenuItem(
@@ -452,9 +623,58 @@ private final class NativeAppSceneAcceptanceRunner {
 
     private func result(passed: Bool, failure: String?) -> [String: Any] {
         let elapsed = startedInstant.duration(to: .now).components
-        let completeKeyboardEvidence = keyboardEventSnapshots.count == 3
+        let keyboardSignatures = keyboardEventSnapshots.map {
+            [
+                $0["stage"] as? String ?? "",
+                $0["key"] as? String ?? "",
+                String($0["key_code"] as? Int ?? -1),
+                $0["modifiers"] as? String ?? "",
+                $0["menu_path"] as? String ?? "",
+                $0["route_before"] as? String ?? "",
+                $0["route_after"] as? String ?? "",
+            ].joined(separator: "|")
+        }
+        let completeKeyboardEvidence = keyboardSignatures == [
+            "navigate-search|3|20|command|Navigate > Search|brain|search",
+            "focus-search|f|3|command|View > Focus Search|search|search",
+            "show-inspector|i|34|control+command|View > Show Inspector|search|search",
+        ] && keyboardEventSnapshots.allSatisfy {
+            $0["dispatch_surface"] as? String == "NSApplication.sendEvent" &&
+                $0["event_sequence"] as? String == "keyDown,keyUp" &&
+                $0["observed_effect"] as? Bool == true &&
+                $0["local_monitor_key_down_count"] as? Int == 1 &&
+                $0["window_number"] as? Int == window.windowNumber &&
+                $0["app_is_active"] as? Bool == true &&
+                $0["window_is_key"] as? Bool == true &&
+                $0["is_repeat"] as? Bool == false
+        }
+        let expectedBrainResponderStages = [
+            "brain-table-before-inspector",
+            "brain-inspector-close",
+            "brain-table-after-dismissal",
+        ]
+        let completeBrainResponderEvidence =
+            brainLifecycleSnapshots.compactMap { $0["stage"] as? String } == [
+                "table-focused-before-inspector",
+                "inspector-open",
+                "table-focused-after-dismissal",
+            ] &&
+            brainMenuLifecycleSnapshots.isEmpty &&
+            responderSnapshots.prefix(3).compactMap { $0["stage"] as? String } == expectedBrainResponderStages &&
+            responderSnapshots.prefix(3).allSatisfy {
+                $0["match_count"] as? Int == 1 &&
+                    $0["control_window_matches"] as? Bool == true &&
+                    $0["control_is_exact_first_responder"] as? Bool == true &&
+                    $0["window_number"] as? Int == window.windowNumber
+            } &&
+            brainInspectorDismissalSnapshot["dispatch_surface"] as? String == "NSButton.performClick" &&
+            brainInspectorDismissalSnapshot["selected_memory_id_before"] as? String == "g1" &&
+            brainInspectorDismissalSnapshot["selected_memory_id_after"] as? String == "g1" &&
+            brainInspectorDismissalSnapshot["same_table_object"] as? Bool ==
+                (brainInspectorDismissalSnapshot["table_object_identity_before"] as? String ==
+                    brainInspectorDismissalSnapshot["table_object_identity_after"] as? String)
         var value: [String: Any] = [
-            "schema": "sage.v12.native-app-scene.v3",
+            "schema": "sage.v12.native-app-scene.v4",
             "scenario": NativeAppSceneAcceptanceFixture.scenario,
             "run_id": runID,
             "commit": commit,
@@ -471,6 +691,9 @@ private final class NativeAppSceneAcceptanceRunner {
             "assertions": assertions,
             "menu_snapshot": menuSnapshot,
             "responder_snapshot": responderSnapshots,
+            "brain_lifecycle_snapshot": brainLifecycleSnapshots,
+            "brain_menu_lifecycle_snapshot": brainMenuLifecycleSnapshots,
+            "brain_inspector_dismissal_snapshot": brainInspectorDismissalSnapshot,
             "search_lifecycle_snapshot": searchLifecycleSnapshots,
             "menu_lifecycle_snapshot": menuLifecycleSnapshots,
             "route_lifecycle_snapshot": routeLifecycleSnapshots,
@@ -480,6 +703,7 @@ private final class NativeAppSceneAcceptanceRunner {
             "application_keyboard_event_routing": completeKeyboardEvidence,
             "synthetic_keyboard_events": completeKeyboardEvidence,
             "physical_keyboard_event_routing": false,
+            "rendered_brain_table_first_responder_evidence": completeBrainResponderEvidence,
             "search_focus_request_id": Int(session.searchFocusRequestID),
             "consumed_search_focus_request_id": Int(session.consumedSearchFocusRequestID),
             "search_has_inspector": session.searchHasInspector,
@@ -509,6 +733,12 @@ private final class NativeAppSceneAcceptanceRunner {
         return withUnsafeBytes(of: &info.machine) { bytes in
             String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
         }
+    }
+
+    private func restoreCapturedKeyWindow() {
+        _ = NSRunningApplication.current.activate(options: [.activateAllWindows])
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     private func wait(_ description: String, condition: @escaping @MainActor () -> Bool) async throws {
@@ -689,6 +919,31 @@ private final class NativeAppSceneAcceptanceRunner {
         ]
     }
 
+    private func brainResponderSnapshot(stage: String, control: NSView, matchCount: Int) -> [String: Any] {
+        var snapshot = controlResponderSnapshot(stage: stage, control: control)
+        snapshot["match_count"] = matchCount
+        snapshot["control_object_identity"] = objectIdentity(control)
+        if let table = control as? NSTableView {
+            snapshot["row_count"] = table.numberOfRows
+            snapshot["selected_row_count"] = table.numberOfSelectedRows
+            snapshot["selected_row"] = table.selectedRow
+        }
+        return snapshot
+    }
+
+    private func brainSnapshot(stage: String, snapshot: NativeAppSceneBrainBridge.Snapshot) -> [String: Any] {
+        [
+            "stage": stage,
+            "route": session.route.rawValue,
+            "mode": "memory",
+            "effective_presentation": "table",
+            "is_ready": snapshot.isReady,
+            "selected_memory_id": snapshot.selectedMemoryID ?? "",
+            "inspector_is_presented": snapshot.inspectorIsPresented,
+            "focus_target": snapshot.focusTarget ?? "",
+        ]
+    }
+
     private func searchSnapshot(stage: String, snapshot: NativeAppSceneSearchBridge.Snapshot) -> [String: Any] {
         [
             "stage": stage,
@@ -700,13 +955,21 @@ private final class NativeAppSceneAcceptanceRunner {
     }
 
     private func menuLifecycleSnapshot(stage: String, item: NSMenuItem) -> [String: Any] {
+        menuLifecycleSnapshot(stage: stage, path: "View > \(item.title)", item: item)
+    }
+
+    private func menuLifecycleSnapshot(stage: String, path: String, item: NSMenuItem) -> [String: Any] {
         [
             "stage": stage,
-            "path": "View > \(item.title)",
+            "path": path,
             "key": item.keyEquivalent,
             "modifiers": modifierNames(item.keyEquivalentModifierMask),
             "enabled": item.isEnabled,
         ]
+    }
+
+    private func objectIdentity(_ object: AnyObject) -> String {
+        String(describing: Unmanaged.passUnretained(object).toOpaque())
     }
 
     private func identifiedControls<T: NSView>(identifier: String, type: T.Type) -> [T] {
@@ -739,10 +1002,14 @@ private final class NativeAppSceneAcceptanceRunner {
             if !identifier.isEmpty || view is NSTableView || view is NSButton {
                 result.append([
                     "class": NSStringFromClass(type(of: view)),
+                    "object_identity": objectIdentity(view),
                     "identifier": identifier,
                     "inherited_identifiers": identifiers,
                     "depth": depth,
                     "is_first_responder": window.firstResponder === view,
+                    "is_hidden": view.isHidden,
+                    "is_hidden_or_has_hidden_ancestor": view.isHiddenOrHasHiddenAncestor,
+                    "frame": NSStringFromRect(view.frame),
                 ])
             }
             for child in view.subviews { visit(child, depth: depth + 1, inheritedIdentifiers: identifiers) }
@@ -773,6 +1040,23 @@ private final class NativeAppSceneAcceptanceRunner {
         }
         guard matches.count == 1, let match = matches.first else {
             throw FixtureError.assertion("expected one rendered \(parent) > \(title) item; found \(matches.count)")
+        }
+        return match.item
+    }
+
+    private func uniqueMenuItem(
+        in menu: NSMenu,
+        path: [String],
+        key: String,
+        modifiers: NSEvent.ModifierFlags
+    ) throws -> NSMenuItem {
+        let matches = menuEntries(in: menu).filter {
+            $0.path == path && $0.item.title == path.last &&
+                $0.item.keyEquivalent == key &&
+                $0.item.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask) == modifiers
+        }
+        guard matches.count == 1, let match = matches.first else {
+            throw FixtureError.assertion("expected one rendered \(path.joined(separator: " > ")) item; found \(matches.count)")
         }
         return match.item
     }

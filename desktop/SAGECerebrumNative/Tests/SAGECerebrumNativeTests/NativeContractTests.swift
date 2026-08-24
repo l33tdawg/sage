@@ -998,20 +998,24 @@ extension HostedBrainAcceptance {
         contentsOf: packageRoot.appendingPathComponent("Sources/SAGECerebrumNative/BrainView.swift"),
         encoding: .utf8
     )
-    let closeStart = try #require(source.range(of: "Button(\"Hide Inspector\""))
-    let closeEnd = try #require(source.range(of: ".labelStyle(.iconOnly)", range: closeStart.lowerBound ..< source.endIndex))
+    let closeStart = try #require(source.range(of: "BrainInspectorCloseButton(model: model)"))
+    let closeEnd = try #require(source.range(of: ".help(\"Hide Inspector\")", range: closeStart.lowerBound ..< source.endIndex))
     let closeAction = source[closeStart.lowerBound ..< closeEnd.lowerBound]
 
-    #expect(closeAction.contains("showsInspector = false"))
-    #expect(closeAction.contains("inspectorVisibilityIsUserControlled = true"))
+    #expect(source.contains("model.inspectorIsPresented = false"))
+    #expect(source.contains("model.inspectorVisibilityIsUserControlled = true"))
     #expect(!closeAction.contains("clearSelection"))
     #expect(!closeAction.contains("selectedNodeID"))
-    #expect(source.contains("selected != nil && !inspectorVisibilityIsUserControlled"))
+    #expect(source.contains("selected != nil && !model.inspectorVisibilityIsUserControlled"))
     #expect(source.contains("Label(inspectorIsPresented ? \"Hide Inspector\" : \"Show Inspector\""))
     #expect(source.contains(".onExitCommand"))
     #expect(source.contains("dismissCurrentSelectionAndRestoreFocus()"))
     #expect(source.contains("if !$0 { requestFocus(returnFocusTarget) }"))
     #expect(source.contains("blocksGlobalCommands: showsNavigator || showsViewOptions"))
+    #expect(source.contains("model.mode == .memory ? \"brain-memory-table\" : \"brain-connectome-table\""))
+    #expect(source.contains("case .inspectorClose:\n            \"brain-inspector-close\""))
+    #expect(source.contains("private struct BrainNativeTableIdentityBridge: NSViewRepresentable"))
+    #expect(source.contains("private struct BrainInspectorCloseButton: NSViewRepresentable"))
 }
 
 extension HostedBrainAcceptance {

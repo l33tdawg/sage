@@ -90,7 +90,7 @@ jobs:
                 echo "Swift-native deliverable must not dynamically reference WebKit: ${candidate}" >&2
                 exit 1
               fi
-              if strings "${candidate}" | grep -E 'NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture|NativeAppSceneSearchBridge|SAGE_NATIVE_AX_|SAGE_NATIVE_APP_SCENE_|SAGE_NATIVE_DESIGN_PREVIEW|SAGE_NATIVE_PREVIEW_ROUTE|sage\.v12\.native-app-scene\.v3|rendered-menu-application-keyboard-search-inspector-lifecycle'; then
+              if strings "${candidate}" | grep -E 'NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture|NativeAppSceneSearchBridge|NativeAppSceneBrainBridge|SAGE_NATIVE_AX_|SAGE_NATIVE_APP_SCENE_|SAGE_NATIVE_DESIGN_PREVIEW|SAGE_NATIVE_PREVIEW_ROUTE|sage\.v12\.native-app-scene\.v4|rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle'; then
                 echo "release Mach-O contains DEBUG-only acceptance markers: ${candidate}" >&2
                 exit 1
               fi
