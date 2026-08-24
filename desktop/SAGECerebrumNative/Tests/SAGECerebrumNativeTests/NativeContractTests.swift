@@ -82,6 +82,41 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     ) == .init(effectivePresentation: .table, mriEnabled: false))
 }
 
+@Test func brainResponsivePolicyHasStableBoundariesAndFitsItsVerticalBudget() {
+    let compact = BrainResponsiveLayoutPolicy.resolve(
+        size: CGSize(width: 619, height: 540), trainVisible: true
+    )
+    let regular = BrainResponsiveLayoutPolicy.resolve(
+        size: CGSize(width: 620, height: 600), trainVisible: true
+    )
+    let regularUpper = BrainResponsiveLayoutPolicy.resolve(
+        size: CGSize(width: 839, height: 700), trainVisible: false
+    )
+    let expanded = BrainResponsiveLayoutPolicy.resolve(
+        size: CGSize(width: 840, height: 760), trainVisible: true
+    )
+
+    #expect(compact.tier == .compact)
+    #expect(regular.tier == .regular)
+    #expect(regularUpper.tier == .regular)
+    #expect(expanded.tier == .expanded)
+    #expect(!compact.showsInlineNavigator)
+    #expect(!regular.showsInlineNavigator)
+    #expect(expanded.showsInlineNavigator)
+    #expect(compact.usesCompactToolbar)
+    #expect(!expanded.usesCompactToolbar)
+    #expect(compact.inspectorMinimumWidth == expanded.inspectorMinimumWidth)
+    #expect(compact.inspectorIdealWidth == expanded.inspectorIdealWidth)
+    #expect(compact.inspectorMaximumWidth == expanded.inspectorMaximumWidth)
+
+    for (plan, height) in [(compact, 540.0), (regular, 600.0), (expanded, 760.0)] {
+        let contentHeight = height - (plan.pagePadding * 2)
+        #expect(plan.surfaceMinimumHeight + plan.trainMinimumHeight <= contentHeight)
+        #expect(plan.trainMinimumHeight <= plan.trainIdealHeight)
+        #expect(plan.trainIdealHeight <= plan.trainMaximumHeight)
+    }
+}
+
 @Test func metalRecoveryFailurePreservesIndependentFocusOwnership() {
     let initial = BrainMetalRecoveryState()
     let transition = BrainMetalRecoveryReducer.reduce(initial, event: .rendererReported(
@@ -246,8 +281,7 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
         rendererBootstrap: { _ in .failure(.rendererInitialization) },
         accessibilityAnnouncer: { recorder.announcements.append($0) },
         surfaceObserver: { surface, mounted in
-            if mounted { recorder.surfaces.insert(surface) }
-            else { recorder.surfaces.remove(surface) }
+            recorder.update(surface, mounted: mounted)
         }
     )
     let window = NSWindow(
@@ -268,6 +302,65 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     #expect(!surfaces.contains(.memoryMRI))
     #expect(model.selectedNodeID == selected.id)
     #expect(recorder.announcements == ["Interactive MRI unavailable. Showing Accessible Table."])
+}
+
+@MainActor
+@Test func hostedBrainAdaptsAcrossNarrowAndExpandedWidthsWithoutLosingSelection() async throws {
+    let selected = BrainNode(
+        id: "responsive-memory", content: "Responsive native memory", domain: "native",
+        confidence: 0.97, status: "committed", memoryType: "fact", createdAt: .now,
+        agent: "test", agentLabel: "Test Agent", agentIsRoot: false,
+        tags: ["responsive"], corroborationCount: 3
+    )
+    let related = RelatedMemoryEnvelope(
+        id: selected.id, domain: selected.domain, content: selected.content, related: []
+    )
+    let graph = BrainGraphEnvelope(
+        nodes: [selected], edges: [], total: 1, domainCounts: ["native": 1],
+        domainLast: nil, continuationRequired: false, projection: nil
+    )
+    let api = MutationTestAPI(forgetResults: [], graph: graph, related: related)
+    let model = BrainViewModel(api: api)
+    model.graph = graph
+    model.selectedNodeID = selected.id
+    model.relatedMemories = related
+    let recorder = BrainHostRecorder()
+    let view = BrainView(
+        model: model,
+        rendererBootstrap: { _ in .failure(.rendererInitialization) },
+        accessibilityAnnouncer: { recorder.announcements.append($0) },
+        surfaceObserver: { surface, mounted in
+            recorder.update(surface, mounted: mounted)
+        },
+        layoutObserver: { recorder.layouts.append($0) }
+    )
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 620, height: 540),
+        styleMask: [.titled, .resizable], backing: .buffered, defer: false
+    )
+    window.contentView = NSHostingView(rootView: view)
+
+    let narrow = try await waitForLayoutTier(recorder, tier: .compact)
+    let narrowSurfaces = try await waitForMountedSurfaces(
+        recorder,
+        required: [.compactNavigatorTrigger, .metalFallbackNotice, .metalRetryButton, .memoryTable],
+        forbidden: [.inlineNavigator, .memoryMRI]
+    )
+    #expect(narrow.surfaceMinimumHeight + narrow.trainMinimumHeight <= 540 - (narrow.pagePadding * 2))
+    #expect(narrowSurfaces.contains(.compactNavigatorTrigger))
+    #expect(model.selectedNodeID == selected.id)
+
+    window.setContentSize(NSSize(width: 1_500, height: 760))
+    let expanded = try await waitForLayoutTier(recorder, tier: .expanded)
+    let expandedSurfaces = try await waitForMountedSurfaces(
+        recorder,
+        required: [.inlineNavigator, .metalFallbackNotice, .memoryTable],
+        forbidden: [.compactNavigatorTrigger, .memoryMRI]
+    )
+    #expect(expanded.showsInlineNavigator)
+    #expect(expandedSurfaces.contains(.inlineNavigator))
+    #expect(model.selectedNodeID == selected.id)
+    #expect(model.relatedMemories?.id == selected.id)
 }
 
 @Test func APIBaseURLRejectsRemoteAndCredentialedOrigins() {
@@ -777,11 +870,36 @@ private func edgeIdentity(_ edge: BrainEdge) -> String {
 @MainActor
 private final class BrainHostRecorder {
     var announcements: [String] = []
-    var surfaces: Set<BrainMountedSurface> = []
+    var layouts: [BrainResponsiveLayoutPlan] = []
+    private var surfaceCounts: [BrainMountedSurface: Int] = [:]
+
+    var surfaces: Set<BrainMountedSurface> {
+        Set(surfaceCounts.compactMap { $0.value > 0 ? $0.key : nil })
+    }
+
+    func update(_ surface: BrainMountedSurface, mounted: Bool) {
+        surfaceCounts[surface] = max(0, (surfaceCounts[surface] ?? 0) + (mounted ? 1 : -1))
+    }
 }
 
 private enum HostedBrainTestError: Error {
     case surfacesDidNotMount(Set<BrainMountedSurface>)
+    case layoutTierDidNotMount(BrainResponsiveTier)
+}
+
+@MainActor
+private func waitForLayoutTier(
+    _ recorder: BrainHostRecorder,
+    tier: BrainResponsiveTier,
+    timeout: Duration = .seconds(3)
+) async throws -> BrainResponsiveLayoutPlan {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+        if let layout = recorder.layouts.last, layout.tier == tier { return layout }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw HostedBrainTestError.layoutTierDidNotMount(tier)
 }
 
 @MainActor

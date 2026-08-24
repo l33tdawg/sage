@@ -12,6 +12,9 @@ struct BrainView: View {
     @State private var memoryHullOpacity = 0.08
     @State private var connectomeHullOpacity = 0.03
     @State private var showsDisplayControls = false
+    @State private var showsNavigator = false
+    @State private var showsInspector = false
+    @State private var availableSize = CGSize(width: 1_180, height: 760)
     @State private var announcementGeneration = 0
     @State private var keyboardFocusGeneration = 0
     @State private var accessibilityFocusGeneration = 0
@@ -20,6 +23,7 @@ struct BrainView: View {
     private let rendererBootstrap: BrainMetalRendererFactory
     private let accessibilityAnnouncer: @MainActor (String) -> Void
     private let surfaceObserver: @MainActor (BrainMountedSurface, Bool) -> Void
+    private let layoutObserver: @MainActor (BrainResponsiveLayoutPlan) -> Void
 
     init(
         api: any SAGEAPI,
@@ -30,60 +34,76 @@ struct BrainView: View {
             return .success(renderer)
         },
         accessibilityAnnouncer: @escaping @MainActor (String) -> Void = BrainView.systemAccessibilityAnnouncement,
-        surfaceObserver: @escaping @MainActor (BrainMountedSurface, Bool) -> Void = { _, _ in }
+        surfaceObserver: @escaping @MainActor (BrainMountedSurface, Bool) -> Void = { _, _ in },
+        layoutObserver: @escaping @MainActor (BrainResponsiveLayoutPlan) -> Void = { _ in }
     ) {
         _model = State(initialValue: BrainViewModel(api: api))
         self.rendererBootstrap = rendererBootstrap
         self.accessibilityAnnouncer = accessibilityAnnouncer
         self.surfaceObserver = surfaceObserver
+        self.layoutObserver = layoutObserver
     }
 
     init(
         model: BrainViewModel,
         rendererBootstrap: @escaping BrainMetalRendererFactory,
         accessibilityAnnouncer: @escaping @MainActor (String) -> Void,
-        surfaceObserver: @escaping @MainActor (BrainMountedSurface, Bool) -> Void
+        surfaceObserver: @escaping @MainActor (BrainMountedSurface, Bool) -> Void,
+        layoutObserver: @escaping @MainActor (BrainResponsiveLayoutPlan) -> Void = { _ in }
     ) {
         _model = State(initialValue: model)
+        _showsInspector = State(initialValue: model.hasVisibleInspector)
         self.rendererBootstrap = rendererBootstrap
         self.accessibilityAnnouncer = accessibilityAnnouncer
         self.surfaceObserver = surfaceObserver
+        self.layoutObserver = layoutObserver
     }
 
     var body: some View {
-        ZStack {
-            CerebrumBackdrop()
-            VStack(alignment: .leading, spacing: 16) {
-                header
-                notices
-                if model.mode == .memory, model.selectedNodeID != nil,
-                   model.relatedMemories != nil || model.isDetailLoading || model.detailErrorMessage != nil {
-                    GeometryReader { proxy in
-                        VSplitView {
-                            brainSurface.frame(minHeight: 240)
-                            trainOfThoughtPane
-                                .frame(
-                                    minHeight: 150,
-                                    idealHeight: min(220, proxy.size.height * 0.38),
-                                    maxHeight: proxy.size.height * 0.52
-                                )
+        GeometryReader { proxy in
+            ZStack {
+                CerebrumBackdrop()
+                if layoutPlan.tier == .compact {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            header
+                            notices
+                            brainSurface.frame(height: layoutPlan.surfaceMinimumHeight)
+                            if trainOfThoughtVisible {
+                                trainOfThoughtPane.frame(minHeight: layoutPlan.trainIdealHeight)
+                            }
                         }
+                        .padding(layoutPlan.pagePadding)
                     }
                 } else {
-                    brainSurface
+                    VStack(alignment: .leading, spacing: 16) {
+                        header
+                        notices
+                        if trainOfThoughtVisible {
+                            VSplitView {
+                                brainSurface.frame(minHeight: layoutPlan.surfaceMinimumHeight)
+                                trainOfThoughtPane
+                                    .frame(
+                                        minHeight: layoutPlan.trainMinimumHeight,
+                                        idealHeight: layoutPlan.trainIdealHeight,
+                                        maxHeight: layoutPlan.trainMaximumHeight
+                                    )
+                            }
+                        } else {
+                            brainSurface
+                        }
+                    }
+                    .padding(layoutPlan.pagePadding)
                 }
             }
-            .padding(CerebrumTheme.pagePadding)
+            .onAppear { updateAvailableSize(proxy.size) }
+            .onChange(of: proxy.size) { _, size in updateAvailableSize(size) }
         }
         .navigationTitle("Brain")
         .toolbar { brainToolbar }
         .inspector(isPresented: Binding(
-            get: { model.hasVisibleInspector },
-            set: {
-                if !$0 {
-                    clearSelectionAndRestoreFocus()
-                }
-            }
+            get: { showsInspector && model.hasVisibleInspector },
+            set: { showsInspector = $0 }
         )) {
             VStack(spacing: 0) {
                 HStack {
@@ -109,9 +129,9 @@ struct BrainView: View {
                 }
             }
             .inspectorColumnWidth(
-                min: model.mode == .memory ? 320 : 340,
-                ideal: model.mode == .memory ? 380 : 400,
-                max: model.mode == .memory ? 520 : 540
+                min: layoutPlan.inspectorMinimumWidth,
+                ideal: layoutPlan.inspectorIdealWidth,
+                max: layoutPlan.inspectorMaximumWidth
             )
         }
         .task(id: BrainRefreshKey(mode: model.mode, domain: model.selectedDomain, status: model.status)) {
@@ -129,14 +149,38 @@ struct BrainView: View {
             guard hasSelection else { return }
             dismissCurrentSelectionAndRestoreFocus()
         }
-        .onChange(of: model.selectedNodeID) { _, _ in scheduleSelectionAnnouncement() }
+        .onChange(of: model.selectedNodeID) { _, selected in
+            if selected != nil { showsInspector = true }
+            scheduleSelectionAnnouncement()
+        }
         .onChange(of: model.relatedMemoryFocus) { _, _ in scheduleSelectionAnnouncement() }
-        .onChange(of: model.selectedAgentID) { _, _ in scheduleSelectionAnnouncement() }
+        .onChange(of: model.selectedAgentID) { _, selected in
+            if selected != nil { showsInspector = true }
+            scheduleSelectionAnnouncement()
+        }
         .onChange(of: model.selectedEngramID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedConnectionID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.mode) { _, _ in
             applyMetalEvent(.modeChanged)
         }
+        .onChange(of: trainOfThoughtVisible) { _, _ in
+            layoutObserver(layoutPlan)
+        }
+    }
+
+    private var trainOfThoughtVisible: Bool {
+        model.mode == .memory && model.selectedNodeID != nil &&
+            (model.relatedMemories != nil || model.isDetailLoading || model.detailErrorMessage != nil)
+    }
+
+    private var layoutPlan: BrainResponsiveLayoutPlan {
+        BrainResponsiveLayoutPolicy.resolve(size: availableSize, trainVisible: trainOfThoughtVisible)
+    }
+
+    private func updateAvailableSize(_ size: CGSize) {
+        guard size != availableSize else { return }
+        availableSize = size
+        layoutObserver(BrainResponsiveLayoutPolicy.resolve(size: size, trainVisible: trainOfThoughtVisible))
     }
 
     private var header: some View {
@@ -160,33 +204,9 @@ struct BrainView: View {
     @ViewBuilder
     private var notices: some View {
         if case .unavailable = metalRecovery.capability {
-            HStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(CerebrumTheme.amber)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Interactive MRI unavailable").font(.callout.weight(.semibold))
-                    Text(model.mode == .memory
-                         ? "The interactive MRI couldn’t be displayed. Your verified memories remain available in the table."
-                         : "The interactive MRI couldn’t be displayed. Your verified Connectome remains available in the table.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .accessibilityElement(children: .combine)
-                Spacer()
-                Button(action: retryMetal) {
-                    if metalRecovery.retryInFlight {
-                        Label("Trying MRI…", systemImage: "arrow.clockwise")
-                    } else {
-                        Text("Try MRI Again")
-                    }
-                }
-                    .buttonStyle(.bordered)
-                    .disabled(metalRecovery.retryInFlight)
-                    .accessibilityIdentifier("brain-metal-retry")
-                    .onAppear { surfaceObserver(.metalRetryButton, true) }
-                    .onDisappear { surfaceObserver(.metalRetryButton, false) }
-                    .focused($keyboardFocus, equals: .metalRetry)
-                    .accessibilityFocused($accessibilityFocus, equals: .metalRetry)
+            ViewThatFits(in: .horizontal) {
+                metalFallbackContent(stacked: false)
+                metalFallbackContent(stacked: true)
             }
             .padding(11)
             .background(CerebrumTheme.amber.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
@@ -229,16 +249,74 @@ struct BrainView: View {
         }
     }
 
+    @ViewBuilder
+    private func metalFallbackContent(stacked: Bool) -> some View {
+        let message = model.mode == .memory
+            ? "The interactive MRI couldn’t be displayed. Your verified memories remain available in the table."
+            : "The interactive MRI couldn’t be displayed. Your verified Connectome remains available in the table."
+        if stacked {
+            VStack(alignment: .leading, spacing: 10) {
+                metalFallbackMessage(message)
+                metalRetryButton.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        } else {
+            HStack(spacing: 12) {
+                metalFallbackMessage(message)
+                Spacer()
+                metalRetryButton
+            }
+            .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+
+    private func metalFallbackMessage(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(CerebrumTheme.amber)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Interactive MRI unavailable").font(.callout.weight(.semibold))
+                    Text(message)
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+        }
+    }
+
+    private var metalRetryButton: some View {
+        Button(action: retryMetal) {
+                    if metalRecovery.retryInFlight {
+                        Label("Trying MRI…", systemImage: "arrow.clockwise")
+                    } else {
+                        Text("Try MRI Again")
+                    }
+        }
+        .buttonStyle(.bordered)
+        .disabled(metalRecovery.retryInFlight)
+        .accessibilityIdentifier("brain-metal-retry")
+        .onAppear { surfaceObserver(.metalRetryButton, true) }
+        .onDisappear { surfaceObserver(.metalRetryButton, false) }
+        .focused($keyboardFocus, equals: .metalRetry)
+        .accessibilityFocused($accessibilityFocus, equals: .metalRetry)
+    }
+
     private func notice(
         _ text: String,
         systemImage: String,
         color: Color,
         action: (String, () -> Void)? = nil
     ) -> some View {
-        HStack {
-            Label(text, systemImage: systemImage).font(.callout).foregroundStyle(color)
-            Spacer()
-            if let action { Button(action.0, action: action.1).buttonStyle(.bordered) }
+        ViewThatFits(in: .horizontal) {
+            HStack {
+                Label(text, systemImage: systemImage).font(.callout).foregroundStyle(color)
+                Spacer()
+                if let action { Button(action.0, action: action.1).buttonStyle(.bordered) }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: 9) {
+                Label(text, systemImage: systemImage).font(.callout).foregroundStyle(color)
+                if let action { Button(action.0, action: action.1).buttonStyle(.bordered) }
+            }
         }
         .padding(11)
         .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
@@ -246,9 +324,11 @@ struct BrainView: View {
 
     private var brainSurface: some View {
         HStack(spacing: 0) {
-            if model.mode == .memory { domainSidebar }
-            else { agentSidebar }
-            Divider()
+            if layoutPlan.showsInlineNavigator {
+                if model.mode == .memory { domainSidebar }
+                else { agentSidebar }
+                Divider()
+            }
             Group {
                 if model.mode == .memory, let graph = model.graph {
                     if graph.nodes.isEmpty { emptyState }
@@ -279,7 +359,7 @@ struct BrainView: View {
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.95), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color(nsColor: .separatorColor).opacity(0.5)))
         .clipShape(RoundedRectangle(cornerRadius: 14))
-        .frame(minHeight: model.relatedMemories == nil ? 520 : 360)
+        .frame(minHeight: layoutPlan.surfaceMinimumHeight)
     }
 
     private var domainSidebar: some View {
@@ -313,6 +393,9 @@ struct BrainView: View {
         .padding(13)
         .frame(width: 230)
         .background(.thinMaterial)
+        .accessibilityIdentifier("brain-inline-navigator")
+        .onAppear { surfaceObserver(.inlineNavigator, true) }
+        .onDisappear { surfaceObserver(.inlineNavigator, false) }
     }
 
     private var agentSidebar: some View {
@@ -345,6 +428,9 @@ struct BrainView: View {
         .padding(13)
         .frame(width: 230)
         .background(.thinMaterial)
+        .accessibilityIdentifier("brain-inline-navigator")
+        .onAppear { surfaceObserver(.inlineNavigator, true) }
+        .onDisappear { surfaceObserver(.inlineNavigator, false) }
     }
 
     private func memoryMRI(_ graph: BrainGraphEnvelope) -> some View {
@@ -646,26 +732,57 @@ struct BrainView: View {
     @ToolbarContentBuilder
     private var brainToolbar: some ToolbarContent {
         ToolbarItemGroup {
-            Picker("Brain mode", selection: $model.mode) {
-                ForEach(BrainMode.allCases) { Label($0.title, systemImage: $0.systemImage).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 210)
-
-            Picker("Presentation", selection: presentationBinding) {
-                ForEach(BrainPresentation.allCases) { option in
-                    Label(option.title, systemImage: option.systemImage)
-                        .tag(option)
-                        .disabled(option == .mri && !BrainPresentationPolicy.resolve(
-                            requested: option, capability: metalRecovery.capability
-                        ).mriEnabled)
+            if layoutPlan.usesCompactToolbar {
+                Menu {
+                    Picker("Brain mode", selection: $model.mode) {
+                        ForEach(BrainMode.allCases) { Label($0.title, systemImage: $0.systemImage).tag($0) }
+                    }
+                } label: {
+                    Label(model.mode.title, systemImage: model.mode.systemImage)
                 }
+
+                Menu {
+                    Picker("Presentation", selection: presentationBinding) {
+                        presentationOptions
+                    }
+                } label: {
+                    Label(metalRecovery.effectivePresentation.title, systemImage: metalRecovery.effectivePresentation.systemImage)
+                }
+                .help(presentationHelp)
+
+                Button {
+                    showsNavigator.toggle()
+                } label: {
+                    Label(model.mode == .memory ? "Memory Lobes" : "Visible Neurons", systemImage: "line.3.horizontal.decrease.circle")
+                }
+                .popover(isPresented: $showsNavigator) { compactNavigator }
+                .accessibilityIdentifier("brain-compact-navigator-trigger")
+                .onAppear { surfaceObserver(.compactNavigatorTrigger, true) }
+                .onDisappear { surfaceObserver(.compactNavigatorTrigger, false) }
+            } else {
+                Picker("Brain mode", selection: $model.mode) {
+                    ForEach(BrainMode.allCases) { Label($0.title, systemImage: $0.systemImage).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 210)
+
+                Picker("Presentation", selection: presentationBinding) {
+                    presentationOptions
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 190)
+                .help(presentationHelp)
             }
-            .pickerStyle(.segmented)
-            .frame(width: 190)
-            .help(metalRecovery.capability.isUnavailable
-                  ? "Metal rendering is unavailable. Choose Try MRI Again to recheck."
-                  : "Choose the interactive MRI or synchronized accessible table.")
+
+            if model.hasVisibleInspector && !showsInspector {
+                Button {
+                    showsInspector = true
+                    requestFocus(.inspectorClose)
+                } label: {
+                    Label("Show Inspector", systemImage: "sidebar.trailing")
+                }
+                .help("Show details for the current Brain selection")
+            }
 
             Button {
                 scanning.toggle()
@@ -709,6 +826,82 @@ struct BrainView: View {
             .keyboardShortcut("r", modifiers: .command)
             .disabled(model.isLoading)
         }
+    }
+
+    @ViewBuilder
+    private var presentationOptions: some View {
+        ForEach(BrainPresentation.allCases) { option in
+            Label(option.title, systemImage: option.systemImage)
+                .tag(option)
+                .disabled(option == .mri && !BrainPresentationPolicy.resolve(
+                    requested: option, capability: metalRecovery.capability
+                ).mriEnabled)
+        }
+    }
+
+    private var presentationHelp: String {
+        metalRecovery.capability.isUnavailable
+            ? "Metal rendering is unavailable. Choose Try MRI Again to recheck."
+            : "Choose the interactive MRI or synchronized accessible table."
+    }
+
+    @ViewBuilder
+    private var compactNavigator: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(model.mode == .memory ? "MEMORY LOBES" : "VISIBLE NEURONS")
+                .font(.caption2.weight(.bold))
+                .tracking(0.9)
+                .foregroundStyle(.secondary)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 11) {
+                    if model.mode == .memory {
+                        Button {
+                            model.selectedDomain = ""
+                            showsNavigator = false
+                        } label: {
+                            Label("Whole Brain", systemImage: "brain")
+                        }
+                        .buttonStyle(.plain)
+                        Divider()
+                        ForEach(model.domains, id: \.self) { domain in
+                            Button {
+                                model.selectedDomain = domain
+                                showsNavigator = false
+                            } label: {
+                                HStack {
+                                    Circle().fill(domainColor(domain)).frame(width: 7, height: 7)
+                                    Text(domain).lineLimit(1)
+                                    Spacer()
+                                    if let count = model.graph?.domainCounts?[domain] {
+                                        Text(count.formatted()).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    } else {
+                        ForEach(model.connectome?.neurons ?? []) { neuron in
+                            Button {
+                                model.selectConnectomeAgent(neuron.agentID)
+                                showsNavigator = false
+                            } label: {
+                                HStack {
+                                    Circle().fill(domainColor(neuron.domain ?? "unassigned")).frame(width: 7, height: 7)
+                                    VStack(alignment: .leading) {
+                                        Text(neuron.name).lineLimit(1)
+                                        Text(neuron.role.capitalized).font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 420)
+        }
+        .padding(16)
+        .frame(width: 280, alignment: .leading)
     }
 
     private var graphSummary: String {
@@ -823,6 +1016,7 @@ struct BrainView: View {
     }
 
     private func clearSelectionAndRestoreFocus() {
+        showsInspector = false
         if model.mode == .memory {
             model.selectedNodeID = nil
             model.relatedMemories = nil
@@ -845,8 +1039,10 @@ struct BrainView: View {
             }
             model.selectedNodeID = nil
             model.relatedMemories = nil
+            showsInspector = false
         } else {
             model.selectConnectomeSceneNode(nil)
+            showsInspector = false
         }
         requestFocus(returnFocusTarget)
     }

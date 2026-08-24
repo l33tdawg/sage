@@ -61,21 +61,35 @@ struct CerebrumPageHeader<Trailing: View>: View {
     @ViewBuilder let trailing: Trailing
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 20) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(eyebrow.uppercased())
-                    .font(.caption.weight(.bold))
-                    .tracking(1.4)
-                    .foregroundStyle(CerebrumTheme.cyan)
-                Text(title)
-                    .font(.largeTitle.weight(.bold))
-                    .fontDesign(.rounded)
-                Text(subtitle)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 20) {
+                titleBlock
+                Spacer(minLength: 24)
+                trailing
             }
-            Spacer(minLength: 24)
-            trailing
+            .fixedSize(horizontal: true, vertical: false)
+
+            VStack(alignment: .leading, spacing: 12) {
+                titleBlock
+                trailing
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var titleBlock: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(eyebrow.uppercased())
+                .font(.caption.weight(.bold))
+                .tracking(1.4)
+                .foregroundStyle(CerebrumTheme.cyan)
+            Text(title)
+                .font(.largeTitle.weight(.bold))
+                .fontDesign(.rounded)
+                .accessibilityAddTraits(.isHeader)
+            Text(subtitle)
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 }

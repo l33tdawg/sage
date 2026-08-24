@@ -126,6 +126,144 @@ enum BrainPresentationPolicy {
     }
 }
 
+struct BrainResponsiveWidth: Equatable, Sendable {
+    static let regularBoundary: CGFloat = 620
+    static let expandedBoundary: CGFloat = 840
+
+    let points: CGFloat
+
+    init(points: CGFloat) {
+        self.points = points.isFinite ? max(0, points) : 0
+    }
+
+    var tier: BrainResponsiveTier {
+        if points < Self.regularBoundary { return .compact }
+        if points < Self.expandedBoundary { return .regular }
+        return .expanded
+    }
+}
+
+enum BrainResponsiveTier: Equatable, Sendable {
+    case compact
+    case regular
+    case expanded
+}
+
+struct BrainResponsiveLayoutPlan: Equatable, Sendable {
+    let width: BrainResponsiveWidth
+    let tier: BrainResponsiveTier
+    let pagePadding: CGFloat
+    let showsInlineNavigator: Bool
+    let navigatorWidth: CGFloat
+    let usesCompactToolbar: Bool
+    let surfaceMinimumHeight: CGFloat
+    let trainMinimumHeight: CGFloat
+    let trainIdealHeight: CGFloat
+    let trainMaximumHeight: CGFloat
+    let inspectorMinimumWidth: CGFloat
+    let inspectorIdealWidth: CGFloat
+    let inspectorMaximumWidth: CGFloat
+}
+
+enum BrainResponsiveLayoutPolicy {
+    static func resolve(size: CGSize, trainVisible: Bool) -> BrainResponsiveLayoutPlan {
+        let width = BrainResponsiveWidth(points: size.width)
+        let height = size.height.isFinite ? max(0, size.height) : 0
+
+        let dimensions: TierDimensions = switch width.tier {
+        case .compact:
+            .init(
+                pagePadding: 16,
+                navigatorWidth: 0,
+                surfaceMinimumHeight: trainVisible ? 200 : 280,
+                trainMinimumHeight: 110,
+                trainIdealHeight: 150,
+                inspectorMinimumWidth: 300,
+                inspectorIdealWidth: 340,
+                inspectorMaximumWidth: 440
+            )
+        case .regular:
+            .init(
+                pagePadding: 22,
+                navigatorWidth: 0,
+                surfaceMinimumHeight: trainVisible ? 220 : 300,
+                trainMinimumHeight: 130,
+                trainIdealHeight: 190,
+                inspectorMinimumWidth: 300,
+                inspectorIdealWidth: 340,
+                inspectorMaximumWidth: 440
+            )
+        case .expanded:
+            .init(
+                pagePadding: 28,
+                navigatorWidth: 230,
+                surfaceMinimumHeight: trainVisible ? 240 : 320,
+                trainMinimumHeight: 150,
+                trainIdealHeight: 220,
+                inspectorMinimumWidth: 300,
+                inspectorIdealWidth: 340,
+                inspectorMaximumWidth: 440
+            )
+        }
+
+        let contentHeight = max(0, height - (dimensions.pagePadding * 2))
+        let splitAllowance: CGFloat = trainVisible && contentHeight > 0 ? 1 : 0
+        let verticalBudget = max(0, contentHeight - splitAllowance)
+
+        let trainMinimumHeight: CGFloat
+        let trainIdealHeight: CGFloat
+        let trainMaximumHeight: CGFloat
+        let surfaceMinimumHeight: CGFloat
+        if trainVisible {
+            trainMinimumHeight = min(dimensions.trainMinimumHeight, verticalBudget * 0.35)
+            surfaceMinimumHeight = min(
+                dimensions.surfaceMinimumHeight,
+                max(0, verticalBudget - trainMinimumHeight)
+            )
+            trainMaximumHeight = max(
+                trainMinimumHeight,
+                min(verticalBudget * 0.48, verticalBudget - surfaceMinimumHeight)
+            )
+            trainIdealHeight = min(
+                trainMaximumHeight,
+                max(trainMinimumHeight, dimensions.trainIdealHeight)
+            )
+        } else {
+            trainMinimumHeight = 0
+            trainIdealHeight = 0
+            trainMaximumHeight = 0
+            surfaceMinimumHeight = min(dimensions.surfaceMinimumHeight, verticalBudget)
+        }
+
+        return .init(
+            width: width,
+            tier: width.tier,
+            pagePadding: dimensions.pagePadding,
+            showsInlineNavigator: width.tier == .expanded,
+            navigatorWidth: dimensions.navigatorWidth,
+            usesCompactToolbar: width.tier != .expanded,
+            surfaceMinimumHeight: surfaceMinimumHeight,
+            trainMinimumHeight: trainMinimumHeight,
+            trainIdealHeight: trainIdealHeight,
+            trainMaximumHeight: trainMaximumHeight,
+            inspectorMinimumWidth: dimensions.inspectorMinimumWidth,
+            inspectorIdealWidth: dimensions.inspectorIdealWidth,
+            inspectorMaximumWidth: dimensions.inspectorMaximumWidth
+        )
+    }
+
+    private struct TierDimensions {
+        let pagePadding: CGFloat
+        let navigatorWidth: CGFloat
+        let surfaceMinimumHeight: CGFloat
+        let trainMinimumHeight: CGFloat
+        let trainIdealHeight: CGFloat
+        let inspectorMinimumWidth: CGFloat
+        let inspectorIdealWidth: CGFloat
+        let inspectorMaximumWidth: CGFloat
+    }
+}
+
 enum BrainMetalFocusDestination: Equatable, Sendable {
     case surface
     case table
@@ -139,6 +277,8 @@ enum BrainMetalAnnouncement: Equatable, Sendable {
 }
 
 enum BrainMountedSurface: Equatable, Hashable, Sendable {
+    case inlineNavigator
+    case compactNavigatorTrigger
     case metalFallbackNotice
     case metalRetryButton
     case memoryMRI

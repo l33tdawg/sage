@@ -108,10 +108,17 @@ initial mount and retry through one injectable renderer seam. A real
 `NSHostingView`/`NSWindow` test proves the production fallback notice, retry
 control, and synchronized memory table replace the failed MRI together without
 clearing selection or duplicating the bounded announcement. The required macOS
-CI lane explicitly enables the separate hardware probe. Hosted retry-action
-acceptance, real VoiceOver evidence, full SwiftUI focus-return evidence,
-cross-GPU/offline behavior, and deeper behavioral, accessibility, and
-performance evidence remain open.
+CI lane explicitly enables the separate hardware probe. Brain now also resolves
+a pure layout plan from its actual routed content size: below the expanded tier,
+the fixed navigator and wide segmented controls become native toolbar menus,
+headers and notices use fit-driven stacked variants, inspector dismissal keeps
+semantic selection, and Train of Thought minimums stay inside the available
+vertical budget. A hosted 620×540-to-expanded resize contract proves the
+fallback table, retry control, navigator transition, selected memory, and
+related-memory payload survive that presentation-only change. Hosted
+retry-action acceptance, real VoiceOver evidence, full SwiftUI focus-return
+evidence, cross-GPU/offline behavior, and deeper behavioral, accessibility,
+large-store, and performance evidence remain open.
 
 The first arm64 application bundle was built and launch-tested on 2026-08-23 at
 `dist/v12-native/12.0.0-beta.1/SAGE CEREBRUM Native.app`. Launch Services
@@ -192,7 +199,7 @@ acceptance gaps are not counted as another route slice.
 | Primary product area | Current surface | Current classification | Acceptance status |
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
-| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, explicit renderer-failure fallback/retry, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity pass implemented; hosted fallback/retry acceptance, real VoiceOver and full SwiftUI focus-return proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
+| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, responsive route-width policy and native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector presentation, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, explicit renderer-failure fallback/retry, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity and hosted narrow-window transition passes implemented; hosted retry-action acceptance, real VoiceOver and full SwiftUI focus-return proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
 | Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; whole-domain transfer and full acceptance evidence remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |
