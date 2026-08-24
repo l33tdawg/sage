@@ -92,6 +92,40 @@ enum BrainPresentation: String, CaseIterable, Identifiable, Sendable {
     var systemImage: String { self == .mri ? "brain" : "tablecells" }
 }
 
+enum BrainMetalBootstrapFailure: Error, Equatable, Sendable {
+    case rendererInitialization
+}
+
+enum BrainMetalCapability: Equatable, Sendable {
+    case probing
+    case available
+    case unavailable(BrainMetalBootstrapFailure)
+}
+
+extension BrainMetalCapability {
+    var isUnavailable: Bool {
+        if case .unavailable = self { return true }
+        return false
+    }
+}
+
+struct BrainPresentationDecision: Equatable, Sendable {
+    let effectivePresentation: BrainPresentation
+    let mriEnabled: Bool
+}
+
+enum BrainPresentationPolicy {
+    static func resolve(
+        requested: BrainPresentation,
+        capability: BrainMetalCapability
+    ) -> BrainPresentationDecision {
+        if case .unavailable = capability {
+            return .init(effectivePresentation: .table, mriEnabled: false)
+        }
+        return .init(effectivePresentation: requested, mriEnabled: true)
+    }
+}
+
 enum BrainMode: String, CaseIterable, Identifiable, Sendable {
     case memory
     case connectome

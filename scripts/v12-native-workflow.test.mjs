@@ -24,4 +24,8 @@ test('v12 macOS CI pins a runner and Xcode compatible with the Swift package', a
         workflow,
         /node --test scripts\/v12-native-acceptance-validate\.test\.mjs scripts\/v12-native-workflow\.test\.mjs/,
     );
+    assert.match(
+        workflow,
+        /SAGE_REQUIRE_METAL_HARDWARE=1 swift test --package-path desktop\/SAGECerebrumNative --disable-sandbox/,
+    );
 });

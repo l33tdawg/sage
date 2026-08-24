@@ -30,7 +30,8 @@ import Testing
 }
 
 @MainActor
-@Test func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
+@Test(.enabled(if: ProcessInfo.processInfo.environment["SAGE_REQUIRE_METAL_HARDWARE"] == "1"))
+func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     let renderer = try #require(BrainMetalRenderer(onPick: { _ in }))
     #expect(!renderer.metalDevice.name.isEmpty)
 
@@ -63,6 +64,31 @@ import Testing
     #expect(throws: BrainMetalOffscreenError.self) {
         try renderer.renderOffscreenProbe(width: 2_049, height: 120)
     }
+}
+
+@Test func metalPresentationPolicyFallsBackOnlyWhenRenderingIsUnavailable() {
+    #expect(BrainPresentationPolicy.resolve(
+        requested: .mri, capability: .probing
+    ) == .init(effectivePresentation: .mri, mriEnabled: true))
+    #expect(BrainPresentationPolicy.resolve(
+        requested: .mri, capability: .available
+    ) == .init(effectivePresentation: .mri, mriEnabled: true))
+    #expect(BrainPresentationPolicy.resolve(
+        requested: .mri, capability: .unavailable(.rendererInitialization)
+    ) == .init(effectivePresentation: .table, mriEnabled: false))
+    #expect(BrainPresentationPolicy.resolve(
+        requested: .table, capability: .unavailable(.rendererInitialization)
+    ) == .init(effectivePresentation: .table, mriEnabled: false))
+}
+
+@MainActor
+@Test func metalCoordinatorReportsAnInjectedBootstrapFailure() {
+    let coordinator = BrainMetalCoordinator(onPick: { _ in }) { _ in
+        .failure(.rendererInitialization)
+    }
+
+    #expect(coordinator.renderer == nil)
+    #expect(coordinator.capability == .unavailable(.rendererInitialization))
 }
 
 @Test func APIBaseURLRejectsRemoteAndCredentialedOrigins() {

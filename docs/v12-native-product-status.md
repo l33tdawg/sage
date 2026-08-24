@@ -49,7 +49,11 @@ and Accessible Table presentations. Memory reads
 `/v1/dashboard/memory/graph`; Connectome reads
 `/v1/dashboard/network/synapses`. Both modes render shared selection state
 through an interactive AppKit `MTKView` with Metal shaders and a synchronized
-SwiftUI table. The MRI now consumes the same anatomical `brain.obj` hull as
+SwiftUI table. If native renderer initialization fails, the presentation policy
+immediately switches to that same table without clearing graph, selection, or
+inspector state, announces the change to assistive technology, and offers a
+bounded explicit **Try MRI Again** action without an automatic retry loop. The
+MRI now consumes the same anatomical `brain.obj` hull as
 browser CEREBRUM, uses its ten-color domain palette and deterministic cortical
 placement rules, and renders native spherical billboard cells, additive halos,
 and directional traffic particles. Memory provides domain lobes, graph edges, memory focus,
@@ -77,8 +81,7 @@ focus, collision-safe scene identities, reserved overlay budgets, and linear
 traffic summaries. The renderer now adds time-invariant half-resolution
 offscreen extraction, separable blur, and additive bloom; retained traffic
 drives p95-normalized screen-space ribbon width; and selected cells receive a
-reduced-motion-aware camera-focus ease. Related-memory focus is not yet
-independently typed. Reciprocal synapses now occupy deterministic curved lanes,
+reduced-motion-aware camera-focus ease. Reciprocal synapses now occupy deterministic curved lanes,
 self-synapses render as finite loops, `last_fired` drives a truthful 30-minute
 plasticity decay with a visible floor, and direct Metal ribbon picks synchronize
 through the same directed connection identity as the accessible inspector. A
@@ -98,9 +101,12 @@ responder chain. A hardware runtime test now compiles the required Metal pipelin
 family, renders the shared production scene encoder into a 4× MSAA offscreen
 target, resolves it, executes the bloom chain, waits for successful GPU
 completion, and verifies relative scene and bloom pixel changes without relying
-on cross-GPU golden hashes.
-Real VoiceOver evidence, full SwiftUI focus-return evidence, and deeper behavioral,
-accessibility, Metal-fallback, and performance evidence remain open.
+on cross-GPU golden hashes. Deterministic policy and injected-bootstrap tests
+cover renderer-unavailable resolution without requiring absent GPU hardware;
+the required macOS CI lane explicitly enables the hardware probe. Hosted
+fallback/retry acceptance, real VoiceOver evidence, full SwiftUI focus-return evidence,
+cross-GPU/offline behavior, and deeper behavioral, accessibility, and
+performance evidence remain open.
 
 The first arm64 application bundle was built and launch-tested on 2026-08-23 at
 `dist/v12-native/12.0.0-beta.1/SAGE CEREBRUM Native.app`. Launch Services
@@ -181,7 +187,7 @@ acceptance gaps are not counted as another route slice.
 | Primary product area | Current surface | Current classification | Acceptance status |
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
-| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity pass implemented; real VoiceOver and full SwiftUI focus-return proof, cross-GPU/offline behavior, daemon lifecycle, Metal fallback, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
+| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, explicit renderer-failure fallback/retry, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity pass implemented; hosted fallback/retry acceptance, real VoiceOver and full SwiftUI focus-return proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
 | Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; whole-domain transfer and full acceptance evidence remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |
@@ -225,9 +231,9 @@ production promotion.
   attaches to an already-running loopback daemon; it does not yet own that
   daemon's lifecycle.
 - Complete the remaining Brain work: prove real VoiceOver announcements and full
-  SwiftUI focus return, Metal/Table parity,
+  SwiftUI focus return, hosted fallback/retry behavior, Metal/Table parity,
   access-purge behavior, broader keyboard operation,
-  large-store performance, and graceful behavior when Metal is unavailable.
+  cross-GPU/offline behavior, and large-store performance.
 - Convert the private tester artifact into a signed production candidate and
   produce installed clean-machine evidence for the supported macOS architecture
   matrix. The nested Go daemon must be Developer ID signed before the outer app,

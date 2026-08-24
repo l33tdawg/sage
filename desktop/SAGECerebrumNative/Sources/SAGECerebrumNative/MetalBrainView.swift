@@ -63,6 +63,47 @@ enum BrainMetalOffscreenError: LocalizedError {
     }
 }
 
+typealias BrainMetalRendererFactory = @MainActor (
+    @escaping (BrainMetalPick) -> Void
+) -> Result<BrainMetalRenderer, BrainMetalBootstrapFailure>
+
+@MainActor
+final class BrainMetalCoordinator {
+    let renderer: BrainMetalRenderer?
+    let capability: BrainMetalCapability
+    var reportedAttemptID: UInt64?
+
+    init(
+        onPick: @escaping (BrainMetalPick) -> Void,
+        factory: BrainMetalRendererFactory
+    ) {
+        switch factory(onPick) {
+        case let .success(renderer):
+            self.renderer = renderer
+            capability = .available
+        case let .failure(error):
+            renderer = nil
+            capability = .unavailable(error)
+        }
+    }
+}
+
+@MainActor
+final class BrainMetalRendererHandoff {
+    private var renderer: BrainMetalRenderer?
+
+    init(_ renderer: BrainMetalRenderer) {
+        self.renderer = renderer
+    }
+
+    func take(onPick: @escaping (BrainMetalPick) -> Void) -> BrainMetalRenderer? {
+        guard let renderer else { return nil }
+        self.renderer = nil
+        renderer.onPick = onPick
+        return renderer
+    }
+}
+
 struct MetalBrainView: NSViewRepresentable {
     let nodes: [BrainNode]
     let edges: [BrainEdge]
@@ -74,11 +115,45 @@ struct MetalBrainView: NSViewRepresentable {
     let flow: Bool
     let hullOpacity: Double
     let onPick: (BrainMetalPick) -> Void
+    let attemptID: UInt64
+    let onCapabilityChange: (UInt64, BrainMetalCapability) -> Void
+    private let rendererFactory: BrainMetalRendererFactory
 
-    func makeCoordinator() -> BrainMetalRenderer? { BrainMetalRenderer(onPick: onPick) }
+    init(
+        nodes: [BrainNode], edges: [BrainEdge], selectedID: String?, topologyFocusID: String?,
+        highlightedEdge: BrainEdge?, layout: BrainMetalLayout, autoRotate: Bool, flow: Bool,
+        hullOpacity: Double, onPick: @escaping (BrainMetalPick) -> Void,
+        attemptID: UInt64,
+        onCapabilityChange: @escaping (UInt64, BrainMetalCapability) -> Void,
+        rendererFactory: @escaping BrainMetalRendererFactory = { onPick in
+            guard let renderer = BrainMetalRenderer(onPick: onPick) else {
+                return .failure(.rendererInitialization)
+            }
+            return .success(renderer)
+        }
+    ) {
+        self.nodes = nodes
+        self.edges = edges
+        self.selectedID = selectedID
+        self.topologyFocusID = topologyFocusID
+        self.highlightedEdge = highlightedEdge
+        self.layout = layout
+        self.autoRotate = autoRotate
+        self.flow = flow
+        self.hullOpacity = hullOpacity
+        self.onPick = onPick
+        self.attemptID = attemptID
+        self.onCapabilityChange = onCapabilityChange
+        self.rendererFactory = rendererFactory
+    }
+
+    func makeCoordinator() -> BrainMetalCoordinator {
+        BrainMetalCoordinator(onPick: onPick, factory: rendererFactory)
+    }
 
     func makeNSView(context: Context) -> InteractiveMetalView {
-        let device = context.coordinator?.metalDevice
+        let renderer = context.coordinator.renderer
+        let device = renderer?.metalDevice
         let view = InteractiveMetalView(frame: .zero, device: device)
         view.colorPixelFormat = .bgra8Unorm_srgb
         view.depthStencilPixelFormat = .depth32Float
@@ -88,32 +163,42 @@ struct MetalBrainView: NSViewRepresentable {
         view.enableSetNeedsDisplay = true
         view.isPaused = false
         view.clearColor = MTLClearColor(red: 0.004, green: 0.004, blue: 0.008, alpha: 1)
-        view.renderer = context.coordinator
-        view.delegate = context.coordinator
+        view.renderer = renderer
+        view.delegate = renderer
         view.setAccessibilityLabel("Interactive memory brain MRI")
         view.setAccessibilityHelp("Drag to orbit, scroll to zoom, or switch to Accessible Table for the same memories.")
-        context.coordinator?.attach(view)
-        if context.coordinator == nil {
+        renderer?.attach(view)
+        if renderer == nil {
             view.setAccessibilityLabel("Memory MRI unavailable")
             view.setAccessibilityHelp("Metal could not initialize. Switch to Accessible Table to inspect the same memories.")
         }
+        let capability = context.coordinator.capability
+        let attemptID = attemptID
+        context.coordinator.reportedAttemptID = attemptID
+        Task { @MainActor in onCapabilityChange(attemptID, capability) }
         return view
     }
 
     func updateNSView(_ view: InteractiveMetalView, context: Context) {
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        context.coordinator?.onPick = onPick
-        context.coordinator?.update(
+        context.coordinator.renderer?.onPick = onPick
+        context.coordinator.renderer?.update(
             nodes: nodes, edges: edges, highlightedEdge: highlightedEdge,
             topologyFocusID: topologyFocusID, layout: layout
         )
-        context.coordinator?.setSelectedID(
+        context.coordinator.renderer?.setSelectedID(
             selectedID,
             reduceMotion: reduceMotion
         )
-        context.coordinator?.autoRotate = autoRotate
-        context.coordinator?.flow = flow && !reduceMotion
-        context.coordinator?.hullOpacity = Float(hullOpacity)
+        context.coordinator.renderer?.autoRotate = autoRotate
+        context.coordinator.renderer?.flow = flow && !reduceMotion
+        context.coordinator.renderer?.hullOpacity = Float(hullOpacity)
+        if context.coordinator.reportedAttemptID != attemptID {
+            context.coordinator.reportedAttemptID = attemptID
+            let capability = context.coordinator.capability
+            let attemptID = attemptID
+            Task { @MainActor in onCapabilityChange(attemptID, capability) }
+        }
         view.isPaused = !(autoRotate || (flow && !reduceMotion) || (highlightedEdge != nil && !reduceMotion))
         view.setAccessibilityLabel(layout == .memory ? "Interactive memory brain MRI" : "Interactive agent connectome MRI")
         view.setAccessibilityHelp(
