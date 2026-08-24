@@ -33,6 +33,141 @@ import Testing
     #expect(session.acceptsReadyCommands)
 }
 
+@MainActor
+@Test func focusSearchIsReadyGatedAndConsumedExactlyOnce() {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    session.phase = .locked
+    session.route = .brain
+    session.focusSearch()
+    #expect(session.route == .brain)
+    #expect(session.searchFocusRequestID == 0)
+
+    session.phase = .ready
+    session.focusSearch()
+    #expect(session.route == .search)
+    #expect(session.searchFocusRequestID == 1)
+    #expect(session.consumedSearchFocusRequestID == 0)
+    session.consumeSearchFocusRequest(1)
+    #expect(session.consumedSearchFocusRequestID == 1)
+    session.focusSearch()
+    #expect(session.searchFocusRequestID == 2)
+    session.consumeSearchFocusRequest(1)
+    #expect(session.consumedSearchFocusRequestID == 1)
+    session.consumeSearchFocusRequest(2)
+    #expect(session.consumedSearchFocusRequestID == 2)
+}
+
+@MainActor
+@Test func routeCommandsRejectMissingAPINonReadyAndStaleFocusedRoutes() {
+    let session = AppSession()
+    session.phase = .ready
+    session.route = .brain
+    #expect(!session.acceptsRouteCommands(for: .brain))
+
+    session.api = MutationTestAPI(forgetResults: [])
+    #expect(session.acceptsRouteCommands(for: .brain))
+    #expect(!session.acceptsRouteCommands(for: .search))
+    #expect(!session.acceptsRouteCommands(for: .settings))
+
+    session.phase = .failed("Unavailable")
+    #expect(!session.acceptsRouteCommands(for: .brain))
+}
+
+@Test func nativeCommandIDsAreExactAndUnique() {
+    #expect(CerebrumCommandID.allCases.map(\.rawValue) == [
+        "global.command.focus-search",
+        "global.command.keyboard-shortcuts",
+        "overview.command.refresh",
+        "search.command.refresh",
+        "brain.command.refresh",
+        "brain.command.toggle-inspector",
+        "brain.command.mode-memory-map",
+        "brain.command.mode-agent-network",
+        "brain.command.presentation-interactive-map",
+        "brain.command.presentation-list-view",
+        "brain.command.clear-selection",
+        "brain.command.view-options",
+    ])
+    #expect(Set(CerebrumCommandID.allCases.map(\.rawValue)).count == CerebrumCommandID.allCases.count)
+
+    func modifierName(_ modifiers: EventModifiers) -> String {
+        [
+            (EventModifiers.command, "command"),
+            (.control, "control"),
+            (.option, "option"),
+            (.shift, "shift"),
+        ]
+        .filter { modifiers.contains($0.0) }
+        .map(\.1)
+        .joined(separator: "+")
+    }
+    let catalog = CerebrumCommandID.allCases.map { command in
+        let spec = command.specification
+        return [
+            command.rawValue, spec.label, spec.key.map(String.init) ?? "-",
+            modifierName(spec.modifiers), spec.display, spec.section,
+        ].joined(separator: "|")
+    }
+    #expect(catalog == [
+        "global.command.focus-search|Focus Search|f|command|⌘F|Search",
+        "global.command.keyboard-shortcuts|Keyboard Shortcuts…|/|command|⌘/|Global",
+        "overview.command.refresh|Refresh Overview|r|command|⌘R|Global",
+        "search.command.refresh|Refresh Search|r|command|⌘R|Global",
+        "brain.command.refresh|Refresh Brain|r|command|⌘R|Global",
+        "brain.command.toggle-inspector|Show or Hide Inspector|i|command+control|⌃⌘I|Brain",
+        "brain.command.mode-memory-map|Memory Map|1|control+option|⌥⌃1|Brain",
+        "brain.command.mode-agent-network|Agent Network|2|control+option|⌥⌃2|Brain",
+        "brain.command.presentation-interactive-map|Interactive Map|m|command+control|⌃⌘M|Brain",
+        "brain.command.presentation-list-view|List View|l|command+control|⌃⌘L|Brain",
+        "brain.command.clear-selection|Clear Brain Selection|-|||Brain",
+        "brain.command.view-options|Show or Hide View Options|v|control+option|⌥⌃V|Brain",
+    ])
+}
+
+@Test func routedRefreshOwnsTheOnlyCommandRRegistration() throws {
+    let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let sourceRoot = packageRoot.appendingPathComponent("Sources/SAGECerebrumNative")
+    let routeFiles = ["OverviewView.swift", "SearchView.swift", "BrainView.swift"]
+    for file in routeFiles {
+        let source = try String(contentsOf: sourceRoot.appendingPathComponent(file), encoding: .utf8)
+        #expect(!source.contains(".keyboardShortcut(\"r\""))
+        #expect(source.contains(".focusedSceneValue(\\.cerebrumRouteCommandActions"))
+    }
+    let commands = try String(
+        contentsOf: sourceRoot.appendingPathComponent("CerebrumCommands.swift"),
+        encoding: .utf8
+    )
+    #expect(commands.components(separatedBy: ".cerebrumShortcut(refreshCommandID").count - 1 == 1)
+    #expect(commands.components(separatedBy: "key: \"r\", modifiers: .command").count - 1 == 3)
+}
+
+@Test func nativeCommandsUseStandardMenuPlacementAndExactShortcutCatalog() throws {
+    let packageRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let sourceRoot = packageRoot.appendingPathComponent("Sources/SAGECerebrumNative")
+    let commands = try String(
+        contentsOf: sourceRoot.appendingPathComponent("CerebrumCommands.swift"),
+        encoding: .utf8
+    )
+    #expect(commands.contains("CommandGroup(after: .sidebar)"))
+    #expect(commands.contains("CommandGroup(before: .help)"))
+    #expect(commands.contains("keyboardShortcut(KeyEquivalent(key), modifiers: command.specification.modifiers)"))
+    #expect(commands.contains("Self.shortcutRow(.keyboardShortcuts)"))
+    #expect(commands.contains("(\"Dismiss Current Brain Focus\", \"Esc\")"))
+
+    let search = try String(
+        contentsOf: sourceRoot.appendingPathComponent("SearchView.swift"),
+        encoding: .utf8
+    )
+    #expect(search.contains("isPresented: $searchIsPresented"))
+    #expect(search.contains("onFocusRequestConsumed(focusRequestID)"))
+}
+
 @Test func brainUsesPlainLanguageAliasesForPrimaryControls() {
     #expect(BrainMode.memory.title == "Memory Map")
     #expect(BrainMode.connectome.title == "Agent Network")

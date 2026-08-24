@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SearchView: View {
@@ -7,9 +8,21 @@ struct SearchView: View {
     @State private var showsBulkTagSheet = false
     @State private var bulkTag = ""
     @State private var forgetConfirmation: ForgetConfirmation?
+    @State private var searchIsPresented = false
+    private let focusRequestID: UInt64
+    private let consumedFocusRequestID: UInt64
+    private let onFocusRequestConsumed: (UInt64) -> Void
 
-    init(api: any SAGEAPI) {
+    init(
+        api: any SAGEAPI,
+        focusRequestID: UInt64 = 0,
+        consumedFocusRequestID: UInt64 = 0,
+        onFocusRequestConsumed: @escaping (UInt64) -> Void = { _ in }
+    ) {
         _model = State(initialValue: SearchViewModel(api: api))
+        self.focusRequestID = focusRequestID
+        self.consumedFocusRequestID = consumedFocusRequestID
+        self.onFocusRequestConsumed = onFocusRequestConsumed
     }
 
     var body: some View {
@@ -25,7 +38,13 @@ struct SearchView: View {
             .padding(CerebrumTheme.pagePadding)
         }
         .navigationTitle("Search")
-        .searchable(text: $model.query, placement: .toolbar, prompt: "Search sovereign memory")
+        .searchable(
+            text: $model.query,
+            isPresented: $searchIsPresented,
+            placement: .toolbar,
+            prompt: "Search sovereign memory"
+        )
+        .focusedSceneValue(\.cerebrumRouteCommandActions, routeCommandActions)
         .toolbar { searchToolbar }
         .inspector(isPresented: Binding(
             get: { model.inspectedMemory != nil },
@@ -62,6 +81,12 @@ struct SearchView: View {
         .task(id: model.inspectedMemoryID) {
             await model.loadInspectedTags()
         }
+        .task(id: focusRequestID) {
+            guard focusRequestID > consumedFocusRequestID else { return }
+            searchIsPresented = true
+            await Task.yield()
+            onFocusRequestConsumed(focusRequestID)
+        }
         .onChange(of: model.selection) { _, selection in
             if selection.count == 1 { model.inspectedMemoryID = selection.first }
         }
@@ -95,6 +120,20 @@ struct SearchView: View {
             datePreset: model.datePreset, customFrom: model.customFrom, customTo: model.customTo
         )
     }
+
+    private var routeCommandActions: CerebrumRouteCommandActions {
+        .init(
+            route: .search,
+            isRefreshing: model.isLoading,
+            refresh: refresh,
+            blocksGlobalCommands: showsBulkTagSheet || forgetConfirmation != nil
+        )
+    }
+
+    private func refresh() {
+        Task { await model.refresh() }
+    }
+
 
     private var header: some View {
         CerebrumPageContextBar(routeTitle: "Search", context: resultSummary) {
@@ -336,13 +375,11 @@ struct SearchView: View {
             }
             .popover(isPresented: $showsFilters, arrowEdge: .bottom) { filterPopover }
 
-            Button {
-                Task { await model.refresh() }
-            } label: {
+            Button(action: refresh) {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
             .disabled(model.isLoading)
-            .keyboardShortcut("r", modifiers: .command)
+            .accessibilityIdentifier("search-toolbar-refresh")
         }
     }
 

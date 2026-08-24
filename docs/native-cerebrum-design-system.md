@@ -82,6 +82,20 @@ website in a window, a mobile app enlarged for desktop, or a sci-fi skin.
 - Empty/error states use one symbol, a direct headline, explanation and at most
   one primary recovery action.
 
+## Menus and keyboard
+
+- Put route-aware actions in standard macOS command groups, not a second custom
+  menu with the same system title.
+- Menu items and toolbar controls must call the same action path. A shortcut is
+  registered once and disabled whenever the active route cannot perform it.
+- Focus Search and Refresh are global native commands; Brain adds mode,
+  presentation, inspector, selection, and View Options commands only while its
+  scene value is active.
+- Keyboard Shortcuts belongs in Help and lists implemented actions only.
+- Every command transition must preserve semantic selection where promised and
+  return focus to a stable mounted target. Avoid collisions with standard text,
+  window, and navigation shortcuts.
+
 ## Accessibility gate
 
 Before this system is considered stable on a screen, it must support complete

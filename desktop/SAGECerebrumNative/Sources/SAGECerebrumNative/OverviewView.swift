@@ -23,21 +23,32 @@ struct OverviewView: View {
             }
         }
         .navigationTitle("Overview")
+        .focusedSceneValue(\.cerebrumRouteCommandActions, routeCommandActions)
         .toolbar {
             ToolbarItem {
-                Button {
-                    Task { await model.refresh() }
-                } label: {
+                Button(action: refresh) {
                     Label(model.isRefreshing ? "Refreshing" : "Refresh", systemImage: "arrow.clockwise")
                 }
                 .disabled(model.isRefreshing)
-                .keyboardShortcut("r", modifiers: .command)
+                .accessibilityIdentifier("overview-toolbar-refresh")
             }
         }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             await model.runLiveUpdates()
         }
+    }
+
+    private var routeCommandActions: CerebrumRouteCommandActions {
+        .init(
+            route: .overview,
+            isRefreshing: model.isRefreshing,
+            refresh: refresh
+        )
+    }
+
+    private func refresh() {
+        Task { await model.refresh() }
     }
 
     private var pageHeader: some View {

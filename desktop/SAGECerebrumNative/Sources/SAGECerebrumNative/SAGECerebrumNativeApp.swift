@@ -23,21 +23,8 @@ struct SAGECerebrumNativeApp: App {
         .commands {
             SidebarCommands()
             CommandGroup(replacing: .newItem) {}
-            CommandMenu("Navigate") {
-                ForEach(AppRoute.implemented) { route in
-                    if let shortcut = route.navigationShortcut {
-                        Button(route.title) { session.route = route }
-                            .keyboardShortcut(KeyEquivalent(shortcut), modifiers: .command)
-                            .disabled(!session.acceptsReadyCommands)
-                    }
-                }
-            }
             CommandGroup(replacing: .appSettings) {}
-            CommandMenu("CEREBRUM") {
-                Button("Lock CEREBRUM") { Task { await session.lock() } }
-                    .keyboardShortcut("l", modifiers: .command)
-                    .disabled(!session.acceptsReadyCommands)
-            }
+            CerebrumViewCommands(session: session)
         }
     }
 }

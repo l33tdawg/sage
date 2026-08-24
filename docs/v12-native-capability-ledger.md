@@ -41,6 +41,14 @@ titles with compact adaptive context/status bars. Brain keeps mode,
 presentation, inspector, View Options, and Refresh in the primary toolbar;
 View Options owns rotation, flow, shell visibility, and Whole Brain reset.
 Hiding the Brain inspector preserves semantic selection while Escape clears it.
+The active route is source-wired through focused scene commands for the standard
+macOS View menu: global Focus Search, one routed Refresh, and Brain-only mode,
+presentation, inspector, selection, and View Options actions. Keyboard Shortcuts
+is in Help. Development IDs are `global.command.focus-search`,
+`global.command.keyboard-shortcuts`, route-specific `*.command.refresh`, and
+`brain.command.{toggle-inspector,mode-memory-map,mode-agent-network,presentation-interactive-map,presentation-list-view,clear-selection,view-options}`.
+These IDs are source contracts; rendered-menu dispatch, mounted search focus,
+reconciliation, and system-AX acceptance remain open for the RC inventory.
 
 | Entry ID | Route | Mounted UI | Owner | Current native-window path | App-owned integration still required | Status |
 |---|---|---|---|---|---|---|

@@ -80,13 +80,19 @@ invalidation hints, selected focus is preserved behind update notices, and an
 `access` event immediately purges Brain graphs, selections, inspectors,
 engrams, and related-memory state before authoritative refetch. Reduced Motion
 disables automatic rotation and flow animation while preserving manual orbit
-and zoom. Brain
-keeps mode, presentation, inspector, View Options, and Refresh in its primary
+and zoom. Brain keeps mode, presentation, inspector, View Options, and Refresh in its primary
 toolbar. View Options groups automatic rotation, flow animation, shell
 visibility, and reset to Whole Brain. Hiding the Brain inspector preserves the
 semantic selection; Escape remains the explicit clear-selection and focus-return
-command. Brain
-phase three is implemented with separate agent, engram, and directed-connection
+command. The source is wired so the standard macOS View menu owns one routed
+Refresh command and a ready-gated Focus Search command that navigates to Search
+and requests presentation of its native search field. Brain contributes route-scoped mode,
+presentation, inspector, clear-selection, and View Options commands through a
+focused scene value, while Help owns the accessible keyboard-shortcut reference.
+The typed source catalog, ready/exact-route/modal routing, one-shot search
+request policy, and duplicate Command-R guard are covered. Rendered NSMenu
+dispatch, mounted search-field focus, focus return, system AX, and VoiceOver
+discovery stay acceptance-open on the named Mac. Brain phase three is implemented with separate agent, engram, and directed-connection
 focus, collision-safe scene identities, reserved overlay budgets, and linear
 traffic summaries. The renderer now adds time-invariant half-resolution
 offscreen extraction, separable blur, and additive bloom; retained traffic

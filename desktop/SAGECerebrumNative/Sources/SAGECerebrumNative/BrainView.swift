@@ -113,6 +113,7 @@ struct BrainView: View {
             .onChange(of: proxy.size) { _, size in updateAvailableSize(size) }
         }
         .navigationTitle("Brain")
+        .focusedSceneValue(\.cerebrumRouteCommandActions, routeCommandActions)
         .toolbar { brainToolbar }
         .inspector(isPresented: Binding(
             get: { inspectorIsPresented },
@@ -751,6 +752,7 @@ struct BrainView: View {
                         ForEach(BrainMode.allCases) {
                             Label($0.title, systemImage: $0.systemImage)
                                 .accessibilityLabel($0.accessibilityTitle)
+                                .accessibilityIdentifier("brain-mode-option-\($0.rawValue)")
                                 .tag($0)
                         }
                     }
@@ -758,6 +760,7 @@ struct BrainView: View {
                     Label(model.mode.title, systemImage: model.mode.systemImage)
                         .accessibilityLabel(model.mode.accessibilityTitle)
                 }
+                .accessibilityIdentifier("brain-mode-control")
 
                 Menu {
                     Picker("Presentation", selection: presentationBinding) {
@@ -768,6 +771,7 @@ struct BrainView: View {
                         .accessibilityLabel(metalRecovery.effectivePresentation.accessibilityTitle)
                 }
                 .help(presentationHelp)
+                .accessibilityIdentifier("brain-presentation-control")
 
                 Button {
                     showsNavigator.toggle()
@@ -783,11 +787,13 @@ struct BrainView: View {
                     ForEach(BrainMode.allCases) {
                         Label($0.title, systemImage: $0.systemImage)
                             .accessibilityLabel($0.accessibilityTitle)
+                            .accessibilityIdentifier("brain-mode-option-\($0.rawValue)")
                             .tag($0)
                     }
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 210)
+                .accessibilityIdentifier("brain-mode-control")
 
                 Picker("Presentation", selection: presentationBinding) {
                     presentationOptions
@@ -795,12 +801,11 @@ struct BrainView: View {
                 .pickerStyle(.segmented)
                 .frame(width: 190)
                 .help(presentationHelp)
+                .accessibilityIdentifier("brain-presentation-control")
             }
 
             Button {
-                inspectorVisibilityIsUserControlled = true
-                showsInspector.toggle()
-                requestFocus(showsInspector ? .inspectorClose : returnFocusTarget)
+                toggleInspectorPresentation()
             } label: {
                 Label(inspectorIsPresented ? "Hide Inspector" : "Show Inspector", systemImage: "sidebar.trailing")
             }
@@ -811,7 +816,7 @@ struct BrainView: View {
             .accessibilityIdentifier("brain-inspector-toggle")
 
             Button {
-                showsViewOptions.toggle()
+                toggleViewOptionsPresentation()
             } label: {
                 Label("View Options", systemImage: "slider.horizontal.3")
             }
@@ -850,10 +855,9 @@ struct BrainView: View {
                 .frame(width: 280)
             }
 
-            Button { Task { await model.refreshIncludingPinnedDetail() } } label: {
+            Button(action: refreshBrain) {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
-            .keyboardShortcut("r", modifiers: .command)
             .disabled(model.isLoading)
             .accessibilityIdentifier("brain-refresh")
         }
@@ -864,6 +868,7 @@ struct BrainView: View {
         ForEach(BrainPresentation.allCases) { option in
             Label(option.title, systemImage: option.systemImage)
                 .accessibilityLabel(option.accessibilityTitle)
+                .accessibilityIdentifier("brain-presentation-option-\(option.rawValue)")
                 .tag(option)
                 .disabled(option == .mri && !BrainPresentationPolicy.resolve(
                     requested: option, capability: metalRecovery.capability
@@ -945,6 +950,46 @@ struct BrainView: View {
         let rendered = graph.nodes.count.formatted()
         if let total = graph.total, total > graph.nodes.count { return "\(rendered) rendered · \(total.formatted()) available" }
         return "\(rendered) memories · \(graph.edges.count.formatted()) links"
+    }
+
+    private var routeCommandActions: CerebrumRouteCommandActions {
+        .init(
+            route: .brain,
+            isRefreshing: model.isLoading,
+            refresh: refreshBrain,
+            brain: .init(
+                mode: model.mode,
+                presentation: metalRecovery.effectivePresentation,
+                inspectorIsPresented: inspectorIsPresented,
+                hasInspector: model.hasVisibleInspector,
+                hasSelection: hasSelection,
+                viewOptionsArePresented: showsViewOptions,
+                interactiveMapIsEnabled: BrainPresentationPolicy.resolve(
+                    requested: .mri,
+                    capability: metalRecovery.capability
+                ).mriEnabled,
+                setMode: { model.mode = $0 },
+                setPresentation: { applyMetalEvent(.presentationSelected($0)) },
+                toggleInspector: toggleInspectorPresentation,
+                clearSelection: { clearSelectionAndRestoreFocus() },
+                toggleViewOptions: toggleViewOptionsPresentation
+            )
+        )
+    }
+
+    private func refreshBrain() {
+        Task { await model.refreshIncludingPinnedDetail() }
+    }
+
+    private func toggleInspectorPresentation() {
+        inspectorVisibilityIsUserControlled = true
+        showsInspector.toggle()
+        requestFocus(showsInspector ? .inspectorClose : returnFocusTarget)
+    }
+
+    private func toggleViewOptionsPresentation() {
+        showsViewOptions.toggle()
+        requestFocus(.viewOptions)
     }
 
     private var currentHullOpacity: Double {

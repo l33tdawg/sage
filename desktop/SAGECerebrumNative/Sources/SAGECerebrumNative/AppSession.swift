@@ -17,9 +17,16 @@ final class AppSession {
     var loginError: String?
     var isLoggingIn = false
     var loginFailureID = 0
+    var searchFocusRequestID: UInt64 = 0
+    var consumedSearchFocusRequestID: UInt64 = 0
+    var showsKeyboardShortcuts = false
     var api: (any SAGEAPI)?
 
     var acceptsReadyCommands: Bool { phase == .ready }
+
+    func acceptsRouteCommands(for candidate: AppRoute) -> Bool {
+        acceptsReadyCommands && api != nil && candidate.isImplemented && candidate == route
+    }
 
     init() {}
 
@@ -78,6 +85,17 @@ final class AppSession {
         } catch {
             phase = .failed(error.localizedDescription)
         }
+    }
+
+    func focusSearch() {
+        guard acceptsReadyCommands, api != nil, !showsKeyboardShortcuts else { return }
+        route = .search
+        searchFocusRequestID &+= 1
+    }
+
+    func consumeSearchFocusRequest(_ requestID: UInt64) {
+        guard requestID == searchFocusRequestID else { return }
+        consumedSearchFocusRequestID = requestID
     }
 
     private func handleUnauthorized() {

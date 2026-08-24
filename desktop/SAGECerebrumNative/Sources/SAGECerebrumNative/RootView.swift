@@ -30,6 +30,9 @@ struct RootView: View {
         }
         .tint(CerebrumTheme.cyan)
         .preferredColorScheme(designPreviewColorScheme)
+        .sheet(isPresented: $session.showsKeyboardShortcuts) {
+            CerebrumKeyboardShortcutsView()
+        }
     }
 
     private var designPreviewColorScheme: ColorScheme? {
@@ -151,7 +154,13 @@ struct RootView: View {
             #else
             BrainView(api: api)
             #endif
-        case .search: SearchView(api: api)
+        case .search:
+            SearchView(
+                api: api,
+                focusRequestID: session.searchFocusRequestID,
+                consumedFocusRequestID: session.consumedSearchFocusRequestID,
+                onFocusRequestConsumed: session.consumeSearchFocusRequest
+            )
         case .tasks, .importData, .network, .access, .federation, .settings:
             NativePlaceholderView(route: route)
         }

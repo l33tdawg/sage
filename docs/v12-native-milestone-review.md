@@ -115,9 +115,14 @@ another large subsystem:
 5. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
    detail errors, safe per-feed errors on Overview, and Diagnose/drill-down
    actions on unhealthy cards.
-6. Add menu commands and discoverability for Focus Search, Refresh,
-   Show/Hide Inspector, Memory Map/List View, Memory/Agent Network, Clear
-   Selection, View Options, and Keyboard Shortcuts.
+6. **Source-implemented for the current native slices:** Add route-aware macOS commands
+   for Focus Search, routed Refresh, Brain Show/Hide Inspector, Brain Mode—Memory
+   Map or Agent Network—Presentation—Interactive Map or List View—Clear Brain
+   Selection, View Options, and a Help-menu Keyboard Shortcuts reference. Stable
+   development action catalog, one-shot search request policy, and
+   duplicate-shortcut guards are covered. Rendered NSMenu dispatch, mounted
+   search-field focus, system-AX/VoiceOver discovery, focus return, and RC
+   rendered-action inventory remain open on the named Mac.
 7. **Implemented for the current native slices:** General titles and metrics use
    standard SF Pro. Rounded typography is allowlisted to the CEREBRUM mark and
    Overview hero accent; SF Mono remains reserved for identifiers, hashes, and
