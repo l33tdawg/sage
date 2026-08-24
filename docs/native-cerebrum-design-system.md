@@ -79,6 +79,10 @@ website in a window, a mobile app enlarged for desktop, or a sci-fi skin.
   sheets; destructive actions use confirmation dialogs.
 - Hiding an inspector changes presentation only and preserves semantic
   selection. Escape clears the current semantic selection and restores focus.
+- Search keeps bulk selection independent from its one-memory inspector target:
+  explicit Inspect/row activation opens details, ordinary multiselection does
+  not retarget them, and a refresh closes details only when that memory is no
+  longer in the visible authoritative result set.
 - Empty/error states use one symbol, a direct headline, explanation and at most
   one primary recovery action.
 
@@ -88,9 +92,10 @@ website in a window, a mobile app enlarged for desktop, or a sci-fi skin.
   menu with the same system title.
 - Menu items and toolbar controls must call the same action path. A shortcut is
   registered once and disabled whenever the active route cannot perform it.
-- Focus Search and Refresh are global native commands; Brain adds mode,
-  presentation, inspector, selection, and View Options commands only while its
-  scene value is active.
+- Focus Search and Refresh are global native commands. Search adds inspector
+  presentation and clear-selection commands; Brain adds mode, presentation,
+  inspector, selection, and View Options commands only while the matching scene
+  value is active.
 - Keyboard Shortcuts belongs in Help and lists implemented actions only.
 - Every command transition must preserve semantic selection where promised and
   return focus to a stable mounted target. Avoid collisions with standard text,

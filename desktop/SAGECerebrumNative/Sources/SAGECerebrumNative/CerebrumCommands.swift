@@ -5,7 +5,16 @@ struct CerebrumRouteCommandActions {
     let isRefreshing: Bool
     let refresh: () -> Void
     var blocksGlobalCommands = false
+    var search: SearchCommandActions?
     var brain: BrainCommandActions?
+}
+
+struct SearchCommandActions {
+    let inspectorIsPresented: Bool
+    let hasInspector: Bool
+    let hasSelection: Bool
+    let toggleInspector: () -> Void
+    let clearSelection: () -> Void
 }
 
 enum CerebrumCommandID: String, CaseIterable {
@@ -13,6 +22,8 @@ enum CerebrumCommandID: String, CaseIterable {
     case keyboardShortcuts = "global.command.keyboard-shortcuts"
     case overviewRefresh = "overview.command.refresh"
     case searchRefresh = "search.command.refresh"
+    case searchToggleInspector = "search.command.toggle-inspector"
+    case searchClearSelection = "search.command.clear-selection"
     case brainRefresh = "brain.command.refresh"
     case brainToggleInspector = "brain.command.toggle-inspector"
     case brainModeMemory = "brain.command.mode-memory-map"
@@ -28,6 +39,8 @@ enum CerebrumCommandID: String, CaseIterable {
         case .keyboardShortcuts: .init(label: "Keyboard Shortcuts…", key: "/", modifiers: .command, display: "⌘/", section: "Global")
         case .overviewRefresh: .init(label: "Refresh Overview", key: "r", modifiers: .command, display: "⌘R", section: "Global")
         case .searchRefresh: .init(label: "Refresh Search", key: "r", modifiers: .command, display: "⌘R", section: "Global")
+        case .searchToggleInspector: .init(label: "Show or Hide Inspector", key: "i", modifiers: [.control, .command], display: "⌃⌘I", section: "Search")
+        case .searchClearSelection: .init(label: "Clear Search Selection", key: nil, modifiers: [], display: "", section: "Search")
         case .brainRefresh: .init(label: "Refresh Brain", key: "r", modifiers: .command, display: "⌘R", section: "Global")
         case .brainToggleInspector: .init(label: "Show or Hide Inspector", key: "i", modifiers: [.control, .command], display: "⌃⌘I", section: "Brain")
         case .brainModeMemory: .init(label: "Memory Map", key: "1", modifiers: [.control, .option], display: "⌥⌃1", section: "Brain")
@@ -100,6 +113,20 @@ struct CerebrumViewCommands: Commands {
                     .cerebrumShortcut(refreshCommandID(for: routeActions.route))
                     .disabled(routeActions.isRefreshing)
                     .accessibilityIdentifier(refreshCommandID(for: routeActions.route).rawValue)
+            }
+
+            if let search = activeRouteActions?.search {
+                Divider()
+                Button(search.inspectorIsPresented ? "Hide Inspector" : "Show Inspector") {
+                    search.toggleInspector()
+                }
+                .cerebrumShortcut(CerebrumCommandID.searchToggleInspector)
+                .disabled(!search.hasInspector)
+                .accessibilityIdentifier(CerebrumCommandID.searchToggleInspector.rawValue)
+
+                Button("Clear Search Selection") { search.clearSelection() }
+                    .disabled(!search.hasSelection)
+                    .accessibilityIdentifier(CerebrumCommandID.searchClearSelection.rawValue)
             }
 
             if let brain = activeRouteActions?.brain {
@@ -243,7 +270,10 @@ struct CerebrumKeyboardShortcutsView: View {
                 ("Refresh Current View", "⌘R"), ("Lock CEREBRUM", "⌘L"),
                 Self.shortcutRow(.keyboardShortcuts),
             ]),
-            ("Search", [Self.shortcutRow(.focusSearch)]),
+            ("Search", [
+                Self.shortcutRow(.focusSearch), Self.shortcutRow(.searchToggleInspector),
+                ("Clear Search Selection and Details", "Esc"),
+            ]),
             ("Brain", [
                 Self.shortcutRow(.brainModeMemory), Self.shortcutRow(.brainModeAgent),
                 Self.shortcutRow(.brainPresentationInteractive), Self.shortcutRow(.brainPresentationList),

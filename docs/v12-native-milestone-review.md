@@ -109,14 +109,18 @@ another large subsystem:
 3. **Implemented:** Simplify the Brain toolbar: mode, presentation, inspector,
    View Options, and Refresh remain visible; rotation, flow, shell visibility,
    and reset are grouped under View Options.
-4. **Implemented for Brain:** Inspector hiding is independent of selection.
-   Closing the inspector preserves semantic selection; Escape clears selection
-   and returns focus. Search inspector lifecycle remains an acceptance item.
+4. **Source-implemented for Brain and Search:** Inspector hiding is independent
+   of semantic selection. Search also keeps its one-memory inspector target
+   independent from bulk selection, shares toolbar/View-menu action paths, and
+   reconciles a removed result fail closed. Escape clears selection and requests
+   the stable route surface. Rendered responder delivery, system AX, and real
+   VoiceOver remain named-Mac acceptance items.
 5. Add filtered-empty recovery in Search (**Clear Filters**), Retry on Brain
    detail errors, safe per-feed errors on Overview, and Diagnose/drill-down
    actions on unhealthy cards.
 6. **Source-implemented for the current native slices:** Add route-aware macOS commands
-   for Focus Search, routed Refresh, Brain Show/Hide Inspector, Brain Mode—Memory
+   for Focus Search, routed Refresh, Search Show/Hide Inspector and Clear Search
+   Selection, Brain Show/Hide Inspector, Brain Mode—Memory
    Map or Agent Network—Presentation—Interactive Map or List View—Clear Brain
    Selection, View Options, and a Help-menu Keyboard Shortcuts reference. Stable
    development action catalog, one-shot search request policy, and

@@ -48,6 +48,19 @@ durable-FACT warning, execute IDs sequentially, stop on uncertain signer state,
 and distinguish deprecated, challenge-opened, settling, failed, and not-attempted
 outcomes. Whole-domain ownership transfer remains open.
 
+Search inspector identity is now independent from presentation and bulk
+selection, matching browser CEREBRUM's separate expanded-detail and selection
+states while retaining a native trailing inspector. Explicit Inspect or row
+activation opens one memory; ordinary multiselection does not retarget it.
+Hiding through the inspector, toolbar, or route-aware View command preserves the
+memory and selection, while Escape clears both and requests results-table focus.
+The same action path publishes stable focus/AX targets and concise announcements.
+Commands fail closed during the filter popover, bulk-tag sheet, Forget dialog,
+and active mutations. Repeated Focus Search requests now re-present the native
+toolbar search field before one-shot consumption. Reducer/source evidence covers
+these transitions; rendered menu dispatch, mounted responder delivery, system
+AX, and real VoiceOver remain named-Mac acceptance items.
+
 Brain now separates native Memory and Connectome modes from the independent MRI
 and Accessible Table presentations. Memory reads
 `/v1/dashboard/memory/graph`; Connectome reads

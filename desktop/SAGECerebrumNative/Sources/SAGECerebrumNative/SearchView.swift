@@ -9,6 +9,10 @@ struct SearchView: View {
     @State private var bulkTag = ""
     @State private var forgetConfirmation: ForgetConfirmation?
     @State private var searchIsPresented = false
+    @State private var inspectorIsPresented = false
+    @State private var focusGeneration = 0
+    @FocusState private var keyboardFocus: SearchFocusTarget?
+    @AccessibilityFocusState private var accessibilityFocus: SearchFocusTarget?
     private let focusRequestID: UInt64
     private let consumedFocusRequestID: UInt64
     private let onFocusRequestConsumed: (UInt64) -> Void
@@ -47,23 +51,49 @@ struct SearchView: View {
         .focusedSceneValue(\.cerebrumRouteCommandActions, routeCommandActions)
         .toolbar { searchToolbar }
         .inspector(isPresented: Binding(
-            get: { model.inspectedMemory != nil },
-            set: { if !$0 { model.inspectedMemoryID = nil } }
+            get: { inspectorIsPresented && model.inspectedMemoryID != nil },
+            set: { if !$0 { hideInspectorAndRestoreFocus() } }
         )) {
             if let memory = model.inspectedMemory {
-                MemoryInspectorView(
-                    memory: memory,
-                    authorLabel: model.authorLabels[memory.submittingAgent],
-                    tags: model.inspectedTags,
-                    tagsAreLoading: model.tagsAreLoading,
-                    tagsError: model.tagsError,
-                    newTag: $model.newTag,
-                    isMutating: model.isMutating,
-                    onAddTag: { Task { await model.addInspectedTag() } },
-                    onRemoveTag: { tag in Task { await model.removeInspectedTag(tag) } },
-                    onForget: { requestForget([memory.id]) }
-                )
+                VStack(spacing: 0) {
+                    HStack {
+                        Spacer()
+                        Button("Hide Inspector", systemImage: "xmark") {
+                            hideInspectorAndRestoreFocus()
+                        }
+                        .labelStyle(.iconOnly)
+                        .help("Hide Inspector")
+                        .focused($keyboardFocus, equals: .inspectorClose)
+                        .accessibilityFocused($accessibilityFocus, equals: .inspectorClose)
+                        .accessibilityLabel("Hide Search inspector")
+                        .accessibilityIdentifier("search-inspector-close")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+
+                    Divider()
+
+                    MemoryInspectorView(
+                        memory: memory,
+                        authorLabel: model.authorLabels[memory.submittingAgent],
+                        tags: model.inspectedTags,
+                        tagsAreLoading: model.tagsAreLoading,
+                        tagsError: model.tagsError,
+                        newTag: $model.newTag,
+                        isMutating: model.isMutating,
+                        onAddTag: { Task { await model.addInspectedTag() } },
+                        onRemoveTag: { tag in Task { await model.removeInspectedTag(tag) } },
+                        onForget: { requestForget([memory.id]) }
+                    )
+                }
                     .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
+            } else if model.inspectedMemoryID != nil {
+                ContentUnavailableView {
+                    Label("Updating memory details", systemImage: "clock.arrow.circlepath")
+                } description: {
+                    Text("CEREBRUM is reconciling this memory with the current results.")
+                }
+                .inspectorColumnWidth(min: 320, ideal: 380, max: 520)
             }
         }
         .task {
@@ -83,12 +113,25 @@ struct SearchView: View {
         }
         .task(id: focusRequestID) {
             guard focusRequestID > consumedFocusRequestID else { return }
+            searchIsPresented = false
+            await Task.yield()
+            guard !Task.isCancelled else { return }
             searchIsPresented = true
             await Task.yield()
+            guard !Task.isCancelled else { return }
             onFocusRequestConsumed(focusRequestID)
         }
         .onChange(of: model.selection) { _, selection in
-            if selection.count == 1 { model.inspectedMemoryID = selection.first }
+            applyInspectorState(
+                SearchInspectorLifecycle.selectionChanged(from: inspectorState, selection: selection)
+            )
+        }
+        .onChange(of: model.inspectedMemoryID) { _, inspectedMemoryID in
+            if inspectedMemoryID == nil, inspectorIsPresented {
+                inspectorIsPresented = false
+                requestFocus(.results)
+                postAccessibilityAnnouncement("The inspected memory is no longer in these results.")
+            }
         }
         .onChange(of: model.customFrom) { _, from in
             if model.customTo < from { model.customTo = from }
@@ -111,6 +154,12 @@ struct SearchView: View {
                 }
             )
         }
+        .onExitCommand {
+            if !model.isMutating,
+               !model.selection.isEmpty || model.inspectedMemoryID != nil {
+                dismissCurrentSearchFocusAndRestoreFocus()
+            }
+        }
     }
 
     private var refreshKey: SearchRefreshKey {
@@ -126,7 +175,15 @@ struct SearchView: View {
             route: .search,
             isRefreshing: model.isLoading,
             refresh: refresh,
-            blocksGlobalCommands: showsBulkTagSheet || forgetConfirmation != nil
+            blocksGlobalCommands: showsFilters || showsBulkTagSheet ||
+                forgetConfirmation != nil || model.isMutating,
+            search: .init(
+                inspectorIsPresented: inspectorIsPresented && model.inspectedMemoryID != nil,
+                hasInspector: model.inspectedMemoryID != nil,
+                hasSelection: !model.selection.isEmpty,
+                toggleInspector: toggleInspectorPresentation,
+                clearSelection: clearBulkSelectionAndRestoreFocus
+            )
         )
     }
 
@@ -247,16 +304,19 @@ struct SearchView: View {
                     }
                     .contextMenu(forSelectionType: MemorySummary.ID.self) { ids in
                         Button("Inspect", systemImage: "sidebar.right") {
-                            model.inspectedMemoryID = ids.first
+                            inspectMemory(ids.first)
                         }
-                        .disabled(ids.count != 1)
+                        .disabled(ids.count != 1 || model.isMutating)
                         Button("Copy Memory ID", systemImage: "doc.on.doc") {
                             if let id = ids.first { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(id, forType: .string) }
                         }
                         .disabled(ids.count != 1)
                     } primaryAction: { ids in
-                        model.inspectedMemoryID = ids.first
+                        inspectMemory(ids.count == 1 ? ids.first : nil)
                     }
+                    .focused($keyboardFocus, equals: .results)
+                    .accessibilityFocused($accessibilityFocus, equals: .results)
+                    .accessibilityIdentifier("search-results-table")
 
                     if model.nextCursor != nil {
                         Divider()
@@ -299,8 +359,10 @@ struct SearchView: View {
                 else { model.selection = Set(model.memories.map(\.id)) }
             }
             .buttonStyle(.plain)
+            .disabled(model.isMutating)
             Button("Clear") { model.selection.removeAll() }
                 .buttonStyle(.plain)
+                .disabled(model.isMutating)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
@@ -374,13 +436,93 @@ struct SearchView: View {
                 Label(model.activeFilterCount == 0 ? "Filters" : "Filters (\(model.activeFilterCount))", systemImage: "line.3.horizontal.decrease.circle")
             }
             .popover(isPresented: $showsFilters, arrowEdge: .bottom) { filterPopover }
+            .disabled(model.isMutating)
 
             Button(action: refresh) {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
-            .disabled(model.isLoading)
+            .disabled(model.isLoading || model.isMutating)
             .accessibilityIdentifier("search-toolbar-refresh")
+
+            Button(action: toggleInspectorPresentation) {
+                Label(inspectorIsPresented ? "Hide Inspector" : "Show Inspector", systemImage: "sidebar.trailing")
+            }
+            .disabled(model.inspectedMemoryID == nil || model.isMutating)
+            .help(inspectorIsPresented ? "Hide Search Inspector" : "Show Search Inspector")
+            .accessibilityIdentifier("search-inspector-toggle")
         }
+    }
+
+    private func inspectMemory(_ id: MemorySummary.ID?) {
+        guard let id, !model.isMutating else { return }
+        applyInspectorState(SearchInspectorLifecycle.activated(memoryID: id))
+        requestFocus(.inspectorClose)
+        let memory = model.memories.first { $0.id == id }
+        let context = memory.map { " in \($0.domainTag), ID \(String(id.prefix(8)))" } ?? ""
+        postAccessibilityAnnouncement("Showing details for memory\(context).")
+    }
+
+    private func toggleInspectorPresentation() {
+        let next = SearchInspectorLifecycle.toggled(
+            from: inspectorState,
+            inspectedMemoryIsAvailable: model.inspectedMemoryID != nil && !model.isMutating
+        )
+        guard next != inspectorState else { return }
+        applyInspectorState(next)
+        requestFocus(next.isPresented ? .inspectorClose : .results)
+        postAccessibilityAnnouncement(next.isPresented ? "Showing Search inspector." : "Search inspector hidden.")
+    }
+
+    private func hideInspectorAndRestoreFocus() {
+        let next = SearchInspectorLifecycle.hidden(from: inspectorState)
+        guard next != inspectorState else { return }
+        applyInspectorState(next)
+        requestFocus(.results)
+        postAccessibilityAnnouncement("Search inspector hidden.")
+    }
+
+    private func clearBulkSelectionAndRestoreFocus() {
+        model.selection.removeAll()
+        requestFocus(.results)
+        postAccessibilityAnnouncement("Search selection cleared.")
+    }
+
+    private func dismissCurrentSearchFocusAndRestoreFocus() {
+        model.selection.removeAll()
+        applyInspectorState(SearchInspectorLifecycle.cleared)
+        requestFocus(.results)
+        postAccessibilityAnnouncement("Search selection and details cleared.")
+    }
+
+    private var inspectorState: SearchInspectorState {
+        .init(inspectedMemoryID: model.inspectedMemoryID, isPresented: inspectorIsPresented)
+    }
+
+    private func applyInspectorState(_ state: SearchInspectorState) {
+        model.inspectedMemoryID = state.inspectedMemoryID
+        inspectorIsPresented = state.isPresented
+    }
+
+    private func requestFocus(_ target: SearchFocusTarget) {
+        focusGeneration += 1
+        let generation = focusGeneration
+        Task { @MainActor in
+            await Task.yield()
+            guard generation == focusGeneration else { return }
+            keyboardFocus = target
+            accessibilityFocus = target
+        }
+    }
+
+    private func postAccessibilityAnnouncement(_ message: String) {
+        NSAccessibility.post(
+            element: NSApplication.shared,
+            notification: .announcementRequested,
+            userInfo: [
+                .announcement: message,
+                .priority: NSAccessibilityPriorityLevel.medium.rawValue,
+            ]
+        )
     }
 
     private var filterPopover: some View {
@@ -493,4 +635,43 @@ private struct SearchRefreshKey: Hashable {
     let datePreset: MemoryDatePreset
     let customFrom: Date
     let customTo: Date
+}
+
+private enum SearchFocusTarget: Hashable {
+    case results
+    case inspectorClose
+}
+
+struct SearchInspectorState: Equatable, Sendable {
+    var inspectedMemoryID: MemorySummary.ID?
+    var isPresented: Bool
+}
+
+enum SearchInspectorLifecycle {
+    static func activated(memoryID: MemorySummary.ID) -> SearchInspectorState {
+        .init(inspectedMemoryID: memoryID, isPresented: true)
+    }
+
+    static func selectionChanged(
+        from state: SearchInspectorState,
+        selection _: Set<MemorySummary.ID>
+    ) -> SearchInspectorState {
+        state
+    }
+
+    static func toggled(
+        from state: SearchInspectorState,
+        inspectedMemoryIsAvailable: Bool
+    ) -> SearchInspectorState {
+        guard inspectedMemoryIsAvailable, state.inspectedMemoryID != nil else { return state }
+        return .init(inspectedMemoryID: state.inspectedMemoryID, isPresented: !state.isPresented)
+    }
+
+    static func hidden(from state: SearchInspectorState) -> SearchInspectorState {
+        .init(inspectedMemoryID: state.inspectedMemoryID, isPresented: false)
+    }
+
+    static var cleared: SearchInspectorState {
+        .init(inspectedMemoryID: nil, isPresented: false)
+    }
 }

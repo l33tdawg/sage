@@ -409,9 +409,11 @@ final class SearchViewModel {
         lastSuccessfulScope = scope
         isStale = false
         updatesAvailable = false
-        let visible = Set(memories.map(\.id))
-        selection.formIntersection(visible)
-        if let inspectedMemoryID, !visible.contains(inspectedMemoryID) { self.inspectedMemoryID = nil }
+        if !isMutating {
+            let visible = Set(memories.map(\.id))
+            selection.formIntersection(visible)
+            if let inspectedMemoryID, !visible.contains(inspectedMemoryID) { self.inspectedMemoryID = nil }
+        }
         lastUpdated = .now
     }
 

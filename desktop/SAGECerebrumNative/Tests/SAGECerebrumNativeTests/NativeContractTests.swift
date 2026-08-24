@@ -79,6 +79,8 @@ import Testing
         "global.command.keyboard-shortcuts",
         "overview.command.refresh",
         "search.command.refresh",
+        "search.command.toggle-inspector",
+        "search.command.clear-selection",
         "brain.command.refresh",
         "brain.command.toggle-inspector",
         "brain.command.mode-memory-map",
@@ -113,6 +115,8 @@ import Testing
         "global.command.keyboard-shortcuts|Keyboard Shortcuts…|/|command|⌘/|Global",
         "overview.command.refresh|Refresh Overview|r|command|⌘R|Global",
         "search.command.refresh|Refresh Search|r|command|⌘R|Global",
+        "search.command.toggle-inspector|Show or Hide Inspector|i|command+control|⌃⌘I|Search",
+        "search.command.clear-selection|Clear Search Selection|-|||Search",
         "brain.command.refresh|Refresh Brain|r|command|⌘R|Global",
         "brain.command.toggle-inspector|Show or Hide Inspector|i|command+control|⌃⌘I|Brain",
         "brain.command.mode-memory-map|Memory Map|1|control+option|⌥⌃1|Brain",
@@ -158,6 +162,7 @@ import Testing
     #expect(commands.contains("CommandGroup(before: .help)"))
     #expect(commands.contains("keyboardShortcut(KeyEquivalent(key), modifiers: command.specification.modifiers)"))
     #expect(commands.contains("Self.shortcutRow(.keyboardShortcuts)"))
+    #expect(commands.contains("(\"Clear Search Selection and Details\", \"Esc\")"))
     #expect(commands.contains("(\"Dismiss Current Brain Focus\", \"Esc\")"))
 
     let search = try String(
@@ -165,7 +170,115 @@ import Testing
         encoding: .utf8
     )
     #expect(search.contains("isPresented: $searchIsPresented"))
+    #expect(search.contains("searchIsPresented = false"))
     #expect(search.contains("onFocusRequestConsumed(focusRequestID)"))
+    #expect(search.contains("SearchInspectorLifecycle.activated"))
+    #expect(search.contains("SearchInspectorLifecycle.selectionChanged"))
+    #expect(search.contains(".onExitCommand"))
+    #expect(search.contains(".accessibilityIdentifier(\"search-results-table\")"))
+    #expect(search.contains(".accessibilityIdentifier(\"search-inspector-close\")"))
+    #expect(search.contains("showsFilters || showsBulkTagSheet"))
+    #expect(search.contains("forgetConfirmation != nil || model.isMutating"))
+    #expect(search.contains("model.inspectedMemoryID != nil && !model.isMutating"))
+    #expect(search.contains("clearBulkSelectionAndRestoreFocus"))
+    #expect(search.contains("dismissCurrentSearchFocusAndRestoreFocus"))
+}
+
+@Test func searchInspectorLifecycleSeparatesSelectionFromPresentation() {
+    var state = SearchInspectorLifecycle.activated(memoryID: "m1")
+    #expect(state == .init(inspectedMemoryID: "m1", isPresented: true))
+
+    state = SearchInspectorLifecycle.hidden(from: state)
+    #expect(state == .init(inspectedMemoryID: "m1", isPresented: false))
+    #expect(SearchInspectorLifecycle.toggled(from: state, inspectedMemoryIsAvailable: true)
+        == .init(inspectedMemoryID: "m1", isPresented: true))
+    #expect(SearchInspectorLifecycle.toggled(from: state, inspectedMemoryIsAvailable: false) == state)
+
+    let multiSelection = SearchInspectorLifecycle.selectionChanged(
+        from: state,
+        selection: ["m1", "m2"]
+    )
+    #expect(multiSelection == state)
+    #expect(SearchInspectorLifecycle.selectionChanged(from: state, selection: ["m2", "m3"])
+        == state)
+    #expect(SearchInspectorLifecycle.selectionChanged(from: state, selection: [])
+        == state)
+    #expect(SearchInspectorLifecycle.cleared == .init(inspectedMemoryID: nil, isPresented: false))
+}
+
+@MainActor
+@Test func searchRefreshPreservesVisibleInspectionAndClearsRemovedResults() async throws {
+    let decoder = JSONDecoder.sageDashboard()
+    let memories = try decoder.decode([MemorySummary].self, from: Data(#"""
+    [
+      {"memory_id":"m1","submitting_agent":"a1","content":"First","content_hash":"h1","memory_type":"fact","domain_tag":"native","provider":"local","confidence_score":0.9,"status":"committed","created_at":"2026-08-23T00:00:00Z","corroboration_count":1},
+      {"memory_id":"m2","submitting_agent":"a2","content":"Second","content_hash":"h2","memory_type":"observation","domain_tag":"native","provider":"local","confidence_score":0.8,"status":"committed","created_at":"2026-08-23T00:01:00Z","corroboration_count":0}
+    ]
+    """#.utf8))
+    let api = MutationTestAPI(forgetResults: [], searchMemories: memories)
+    let model = SearchViewModel(api: api)
+    await model.refresh()
+    model.selection = ["m1"]
+    model.inspectedMemoryID = "m1"
+
+    await model.refresh()
+    #expect(model.selection == ["m1"])
+    #expect(model.inspectedMemoryID == "m1")
+
+    await api.setSearchMemories([memories[1]])
+    await model.refresh()
+    #expect(model.selection.isEmpty)
+    #expect(model.inspectedMemoryID == nil)
+}
+
+@MainActor
+@Test func searchForgetPreservesUnsettledTargetsAndClearsOnlyDeprecatedOnes() async throws {
+    let memory = try JSONDecoder.sageDashboard().decode(MemorySummary.self, from: Data(#"""
+    {"memory_id":"m1","submitting_agent":"a1","content":"Governed","content_hash":"h1","memory_type":"fact","domain_tag":"native","provider":"local","confidence_score":0.9,"status":"committed","created_at":"2026-08-23T00:00:00Z","corroboration_count":1}
+    """#.utf8))
+    let challengedAPI = MutationTestAPI(
+        forgetResults: [.success(.init(status: "challenge_opened", message: nil))],
+        searchMemories: [memory]
+    )
+    let challenged = SearchViewModel(api: challengedAPI)
+    await challenged.refresh()
+    challenged.selection = [memory.id]
+    challenged.inspectedMemoryID = memory.id
+    await challengedAPI.setSearchMemories([])
+    await challenged.forget(ids: [memory.id])
+    #expect(challenged.selection == [memory.id])
+    #expect(challenged.inspectedMemoryID == memory.id)
+
+    let deprecatedAPI = MutationTestAPI(
+        forgetResults: [.success(.init(status: "deprecated", message: nil))],
+        searchMemories: [memory]
+    )
+    let deprecated = SearchViewModel(api: deprecatedAPI)
+    await deprecated.refresh()
+    deprecated.selection = [memory.id]
+    deprecated.inspectedMemoryID = memory.id
+    await deprecatedAPI.setSearchMemories([])
+    await deprecated.forget(ids: [memory.id])
+    #expect(deprecated.selection.isEmpty)
+    #expect(deprecated.inspectedMemoryID == nil)
+}
+
+@MainActor
+@Test func staleSearchTagResponseCannotPopulateANewInspector() async throws {
+    let api = MutationTestAPI(
+        forgetResults: [],
+        memoryTagsByID: ["m1": ["old"], "m2": ["current"]],
+        memoryTagDelays: ["m1": .milliseconds(60)]
+    )
+    let model = SearchViewModel(api: api)
+    model.inspectedMemoryID = "m1"
+    let staleLoad = Task { await model.loadInspectedTags() }
+    try await Task.sleep(for: .milliseconds(10))
+    model.inspectedMemoryID = "m2"
+    await model.loadInspectedTags()
+    await staleLoad.value
+    #expect(model.inspectedMemoryID == "m2")
+    #expect(model.inspectedTags == ["current"])
 }
 
 @Test func brainUsesPlainLanguageAliasesForPrimaryControls() {
@@ -1935,6 +2048,9 @@ private actor MutationTestAPI: SAGEAPI {
     let eventStreamError: SAGEAPIError?
     let brainEngrams: AgentEngramEnvelope?
     var brainRelated: RelatedMemoryEnvelope?
+    var searchMemories: [MemorySummary]
+    let memoryTagsByID: [String: [String]]
+    let memoryTagDelays: [String: Duration]
 
     init(
         forgetResults: [Result<MemoryMutationResponse, SAGEAPIError>],
@@ -1945,6 +2061,9 @@ private actor MutationTestAPI: SAGEAPI {
         connectome: ConnectomeEnvelope = .init(neurons: [], synapses: []),
         engrams: AgentEngramEnvelope? = nil,
         related: RelatedMemoryEnvelope? = nil,
+        searchMemories: [MemorySummary] = [],
+        memoryTagsByID: [String: [String]] = [:],
+        memoryTagDelays: [String: Duration] = [:],
         searchProjection: MemoryProjection? = nil,
         eventStreamError: SAGEAPIError? = nil
     ) {
@@ -1955,6 +2074,9 @@ private actor MutationTestAPI: SAGEAPI {
         self.eventStreamError = eventStreamError
         self.brainEngrams = engrams
         self.brainRelated = related
+        self.searchMemories = searchMemories
+        self.memoryTagsByID = memoryTagsByID
+        self.memoryTagDelays = memoryTagDelays
     }
 
     func authStatus() async throws -> AuthStatus { .init(authRequired: false, authenticated: true) }
@@ -1967,12 +2089,16 @@ private actor MutationTestAPI: SAGEAPI {
     func federation() async throws -> FederationOverview { .disabled }
     func memories(_ query: MemoryListQuery) async throws -> MemoryListEnvelope {
         .init(
-            memories: [], total: 0, limit: 100, offset: 0, nextCursor: nil,
+            memories: searchMemories, total: searchMemories.count, limit: 100, offset: 0, nextCursor: nil,
             continuationRequired: nil, authorLabels: nil, projection: searchProjection
         )
     }
+    func setSearchMemories(_ memories: [MemorySummary]) { searchMemories = memories }
     func tags() async throws -> TagEnvelope { .init(tags: [], partial: false) }
-    func memoryTags(id: String) async throws -> MemoryTagsEnvelope { .init(memoryID: id, tags: []) }
+    func memoryTags(id: String) async throws -> MemoryTagsEnvelope {
+        if let delay = memoryTagDelays[id] { try await Task.sleep(for: delay) }
+        return .init(memoryID: id, tags: memoryTagsByID[id] ?? [])
+    }
     func setMemoryTags(id: String, tags: [String]) async throws -> MemoryTagsEnvelope { .init(memoryID: id, tags: tags) }
     func addTag(_ tag: String, to ids: [String]) async throws -> BulkMemoryUpdateResponse { .init(status: "updated", updated: ids.count, total: ids.count) }
     func brainGraph(_ query: BrainGraphQuery) async throws -> BrainGraphEnvelope {
