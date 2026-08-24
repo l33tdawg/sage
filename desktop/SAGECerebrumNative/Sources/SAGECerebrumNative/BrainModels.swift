@@ -311,6 +311,7 @@ enum BrainMetalRecoveryEvent: Equatable, Sendable {
         accessibilitySurfaceOwned: Bool
     )
     case retryRequested
+    case retryCancelled
     case retryCompleted(attemptID: UInt64, succeeded: Bool)
 }
 
@@ -403,6 +404,14 @@ enum BrainMetalRecoveryReducer {
             state.retryInFlight = true
             state.attemptID &+= 1
             effects.beginRetryAttempt = state.attemptID
+
+        case .retryCancelled:
+            guard state.retryInFlight else {
+                return .init(state: current, effects: .none)
+            }
+            state.attemptID &+= 1
+            state.retryInFlight = false
+            effects.discardPreparedRenderer = true
 
         case let .retryCompleted(attemptID, succeeded):
             guard attemptID == state.attemptID, state.retryInFlight else {

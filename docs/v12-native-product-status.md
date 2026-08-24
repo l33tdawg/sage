@@ -102,9 +102,10 @@ family, renders the shared production scene encoder into a 4× MSAA offscreen
 target, resolves it, executes the bloom chain, waits for successful GPU
 completion, and verifies relative scene and bloom pixel changes without relying
 on cross-GPU golden hashes. A pure recovery reducer now fences stale renderer
-and retry completions, keeps keyboard and accessibility focus ownership
-independent, rejects MRI picker bypass while unavailable, and drives both
-initial mount and retry through one injectable renderer seam. A real
+and retry completions by attempt, cancels held retry work on mode or view
+invalidation, keeps keyboard and accessibility focus ownership independent, rejects MRI picker
+bypass while unavailable, and drives retry through a separately injectable
+asynchronous renderer seam while initial mount remains synchronous. A real
 `NSHostingView`/`NSWindow` test proves the production fallback notice, retry
 control, and synchronized memory table replace the failed MRI together without
 clearing selection or duplicating the bounded announcement. The retry control is
@@ -112,8 +113,14 @@ now a native AppKit button with an explicit identifier, label, help, disabled
 state, and in-progress value. Hosted acceptance activates its accessibility
 press action, proves a failed retry leaves the table and selection mounted, then
 uses a real prepared Metal renderer to prove recovery replaces the table while
-preserving selection. Restoration focus intent and its bounded announcement are withheld until
-both the MRI surface has mounted and that attempt reports renderer availability;
+preserving selection. A held-retry contract now proves the native button exposes
+an explicit Button role, disabled state, “Trying MRI” label, and “In progress”
+value; rejects a duplicate accessibility press; and leaves the fallback table
+and selection mounted. Switching to Connectome cancels that task, restores the
+enabled retry control beside the Connectome table, and releases a delayed stale
+success without mounting either MRI or announcing restoration. Restoration
+focus intent and its bounded announcement are withheld until both the MRI
+surface has mounted and that attempt reports renderer availability;
 duplicate consumption of the one-shot handoff fails closed. The required macOS
 CI lane explicitly enables the separate hardware probe. Brain now also resolves
 a pure layout plan from its actual routed content size: below the expanded tier,
@@ -122,10 +129,11 @@ headers and notices use fit-driven stacked variants, inspector dismissal keeps
 semantic selection, and Train of Thought minimums stay inside the available
 vertical budget. A hosted 620×540-to-expanded resize contract proves the
 fallback table, retry control, navigator transition, selected memory, and
-related-memory payload survive that presentation-only change. Real VoiceOver
-evidence and full SwiftUI focus-return
-evidence, cross-GPU/offline behavior, and deeper behavioral, accessibility,
-large-store, and performance evidence remain open.
+related-memory payload survive that presentation-only change. The hosted control
+tests do not establish discovery through SwiftUI’s accessibility tree or the
+system AX server. Real VoiceOver evidence, full SwiftUI focus-return evidence,
+cross-GPU/offline behavior, and deeper behavioral, accessibility, large-store,
+and performance evidence remain open.
 
 The first arm64 application bundle was built and launch-tested on 2026-08-23 at
 `dist/v12-native/12.0.0-beta.1/SAGE CEREBRUM Native.app`. Launch Services
@@ -206,7 +214,7 @@ acceptance gaps are not counted as another route slice.
 | Primary product area | Current surface | Current classification | Acceptance status |
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
-| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, responsive route-width policy and native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector presentation, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, accessibility-pressable native retry with mount-gated restoration, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity, hosted narrow-window transition, and hosted retry failure/restoration passes implemented; real VoiceOver and full SwiftUI focus-return proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
+| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, responsive route-width policy and native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector presentation, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, source-level focus targets, synchronized native tables, accessibility-pressable native retry with held-progress state, cancellation/fencing and mount-gated restoration, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity, hosted narrow-window transition, immediate retry failure, held stale-success cancellation, and successful restoration passes implemented; real VoiceOver and full SwiftUI focus-return proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
 | Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; whole-domain transfer and full acceptance evidence remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |

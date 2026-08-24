@@ -17,12 +17,14 @@ struct BrainView: View {
     @State private var availableSize = CGSize(width: 1_180, height: 760)
     @State private var mountedMetalSurfaces: Set<BrainMountedSurface> = []
     @State private var pendingMetalRestorationAttemptID: UInt64?
+    @State private var retryTask: Task<Void, Never>?
     @State private var announcementGeneration = 0
     @State private var keyboardFocusGeneration = 0
     @State private var accessibilityFocusGeneration = 0
     @FocusState private var keyboardFocus: BrainFocusTarget?
     @AccessibilityFocusState private var accessibilityFocus: BrainFocusTarget?
     private let rendererBootstrap: BrainMetalRendererFactory
+    private let retryRendererBootstrap: BrainMetalRetryBootstrap
     private let accessibilityAnnouncer: @MainActor (String) -> Void
     private let surfaceObserver: @MainActor (BrainMountedSurface, Bool) -> Void
     private let layoutObserver: @MainActor (BrainResponsiveLayoutPlan) -> Void
@@ -35,12 +37,16 @@ struct BrainView: View {
             }
             return .success(renderer)
         },
+        retryRendererBootstrap: BrainMetalRetryBootstrap? = nil,
         accessibilityAnnouncer: @escaping @MainActor (String) -> Void = BrainView.systemAccessibilityAnnouncement,
         surfaceObserver: @escaping @MainActor (BrainMountedSurface, Bool) -> Void = { _, _ in },
         layoutObserver: @escaping @MainActor (BrainResponsiveLayoutPlan) -> Void = { _ in }
     ) {
         _model = State(initialValue: BrainViewModel(api: api))
         self.rendererBootstrap = rendererBootstrap
+        self.retryRendererBootstrap = retryRendererBootstrap ?? {
+            rendererBootstrap({ _ in })
+        }
         self.accessibilityAnnouncer = accessibilityAnnouncer
         self.surfaceObserver = surfaceObserver
         self.layoutObserver = layoutObserver
@@ -49,6 +55,7 @@ struct BrainView: View {
     init(
         model: BrainViewModel,
         rendererBootstrap: @escaping BrainMetalRendererFactory,
+        retryRendererBootstrap: BrainMetalRetryBootstrap? = nil,
         accessibilityAnnouncer: @escaping @MainActor (String) -> Void,
         surfaceObserver: @escaping @MainActor (BrainMountedSurface, Bool) -> Void,
         layoutObserver: @escaping @MainActor (BrainResponsiveLayoutPlan) -> Void = { _ in }
@@ -56,6 +63,9 @@ struct BrainView: View {
         _model = State(initialValue: model)
         _showsInspector = State(initialValue: model.hasVisibleInspector)
         self.rendererBootstrap = rendererBootstrap
+        self.retryRendererBootstrap = retryRendererBootstrap ?? {
+            rendererBootstrap({ _ in })
+        }
         self.accessibilityAnnouncer = accessibilityAnnouncer
         self.surfaceObserver = surfaceObserver
         self.layoutObserver = layoutObserver
@@ -167,6 +177,9 @@ struct BrainView: View {
         }
         .onChange(of: trainOfThoughtVisible) { _, _ in
             layoutObserver(layoutPlan)
+        }
+        .onDisappear {
+            applyMetalEvent(.retryCancelled)
         }
     }
 
@@ -969,9 +982,13 @@ struct BrainView: View {
     }
 
     private func beginMetalRetry(attemptID: UInt64) {
-        Task { @MainActor in
+        let retryMode = model.mode
+        retryTask?.cancel()
+        retryTask = Task { @MainActor in
             await Task.yield()
-            switch rendererBootstrap({ _ in }) {
+            let result = await retryRendererBootstrap()
+            guard !Task.isCancelled, model.mode == retryMode else { return }
+            switch result {
             case let .success(renderer):
                 applyMetalEvent(
                     .retryCompleted(attemptID: attemptID, succeeded: true),
@@ -979,6 +996,9 @@ struct BrainView: View {
                 )
             case .failure:
                 applyMetalEvent(.retryCompleted(attemptID: attemptID, succeeded: false))
+            }
+            if metalRecovery.attemptID == attemptID {
+                retryTask = nil
             }
         }
     }
@@ -1002,8 +1022,12 @@ struct BrainView: View {
         let transition = BrainMetalRecoveryReducer.reduce(metalRecovery, event: event)
         let effects = transition.effects
 
-        if effects.discardPreparedRenderer { preparedMetalRenderer = nil }
-        if effects.discardPreparedRenderer { pendingMetalRestorationAttemptID = nil }
+        if effects.discardPreparedRenderer {
+            retryTask?.cancel()
+            retryTask = nil
+            preparedMetalRenderer = nil
+            pendingMetalRestorationAttemptID = nil
+        }
         if effects.acceptPreparedRenderer, let preparedRenderer {
             preparedMetalRenderer = BrainMetalRendererHandoff(preparedRenderer)
         }
@@ -1197,6 +1221,7 @@ private struct BrainMetalRetryButton: NSViewRepresentable {
         button.setButtonType(.momentaryPushIn)
         button.identifier = NSUserInterfaceItemIdentifier("brain-metal-retry")
         button.setAccessibilityIdentifier("brain-metal-retry")
+        button.setAccessibilityRole(.button)
         button.setAccessibilityHelp("Attempts to restore the interactive Metal MRI while preserving the accessible table and current selection.")
         update(button)
         return button

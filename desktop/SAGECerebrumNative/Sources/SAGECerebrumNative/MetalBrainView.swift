@@ -67,6 +67,11 @@ typealias BrainMetalRendererFactory = @MainActor (
     @escaping (BrainMetalPick) -> Void
 ) -> Result<BrainMetalRenderer, BrainMetalBootstrapFailure>
 
+typealias BrainMetalRetryBootstrap = @MainActor () async -> Result<
+    BrainMetalRenderer,
+    BrainMetalBootstrapFailure
+>
+
 @MainActor
 final class BrainMetalCoordinator {
     let renderer: BrainMetalRenderer?

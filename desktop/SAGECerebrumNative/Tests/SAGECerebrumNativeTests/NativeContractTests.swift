@@ -13,22 +13,8 @@ import Testing
     #expect(Set(AppRoute.allCases.map(\.cerebrumHash)).count == 9)
 }
 
-@MainActor
-@Test func hostedMetalSurfaceAcceptsNativeFirstResponderFocus() {
-    let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
-        styleMask: [.borderless],
-        backing: .buffered,
-        defer: false
-    )
-    let surface = InteractiveMetalView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), device: nil)
-    window.contentView = surface
-
-    #expect(surface.window === window)
-    #expect(surface.acceptsFirstResponder)
-    #expect(window.makeFirstResponder(surface))
-    #expect(window.firstResponder === surface)
-}
+@Suite(.serialized)
+struct HostedBrainAcceptance {}
 
 @MainActor
 @Test(.enabled(if: ProcessInfo.processInfo.environment["SAGE_REQUIRE_METAL_HARDWARE"] == "1"))
@@ -196,6 +182,11 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     #expect(duplicate.state == requested.state)
     #expect(duplicate.effects == .none)
 
+    let cancelled = BrainMetalRecoveryReducer.reduce(requested.state, event: .retryCancelled)
+    #expect(!cancelled.state.retryInFlight)
+    #expect(cancelled.state.attemptID == 9)
+    #expect(cancelled.effects.discardPreparedRenderer)
+
     let changedMode = BrainMetalRecoveryReducer.reduce(requested.state, event: .modeChanged)
     #expect(!changedMode.state.retryInFlight)
     #expect(changedMode.state.attemptID == 9)
@@ -207,6 +198,23 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     )
     #expect(staleSuccess.state == changedMode.state)
     #expect(staleSuccess.effects == .none)
+
+    let staleFailure = BrainMetalRecoveryReducer.reduce(
+        changedMode.state,
+        event: .retryCompleted(attemptID: 8, succeeded: false)
+    )
+    #expect(staleFailure.state == changedMode.state)
+    #expect(staleFailure.effects == .none)
+
+    let newerRetry = BrainMetalRecoveryReducer.reduce(changedMode.state, event: .retryRequested)
+    #expect(newerRetry.state.retryInFlight)
+    #expect(newerRetry.state.attemptID == 10)
+    let oldCompletionDuringNewerRetry = BrainMetalRecoveryReducer.reduce(
+        newerRetry.state,
+        event: .retryCompleted(attemptID: 8, succeeded: true)
+    )
+    #expect(oldCompletionDuringNewerRetry.state == newerRetry.state)
+    #expect(oldCompletionDuringNewerRetry.effects == .none)
 }
 
 @Test func metalRecoveryRetryProducesDeterministicFailureAndSuccessEffects() {
@@ -273,6 +281,7 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     #expect(coordinator.capability == .unavailable(.rendererInitialization))
 }
 
+extension HostedBrainAcceptance {
 @MainActor
 @Test func hostedBrainMountsAccessibleFallbackWithoutClearingSelection() async throws {
     let selected = BrainNode(
@@ -304,6 +313,8 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     )
     let host = NSHostingView(rootView: view)
     window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    host.layoutSubtreeIfNeeded()
     let surfaces = try await waitForMountedSurfaces(
         recorder,
         required: [.metalFallbackNotice, .metalRetryButton, .memoryTable],
@@ -317,9 +328,9 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     #expect(model.selectedNodeID == selected.id)
     #expect(recorder.announcements == ["Interactive MRI unavailable. Showing Accessible Table."])
 }
+}
 
-@Suite(.serialized)
-struct HostedBrainRetryAcceptance {
+extension HostedBrainAcceptance {
 @MainActor
 @Test func hostedBrainRetryControlPerformsARealAccessibilityPressAndKeepsFallbackStable() async throws {
     let selected = BrainNode(
@@ -377,6 +388,113 @@ struct HostedBrainRetryAcceptance {
         "Interactive MRI unavailable. Showing Accessible Table.",
         "Interactive MRI is still unavailable. Accessible Table remains active.",
     ])
+}
+
+@MainActor
+@Test(.enabled(if: ProcessInfo.processInfo.environment["SAGE_REQUIRE_METAL_HARDWARE"] == "1"))
+func hostedBrainHoldsRetryProgressAndDiscardsDelayedSuccessAfterModeChange() async throws {
+    let selected = BrainNode(
+        id: "held-retry-memory", content: "Held retry native memory", domain: "native",
+        confidence: 0.99, status: "committed", memoryType: "fact", createdAt: .now,
+        agent: "test", agentLabel: "Test Agent", agentIsRoot: false,
+        tags: ["retry", "stale"], corroborationCount: 6
+    )
+    let graph = BrainGraphEnvelope(
+        nodes: [selected], edges: [], total: 1, domainCounts: ["native": 1],
+        domainLast: nil, continuationRequired: false, projection: nil
+    )
+    let connectome = ConnectomeEnvelope(
+        neurons: [.init(agentID: "retry-agent", name: "Retry Agent", role: "member", domain: "native")],
+        synapses: []
+    )
+    let api = MutationTestAPI(forgetResults: [], graph: graph, connectome: connectome)
+    let model = BrainViewModel(api: api)
+    model.graph = graph
+    model.connectome = connectome
+    model.selectedNodeID = selected.id
+    let recorder = BrainHostRecorder()
+    let gate = BrainRetryGate()
+    defer { gate.open() }
+    var delayedRenderer: BrainMetalRenderer? = BrainMetalRenderer(onPick: { _ in })
+    weak let releasedRenderer = delayedRenderer
+    let view = BrainView(
+        model: model,
+        rendererBootstrap: { _ in
+            recorder.bootstrapAttempts += 1
+            return .failure(.rendererInitialization)
+        },
+        retryRendererBootstrap: {
+            recorder.retryBootstrapAttempts += 1
+            await gate.wait()
+            recorder.retryBootstrapReturned = true
+            guard let renderer = delayedRenderer else {
+                return .failure(.rendererInitialization)
+            }
+            delayedRenderer = nil
+            return .success(renderer)
+        },
+        accessibilityAnnouncer: { recorder.recordAnnouncement($0) },
+        surfaceObserver: { recorder.update($0, mounted: $1) }
+    )
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
+        styleMask: [.titled, .resizable], backing: .buffered, defer: false
+    )
+    let host = NSHostingView(rootView: view)
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    host.layoutSubtreeIfNeeded()
+    _ = try await waitForMountedSurfaces(
+        recorder,
+        required: [.metalFallbackNotice, .metalRetryButton, .memoryTable],
+        forbidden: [.memoryMRI]
+    )
+    try await waitForAnnouncements(recorder, count: 1)
+
+    try await pressAccessibilityElement(identifier: "brain-metal-retry", in: host)
+    try await waitUntil { recorder.retryBootstrapAttempts == 1 && gate.isWaiting }
+    let retryButton = try await waitForNativeAccessibilityButton(
+        identifier: "brain-metal-retry",
+        in: host,
+        where: { !$0.isEnabled }
+    )
+    #expect(retryButton.accessibilityRole() == .button)
+    #expect(!retryButton.isAccessibilityEnabled())
+    #expect(retryButton.accessibilityLabel() == "Trying MRI")
+    #expect(retryButton.accessibilityValue() as? String == "In progress")
+    #expect(!retryButton.accessibilityPerformPress())
+    #expect(recorder.retryBootstrapAttempts == 1)
+    #expect(model.selectedNodeID == selected.id)
+    _ = try await waitForMountedSurfaces(
+        recorder,
+        required: [.metalFallbackNotice, .metalRetryButton, .memoryTable],
+        forbidden: [.memoryMRI]
+    )
+
+    model.mode = .connectome
+    gate.open()
+    try await waitUntil { recorder.retryBootstrapReturned && releasedRenderer == nil }
+    _ = try await waitForMountedSurfaces(
+        recorder,
+        required: [.metalFallbackNotice, .metalRetryButton, .connectomeTable],
+        forbidden: [.memoryMRI, .memoryTable, .connectomeMRI]
+    )
+    let resetRetryButton = try await waitForNativeAccessibilityButton(
+        identifier: "brain-metal-retry",
+        in: host,
+        where: { $0.isEnabled }
+    )
+    #expect(resetRetryButton.accessibilityLabel() == "Try MRI Again")
+    #expect(resetRetryButton.isAccessibilityEnabled())
+
+    #expect(model.mode == .connectome)
+    #expect(model.selectedNodeID == selected.id)
+    #expect(recorder.retryBootstrapAttempts == 1)
+    #expect(recorder.announcements == [
+        "Interactive MRI unavailable. Showing Accessible Table.",
+    ])
+    #expect(!recorder.surfaces.contains(.memoryMRI))
+    #expect(!recorder.surfaces.contains(.connectomeMRI))
 }
 
 @MainActor
@@ -461,6 +579,7 @@ func hostedBrainRetryControlRestoresMRIOnlyAfterTheRendererMounts() async throws
 }
 }
 
+extension HostedBrainAcceptance {
 @MainActor
 @Test func hostedBrainAdaptsAcrossNarrowAndExpandedWidthsWithoutLosingSelection() async throws {
     let selected = BrainNode(
@@ -495,7 +614,10 @@ func hostedBrainRetryControlRestoresMRIOnlyAfterTheRendererMounts() async throws
         contentRect: NSRect(x: 0, y: 0, width: 620, height: 540),
         styleMask: [.titled, .resizable], backing: .buffered, defer: false
     )
-    window.contentView = NSHostingView(rootView: view)
+    let host = NSHostingView(rootView: view)
+    window.contentView = host
+    window.makeKeyAndOrderFront(nil)
+    host.layoutSubtreeIfNeeded()
 
     let narrow = try await waitForLayoutTier(recorder, tier: .compact)
     let narrowSurfaces = try await waitForMountedSurfaces(
@@ -518,6 +640,26 @@ func hostedBrainRetryControlRestoresMRIOnlyAfterTheRendererMounts() async throws
     #expect(expandedSurfaces.contains(.inlineNavigator))
     #expect(model.selectedNodeID == selected.id)
     #expect(model.relatedMemories?.id == selected.id)
+}
+}
+
+extension HostedBrainAcceptance {
+@MainActor
+@Test func hostedMetalSurfaceAcceptsNativeFirstResponderFocus() {
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+    )
+    let surface = InteractiveMetalView(frame: NSRect(x: 0, y: 0, width: 320, height: 240), device: nil)
+    window.contentView = surface
+
+    #expect(surface.window === window)
+    #expect(surface.acceptsFirstResponder)
+    #expect(window.makeFirstResponder(surface))
+    #expect(window.firstResponder === surface)
+}
 }
 
 @Test func APIBaseURLRejectsRemoteAndCredentialedOrigins() {
@@ -1034,6 +1176,8 @@ private final class BrainHostRecorder {
     var announcements: [String] = []
     var layouts: [BrainResponsiveLayoutPlan] = []
     var bootstrapAttempts = 0
+    var retryBootstrapAttempts = 0
+    var retryBootstrapReturned = false
     var servesSuccessRenderer = false
     var successRenderer: BrainMetalRenderer?
     var events: [Event] = []
@@ -1054,11 +1198,44 @@ private final class BrainHostRecorder {
     }
 }
 
+@MainActor
+private final class BrainRetryGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    var isWaiting: Bool { continuation != nil }
+
+    func wait() async {
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func open() {
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 private enum HostedBrainTestError: Error {
     case surfacesDidNotMount(Set<BrainMountedSurface>)
     case layoutTierDidNotMount(BrainResponsiveTier)
     case accessibilityElementDidNotPress(String)
     case retryAttemptsDidNotReach(Int)
+    case nativeAccessibilityButtonDidNotAppear(String)
+    case conditionDidNotBecomeTrue
+}
+
+@MainActor
+private func waitUntil(
+    timeout: Duration = .seconds(6),
+    condition: @MainActor () -> Bool
+) async throws {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+        if condition() { return }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    if condition() { return }
+    throw HostedBrainTestError.conditionDidNotBecomeTrue
 }
 
 @MainActor
@@ -1116,6 +1293,41 @@ private func findAndPressAccessibilityElement(
         }
     }
     return false
+}
+
+@MainActor
+private func waitForNativeAccessibilityButton(
+    identifier: String,
+    in root: NSView,
+    timeout: Duration = .seconds(6),
+    where predicate: @MainActor (NSButton) -> Bool = { _ in true }
+) async throws -> NSButton {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+        if let button = findNativeAccessibilityButton(identifier: identifier, in: root), predicate(button) {
+            return button
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    if let button = findNativeAccessibilityButton(identifier: identifier, in: root), predicate(button) {
+        return button
+    }
+    throw HostedBrainTestError.nativeAccessibilityButtonDidNotAppear(identifier)
+}
+
+@MainActor
+private func findNativeAccessibilityButton(identifier: String, in root: NSView) -> NSButton? {
+    if let button = root as? NSButton,
+       button.accessibilityIdentifier() == identifier || button.identifier?.rawValue == identifier {
+        return button
+    }
+    for child in root.subviews {
+        if let button = findNativeAccessibilityButton(identifier: identifier, in: child) {
+            return button
+        }
+    }
+    return nil
 }
 
 @MainActor
