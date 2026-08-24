@@ -10,6 +10,18 @@ enum MemoryOperationTone: Equatable, Sendable {
 @MainActor
 @Observable
 final class SearchViewModel {
+    private struct SnapshotScope: Hashable {
+        let query: String
+        let domain: String
+        let status: String
+        let tag: String
+        let agent: String
+        let sort: String
+        let datePreset: String
+        let customFrom: Date?
+        let customTo: Date?
+    }
+
     var query = ""
     var domain = ""
     var status = "active"
@@ -41,20 +53,68 @@ final class SearchViewModel {
     var isLoading = false
     var isLoadingOlder = false
     var errorMessage: String?
-    var liveEventsConnected = false
+    var eventStreamState: CerebrumEventStreamState = .connecting
+    var hasCompletedRefresh: Bool {
+        get { completedScopes.contains(currentScope) }
+        set {
+            if newValue { completedScopes.insert(currentScope) }
+            else { completedScopes.remove(currentScope) }
+        }
+    }
     var lastUpdated: Date?
-    var isStale = false
-    var updatesAvailable = false
+    var isStale: Bool {
+        get { staleScopes.contains(currentScope) }
+        set {
+            if newValue { staleScopes.insert(currentScope) }
+            else { staleScopes.remove(currentScope) }
+        }
+    }
+    var updatesAvailable: Bool {
+        get { pendingUpdateScopes.contains(currentScope) }
+        set {
+            if newValue { pendingUpdateScopes.insert(currentScope) }
+            else { pendingUpdateScopes.remove(currentScope) }
+        }
+    }
 
     private let api: any SAGEAPI
     private var requestGeneration = 0
     private var tagRequestGeneration = 0
     private var metadataGeneration = 0
+    private var lastSuccessfulScope: SnapshotScope?
+    private var pendingUpdateScopes = Set<SnapshotScope>()
+    private var completedScopes = Set<SnapshotScope>()
+    private var staleScopes = Set<SnapshotScope>()
+    private var eventRefresh: Task<Void, Never>?
 
     init(api: any SAGEAPI) { self.api = api }
 
+    var dataStatus: CerebrumDataStatus {
+        let snapshot: CerebrumSnapshotState
+        if lastSuccessfulScope == currentScope, let lastUpdated {
+            if isStale {
+                snapshot = .refreshFailed(updatedAt: lastUpdated)
+            } else if projection?.partial == true {
+                snapshot = .partial(updatedAt: lastUpdated, detail: projection?.message)
+            } else {
+                snapshot = .available(updatedAt: lastUpdated)
+            }
+        } else {
+            snapshot = isLoading || !hasCompletedRefresh ? .loading : .unavailable
+        }
+        return .init(
+            snapshot: snapshot,
+            events: eventStreamState,
+            isRefreshing: isLoading,
+            hasPendingUpdate: updatesAvailable
+        )
+    }
+
+    var hasSnapshotForCurrentScope: Bool { lastSuccessfulScope == currentScope }
+
     var inspectedMemory: MemorySummary? {
-        memories.first { $0.id == inspectedMemoryID }
+        guard hasSnapshotForCurrentScope else { return nil }
+        return memories.first { $0.id == inspectedMemoryID }
     }
 
     var activeFilterCount: Int {
@@ -80,34 +140,52 @@ final class SearchViewModel {
     func refresh() async {
         requestGeneration += 1
         let generation = requestGeneration
+        let requestedScope = currentScope
+        let requestedQuery = currentQuery()
+        var didComplete = false
         isLoading = true
         errorMessage = nil
-        defer { if generation == requestGeneration { isLoading = false } }
+        defer {
+            if generation == requestGeneration {
+                isLoading = false
+                if didComplete { hasCompletedRefresh = true }
+            }
+        }
         do {
-            let response = try await api.memories(currentQuery())
-            guard generation == requestGeneration else { return }
-            apply(response, append: false)
+            let response = try await api.memories(requestedQuery)
+            guard generation == requestGeneration, currentScope == requestedScope,
+                  !Task.isCancelled else { return }
+            apply(response, append: false, scope: requestedScope)
+            didComplete = true
         } catch is CancellationError {
             return
         } catch {
-            guard generation == requestGeneration else { return }
-            isStale = !memories.isEmpty
+            guard generation == requestGeneration, currentScope == requestedScope,
+                  !Task.isCancelled else { return }
+            isStale = lastSuccessfulScope == requestedScope && lastUpdated != nil
             errorMessage = error.localizedDescription
+            didComplete = true
         }
     }
 
     func loadOlder() async {
         guard let nextCursor, !nextCursor.isEmpty, !isLoadingOlder else { return }
         let generation = requestGeneration
+        let requestedScope = currentScope
         isLoadingOlder = true
         defer { isLoadingOlder = false }
         do {
             var query = currentQuery()
             query.cursor = nextCursor
             let response = try await api.memories(query)
-            guard generation == requestGeneration, self.nextCursor == nextCursor else { return }
-            apply(response, append: true)
+            guard generation == requestGeneration, currentScope == requestedScope,
+                  self.nextCursor == nextCursor, !Task.isCancelled else { return }
+            apply(response, append: true, scope: requestedScope)
+        } catch is CancellationError {
+            return
         } catch {
+            guard generation == requestGeneration, currentScope == requestedScope,
+                  !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
         }
     }
@@ -276,9 +354,16 @@ final class SearchViewModel {
     }
 
     func runLiveUpdates() async {
-        async let events: Void = consumeEvents()
-        async let fallback: Void = pollFallback()
-        _ = await (events, fallback)
+        defer {
+            eventRefresh?.cancel()
+            eventRefresh = nil
+        }
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.consumeEvents() }
+            group.addTask { await self.pollScheduledRefresh() }
+            _ = await group.next()
+            group.cancelAll()
+        }
     }
 
     private func currentQuery() -> MemoryListQuery {
@@ -295,7 +380,21 @@ final class SearchViewModel {
         )
     }
 
-    private func apply(_ response: MemoryListEnvelope, append: Bool) {
+    private var currentScope: SnapshotScope {
+        .init(
+            query: query,
+            domain: domain,
+            status: status,
+            tag: tag,
+            agent: agent,
+            sort: sort.rawValue,
+            datePreset: datePreset.rawValue,
+            customFrom: datePreset == .custom ? customFrom : nil,
+            customTo: datePreset == .custom ? customTo : nil
+        )
+    }
+
+    private func apply(_ response: MemoryListEnvelope, append: Bool, scope: SnapshotScope) {
         if append {
             let known = Set(memories.map(\.id))
             memories.append(contentsOf: response.memories.filter { !known.contains($0.id) })
@@ -307,6 +406,7 @@ final class SearchViewModel {
         continuationRequired = response.continuationRequired == true
         authorLabels.merge(response.authorLabels ?? [:]) { _, new in new }
         projection = response.projection
+        lastSuccessfulScope = scope
         isStale = false
         updatesAvailable = false
         let visible = Set(memories.map(\.id))
@@ -316,39 +416,55 @@ final class SearchViewModel {
     }
 
     private func consumeEvents() async {
+        eventStreamState = .connecting
         let stream = await api.events()
         do {
-            for try await event in stream {
+            for try await element in stream {
                 if Task.isCancelled { break }
-                await handleLiveEvent(event)
+                handleEventStreamElement(element)
             }
+        } catch is CancellationError {
+            return
+        } catch SAGEAPIError.unauthorized {
+            eventStreamState = .stopped
+            purgeSensitiveState()
+            return
         } catch {
-            liveEventsConnected = false
+            if !Task.isCancelled { eventStreamState = .reconnecting }
+        }
+        if !Task.isCancelled { eventStreamState = .reconnecting }
+    }
+
+    func handleEventStreamElement(_ element: DashboardEventStreamElement) {
+        switch element {
+        case let .state(state):
+            eventStreamState = state
+        case let .event(event):
+            handleLiveEvent(event)
         }
     }
 
-    private func pollFallback() async {
+    private func pollScheduledRefresh() async {
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(30))
             if Task.isCancelled { break }
-            if selection.isEmpty { await refresh() }
-            else { updatesAvailable = true }
+            await refresh()
         }
     }
 
-    func handleLiveEvent(_ event: DashboardEvent) async {
-        if event.name == "disconnected" {
-            liveEventsConnected = false
-            return
-        }
-        liveEventsConnected = true
-        guard event.name != "connected" else { return }
+    func handleLiveEvent(_ event: DashboardEvent) {
         if event.name == "access" {
             purgeSensitiveState()
-            async let content: Void = refresh()
-            async let metadata: Void = loadMetadata()
-            _ = await (content, metadata)
-        } else if selection.isEmpty { await refresh() }
+            eventRefresh = Task { [weak self] in
+                guard let self else { return }
+                async let content: Void = refresh()
+                async let metadata: Void = loadMetadata()
+                _ = await (content, metadata)
+            }
+        } else if selection.isEmpty {
+            eventRefresh?.cancel()
+            eventRefresh = Task { [weak self] in await self?.refresh() }
+        }
         else { updatesAvailable = true }
     }
 
@@ -366,6 +482,8 @@ final class SearchViewModel {
 
     private func purgeSensitiveState() {
         requestGeneration += 1
+        eventRefresh?.cancel()
+        eventRefresh = nil
         tagRequestGeneration += 1
         metadataGeneration += 1
         memories = []
@@ -385,6 +503,14 @@ final class SearchViewModel {
         operationMessage = nil
         updatesAvailable = false
         isStale = false
+        isLoading = false
+        errorMessage = nil
+        hasCompletedRefresh = false
+        lastUpdated = nil
+        lastSuccessfulScope = nil
+        pendingUpdateScopes.removeAll()
+        completedScopes.removeAll()
+        staleScopes.removeAll()
     }
 }
 

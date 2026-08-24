@@ -438,7 +438,7 @@ enum BrainMetalRecoveryReducer {
     }
 }
 
-enum BrainMode: String, CaseIterable, Identifiable, Sendable {
+enum BrainMode: String, CaseIterable, Hashable, Identifiable, Sendable {
     case memory
     case connectome
     var id: String { rawValue }

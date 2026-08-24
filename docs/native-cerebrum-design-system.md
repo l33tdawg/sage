@@ -41,20 +41,32 @@ website in a window, a mobile app enlarged for desktop, or a sci-fi skin.
 - Content grids are adaptive and collapse naturally with window width and text
   size.
 
-## Motion and live data
+## Motion and changing data
 
 - Use short `.snappy` transitions for numeric and state changes.
 - Use gentle spring transitions for navigation, inspectors and disclosure.
-- Continuous animation is limited to meaningful live status or MRI rendering.
+- Continuous animation is limited to MRI rendering; data and transport status
+  use static symbols and native progress indicators.
 - Respect Reduce Motion, Reduce Transparency and Increase Contrast.
 - SSE is an invalidation signal. Native stores refetch authoritative API state;
   polling remains a low-frequency recovery path because SSE has no resume log.
+- Snapshot quality and event transport are separate axes. Snapshot labels report
+  loading, updated age, partial projection, cached refresh failure, or unavailable
+  data. Transport labels report only connecting, connected, or reconnecting event
+  updates, with Stopped reserved for terminal session authorization. Neither an
+  open SSE connection nor polling proves freshness or offline state.
+- Pending updates are an independent, selection-preserving signal raised only by
+  a relevant invalidation event—not by a refresh timer. Visible snapshot age is
+  keyed to the active Search query or Brain mode/filter scope.
+- Route-level unit coverage proves scope, partiality, authorization purge, and
+  transport/domain-event separation. End-to-end URLSession EOF/error/backoff and
+  cancellation timing remain promotion evidence, not completed acceptance.
 - Background scenes pause nonessential animation and high-rate refresh work.
 
 ## Component grammar
 
 - Grouped, collapsible native sidebar with SF Symbols and text labels.
-- Unified toolbar for contextual actions, refresh, live status and session lock.
+- Unified toolbar for contextual actions, refresh, data/transport status and session lock.
 - Page header: restrained eyebrow, clear title, one-line purpose statement.
 - Hero surface: one decisive operational summary, never a marketing banner.
 - Cards: semantic title, optional status, divider, adaptive metrics or native

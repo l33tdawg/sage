@@ -163,10 +163,23 @@ The native visual foundation is now frozen in
 first design pass establishes SF Pro/SF Mono roles, adaptive light/dark SAGE
 tokens, grouped macOS navigation, semantic cards, responsive metrics, native
 unlock progress/focus behavior, reduced-motion-aware transitions, and explicit
-loading/degraded labels. Overview now consumes the dashboard SSE stream as an
-invalidation channel, refetches authoritative state after events, reports live
-versus reconnecting status, pauses while the scene is inactive, and retains a
-30-second polling recovery path.
+loading/degraded labels. Overview, Search, and Brain now present fetched snapshot
+quality separately from typed SSE transport state. Snapshot labels distinguish
+loading, updated age, partial projection, cached refresh failure, and unavailable
+data; transport labels only report event updates connecting, connected,
+reconnecting, or terminally stopped after session authorization ends. Normal
+stream EOF and transient errors reconnect with capped
+backoff, authorization termination purges sensitive state, and a terminated
+stream cancels its scheduled-refresh sibling. The 30-second recovery refresh no
+longer fabricates an “Update available” claim; that independent,
+selection-preserving signal is raised only by relevant SSE invalidation.
+Search timestamps are keyed to the exact query/filter scope and Brain timestamps
+to mode/domain/status, so an older result cannot appear current for a newly
+selected scope.
+The typed view-model transitions, scope isolation, partiality, and authorization
+termination are unit-tested. Real URLSession EOF/error/backoff timing and
+cancellation remain explicit promotion evidence rather than completed runtime
+acceptance.
 
 This record separates four claims that must not be conflated:
 

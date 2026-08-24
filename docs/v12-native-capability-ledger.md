@@ -59,7 +59,7 @@ links from the historical Tauri prototype are not evidence for this product.
 | `session.login-lock-recover` | global/session | Connect, unlock and lock the local encrypted session; show native failure state | `RootView`, `AppSession`, `LoginView`, typed auth APIs | `native-control` | Daemon launch/supervision, recovery continuity, auth-denial and data-safety evidence | partial; acceptance open |
 | `global.navigation-preferences` | global | Native split-view sidebar with three selectable implemented destinations, six non-selectable Coming Soon destinations, and fixed ready-session route commands | `RootView`, `AppRoute`, `SAGECerebrumNativeApp` | `native-control` | Functional Settings scene, deep links, restoration, hosted menu/focus, zoom and reduced-motion evidence | partial; acceptance open |
 | `onboarding.run` | global/settings | First-run setup and explicit rerun | Browser workflow and onboarding/embeddings/provider APIs are parity references | `native-control` target | Clean-machine native flow, restart continuity, permissions, offline/degraded paths | implementation open |
-| `overview.inspect-health` | overview | Health, memory/agent/federation/consensus summary and live activity | `OverviewView`, `OverviewViewModel`; health/stats/agents/validators/federation APIs and SSE | `native-control` | Paint/interactive latency, SSE loss, stale/degraded and offline evidence | implemented; acceptance open |
+| `overview.inspect-health` | overview | Health, memory/agent/federation/consensus summary with independent snapshot quality and event-transport state | `OverviewView`, `OverviewViewModel`; health/stats/agents/validators/federation APIs and typed SSE transport | `native-control` | Paint/interactive latency, prolonged SSE loss, stale/degraded and typed offline evidence | implemented; acceptance open |
 | `overview.resolve-adoption` | overview | Inspect, retry, assign, or deprecate historical adoption items | Browser workflow and adoption APIs are parity references | `native-control` target | Native implementation, Root/operator authorization, interruption and immutable history evidence | implementation open |
 | `brain.explore-memory` | brain | Render the Memory Map (MRI), filter domain/status, orbit/zoom/select, inspect loaded memory, switch to synchronized List View (Accessible Table), preserve focus across invalidation notices, and fall back to that same table with an accessibility-pressable explicit retry when renderer initialization fails | `BrainView`, `BrainViewModel`, `MetalBrainView`; memory graph API and SSE | `native-control` | Real VoiceOver/system-AX discovery and focus delivery, MRI pacing, large-store/offline and deeper behavioral/accessibility evidence | implemented; hosted Memory press, held-progress, mode-cancelled stale-success and restoration transitions covered; acceptance open |
 | `brain.inspect-related` | brain | Fetch an exact selected memory's related results and present a resizable Train of Thought pane grouped as Do, Don't, Observations and Notes, with separate typed anchor/related focus and responsive vertical budgets | `BrainView`, `BrainViewModel`; related-memory API | `native-control` | Full SwiftUI focus-transition and VoiceOver evidence plus broader failure-state acceptance | implemented; hosted narrow-window contract complete; acceptance open |
@@ -106,6 +106,12 @@ links from the historical Tauri prototype are not evidence for this product.
   selection, inspector, engram, and related-memory state on `access`; promotion
   still requires behavioral tests and runtime evidence for coalescing, races,
   authorization changes, Table/Metal parity, and large snapshots.
+- Overview, Search, and Brain use typed transport elements rather than synthetic
+  event names. Snapshot quality remains visible independently from transport;
+  Search and Brain key successful snapshot age to their active request scope,
+  map backend partial projections, and keep pending-update state separate.
+  Route-level tests cover terminal authorization and scope isolation; real
+  URLSession EOF/backoff/cancellation timing remains acceptance-open.
 - Browser CEREBRUM remains the Linux/Windows product and parity reference, but
   browser success cannot stand in for native macOS application evidence.
 - The source generator does not prove the exact rendered UI/action cross-product

@@ -44,6 +44,225 @@ import Testing
     #expect(BrainPresentation.table.accessibilityTitle.contains("Accessible Table"))
 }
 
+@MainActor
+@Test func overviewStatusSeparatesSnapshotCompletenessFromEventTransport() async {
+    let model = OverviewViewModel(api: MutationTestAPI(forgetResults: []))
+    let updated = Date(timeIntervalSince1970: 1_700_000_000)
+
+    #expect(model.dataStatus == .init(snapshot: .loading, events: .connecting))
+    model.hasCompletedRefresh = true
+    #expect(model.dataStatus.snapshot == .unavailable)
+
+    model.lastUpdated = updated
+    #expect(model.dataStatus.snapshot == .available(updatedAt: updated))
+    model.healthIsStale = true
+    model.statsAreStale = true
+    #expect(model.dataStatus.snapshot == .partial(
+        updatedAt: updated, detail: "2 of 5 sources not refreshed"
+    ))
+    model.agentsAreStale = true
+    model.validatorsAreStale = true
+    model.federationIsStale = true
+    #expect(model.dataStatus.snapshot == .refreshFailed(updatedAt: updated))
+
+    model.handleEventStreamElement(.state(.connected))
+    #expect(model.dataStatus.events == .connected)
+    #expect(model.dataStatus.snapshot == .refreshFailed(updatedAt: updated))
+    model.handleEventStreamElement(.state(.reconnecting))
+    #expect(model.dataStatus.events == .reconnecting)
+}
+
+@MainActor
+@Test func searchStatusPreservesEmptySnapshotAgeAndPinnedUpdates() async throws {
+    let model = SearchViewModel(api: MutationTestAPI(forgetResults: []))
+
+    model.hasCompletedRefresh = true
+    #expect(model.dataStatus.snapshot == .unavailable)
+    await model.refresh()
+    let updated = try #require(model.lastUpdated)
+    #expect(model.dataStatus.snapshot == .available(updatedAt: updated))
+    model.updatesAvailable = true
+    #expect(model.dataStatus.snapshot == .available(updatedAt: updated))
+    #expect(model.dataStatus.hasPendingUpdate)
+    model.isStale = true
+    #expect(model.dataStatus.snapshot == .refreshFailed(updatedAt: updated))
+
+    model.handleEventStreamElement(.state(.connected))
+    #expect(model.dataStatus.events == .connected)
+    model.handleEventStreamElement(.state(.reconnecting))
+    #expect(model.dataStatus.events == .reconnecting)
+}
+
+@MainActor
+@Test func brainStatusKeepsMemoryAndAgentNetworkSnapshotAgesIndependent() async {
+    let model = BrainViewModel(api: MutationTestAPI(forgetResults: []))
+
+    await model.refresh()
+    let memoryUpdatedAt = model.lastUpdated
+    #expect(memoryUpdatedAt != nil)
+    #expect(model.dataStatus.snapshot == memoryUpdatedAt.map(CerebrumSnapshotState.available))
+
+    model.mode = .connectome
+    #expect(model.lastUpdated == nil)
+    #expect(model.dataStatus.snapshot == .loading)
+    await model.refresh()
+    let networkUpdatedAt = model.lastUpdated
+    #expect(networkUpdatedAt != nil)
+    #expect(model.dataStatus.snapshot == networkUpdatedAt.map(CerebrumSnapshotState.available))
+
+    model.mode = .memory
+    #expect(model.lastUpdated == memoryUpdatedAt)
+    model.handleEventStreamElement(.state(.reconnecting))
+    #expect(model.dataStatus.events == .reconnecting)
+}
+
+@Test func dataStatusLanguageDoesNotConfuseTransportWithFreshness() {
+    #expect(CerebrumEventStreamState.allCases.map(\.title) == [
+        "Connecting event updates", "Event updates connected", "Reconnecting event updates",
+        "Event updates stopped",
+    ])
+    #expect(CerebrumSnapshotState.partial(
+        updatedAt: .distantPast, detail: "2 of 5 sources not refreshed"
+    ).detail == "2 of 5 sources not refreshed")
+    #expect(CerebrumSnapshotState.available(updatedAt: .distantPast).title == "Updated")
+    #expect(CerebrumSnapshotState.refreshFailed(updatedAt: .distantPast).title == "Refresh failed")
+}
+
+@MainActor
+@Test func domainEventNamesCannotImpersonateTransportState() async {
+    let model = OverviewViewModel(api: MutationTestAPI(forgetResults: []))
+    #expect(model.eventStreamState == .connecting)
+
+    model.handleEventStreamElement(.event(.init(
+        name: "connected", data: "{}", receivedAt: .now
+    )))
+
+    #expect(model.eventStreamState == .connecting)
+    model.handleEventStreamElement(.state(.connected))
+    #expect(model.eventStreamState == .connected)
+}
+
+@MainActor
+@Test func unauthorizedEventTerminationStopsTransportAndPolling() async {
+    let api = MutationTestAPI(forgetResults: [], eventStreamError: .unauthorized)
+    let overview = OverviewViewModel(api: api)
+    let search = SearchViewModel(api: api)
+    let brain = BrainViewModel(api: api)
+    search.lastUpdated = .now
+    search.hasCompletedRefresh = true
+    brain.graph = .init(
+        nodes: [], edges: [], total: 1, domainCounts: [:], domainLast: [:],
+        continuationRequired: false, projection: nil
+    )
+    brain.lastUpdated = .now
+
+    await overview.runLiveUpdates()
+    await search.runLiveUpdates()
+    await brain.runLiveUpdates()
+
+    #expect(overview.eventStreamState == .stopped)
+    #expect(overview.lastUpdated == nil)
+    #expect(search.eventStreamState == .stopped)
+    #expect(search.lastUpdated == nil)
+    #expect(brain.eventStreamState == .stopped)
+    #expect(brain.graph == nil)
+}
+
+@MainActor
+@Test func snapshotStatusIsKeyedToTheVisibleRequestScope() async {
+    let api = MutationTestAPI(forgetResults: [])
+    let search = SearchViewModel(api: api)
+    await search.refresh()
+    #expect(search.dataStatus.snapshot.updatedAt != nil)
+    search.updatesAvailable = true
+    search.domain = "another-domain"
+    #expect(search.dataStatus.snapshot == .loading)
+    #expect(!search.dataStatus.hasPendingUpdate)
+
+    let brain = BrainViewModel(api: api)
+    await brain.refresh()
+    #expect(brain.dataStatus.snapshot.updatedAt != nil)
+    brain.updatesAvailable = true
+    brain.selectedDomain = "another-domain"
+    #expect(brain.dataStatus.snapshot == .loading)
+    #expect(!brain.dataStatus.hasPendingUpdate)
+}
+
+@MainActor
+@Test func rollingSearchDatePresetsUseStableSnapshotScopes() async {
+    let model = SearchViewModel(api: MutationTestAPI(forgetResults: []))
+    for preset in [MemoryDatePreset.hour, .day, .week, .month] {
+        model.datePreset = preset
+        await model.refresh()
+        #expect(model.dataStatus.snapshot.updatedAt != nil)
+        model.updatesAvailable = true
+        #expect(model.dataStatus.hasPendingUpdate)
+    }
+}
+
+@MainActor
+@Test func brainNeverRestoresMetadataOverAnotherFiltersPayload() async {
+    let model = BrainViewModel(api: MutationTestAPI(forgetResults: []))
+    model.selectedDomain = "alpha"
+    await model.refresh()
+    #expect(model.lastUpdated != nil)
+
+    model.selectedDomain = "beta"
+    await model.refresh()
+    #expect(model.lastUpdated != nil)
+
+    model.selectedDomain = "alpha"
+    #expect(model.graph == nil)
+    #expect(model.lastUpdated == nil)
+    #expect(model.dataStatus.snapshot == .loading)
+}
+
+@MainActor
+@Test func backendPartialitySurvivesPendingUpdateSignals() async {
+    let projection = MemoryProjection(
+        complete: false,
+        partial: true,
+        verifiedOnly: true,
+        state: "partial",
+        hiddenCount: 2,
+        message: "2 memories are still being verified."
+    )
+    let search = SearchViewModel(api: MutationTestAPI(forgetResults: [], searchProjection: projection))
+    await search.refresh()
+    search.updatesAvailable = true
+
+    guard case let .partial(_, detail) = search.dataStatus.snapshot else {
+        Issue.record("Expected the partial backend projection to remain visible")
+        return
+    }
+    #expect(detail == projection.message)
+    #expect(search.dataStatus.hasPendingUpdate)
+    search.domain = "another-domain"
+    #expect(!search.hasSnapshotForCurrentScope)
+}
+
+@MainActor
+@Test func brainPartialitySurvivesPendingUpdateSignals() async {
+    let projection = MemoryProjection(
+        complete: false, partial: true, verifiedOnly: true, state: "partial",
+        hiddenCount: 2, message: "2 memories are still being verified."
+    )
+    let graph = BrainGraphEnvelope(
+        nodes: [], edges: [], total: 2, domainCounts: [:], domainLast: [:],
+        continuationRequired: false, projection: projection
+    )
+    let brain = BrainViewModel(api: MutationTestAPI(forgetResults: [], graph: graph))
+    await brain.refresh()
+    brain.updatesAvailable = true
+
+    guard case let .partial(_, detail) = brain.dataStatus.snapshot else {
+        Issue.record("Expected the Brain partial projection to remain visible")
+        return
+    }
+    #expect(detail == projection.message)
+    #expect(brain.dataStatus.hasPendingUpdate)
+}
+
 @Suite(.serialized)
 struct HostedBrainAcceptance {}
 
@@ -944,7 +1163,7 @@ extension HostedBrainAcceptance {
     search.inspectedMemoryID = "m1"
     search.inspectedTags = ["private"]
     search.authorLabels = ["a1": "Agent One"]
-    await search.handleLiveEvent(.init(name: "access", data: "", receivedAt: .now))
+    search.handleLiveEvent(.init(name: "access", data: "", receivedAt: .now))
     #expect(search.memories.isEmpty)
     #expect(search.selection.isEmpty)
     #expect(search.inspectedMemoryID == nil)
@@ -1534,6 +1753,8 @@ private actor MutationTestAPI: SAGEAPI {
     var maximumConcurrentForgetCalls = 0
     var brainConnectome: ConnectomeEnvelope
     var brainMemoryGraph: BrainGraphEnvelope
+    let searchProjection: MemoryProjection?
+    let eventStreamError: SAGEAPIError?
     let brainEngrams: AgentEngramEnvelope?
     var brainRelated: RelatedMemoryEnvelope?
 
@@ -1545,11 +1766,15 @@ private actor MutationTestAPI: SAGEAPI {
         ),
         connectome: ConnectomeEnvelope = .init(neurons: [], synapses: []),
         engrams: AgentEngramEnvelope? = nil,
-        related: RelatedMemoryEnvelope? = nil
+        related: RelatedMemoryEnvelope? = nil,
+        searchProjection: MemoryProjection? = nil,
+        eventStreamError: SAGEAPIError? = nil
     ) {
         self.forgetResults = forgetResults
         self.brainMemoryGraph = graph
         self.brainConnectome = connectome
+        self.searchProjection = searchProjection
+        self.eventStreamError = eventStreamError
         self.brainEngrams = engrams
         self.brainRelated = related
     }
@@ -1563,7 +1788,10 @@ private actor MutationTestAPI: SAGEAPI {
     func validators() async throws -> ValidatorOverview { .init(count: 0, totalVotingPower: "0", validators: [], error: nil) }
     func federation() async throws -> FederationOverview { .disabled }
     func memories(_ query: MemoryListQuery) async throws -> MemoryListEnvelope {
-        .init(memories: [], total: 0, limit: 100, offset: 0, nextCursor: nil, continuationRequired: nil, authorLabels: nil, projection: nil)
+        .init(
+            memories: [], total: 0, limit: 100, offset: 0, nextCursor: nil,
+            continuationRequired: nil, authorLabels: nil, projection: searchProjection
+        )
     }
     func tags() async throws -> TagEnvelope { .init(tags: [], partial: false) }
     func memoryTags(id: String) async throws -> MemoryTagsEnvelope { .init(memoryID: id, tags: []) }
@@ -1591,7 +1819,11 @@ private actor MutationTestAPI: SAGEAPI {
         try? await Task.sleep(for: .milliseconds(2))
         return try forgetResults.removeFirst().get()
     }
-    func events() async -> AsyncThrowingStream<DashboardEvent, Error> {
-        AsyncThrowingStream { $0.finish() }
+    func events() async -> AsyncThrowingStream<DashboardEventStreamElement, Error> {
+        AsyncThrowingStream { continuation in
+            continuation.yield(.state(.connected))
+            if let eventStreamError { continuation.finish(throwing: eventStreamError) }
+            else { continuation.finish() }
+        }
     }
 }

@@ -46,18 +46,7 @@ struct OverviewView: View {
             title: "Overview",
             subtitle: "Your local intelligence, consensus, and network at a glance."
         ) {
-            if let lastUpdated = model.lastUpdated {
-                VStack(alignment: .trailing, spacing: 5) {
-                    CerebrumLiveIndicator(connected: model.liveEventsConnected)
-                    Text("LAST UPDATED")
-                        .font(.caption2.weight(.bold))
-                        .tracking(0.8)
-                        .foregroundStyle(.tertiary)
-                    Text(lastUpdated, style: .relative)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
+            CerebrumDataStatusView(status: model.dataStatus)
         }
     }
 
@@ -110,7 +99,7 @@ struct OverviewView: View {
     }
 
     private var headlineMetrics: some View {
-        CerebrumCard("At a glance", subtitle: "Live local telemetry", systemImage: "waveform.path.ecg") {
+        CerebrumCard("At a glance", subtitle: "Local telemetry", systemImage: "waveform.path.ecg") {
             CerebrumMetricGrid(metrics: [
                 .init("Memories", model.stats?.totalMemories.formatted() ?? "—", systemImage: "brain"),
                 .init("Block", model.health?.chain?.blockHeight ?? "—", systemImage: "cube.transparent"),
@@ -200,6 +189,9 @@ struct OverviewView: View {
 
     private var nodeHeadline: String {
         guard model.health != nil else { return "Connecting to your SAGE" }
+        if model.healthIsStale {
+            return nodeIsHealthy ? "Last known: your SAGE was online" : "Last known: your SAGE needed attention"
+        }
         return nodeIsHealthy ? "Your SAGE is online" : "Your SAGE needs attention"
     }
 

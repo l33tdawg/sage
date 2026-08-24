@@ -6,6 +6,18 @@ struct DashboardEvent: Equatable, Sendable {
     let receivedAt: Date
 }
 
+enum CerebrumEventStreamState: CaseIterable, Equatable, Sendable {
+    case connecting
+    case connected
+    case reconnecting
+    case stopped
+}
+
+enum DashboardEventStreamElement: Equatable, Sendable {
+    case state(CerebrumEventStreamState)
+    case event(DashboardEvent)
+}
+
 enum DashboardEventError: LocalizedError, Sendable {
     case invalidResponse
     case server(status: Int)

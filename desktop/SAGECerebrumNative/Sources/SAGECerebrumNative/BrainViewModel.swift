@@ -4,6 +4,12 @@ import Observation
 @MainActor
 @Observable
 final class BrainViewModel {
+    private struct SnapshotScope: Hashable {
+        let mode: BrainMode
+        let domain: String
+        let status: String
+    }
+
     var mode: BrainMode = .memory
     var graph: BrainGraphEnvelope?
     var connectome: ConnectomeEnvelope?
@@ -19,24 +25,37 @@ final class BrainViewModel {
     var selectedEngramID: String?
     var selectedConnectionID: DirectedSynapseID?
     var relatedMemoryFocus: RelatedMemoryFocus?
-    var selectedDomain = ""
-    var status = "all"
+    var selectedDomain = "" {
+        didSet { if selectedDomain != oldValue { invalidateMemoryPayload() } }
+    }
+    var status = "all" {
+        didSet { if status != oldValue { invalidateMemoryPayload() } }
+    }
     var engrams: AgentEngramEnvelope?
     var relatedMemories: RelatedMemoryEnvelope?
     var isLoading = false
     var isDetailLoading = false
-    var isStale = false
     var errorMessage: String?
     var detailErrorMessage: String?
-    var updatesAvailable = false
-    var liveEventsConnected = false
-    var lastUpdated: Date?
+    var updatesAvailable: Bool {
+        get { pendingUpdateScopes.contains(currentScope) }
+        set {
+            if newValue { pendingUpdateScopes.insert(currentScope) }
+            else { pendingUpdateScopes.remove(currentScope) }
+        }
+    }
+    var eventStreamState: CerebrumEventStreamState = .connecting
 
     private let api: any SAGEAPI
     private var requestGeneration = 0
     private var detailGeneration = 0
     private var coalescedRefresh: Task<Void, Never>?
     private var trafficByAgent: [String: AgentTraffic] = [:]
+    private var completedScopes = Set<SnapshotScope>()
+    private var staleScopes = Set<SnapshotScope>()
+    private var lastUpdatedByScope: [SnapshotScope: Date] = [:]
+    private var pendingUpdateScopes = Set<SnapshotScope>()
+    private var loadedScopeByMode: [BrainMode: SnapshotScope] = [:]
 
     init(api: any SAGEAPI) {
         self.api = api
@@ -47,6 +66,54 @@ final class BrainViewModel {
         selectedAgentID = ProcessInfo.processInfo.environment["SAGE_NATIVE_PREVIEW_AGENT"]
         selectedNodeID = ProcessInfo.processInfo.environment["SAGE_NATIVE_PREVIEW_MEMORY_ID"]
         #endif
+    }
+
+    private var currentScope: SnapshotScope {
+        mode == .memory
+            ? .init(mode: mode, domain: selectedDomain, status: status)
+            : .init(mode: mode, domain: "", status: "")
+    }
+
+    var hasCompletedRefresh: Bool { completedScopes.contains(currentScope) }
+
+    var isStale: Bool {
+        get { staleScopes.contains(currentScope) }
+        set {
+            if newValue { staleScopes.insert(currentScope) }
+            else { staleScopes.remove(currentScope) }
+        }
+    }
+
+    var lastUpdated: Date? {
+        get {
+            guard loadedScopeByMode[mode] == currentScope else { return nil }
+            return lastUpdatedByScope[currentScope]
+        }
+        set {
+            lastUpdatedByScope[currentScope] = newValue
+            if newValue != nil { loadedScopeByMode[mode] = currentScope }
+        }
+    }
+
+    var dataStatus: CerebrumDataStatus {
+        let snapshot: CerebrumSnapshotState
+        if let lastUpdated {
+            if isStale {
+                snapshot = .refreshFailed(updatedAt: lastUpdated)
+            } else if mode == .memory, graph?.projection?.partial == true {
+                snapshot = .partial(updatedAt: lastUpdated, detail: graph?.projection?.message)
+            } else {
+                snapshot = .available(updatedAt: lastUpdated)
+            }
+        } else {
+            snapshot = isLoading || !hasCompletedRefresh ? .loading : .unavailable
+        }
+        return .init(
+            snapshot: snapshot,
+            events: eventStreamState,
+            isRefreshing: isLoading,
+            hasPendingUpdate: updatesAvailable
+        )
     }
 
     var selectedNode: BrainNode? { graph?.nodes.first { $0.id == selectedNodeID } }
@@ -235,15 +302,22 @@ final class BrainViewModel {
         requestGeneration += 1
         let generation = requestGeneration
         let requestedMode = mode
+        let requestedScope = currentScope
+        var didComplete = false
         isLoading = true
-        isStale = false
         errorMessage = nil
-        defer { if generation == requestGeneration { isLoading = false } }
+        defer {
+            if generation == requestGeneration {
+                isLoading = false
+                if didComplete { completedScopes.insert(requestedScope) }
+            }
+        }
         do {
             switch requestedMode {
             case .memory:
                 let response = try await api.brainGraph(.init(limit: 1_500, status: status, domain: selectedDomain))
-                guard generation == requestGeneration, mode == requestedMode else { return }
+                guard generation == requestGeneration, currentScope == requestedScope,
+                      !Task.isCancelled else { return }
                 graph = response
                 if let selectedNodeID, !response.nodes.contains(where: { $0.id == selectedNodeID }) {
                     self.selectedNodeID = nil
@@ -251,7 +325,8 @@ final class BrainViewModel {
                 }
             case .connectome:
                 let response = try await api.connectome()
-                guard generation == requestGeneration, mode == requestedMode else { return }
+                guard generation == requestGeneration, currentScope == requestedScope,
+                      !Task.isCancelled else { return }
                 let bounded = boundedConnectome(response)
                 connectome = bounded
                 rebuildTrafficIndex(bounded)
@@ -267,13 +342,23 @@ final class BrainViewModel {
             }
             isStale = false
             updatesAvailable = false
-            lastUpdated = .now
+            if let displacedScope = loadedScopeByMode[requestedMode], displacedScope != requestedScope {
+                completedScopes.remove(displacedScope)
+                staleScopes.remove(displacedScope)
+                lastUpdatedByScope[displacedScope] = nil
+                pendingUpdateScopes.remove(displacedScope)
+            }
+            loadedScopeByMode[requestedMode] = requestedScope
+            lastUpdatedByScope[requestedScope] = .now
+            didComplete = true
         } catch is CancellationError {
             return
         } catch {
-            guard generation == requestGeneration, mode == requestedMode else { return }
+            guard generation == requestGeneration, currentScope == requestedScope,
+                  !Task.isCancelled else { return }
             errorMessage = error.localizedDescription
-            isStale = requestedMode == .memory ? graph != nil : connectome != nil
+            if lastUpdatedByScope[requestedScope] != nil { staleScopes.insert(requestedScope) }
+            didComplete = true
         }
     }
 
@@ -360,39 +445,52 @@ final class BrainViewModel {
     func clearRelatedMemoryFocus() { relatedMemoryFocus = nil }
 
     func runLiveUpdates() async {
-        async let events: Void = consumeEvents()
-        async let fallback: Void = pollFallback()
-        _ = await (events, fallback)
-    }
-
-    private func consumeEvents() async {
-        let stream = await api.events()
-        do {
-            for try await event in stream {
-                if Task.isCancelled { break }
-                handleLiveEvent(event)
-            }
-        } catch {
-            liveEventsConnected = false
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.consumeEvents() }
+            group.addTask { await self.pollScheduledRefresh() }
+            _ = await group.next()
+            group.cancelAll()
         }
     }
 
-    private func pollFallback() async {
+    private func consumeEvents() async {
+        eventStreamState = .connecting
+        let stream = await api.events()
+        do {
+            for try await element in stream {
+                if Task.isCancelled { break }
+                handleEventStreamElement(element)
+            }
+        } catch is CancellationError {
+            return
+        } catch SAGEAPIError.unauthorized {
+            eventStreamState = .stopped
+            purgeSensitiveSnapshots()
+            return
+        } catch {
+            if !Task.isCancelled { eventStreamState = .reconnecting }
+        }
+        if !Task.isCancelled { eventStreamState = .reconnecting }
+    }
+
+    func handleEventStreamElement(_ element: DashboardEventStreamElement) {
+        switch element {
+        case let .state(state):
+            eventStreamState = state
+        case let .event(event):
+            handleLiveEvent(event)
+        }
+    }
+
+    private func pollScheduledRefresh() async {
         while !Task.isCancelled {
             try? await Task.sleep(for: .seconds(30))
             if Task.isCancelled { break }
-            if selectedNodeID == nil, selectedAgentID == nil { await refresh() }
-            else { updatesAvailable = true }
+            await refreshIncludingPinnedDetail()
         }
     }
 
     func handleLiveEvent(_ event: DashboardEvent) {
-        if event.name == "disconnected" {
-            liveEventsConnected = false
-            return
-        }
-        liveEventsConnected = true
-        guard event.name != "connected" else { return }
         if event.name == "access" {
             purgeSensitiveSnapshots()
             scheduleRefresh(after: .zero)
@@ -436,11 +534,31 @@ final class BrainViewModel {
         selectedEngramID = nil
         selectedConnectionID = nil
         updatesAvailable = false
-        isStale = false
+        staleScopes.removeAll()
+        completedScopes.removeAll()
+        lastUpdatedByScope.removeAll()
+        pendingUpdateScopes.removeAll()
+        loadedScopeByMode.removeAll()
         isLoading = false
         isDetailLoading = false
         errorMessage = nil
         detailErrorMessage = nil
+    }
+
+    private func invalidateMemoryPayload() {
+        requestGeneration += 1
+        coalescedRefresh?.cancel()
+        graph = nil
+        selectedNodeID = nil
+        relatedMemories = nil
+        relatedMemoryFocus = nil
+        loadedScopeByMode[.memory] = nil
+        completedScopes = Set(completedScopes.filter { $0.mode != .memory })
+        staleScopes = Set(staleScopes.filter { $0.mode != .memory })
+        lastUpdatedByScope = lastUpdatedByScope.filter { $0.key.mode != .memory }
+        pendingUpdateScopes = Set(pendingUpdateScopes.filter { $0.mode != .memory })
+        isLoading = false
+        errorMessage = nil
     }
 
     private func mostRecentActivity(for agentID: String) -> Date? {

@@ -103,7 +103,7 @@ struct SearchView: View {
             subtitle: "Find, inspect, and understand memory across your local SAGE."
         ) {
             VStack(alignment: .trailing, spacing: 5) {
-                CerebrumLiveIndicator(connected: model.liveEventsConnected)
+                CerebrumDataStatusView(status: model.dataStatus)
                 Text(resultSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -141,10 +141,10 @@ struct SearchView: View {
             }
             .padding(12)
             .background(CerebrumTheme.cyan.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
-        } else if model.isStale {
+        }
+        if model.isStale {
             Label("Showing the last successful result set. \(model.errorMessage ?? "Refresh is temporarily unavailable.")", systemImage: "clock.badge.exclamationmark")
                 .font(.callout)
-                .foregroundStyle(CerebrumTheme.amber)
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(CerebrumTheme.amber.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
@@ -153,13 +153,13 @@ struct SearchView: View {
 
     @ViewBuilder
     private var projectionNotice: some View {
-        if let projection = model.projection, projection.partial == true {
+        if model.hasSnapshotForCurrentScope,
+           let projection = model.projection, projection.partial == true {
             Label(
                 projection.message ?? "Showing the verified local projection; some records are temporarily hidden.",
                 systemImage: "eye.trianglebadge.exclamationmark"
             )
             .font(.callout)
-            .foregroundStyle(CerebrumTheme.amber)
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(CerebrumTheme.amber.opacity(0.09), in: RoundedRectangle(cornerRadius: 10))
@@ -168,7 +168,7 @@ struct SearchView: View {
 
     private var resultsSurface: some View {
         Group {
-            if let error = model.errorMessage, model.memories.isEmpty {
+            if let error = model.errorMessage, !model.hasSnapshotForCurrentScope {
                 ContentUnavailableView {
                     Label("Couldn’t load memory", systemImage: "exclamationmark.triangle")
                 } description: {
@@ -176,13 +176,13 @@ struct SearchView: View {
                 } actions: {
                     Button("Try Again") { Task { await model.refresh() } }
                 }
-            } else if model.isLoading && model.memories.isEmpty {
+            } else if model.isLoading && !model.hasSnapshotForCurrentScope {
                 VStack(spacing: 12) {
                     ProgressView()
                     Text("Searching sovereign memory…").foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if model.memories.isEmpty {
+            } else if !model.hasSnapshotForCurrentScope || model.memories.isEmpty {
                 ContentUnavailableView.search(text: model.query)
             } else {
                 VStack(spacing: 0) {
@@ -402,6 +402,7 @@ struct SearchView: View {
 
     private var resultSummary: String {
         if model.isLoading { return "Updating…" }
+        if !model.hasSnapshotForCurrentScope { return "No current results" }
         let shown = model.memories.count.formatted()
         if model.total > model.memories.count || model.continuationRequired {
             return "\(shown) loaded · at least \(model.total.formatted()) matching"

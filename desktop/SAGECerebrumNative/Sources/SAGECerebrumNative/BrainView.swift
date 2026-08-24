@@ -207,7 +207,7 @@ struct BrainView: View {
                 : "See visible authorized agents as neurons and retained local message history as directed synapses."
         ) {
             VStack(alignment: .trailing, spacing: 5) {
-                CerebrumLiveIndicator(connected: model.liveEventsConnected)
+                CerebrumDataStatusView(status: model.dataStatus)
                 Text(graphSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -238,9 +238,10 @@ struct BrainView: View {
                 systemImage: "sparkles", color: CerebrumTheme.cyan,
                 action: ("Refresh Brain", { Task { await model.refreshIncludingPinnedDetail() } })
             )
-        } else if model.isStale {
+        }
+        if model.isStale {
             notice(
-                "Showing the last verified brain snapshot. \(model.errorMessage ?? "Refresh is temporarily unavailable.")",
+                "Showing the last successful brain snapshot. \(model.errorMessage ?? "Refresh is temporarily unavailable.")",
                 systemImage: "clock.badge.exclamationmark", color: CerebrumTheme.amber
             )
         }
@@ -315,13 +316,13 @@ struct BrainView: View {
     ) -> some View {
         ViewThatFits(in: .horizontal) {
             HStack {
-                Label(text, systemImage: systemImage).font(.callout).foregroundStyle(color)
+                Label(text, systemImage: systemImage).font(.callout)
                 Spacer()
                 if let action { Button(action.0, action: action.1).buttonStyle(.bordered) }
             }
             .fixedSize(horizontal: true, vertical: false)
             VStack(alignment: .leading, spacing: 9) {
-                Label(text, systemImage: systemImage).font(.callout).foregroundStyle(color)
+                Label(text, systemImage: systemImage).font(.callout)
                 if let action { Button(action.0, action: action.1).buttonStyle(.bordered) }
             }
         }

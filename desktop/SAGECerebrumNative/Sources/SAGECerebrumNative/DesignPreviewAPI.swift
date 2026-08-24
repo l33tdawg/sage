@@ -163,9 +163,11 @@ actor DesignPreviewAPI: SAGEAPI {
         """#.utf8))
     }
 
-    func events() async -> AsyncThrowingStream<DashboardEvent, Error> {
+    func events() async -> AsyncThrowingStream<DashboardEventStreamElement, Error> {
         AsyncThrowingStream { continuation in
-            continuation.yield(.init(name: "consensus", data: "{}", receivedAt: .now))
+            continuation.yield(.state(.connecting))
+            continuation.yield(.state(.connected))
+            continuation.yield(.event(.init(name: "consensus", data: "{}", receivedAt: .now)))
         }
     }
 

@@ -42,9 +42,10 @@ not obscure the critical path.
 - Freeze and exercise the macOS/architecture/GPU/display support matrix.
 - Bind Windows/Linux browser-continuity evidence to the exact same v12
   candidate identity.
-- Make global snapshot and event-stream state authoritative. The sidebar is
-  now neutral, but each implemented route must still separate fetched-data age,
-  partial/stale results, pending updates, and SSE reconnect state.
+- Extend the implemented route-level snapshot/event-stream contract into future
+  global recovery surfaces. The sidebar is neutral; Overview, Search, and Brain
+  now separate fetched-data age, partial/stale results, pending updates, and
+  typed SSE reconnect state without claiming offline reachability.
 
 ## User-life improvements
 
@@ -63,9 +64,9 @@ These are ordered by user impact rather than novelty.
 4. **Progressive onboarding.** Introduce node, memory, agents, federation, and
    governance only when relevant. Start with safe defaults and reveal advanced
    protocol language behind contextual help.
-5. **Authoritative live-state language.** Distinguish live, reconnecting,
-   verified snapshot, stale, partial, offline, and permission-limited states
-   consistently, with subtle SSE motion that respects Reduce Motion.
+5. **Authoritative changing-state language.** Extend the implemented distinction
+   between snapshot quality and event transport to onboarding/recovery, adding
+   offline and permission-limited labels only when typed evidence can prove them.
 6. **Safe action consistency.** Destructive/privacy-affecting actions use the
    same review sheet, consequence summary, exact scope, confirmation language,
    indeterminate-commit handling, and focus return.
@@ -93,11 +94,15 @@ Connectome as secondary technical terms. This does not complete those routes.
 The remaining design increments should improve comprehension without creating
 another large subsystem:
 
-1. Replace binary Live/Polling labels with separate snapshot and event-stream
+1. **Implemented:** Replace binary Live/Polling labels with separate snapshot and event-stream
    states: Loading, Updated N seconds ago, Partially Updated, Refresh Failed,
-   Update Available, and Event Updates Connecting/Connected/Reconnecting. The
+   independently signaled Update Available, and Event Updates
+   Connecting/Connected/Reconnecting/Stopped. Snapshot age is request-scope keyed and
+   backend partial projections remain visible beside pending updates. The
    sidebar footer is already neutral. Do not claim Offline until daemon
    lifecycle or typed reachability evidence can prove it.
+   Route-level transition coverage is implemented; real URLSession
+   EOF/backoff/cancellation timing remains an acceptance item.
 2. Remove duplicated page-title chrome. Use the unified macOS titlebar for the
    title and keep at most one concise explanation/status line in content.
 3. Simplify the Brain toolbar: keep mode, presentation, and inspector visible;

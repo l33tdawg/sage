@@ -242,35 +242,3 @@ struct CerebrumMetricGrid: View {
         }
     }
 }
-
-struct CerebrumLiveIndicator: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var pulsing = false
-    let connected: Bool
-
-    var body: some View {
-        HStack(spacing: 7) {
-            ZStack {
-                if connected && !reduceMotion {
-                    Circle()
-                        .fill(CerebrumTheme.green.opacity(0.25))
-                        .scaleEffect(pulsing ? 1.9 : 1)
-                        .opacity(pulsing ? 0 : 0.75)
-                }
-                Circle()
-                    .fill(connected ? CerebrumTheme.green : Color.secondary)
-            }
-            .frame(width: 7, height: 7)
-            Text(connected ? "Live" : "Polling")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(connected ? CerebrumTheme.green : .secondary)
-        }
-        .accessibilityLabel(connected ? "Live updates connected" : "Using periodic updates")
-        .onAppear {
-            guard !reduceMotion else { return }
-            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
-                pulsing = true
-            }
-        }
-    }
-}

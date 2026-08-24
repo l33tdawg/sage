@@ -50,7 +50,7 @@ protocol SAGEAPI: Sendable {
     func connectome() async throws -> ConnectomeEnvelope
     func agentEngrams(agentID: String) async throws -> AgentEngramEnvelope
     func relatedMemories(memoryID: String, limit: Int) async throws -> RelatedMemoryEnvelope
-    func events() async -> AsyncThrowingStream<DashboardEvent, Error>
+    func events() async -> AsyncThrowingStream<DashboardEventStreamElement, Error>
 }
 
 actor SAGEAPIClient: SAGEAPI {
@@ -174,12 +174,13 @@ actor SAGEAPIClient: SAGEAPI {
         )
     }
 
-    func events() async -> AsyncThrowingStream<DashboardEvent, Error> {
+    func events() async -> AsyncThrowingStream<DashboardEventStreamElement, Error> {
         let request = makeRequest(.events)
         let session = self.session
         return AsyncThrowingStream { continuation in
             let reader = Task {
                 var reconnectDelay = Duration.seconds(1)
+                continuation.yield(.state(.connecting))
                 while !Task.isCancelled {
                     do {
                         let (bytes, response) = try await session.bytes(for: request)
@@ -194,21 +195,40 @@ actor SAGEAPIClient: SAGEAPI {
                             }
                             throw DashboardEventError.server(status: response.statusCode)
                         }
-                        reconnectDelay = .seconds(1)
-                        continuation.yield(DashboardEvent(name: "connected", data: "", receivedAt: .now))
+                        continuation.yield(.state(.connected))
                         var accumulator = SSEEventAccumulator()
+                        var observedActivity = false
                         for try await line in bytes.lines {
                             if Task.isCancelled { break }
+                            if !observedActivity, !line.isEmpty {
+                                observedActivity = true
+                                reconnectDelay = .seconds(1)
+                            }
                             if let event = accumulator.consume(line) {
-                                continuation.yield(event)
+                                continuation.yield(.event(event))
+                            }
+                        }
+                        if !Task.isCancelled {
+                            continuation.yield(.state(.reconnecting))
+                            do {
+                                try await Task.sleep(for: reconnectDelay)
+                            } catch is CancellationError {
+                                break
+                            }
+                            if !observedActivity {
+                                reconnectDelay = min(reconnectDelay * 2, .seconds(15))
                             }
                         }
                     } catch is CancellationError {
                         break
                     } catch {
                         if Task.isCancelled { break }
-                        continuation.yield(DashboardEvent(name: "disconnected", data: "", receivedAt: .now))
-                        try? await Task.sleep(for: reconnectDelay)
+                        continuation.yield(.state(.reconnecting))
+                        do {
+                            try await Task.sleep(for: reconnectDelay)
+                        } catch is CancellationError {
+                            break
+                        }
                         reconnectDelay = min(reconnectDelay * 2, .seconds(15))
                     }
                 }
