@@ -1264,12 +1264,29 @@ struct BrainView: View {
             guard generation == keyboardFocusGeneration else { return }
             keyboardFocus = target
             guard let identifier = nativeFocusIdentifier(target) else { return }
+            var stableView: NSView?
+            var stableChecks = 0
             for _ in 0..<50 {
                 await Task.yield()
                 guard generation == keyboardFocusGeneration else { return }
                 if let view = nativeFocusView(identifier: identifier, target: target),
-                   view.window?.makeFirstResponder(view) == true {
-                    return
+                   let window = view.window {
+                    if stableView !== view {
+                        stableView = view
+                        stableChecks = 0
+                    }
+                    if window.firstResponder !== view {
+                        guard window.makeFirstResponder(view) else {
+                            stableChecks = 0
+                            try? await Task.sleep(for: .milliseconds(10))
+                            continue
+                        }
+                    }
+                    stableChecks += 1
+                    if stableChecks >= 8 { return }
+                } else {
+                    stableView = nil
+                    stableChecks = 0
                 }
                 try? await Task.sleep(for: .milliseconds(10))
             }

@@ -1015,6 +1015,8 @@ extension HostedBrainAcceptance {
     #expect(source.contains("idealWidth: layoutPlan.inspectorIdealWidth"))
     #expect(source.contains("maxWidth: layoutPlan.inspectorMaximumWidth"))
     #expect(closeAction.contains("requestFocus(returnFocusTarget)"))
+    #expect(source.contains("if stableView !== view"))
+    #expect(source.contains("if stableChecks >= 8 { return }"))
     #expect(source.contains("blocksGlobalCommands: showsNavigator || showsViewOptions"))
     #expect(source.contains("model.mode == .memory ? \"brain-memory-table\" : \"brain-connectome-table\""))
     #expect(source.contains("case .inspectorClose:\n            \"brain-inspector-close\""))
