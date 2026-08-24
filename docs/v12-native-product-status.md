@@ -367,7 +367,7 @@ with one current native execution child:
 
 1. `f3291de2-d270-4c3b-b81b-3f29bc54b83b` — deliver native macOS CEREBRUM on
    `v12-beta`, from the first tester build through production acceptance;
-2. `d9ea08b1-26cb-4a6f-bf3f-d38bc8394f28` — current child of the native lane
+2. `867fa87f-14b0-45ca-a11c-10dc48746257` — current child of the native lane
    for app-scene acceptance and the remaining system-AX/VoiceOver, focus,
    performance, cross-GPU, and offline gates;
 3. `26dee44b-4f7f-459d-a76b-91f0c2d7cdd4` — preserve and prove the separate
