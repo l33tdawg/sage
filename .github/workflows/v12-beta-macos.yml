@@ -8,6 +8,7 @@ on:
       - "scripts/build-native-cerebrum-macos.sh"
       - "scripts/v12-native-acceptance-validate.mjs"
       - "scripts/v12-native-acceptance-validate.test.mjs"
+      - "scripts/v12-native-workflow.test.mjs"
       - "docs/v12-native-acceptance-ledger.schema.json"
       - "docs/v12-native-acceptance-ledger.md"
       - "docs/v12-native-capability-ledger.md"
@@ -33,19 +34,26 @@ jobs:
   validate-unsigned-beta:
     name: Validate unsigned Swift-native macOS beta app
     if: github.ref == 'refs/heads/v12-beta'
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     env:
       SAGE_NATIVE_VERSION: ${{ inputs.version || '12.0.0-beta.1' }}
       SAGE_NATIVE_CONFIGURATION: release
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "24"
+      - name: Verify pinned Swift toolchain
+        run: |
+          test -x "${DEVELOPER_DIR}/usr/bin/swift"
+          xcodebuild -version
+          swift --version
+          swift package --package-path desktop/SAGECerebrumNative dump-package >/dev/null
       - name: Validate Swift-native acceptance contract
         run: |
-          node --test scripts/v12-native-acceptance-validate.test.mjs
+          node --test scripts/v12-native-acceptance-validate.test.mjs scripts/v12-native-workflow.test.mjs
           swift test --package-path desktop/SAGECerebrumNative --disable-sandbox
       - name: Build SwiftUI/AppKit/Metal application
         run: scripts/build-native-cerebrum-macos.sh
