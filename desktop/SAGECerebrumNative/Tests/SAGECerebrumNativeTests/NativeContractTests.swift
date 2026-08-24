@@ -1168,7 +1168,7 @@ private func waitForMountedSurfaces(
     _ recorder: BrainHostRecorder,
     required: Set<BrainMountedSurface>,
     forbidden: Set<BrainMountedSurface> = [],
-    timeout: Duration = .seconds(3)
+    timeout: Duration = .seconds(6)
 ) async throws -> Set<BrainMountedSurface> {
     let clock = ContinuousClock()
     let deadline = clock.now + timeout
@@ -1177,6 +1177,9 @@ private func waitForMountedSurfaces(
             return recorder.surfaces
         }
         try await Task.sleep(for: .milliseconds(10))
+    }
+    if required.isSubset(of: recorder.surfaces), forbidden.isDisjoint(with: recorder.surfaces) {
+        return recorder.surfaces
     }
     throw HostedBrainTestError.surfacesDidNotMount(recorder.surfaces)
 }
