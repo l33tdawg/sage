@@ -101,10 +101,15 @@ responder chain. A hardware runtime test now compiles the required Metal pipelin
 family, renders the shared production scene encoder into a 4× MSAA offscreen
 target, resolves it, executes the bloom chain, waits for successful GPU
 completion, and verifies relative scene and bloom pixel changes without relying
-on cross-GPU golden hashes. Deterministic policy and injected-bootstrap tests
-cover renderer-unavailable resolution without requiring absent GPU hardware;
-the required macOS CI lane explicitly enables the hardware probe. Hosted
-fallback/retry acceptance, real VoiceOver evidence, full SwiftUI focus-return evidence,
+on cross-GPU golden hashes. A pure recovery reducer now fences stale renderer
+and retry completions, keeps keyboard and accessibility focus ownership
+independent, rejects MRI picker bypass while unavailable, and drives both
+initial mount and retry through one injectable renderer seam. A real
+`NSHostingView`/`NSWindow` test proves the production fallback notice, retry
+control, and synchronized memory table replace the failed MRI together without
+clearing selection or duplicating the bounded announcement. The required macOS
+CI lane explicitly enables the separate hardware probe. Hosted retry-action
+acceptance, real VoiceOver evidence, full SwiftUI focus-return evidence,
 cross-GPU/offline behavior, and deeper behavioral, accessibility, and
 performance evidence remain open.
 
@@ -231,7 +236,7 @@ production promotion.
   attaches to an already-running loopback daemon; it does not yet own that
   daemon's lifecycle.
 - Complete the remaining Brain work: prove real VoiceOver announcements and full
-  SwiftUI focus return, hosted fallback/retry behavior, Metal/Table parity,
+  SwiftUI focus return, hosted retry-action behavior, Metal/Table parity,
   access-purge behavior, broader keyboard operation,
   cross-GPU/offline behavior, and large-store performance.
 - Convert the private tester artifact into a signed production candidate and

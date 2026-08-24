@@ -126,6 +126,169 @@ enum BrainPresentationPolicy {
     }
 }
 
+enum BrainMetalFocusDestination: Equatable, Sendable {
+    case surface
+    case table
+    case retryButton
+}
+
+enum BrainMetalAnnouncement: Equatable, Sendable {
+    case unavailable
+    case stillUnavailable
+    case restored
+}
+
+enum BrainMountedSurface: Equatable, Hashable, Sendable {
+    case metalFallbackNotice
+    case metalRetryButton
+    case memoryMRI
+    case memoryTable
+    case connectomeMRI
+    case connectomeTable
+}
+
+struct BrainMetalRecoveryState: Equatable, Sendable {
+    var presentation: BrainPresentation = .mri
+    var capability: BrainMetalCapability = .probing
+    var retryInFlight = false
+    var attemptID: UInt64 = 0
+
+    var effectivePresentation: BrainPresentation {
+        BrainPresentationPolicy.resolve(
+            requested: presentation,
+            capability: capability
+        ).effectivePresentation
+    }
+}
+
+enum BrainMetalRecoveryEvent: Equatable, Sendable {
+    case presentationSelected(BrainPresentation)
+    case modeChanged
+    case rendererReported(
+        attemptID: UInt64,
+        capability: BrainMetalCapability,
+        keyboardSurfaceOwned: Bool,
+        accessibilitySurfaceOwned: Bool
+    )
+    case retryRequested
+    case retryCompleted(attemptID: UInt64, succeeded: Bool)
+}
+
+struct BrainMetalRecoveryEffects: Equatable, Sendable {
+    var keyboardFocus: BrainMetalFocusDestination?
+    var accessibilityFocus: BrainMetalFocusDestination?
+    var announcement: BrainMetalAnnouncement?
+    var beginRetryAttempt: UInt64?
+    var discardPreparedRenderer = false
+    var acceptPreparedRenderer = false
+
+    static let none = Self()
+}
+
+struct BrainMetalRecoveryTransition: Equatable, Sendable {
+    let state: BrainMetalRecoveryState
+    let effects: BrainMetalRecoveryEffects
+}
+
+enum BrainMetalRecoveryReducer {
+    static func reduce(
+        _ current: BrainMetalRecoveryState,
+        event: BrainMetalRecoveryEvent
+    ) -> BrainMetalRecoveryTransition {
+        var state = current
+        var effects = BrainMetalRecoveryEffects.none
+
+        switch event {
+        case let .presentationSelected(presentation):
+            if presentation == .mri, state.capability.isUnavailable {
+                return .init(state: current, effects: .none)
+            }
+            guard presentation != state.presentation else {
+                return .init(state: current, effects: .none)
+            }
+            state.presentation = presentation
+            state.attemptID &+= 1
+            state.retryInFlight = false
+            effects.discardPreparedRenderer = true
+            if presentation == .mri {
+                state.capability = .probing
+                effects.keyboardFocus = .surface
+                effects.accessibilityFocus = .surface
+            } else {
+                effects.keyboardFocus = .table
+                effects.accessibilityFocus = .table
+            }
+
+        case .modeChanged:
+            state.attemptID &+= 1
+            state.retryInFlight = false
+            effects.discardPreparedRenderer = true
+            let destination: BrainMetalFocusDestination = state.effectivePresentation == .table ? .table : .surface
+            effects.keyboardFocus = destination
+            effects.accessibilityFocus = destination
+
+        case let .rendererReported(attemptID, capability, keyboardOwned, accessibilityOwned):
+            guard attemptID == state.attemptID, capability != state.capability else {
+                return .init(state: current, effects: .none)
+            }
+            let wasRetrying = state.retryInFlight
+            state.capability = capability
+            switch capability {
+            case .probing:
+                break
+            case .available:
+                state.retryInFlight = false
+                if wasRetrying {
+                    effects.announcement = .restored
+                    effects.keyboardFocus = .surface
+                    effects.accessibilityFocus = .surface
+                }
+            case .unavailable:
+                state.presentation = .table
+                state.retryInFlight = false
+                effects.announcement = wasRetrying ? .stillUnavailable : .unavailable
+                if wasRetrying {
+                    effects.keyboardFocus = .retryButton
+                    effects.accessibilityFocus = .retryButton
+                } else {
+                    effects.keyboardFocus = keyboardOwned ? .table : nil
+                    effects.accessibilityFocus = accessibilityOwned ? .table : nil
+                }
+            }
+
+        case .retryRequested:
+            guard state.capability.isUnavailable, !state.retryInFlight else {
+                return .init(state: current, effects: .none)
+            }
+            state.retryInFlight = true
+            state.attemptID &+= 1
+            effects.beginRetryAttempt = state.attemptID
+
+        case let .retryCompleted(attemptID, succeeded):
+            guard attemptID == state.attemptID, state.retryInFlight else {
+                return .init(state: current, effects: .none)
+            }
+            state.retryInFlight = false
+            if succeeded {
+                state.capability = .available
+                state.presentation = .mri
+                effects.acceptPreparedRenderer = true
+                effects.announcement = .restored
+                effects.keyboardFocus = .surface
+                effects.accessibilityFocus = .surface
+            } else {
+                state.capability = .unavailable(.rendererInitialization)
+                state.presentation = .table
+                effects.announcement = .stillUnavailable
+                effects.keyboardFocus = .retryButton
+                effects.accessibilityFocus = .retryButton
+            }
+        }
+
+        return .init(state: state, effects: effects)
+    }
+}
+
 enum BrainMode: String, CaseIterable, Identifiable, Sendable {
     case memory
     case connectome

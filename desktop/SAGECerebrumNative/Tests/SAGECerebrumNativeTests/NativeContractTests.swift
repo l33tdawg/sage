@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import MetalKit
+import SwiftUI
 import Testing
 @testable import SAGECerebrumNative
 
@@ -81,6 +82,138 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
     ) == .init(effectivePresentation: .table, mriEnabled: false))
 }
 
+@Test func metalRecoveryFailurePreservesIndependentFocusOwnership() {
+    let initial = BrainMetalRecoveryState()
+    let transition = BrainMetalRecoveryReducer.reduce(initial, event: .rendererReported(
+        attemptID: 0,
+        capability: .unavailable(.rendererInitialization),
+        keyboardSurfaceOwned: true,
+        accessibilitySurfaceOwned: false
+    ))
+
+    #expect(transition.state.presentation == .table)
+    #expect(transition.state.effectivePresentation == .table)
+    #expect(transition.state.capability == .unavailable(.rendererInitialization))
+    #expect(transition.effects.keyboardFocus == .table)
+    #expect(transition.effects.accessibilityFocus == nil)
+    #expect(transition.effects.announcement == .unavailable)
+
+    let duplicate = BrainMetalRecoveryReducer.reduce(transition.state, event: .rendererReported(
+        attemptID: 0,
+        capability: .unavailable(.rendererInitialization),
+        keyboardSurfaceOwned: true,
+        accessibilitySurfaceOwned: true
+    ))
+    #expect(duplicate.state == transition.state)
+    #expect(duplicate.effects == .none)
+
+    let stale = BrainMetalRecoveryReducer.reduce(initial, event: .rendererReported(
+        attemptID: 42,
+        capability: .unavailable(.rendererInitialization),
+        keyboardSurfaceOwned: true,
+        accessibilitySurfaceOwned: true
+    ))
+    #expect(stale.state == initial)
+    #expect(stale.effects == .none)
+}
+
+@Test func selectingTableInvalidatesThePendingMRIAttempt() {
+    let probing = BrainMetalRecoveryState(
+        presentation: .mri, capability: .probing,
+        retryInFlight: false, attemptID: 12
+    )
+    let selectedTable = BrainMetalRecoveryReducer.reduce(
+        probing, event: .presentationSelected(.table)
+    )
+    #expect(selectedTable.state.presentation == .table)
+    #expect(selectedTable.state.attemptID == 13)
+    #expect(selectedTable.effects.discardPreparedRenderer)
+    #expect(selectedTable.effects.keyboardFocus == .table)
+    #expect(selectedTable.effects.accessibilityFocus == .table)
+
+    let staleFailure = BrainMetalRecoveryReducer.reduce(
+        selectedTable.state,
+        event: .rendererReported(
+            attemptID: 12,
+            capability: .unavailable(.rendererInitialization),
+            keyboardSurfaceOwned: true,
+            accessibilitySurfaceOwned: true
+        )
+    )
+    #expect(staleFailure.state == selectedTable.state)
+    #expect(staleFailure.effects == .none)
+}
+
+@Test func metalRecoveryRetryKeepsTableMountedAndFencesCompletion() {
+    let unavailable = BrainMetalRecoveryState(
+        presentation: .table,
+        capability: .unavailable(.rendererInitialization),
+        retryInFlight: false,
+        attemptID: 7
+    )
+    let requested = BrainMetalRecoveryReducer.reduce(unavailable, event: .retryRequested)
+    #expect(requested.state.retryInFlight)
+    #expect(requested.state.attemptID == 8)
+    #expect(requested.state.effectivePresentation == .table)
+    #expect(requested.effects.beginRetryAttempt == 8)
+
+    let duplicate = BrainMetalRecoveryReducer.reduce(requested.state, event: .retryRequested)
+    #expect(duplicate.state == requested.state)
+    #expect(duplicate.effects == .none)
+
+    let changedMode = BrainMetalRecoveryReducer.reduce(requested.state, event: .modeChanged)
+    #expect(!changedMode.state.retryInFlight)
+    #expect(changedMode.state.attemptID == 9)
+    #expect(changedMode.effects.discardPreparedRenderer)
+
+    let staleSuccess = BrainMetalRecoveryReducer.reduce(
+        changedMode.state,
+        event: .retryCompleted(attemptID: 8, succeeded: true)
+    )
+    #expect(staleSuccess.state == changedMode.state)
+    #expect(staleSuccess.effects == .none)
+}
+
+@Test func metalRecoveryRetryProducesDeterministicFailureAndSuccessEffects() {
+    let unavailable = BrainMetalRecoveryState(
+        presentation: .table,
+        capability: .unavailable(.rendererInitialization),
+        retryInFlight: false,
+        attemptID: 3
+    )
+    let retry = BrainMetalRecoveryReducer.reduce(unavailable, event: .retryRequested)
+
+    let failed = BrainMetalRecoveryReducer.reduce(
+        retry.state,
+        event: .retryCompleted(attemptID: 4, succeeded: false)
+    )
+    #expect(failed.state.effectivePresentation == .table)
+    #expect(!failed.state.retryInFlight)
+    #expect(failed.effects.keyboardFocus == .retryButton)
+    #expect(failed.effects.accessibilityFocus == .retryButton)
+    #expect(failed.effects.announcement == .stillUnavailable)
+
+    let retryAgain = BrainMetalRecoveryReducer.reduce(failed.state, event: .retryRequested)
+    let succeeded = BrainMetalRecoveryReducer.reduce(
+        retryAgain.state,
+        event: .retryCompleted(attemptID: 5, succeeded: true)
+    )
+    #expect(succeeded.state.presentation == .mri)
+    #expect(succeeded.state.capability == .available)
+    #expect(succeeded.state.effectivePresentation == .mri)
+    #expect(succeeded.effects.acceptPreparedRenderer)
+    #expect(succeeded.effects.keyboardFocus == .surface)
+    #expect(succeeded.effects.accessibilityFocus == .surface)
+    #expect(succeeded.effects.announcement == .restored)
+
+    let blockedPickerMRI = BrainMetalRecoveryReducer.reduce(
+        unavailable,
+        event: .presentationSelected(.mri)
+    )
+    #expect(blockedPickerMRI.state == unavailable)
+    #expect(blockedPickerMRI.effects == .none)
+}
+
 @MainActor
 @Test func metalCoordinatorReportsAnInjectedBootstrapFailure() {
     let coordinator = BrainMetalCoordinator(onPick: { _ in }) { _ in
@@ -89,6 +222,52 @@ func nativeBrainRendererCompilesItsMetalPipelineFamily() throws {
 
     #expect(coordinator.renderer == nil)
     #expect(coordinator.capability == .unavailable(.rendererInitialization))
+}
+
+@MainActor
+@Test func hostedBrainMountsAccessibleFallbackWithoutClearingSelection() async throws {
+    let selected = BrainNode(
+        id: "selected-memory", content: "Selected native memory", domain: "native",
+        confidence: 0.96, status: "committed", memoryType: "fact", createdAt: .now,
+        agent: "test", agentLabel: "Test Agent", agentIsRoot: false,
+        tags: ["native"], corroborationCount: 2
+    )
+    let graph = BrainGraphEnvelope(
+        nodes: [selected], edges: [], total: 1, domainCounts: ["native": 1],
+        domainLast: nil, continuationRequired: false, projection: nil
+    )
+    let api = MutationTestAPI(forgetResults: [], graph: graph)
+    let model = BrainViewModel(api: api)
+    model.graph = graph
+    model.selectedNodeID = selected.id
+    let recorder = BrainHostRecorder()
+    let view = BrainView(
+        model: model,
+        rendererBootstrap: { _ in .failure(.rendererInitialization) },
+        accessibilityAnnouncer: { recorder.announcements.append($0) },
+        surfaceObserver: { surface, mounted in
+            if mounted { recorder.surfaces.insert(surface) }
+            else { recorder.surfaces.remove(surface) }
+        }
+    )
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 1_180, height: 760),
+        styleMask: [.titled, .resizable], backing: .buffered, defer: false
+    )
+    let host = NSHostingView(rootView: view)
+    window.contentView = host
+    let surfaces = try await waitForMountedSurfaces(
+        recorder,
+        required: [.metalFallbackNotice, .metalRetryButton, .memoryTable],
+        forbidden: [.memoryMRI]
+    )
+
+    #expect(surfaces.contains(.metalFallbackNotice))
+    #expect(surfaces.contains(.metalRetryButton))
+    #expect(surfaces.contains(.memoryTable))
+    #expect(!surfaces.contains(.memoryMRI))
+    #expect(model.selectedNodeID == selected.id)
+    #expect(recorder.announcements == ["Interactive MRI unavailable. Showing Accessible Table."])
 }
 
 @Test func APIBaseURLRejectsRemoteAndCredentialedOrigins() {
@@ -595,22 +774,56 @@ private func edgeIdentity(_ edge: BrainEdge) -> String {
     "\(edge.source)\u{0}\(edge.target)\u{0}\(edge.type)"
 }
 
+@MainActor
+private final class BrainHostRecorder {
+    var announcements: [String] = []
+    var surfaces: Set<BrainMountedSurface> = []
+}
+
+private enum HostedBrainTestError: Error {
+    case surfacesDidNotMount(Set<BrainMountedSurface>)
+}
+
+@MainActor
+private func waitForMountedSurfaces(
+    _ recorder: BrainHostRecorder,
+    required: Set<BrainMountedSurface>,
+    forbidden: Set<BrainMountedSurface> = [],
+    timeout: Duration = .seconds(3)
+) async throws -> Set<BrainMountedSurface> {
+    let clock = ContinuousClock()
+    let deadline = clock.now + timeout
+    while clock.now < deadline {
+        if required.isSubset(of: recorder.surfaces), forbidden.isDisjoint(with: recorder.surfaces) {
+            return recorder.surfaces
+        }
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    throw HostedBrainTestError.surfacesDidNotMount(recorder.surfaces)
+}
+
 private actor MutationTestAPI: SAGEAPI {
     var forgetResults: [Result<MemoryMutationResponse, SAGEAPIError>]
     var forgetCalls: [String] = []
     var concurrentForgetCalls = 0
     var maximumConcurrentForgetCalls = 0
     var brainConnectome: ConnectomeEnvelope
+    var brainMemoryGraph: BrainGraphEnvelope
     let brainEngrams: AgentEngramEnvelope?
     var brainRelated: RelatedMemoryEnvelope?
 
     init(
         forgetResults: [Result<MemoryMutationResponse, SAGEAPIError>],
+        graph: BrainGraphEnvelope = .init(
+            nodes: [], edges: [], total: 0, domainCounts: [:], domainLast: [:],
+            continuationRequired: false, projection: nil
+        ),
         connectome: ConnectomeEnvelope = .init(neurons: [], synapses: []),
         engrams: AgentEngramEnvelope? = nil,
         related: RelatedMemoryEnvelope? = nil
     ) {
         self.forgetResults = forgetResults
+        self.brainMemoryGraph = graph
         self.brainConnectome = connectome
         self.brainEngrams = engrams
         self.brainRelated = related
@@ -632,7 +845,7 @@ private actor MutationTestAPI: SAGEAPI {
     func setMemoryTags(id: String, tags: [String]) async throws -> MemoryTagsEnvelope { .init(memoryID: id, tags: tags) }
     func addTag(_ tag: String, to ids: [String]) async throws -> BulkMemoryUpdateResponse { .init(status: "updated", updated: ids.count, total: ids.count) }
     func brainGraph(_ query: BrainGraphQuery) async throws -> BrainGraphEnvelope {
-        .init(nodes: [], edges: [], total: 0, domainCounts: [:], domainLast: [:], continuationRequired: false, projection: nil)
+        brainMemoryGraph
     }
     func connectome() async throws -> ConnectomeEnvelope { brainConnectome }
     func setConnectome(_ value: ConnectomeEnvelope) { brainConnectome = value }

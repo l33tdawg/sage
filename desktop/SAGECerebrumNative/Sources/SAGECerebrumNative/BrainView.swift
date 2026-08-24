@@ -5,23 +5,49 @@ struct BrainView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var model: BrainViewModel
-    @State private var presentation: BrainPresentation = .mri
-    @State private var metalCapability: BrainMetalCapability = .probing
-    @State private var isRetryingMetal = false
+    @State private var metalRecovery = BrainMetalRecoveryState()
     @State private var preparedMetalRenderer: BrainMetalRendererHandoff?
-    @State private var metalAttemptGeneration: UInt64 = 0
     @State private var scanning = true
     @State private var flow = true
     @State private var memoryHullOpacity = 0.08
     @State private var connectomeHullOpacity = 0.03
     @State private var showsDisplayControls = false
     @State private var announcementGeneration = 0
-    @State private var focusGeneration = 0
+    @State private var keyboardFocusGeneration = 0
+    @State private var accessibilityFocusGeneration = 0
     @FocusState private var keyboardFocus: BrainFocusTarget?
     @AccessibilityFocusState private var accessibilityFocus: BrainFocusTarget?
+    private let rendererBootstrap: BrainMetalRendererFactory
+    private let accessibilityAnnouncer: @MainActor (String) -> Void
+    private let surfaceObserver: @MainActor (BrainMountedSurface, Bool) -> Void
 
-    init(api: any SAGEAPI) {
+    init(
+        api: any SAGEAPI,
+        rendererBootstrap: @escaping BrainMetalRendererFactory = { onPick in
+            guard let renderer = BrainMetalRenderer(onPick: onPick) else {
+                return .failure(.rendererInitialization)
+            }
+            return .success(renderer)
+        },
+        accessibilityAnnouncer: @escaping @MainActor (String) -> Void = BrainView.systemAccessibilityAnnouncement,
+        surfaceObserver: @escaping @MainActor (BrainMountedSurface, Bool) -> Void = { _, _ in }
+    ) {
         _model = State(initialValue: BrainViewModel(api: api))
+        self.rendererBootstrap = rendererBootstrap
+        self.accessibilityAnnouncer = accessibilityAnnouncer
+        self.surfaceObserver = surfaceObserver
+    }
+
+    init(
+        model: BrainViewModel,
+        rendererBootstrap: @escaping BrainMetalRendererFactory,
+        accessibilityAnnouncer: @escaping @MainActor (String) -> Void,
+        surfaceObserver: @escaping @MainActor (BrainMountedSurface, Bool) -> Void
+    ) {
+        _model = State(initialValue: model)
+        self.rendererBootstrap = rendererBootstrap
+        self.accessibilityAnnouncer = accessibilityAnnouncer
+        self.surfaceObserver = surfaceObserver
     }
 
     var body: some View {
@@ -108,14 +134,8 @@ struct BrainView: View {
         .onChange(of: model.selectedAgentID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedEngramID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedConnectionID) { _, _ in scheduleSelectionAnnouncement() }
-        .onChange(of: presentation) { _, newValue in
-            guard !(newValue == .table && metalCapability.isUnavailable) else { return }
-            requestFocus(returnFocusTarget)
-        }
         .onChange(of: model.mode) { _, _ in
-            metalAttemptGeneration &+= 1
-            preparedMetalRenderer = nil
-            requestFocus(returnFocusTarget)
+            applyMetalEvent(.modeChanged)
         }
     }
 
@@ -139,7 +159,7 @@ struct BrainView: View {
 
     @ViewBuilder
     private var notices: some View {
-        if case .unavailable = metalCapability {
+        if case .unavailable = metalRecovery.capability {
             HStack(spacing: 12) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(CerebrumTheme.amber)
@@ -154,20 +174,26 @@ struct BrainView: View {
                 .accessibilityElement(children: .combine)
                 Spacer()
                 Button(action: retryMetal) {
-                    if isRetryingMetal {
+                    if metalRecovery.retryInFlight {
                         Label("Trying MRI…", systemImage: "arrow.clockwise")
                     } else {
                         Text("Try MRI Again")
                     }
                 }
                     .buttonStyle(.bordered)
-                    .disabled(isRetryingMetal)
+                    .disabled(metalRecovery.retryInFlight)
+                    .accessibilityIdentifier("brain-metal-retry")
+                    .onAppear { surfaceObserver(.metalRetryButton, true) }
+                    .onDisappear { surfaceObserver(.metalRetryButton, false) }
                     .focused($keyboardFocus, equals: .metalRetry)
                     .accessibilityFocused($accessibilityFocus, equals: .metalRetry)
             }
             .padding(11)
             .background(CerebrumTheme.amber.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
             .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("brain-metal-fallback-notice")
+            .onAppear { surfaceObserver(.metalFallbackNotice, true) }
+            .onDisappear { surfaceObserver(.metalFallbackNotice, false) }
         }
         if model.updatesAvailable {
             notice(
@@ -226,11 +252,11 @@ struct BrainView: View {
             Group {
                 if model.mode == .memory, let graph = model.graph {
                     if graph.nodes.isEmpty { emptyState }
-                    else if effectivePresentation == .mri { memoryMRI(graph) }
+                    else if metalRecovery.effectivePresentation == .mri { memoryMRI(graph) }
                     else { memoryTable(graph) }
                 } else if model.mode == .connectome, let connectome = model.connectome {
                     if connectome.neurons.isEmpty { connectomeEmptyState }
-                    else if effectivePresentation == .mri { connectomeMRI(connectome) }
+                    else if metalRecovery.effectivePresentation == .mri { connectomeMRI(connectome) }
                     else { connectomeTable(connectome) }
                 } else if model.isLoading {
                     VStack(spacing: 12) {
@@ -342,7 +368,7 @@ struct BrainView: View {
                     case .background: dismissCurrentSelectionAndRestoreFocus()
                     }
                 },
-                attemptID: metalAttemptGeneration,
+                attemptID: metalRecovery.attemptID,
                 onCapabilityChange: { handleMetalCapability($1, attemptID: $0) },
                 rendererFactory: metalRendererFactory
             )
@@ -360,6 +386,9 @@ struct BrainView: View {
             .allowsHitTesting(false)
         }
         .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("brain-memory-mri")
+        .onAppear { surfaceObserver(.memoryMRI, true) }
+        .onDisappear { surfaceObserver(.memoryMRI, false) }
         .focusable()
         .focused($keyboardFocus, equals: .surface)
         .accessibilityFocused($accessibilityFocus, equals: .surface)
@@ -395,6 +424,9 @@ struct BrainView: View {
                 .width(min: 100, ideal: 140)
         }
         .accessibilityLabel("Memory brain table")
+        .accessibilityIdentifier("brain-memory-table")
+        .onAppear { surfaceObserver(.memoryTable, true) }
+        .onDisappear { surfaceObserver(.memoryTable, false) }
         .focused($keyboardFocus, equals: .table)
         .accessibilityFocused($accessibilityFocus, equals: .table)
     }
@@ -423,7 +455,7 @@ struct BrainView: View {
                         dismissCurrentSelectionAndRestoreFocus()
                     }
                 },
-                attemptID: metalAttemptGeneration,
+                attemptID: metalRecovery.attemptID,
                 onCapabilityChange: { handleMetalCapability($1, attemptID: $0) },
                 rendererFactory: metalRendererFactory
             )
@@ -441,6 +473,9 @@ struct BrainView: View {
             .allowsHitTesting(false)
         }
         .accessibilityLabel("Connectome MRI, \(connectome.neurons.count) visible agents, \(connectome.synapses.count) directed retained-traffic synapses. Use Accessible Table to inspect.")
+        .accessibilityIdentifier("brain-connectome-mri")
+        .onAppear { surfaceObserver(.connectomeMRI, true) }
+        .onDisappear { surfaceObserver(.connectomeMRI, false) }
         .focusable()
         .focused($keyboardFocus, equals: .surface)
         .accessibilityFocused($accessibilityFocus, equals: .surface)
@@ -475,6 +510,9 @@ struct BrainView: View {
             }.width(min: 130, ideal: 170)
         }
         .accessibilityLabel("Agent connectome table")
+        .accessibilityIdentifier("brain-connectome-table")
+        .onAppear { surfaceObserver(.connectomeTable, true) }
+        .onDisappear { surfaceObserver(.connectomeTable, false) }
         .focused($keyboardFocus, equals: .table)
         .accessibilityFocused($accessibilityFocus, equals: .table)
     }
@@ -619,13 +657,13 @@ struct BrainView: View {
                     Label(option.title, systemImage: option.systemImage)
                         .tag(option)
                         .disabled(option == .mri && !BrainPresentationPolicy.resolve(
-                            requested: option, capability: metalCapability
+                            requested: option, capability: metalRecovery.capability
                         ).mriEnabled)
                 }
             }
             .pickerStyle(.segmented)
             .frame(width: 190)
-            .help(metalCapability.isUnavailable
+            .help(metalRecovery.capability.isUnavailable
                   ? "Metal rendering is unavailable. Choose Try MRI Again to recheck."
                   : "Choose the interactive MRI or synchronized accessible table.")
 
@@ -634,7 +672,7 @@ struct BrainView: View {
             } label: {
                 Label(scanning ? "Pause Scan" : "Resume Scan", systemImage: scanning ? "pause.circle" : "play.circle")
             }
-            .disabled(reduceMotion || presentation == .table)
+            .disabled(reduceMotion || metalRecovery.effectivePresentation == .table)
 
             Button {
                 showsDisplayControls.toggle()
@@ -694,73 +732,41 @@ struct BrainView: View {
     }
 
     private var returnFocusTarget: BrainFocusTarget {
-        effectivePresentation == .table ? .table : .surface
+        metalRecovery.effectivePresentation == .table ? .table : .surface
     }
 
     private var presentationBinding: Binding<BrainPresentation> {
         Binding(
-            get: { presentation },
-            set: { newValue in
-                if newValue == .mri, presentation != .mri {
-                    metalAttemptGeneration &+= 1
-                    preparedMetalRenderer = nil
-                    metalCapability = .probing
-                }
-                presentation = newValue
-            }
+            get: { metalRecovery.presentation },
+            set: { applyMetalEvent(.presentationSelected($0)) }
         )
     }
 
-    private var effectivePresentation: BrainPresentation {
-        BrainPresentationPolicy.resolve(
-            requested: presentation, capability: metalCapability
-        ).effectivePresentation
-    }
-
     private func handleMetalCapability(_ capability: BrainMetalCapability, attemptID: UInt64) {
-        guard attemptID == metalAttemptGeneration else { return }
-        guard capability != metalCapability else { return }
-        let wasRetrying = isRetryingMetal
-        let failedSurfaceOwnedFocus = keyboardFocus == .surface || accessibilityFocus == .surface
-        metalCapability = capability
-        let decision = BrainPresentationPolicy.resolve(requested: presentation, capability: capability)
-        if presentation != decision.effectivePresentation { presentation = decision.effectivePresentation }
-        switch capability {
-        case .probing:
-            break
-        case .available:
-            if wasRetrying { postAccessibilityAnnouncement("Interactive MRI restored.") }
-            isRetryingMetal = false
-            if wasRetrying { requestFocus(.surface) }
-        case .unavailable:
-            postAccessibilityAnnouncement(
-                wasRetrying
-                    ? "Interactive MRI is still unavailable. Accessible Table remains active."
-                    : "Interactive MRI unavailable. Showing Accessible Table."
-            )
-            isRetryingMetal = false
-            if wasRetrying { requestFocus(.metalRetry) }
-            else if failedSurfaceOwnedFocus { requestFocus(.table) }
-        }
+        applyMetalEvent(.rendererReported(
+            attemptID: attemptID,
+            capability: capability,
+            keyboardSurfaceOwned: keyboardFocus == .surface,
+            accessibilitySurfaceOwned: accessibilityFocus == .surface
+        ))
     }
 
     private func retryMetal() {
-        guard !isRetryingMetal else { return }
-        isRetryingMetal = true
-        metalAttemptGeneration &+= 1
+        applyMetalEvent(.retryRequested)
+    }
+
+    private func beginMetalRetry(attemptID: UInt64) {
         Task { @MainActor in
             await Task.yield()
-            guard let renderer = BrainMetalRenderer(onPick: { _ in }) else {
-                isRetryingMetal = false
-                postAccessibilityAnnouncement("Interactive MRI is still unavailable. Accessible Table remains active.")
-                requestFocus(.metalRetry)
-                return
+            switch rendererBootstrap({ _ in }) {
+            case let .success(renderer):
+                applyMetalEvent(
+                    .retryCompleted(attemptID: attemptID, succeeded: true),
+                    preparedRenderer: renderer
+                )
+            case .failure:
+                applyMetalEvent(.retryCompleted(attemptID: attemptID, succeeded: false))
             }
-            preparedMetalRenderer = BrainMetalRendererHandoff(renderer)
-            metalCapability = .available
-            presentation = .mri
-            isRetryingMetal = false
-            postAccessibilityAnnouncement("Interactive MRI restored.")
         }
     }
 
@@ -769,10 +775,50 @@ struct BrainView: View {
             if let renderer = preparedMetalRenderer?.take(onPick: onPick) {
                 return .success(renderer)
             }
-            guard let renderer = BrainMetalRenderer(onPick: onPick) else {
-                return .failure(.rendererInitialization)
-            }
-            return .success(renderer)
+            return rendererBootstrap(onPick)
+        }
+    }
+
+    private func applyMetalEvent(
+        _ event: BrainMetalRecoveryEvent,
+        preparedRenderer: BrainMetalRenderer? = nil
+    ) {
+        let transition = BrainMetalRecoveryReducer.reduce(metalRecovery, event: event)
+        let effects = transition.effects
+
+        if effects.discardPreparedRenderer { preparedMetalRenderer = nil }
+        if effects.acceptPreparedRenderer, let preparedRenderer {
+            preparedMetalRenderer = BrainMetalRendererHandoff(preparedRenderer)
+        }
+        metalRecovery = transition.state
+
+        if let announcement = effects.announcement {
+            postAccessibilityAnnouncement(announcementText(announcement))
+        }
+        if let focus = effects.keyboardFocus {
+            requestKeyboardFocus(focusTarget(focus))
+        }
+        if let focus = effects.accessibilityFocus {
+            requestAccessibilityFocus(focusTarget(focus))
+        }
+        if let attemptID = effects.beginRetryAttempt {
+            beginMetalRetry(attemptID: attemptID)
+        }
+    }
+
+    private func focusTarget(_ destination: BrainMetalFocusDestination) -> BrainFocusTarget {
+        switch destination {
+        case .surface: .surface
+        case .table: .table
+        case .retryButton: .metalRetry
+        }
+    }
+
+    private func announcementText(_ announcement: BrainMetalAnnouncement) -> String {
+        switch announcement {
+        case .unavailable: "Interactive MRI unavailable. Showing Accessible Table."
+        case .stillUnavailable: "Interactive MRI is still unavailable. Accessible Table remains active."
+        case .restored: "Interactive MRI restored."
         }
     }
 
@@ -806,12 +852,26 @@ struct BrainView: View {
     }
 
     private func requestFocus(_ target: BrainFocusTarget) {
-        focusGeneration += 1
-        let generation = focusGeneration
+        requestKeyboardFocus(target)
+        requestAccessibilityFocus(target)
+    }
+
+    private func requestKeyboardFocus(_ target: BrainFocusTarget) {
+        keyboardFocusGeneration += 1
+        let generation = keyboardFocusGeneration
         Task { @MainActor in
             await Task.yield()
-            guard generation == focusGeneration else { return }
+            guard generation == keyboardFocusGeneration else { return }
             keyboardFocus = target
+        }
+    }
+
+    private func requestAccessibilityFocus(_ target: BrainFocusTarget) {
+        accessibilityFocusGeneration += 1
+        let generation = accessibilityFocusGeneration
+        Task { @MainActor in
+            await Task.yield()
+            guard generation == accessibilityFocusGeneration else { return }
             accessibilityFocus = target
         }
     }
@@ -856,6 +916,10 @@ struct BrainView: View {
     }
 
     private func postAccessibilityAnnouncement(_ message: String) {
+        accessibilityAnnouncer(message)
+    }
+
+    private static func systemAccessibilityAnnouncement(_ message: String) {
         NSAccessibility.post(
             element: NSApplication.shared,
             notification: .announcementRequested,

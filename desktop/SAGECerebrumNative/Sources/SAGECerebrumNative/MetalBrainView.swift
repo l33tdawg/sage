@@ -165,13 +165,8 @@ struct MetalBrainView: NSViewRepresentable {
         view.clearColor = MTLClearColor(red: 0.004, green: 0.004, blue: 0.008, alpha: 1)
         view.renderer = renderer
         view.delegate = renderer
-        view.setAccessibilityLabel("Interactive memory brain MRI")
-        view.setAccessibilityHelp("Drag to orbit, scroll to zoom, or switch to Accessible Table for the same memories.")
         renderer?.attach(view)
-        if renderer == nil {
-            view.setAccessibilityLabel("Memory MRI unavailable")
-            view.setAccessibilityHelp("Metal could not initialize. Switch to Accessible Table to inspect the same memories.")
-        }
+        configureAccessibility(for: view, rendererAvailable: renderer != nil)
         let capability = context.coordinator.capability
         let attemptID = attemptID
         context.coordinator.reportedAttemptID = attemptID
@@ -200,13 +195,33 @@ struct MetalBrainView: NSViewRepresentable {
             Task { @MainActor in onCapabilityChange(attemptID, capability) }
         }
         view.isPaused = !(autoRotate || (flow && !reduceMotion) || (highlightedEdge != nil && !reduceMotion))
-        view.setAccessibilityLabel(layout == .memory ? "Interactive memory brain MRI" : "Interactive agent connectome MRI")
-        view.setAccessibilityHelp(
-            layout == .memory
-                ? "Drag to orbit, scroll to zoom, or switch to Table for complete keyboard-accessible memory inspection."
-                : "Drag to orbit, scroll to zoom, or switch to Table and the agent inspector for complete keyboard-accessible agent, engram, and directed-connection inspection."
-        )
+        configureAccessibility(for: view, rendererAvailable: context.coordinator.renderer != nil)
         if view.isPaused { view.setNeedsDisplay(view.bounds) }
+    }
+
+    private func configureAccessibility(
+        for view: InteractiveMetalView,
+        rendererAvailable: Bool
+    ) {
+        if rendererAvailable {
+            view.setAccessibilityLabel(
+                layout == .memory ? "Interactive memory brain MRI" : "Interactive agent connectome MRI"
+            )
+            view.setAccessibilityHelp(
+                layout == .memory
+                    ? "Drag to orbit, scroll to zoom, or switch to Table for complete keyboard-accessible memory inspection."
+                    : "Drag to orbit, scroll to zoom, or switch to Table and the agent inspector for complete keyboard-accessible agent, engram, and directed-connection inspection."
+            )
+        } else {
+            view.setAccessibilityLabel(
+                layout == .memory ? "Memory MRI unavailable" : "Connectome MRI unavailable"
+            )
+            view.setAccessibilityHelp(
+                layout == .memory
+                    ? "The synchronized memory table is active. Use Try MRI Again to recheck interactive rendering."
+                    : "The synchronized Connectome table is active. Use Try MRI Again to recheck interactive rendering."
+            )
+        }
     }
 }
 
