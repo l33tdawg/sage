@@ -222,6 +222,8 @@ import Testing
     #expect(search.contains("model.inspectedMemoryID != nil && !model.isMutating"))
     #expect(search.contains("clearBulkSelectionAndRestoreFocus"))
     #expect(search.contains("dismissCurrentSearchFocusAndRestoreFocus"))
+    #expect(search.contains("if stableView !== view"))
+    #expect(search.contains("if stableChecks >= 8 { return }"))
 }
 
 @Test func searchInspectorLifecycleSeparatesSelectionFromPresentation() {

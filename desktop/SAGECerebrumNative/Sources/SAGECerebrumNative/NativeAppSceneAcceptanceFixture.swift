@@ -559,15 +559,23 @@ private final class NativeAppSceneAcceptanceRunner {
         try dispatch(hideInspector)
 
         try await wait("inspector unmount and exact results-table focus return") {
-            guard let snapshot = NativeAppSceneSearchBridge.shared.snapshot() else { return false }
+            guard let snapshot = NativeAppSceneSearchBridge.shared.snapshot(),
+                  let currentResultsTable = self.uniqueIdentifiedControl(
+                    identifier: "search-results-table",
+                    type: NSTableView.self
+                  ) else { return false }
             return !snapshot.inspectorIsPresented && snapshot.inspectedMemoryID == inspectedMemoryID &&
-                resultsTable.window === self.window && self.window.firstResponder === resultsTable
+                currentResultsTable.window === self.window && self.window.firstResponder === currentResultsTable
         }
-        guard let hiddenSnapshot = NativeAppSceneSearchBridge.shared.snapshot() else {
+        guard let hiddenSnapshot = NativeAppSceneSearchBridge.shared.snapshot(),
+              let hiddenResultsTable = uniqueIdentifiedControl(
+                identifier: "search-results-table",
+                type: NSTableView.self
+              ) else {
             throw FixtureError.assertion("Search semantic state disappeared after hiding inspector")
         }
         searchLifecycleSnapshots.append(searchSnapshot(stage: "inspector-hidden", snapshot: hiddenSnapshot))
-        responderSnapshots.append(controlResponderSnapshot(stage: "results-after-hide", control: resultsTable))
+        responderSnapshots.append(controlResponderSnapshot(stage: "results-after-hide", control: hiddenResultsTable))
         record("hide-preserves-inspection-and-restores-table", expected: "same inspected ID, presentation hidden, exact table first responder", actual: inspectedMemoryID)
 
         try await wait("rendered Show Inspector command replacing Hide Inspector") {

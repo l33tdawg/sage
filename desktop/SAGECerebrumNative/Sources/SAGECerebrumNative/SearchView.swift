@@ -585,12 +585,29 @@ struct SearchView: View {
             guard generation == focusGeneration else { return }
             keyboardFocus = target
             accessibilityFocus = target
+            var stableView: NSView?
+            var stableChecks = 0
             for _ in 0..<50 {
                 await Task.yield()
                 guard generation == focusGeneration else { return }
                 if let view = nativeFocusableView(for: target),
-                   view.window?.makeFirstResponder(view) == true {
-                    return
+                   let window = view.window {
+                    if stableView !== view {
+                        stableView = view
+                        stableChecks = 0
+                    }
+                    if window.firstResponder !== view {
+                        guard window.makeFirstResponder(view) else {
+                            stableChecks = 0
+                            try? await Task.sleep(for: .milliseconds(10))
+                            continue
+                        }
+                    }
+                    stableChecks += 1
+                    if stableChecks >= 8 { return }
+                } else {
+                    stableView = nil
+                    stableChecks = 0
                 }
                 try? await Task.sleep(for: .milliseconds(10))
             }
