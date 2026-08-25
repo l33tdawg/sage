@@ -318,7 +318,7 @@ The whole inner proof plus intent/payload/result use the local vault-backed
 storage path. Foreign completion creates no memory journal, and the result is
 atomically paired with its durable return outbox event before the peer is
 acknowledged (`internal/store/pipeline_transport.go:126-189`, `:256-326`;
-`handlePipeResult`, `api/rest/pipe_handler.go:1545-1780`).
+`handlePipeResult`, `api/rest/pipe_handler.go:1580-1882`).
 
 ### `POST /fed/v1/query/available`
 

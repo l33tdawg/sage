@@ -161,6 +161,28 @@ func TestAdvertisedMessageRepliesUsesExactSignedPassiveContract(t *testing.T) {
 	require.Contains(t, tool.Description, "Passive")
 }
 
+func TestAdvertisedMessageReplyForbidsSubstituteSend(t *testing.T) {
+	s, _ := newAdvertisedToolTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{})
+	})
+
+	reply := s.tools["sage_message_reply"].Description
+	require.Contains(t, reply, "provider-addressed legacy")
+	require.Contains(t, reply, "exact typed compatibility signal")
+	require.Contains(t, reply, "failed reply is not authorization")
+	require.Contains(t, reply, "sage_message_send")
+
+	inbox := s.tools["sage_inbox"].Description
+	require.Contains(t, inbox, "provider-addressed legacy work")
+	require.Contains(t, inbox, "failed reply is not authorization")
+	require.Contains(t, inbox, "sage_message_send")
+
+	receive := s.tools["sage_messages_receive"].Description
+	require.Contains(t, receive, "fresh token does not make prior work look cleared")
+	require.Contains(t, receive, "own_claimed_unfinished")
+	require.Contains(t, receive, "claimed_elsewhere")
+}
+
 // TestHiddenCompatibilityToolsAreUnchangedByReplyVisibility guards the other
 // direction: adding the advertised reply read must not un-hide or re-home any
 // deprecated pipe alias, and must not teach a client to use one.
@@ -199,4 +221,12 @@ func TestAdvertisedMessageIdentityContractsKeepExactIDsAuthoritative(t *testing.
 	require.Contains(t, history.Description, "agent@chain")
 	require.Contains(t, history.Description, "presentation metadata")
 	require.Contains(t, history.Description, "current display-name compatibility fallback")
+	require.Contains(t, history.Description, "claimed_elsewhere")
+	require.Contains(t, history.Description, "payload-free")
+	properties := history.InputSchema["properties"].(map[string]any)
+	folders := properties["folder"].(map[string]any)["enum"].([]string)
+	require.Contains(t, folders, "claimed_elsewhere")
+	require.Equal(t, 20, properties["limit"].(map[string]any)["default"],
+		"the existing history schema default must remain backward compatible")
+	require.Contains(t, properties, "cursor")
 }

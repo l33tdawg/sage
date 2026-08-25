@@ -63,6 +63,16 @@ type federatedMessageSessionClaimer interface {
 	ClaimFederatedMessageWithSession(context.Context, string, string, string) error
 }
 
+type providerMessageSessionClaimer interface {
+	ClaimProviderMessageWithSession(context.Context, string, string, string) error
+}
+
+type providerMessageSessionVerifier interface {
+	VerifyProviderMessageClaimSession(context.Context, string, string, string) error
+	LookupProviderMessageReplyReplay(context.Context, string, string, string, string) (bool, string, error)
+	CompleteProviderMessageWithSession(context.Context, string, string, string, string, *memory.MemoryRecord) (bool, string, error)
+}
+
 type federatedMessageReplyReplayStore interface {
 	LookupFederatedMessageReplyReplay(context.Context, string, string, string, string) (string, bool, error)
 }
@@ -1130,6 +1140,16 @@ func (s *Server) handlePipeInbox(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			item.ClaimedSessionID = claimantSessionID
+		} else if item.ToAgent == "" && item.ToProvider != "" {
+			providerClaimSessionID := claimantSessionID
+			if providerClaimSessionID == "" {
+				providerClaimSessionID = "legacy"
+			}
+			sessionClaimer, ok := s.store.(providerMessageSessionClaimer)
+			if !ok || sessionClaimer.ClaimProviderMessageWithSession(r.Context(), agentID, item.PipeID, providerClaimSessionID) != nil {
+				continue
+			}
+			item.ClaimedSessionID = providerClaimSessionID
 		} else if err := pipeStore.ClaimPipeline(r.Context(), item.PipeID, agentID); err != nil {
 			continue
 		}
@@ -1248,6 +1268,7 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 	pipeID := chi.URLParam(r, "pipe_id")
 	agentID := middleware.ContextAgentID(r.Context())
 	claimantSessionID := strings.TrimSpace(r.URL.Query().Get("claimant_session_id"))
+	boundClaimantSessionID := ""
 
 	pipeStore, ok := s.store.(store.PipelineStore)
 	if !ok {
@@ -1286,15 +1307,29 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusConflict, "Federated pipeline suspended", "The connection, sharing grant, owner, or work-request permission changed.")
 			return
 		}
+	} else if msg.ToAgent == "" && msg.ToProvider != "" {
+		boundClaimantSessionID = claimantSessionID
+		if boundClaimantSessionID == "" {
+			boundClaimantSessionID = "legacy"
+		}
+		sessionClaimer, ok := s.store.(providerMessageSessionClaimer)
+		if !ok || sessionClaimer.ClaimProviderMessageWithSession(r.Context(), agentID, pipeID, boundClaimantSessionID) != nil {
+			writeProblem(w, http.StatusConflict, "Claim failed", "The provider-addressed message could not be session-bound.")
+			return
+		}
 	} else if err := pipeStore.ClaimPipeline(r.Context(), pipeID, agentID); err != nil {
 		writeProblem(w, http.StatusConflict, "Claim failed", err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"pipe_id": pipeID,
 		"status":  "claimed",
-	})
+	}
+	if boundClaimantSessionID != "" {
+		response["claimant_session_id"] = boundClaimantSessionID
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handlePipeReceiptChallenge(w http.ResponseWriter, r *http.Request) {
@@ -1611,6 +1646,55 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusConflict, "Completion failed", fmt.Sprintf("pipeline message %s not available for completion by this agent", pipeID))
 		return
 	}
+	if msg.SourceChainID == "" && msg.DestinationChainID == "" && msg.ToAgent == "" && msg.ToProvider != "" {
+		if !requireExactSignedMessageAction(w, r) {
+			return
+		}
+		// Older provider-pipe callers omitted a session. Sessionless provider
+		// claims are now explicitly fenced as legacy, so preserve that exact
+		// compatibility only after the row and claimant have been proven above.
+		if req.ClaimantSessionID == "" {
+			req.ClaimantSessionID = "legacy"
+		}
+		if len(req.ClaimantSessionID) > store.MaxMessageClaimantSessionBytes {
+			writeProblem(w, http.StatusBadRequest, "Invalid claimant session", "claimant_session_id is too long for a provider-addressed result")
+			return
+		}
+		verifier, ok := s.store.(providerMessageSessionVerifier)
+		if !ok {
+			writeProblem(w, http.StatusNotImplemented, "Provider message sessions unavailable", "The active store cannot verify provider message claim sessions.")
+			return
+		}
+		replayed, replayJournalID, replayErr := verifier.LookupProviderMessageReplyReplay(
+			r.Context(), agentID, pipeID, req.ClaimantSessionID, req.Result)
+		if replayErr != nil {
+			switch {
+			case errors.Is(replayErr, store.ErrMessageClaimedByOtherSession):
+				writeProblemTyped(w, http.StatusConflict, messageClaimSessionProblemType, "Claimed by another session",
+					"Another session of this agent holds this provider-addressed message claim. Use sage_message_handoff after deciding that claimant is stale.")
+			case errors.Is(replayErr, store.ErrMessageReplyConflict):
+				writeProblem(w, http.StatusConflict, "Reply conflict", "This provider-addressed message already has a different reply.")
+			default:
+				writeProblem(w, http.StatusNotFound, "Pipeline message not found", pipeNotFoundDetail)
+			}
+			return
+		}
+		if replayed {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status": "completed", "journal_id": replayJournalID, "journaled": replayJournalID != "", "idempotent_replay": true,
+			})
+			return
+		}
+		if verifyErr := verifier.VerifyProviderMessageClaimSession(r.Context(), agentID, pipeID, req.ClaimantSessionID); verifyErr != nil {
+			if errors.Is(verifyErr, store.ErrMessageClaimedByOtherSession) {
+				writeProblemTyped(w, http.StatusConflict, messageClaimSessionProblemType, "Claimed by another session",
+					"Another session of this agent holds this provider-addressed message claim. Use sage_message_handoff after deciding that claimant is stale.")
+				return
+			}
+			writeProblem(w, http.StatusNotFound, "Pipeline message not found", pipeNotFoundDetail)
+			return
+		}
+	}
 	if msg.SourceChainID != "" {
 		proof := middleware.ContextAgentAuth(r.Context())
 		if proof == nil || len(proof.Signature) == 0 || len(proof.CanonicalRequest) == 0 || len(proof.Nonce) < 8 {
@@ -1662,6 +1746,8 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 	// future consensus-backed recall.
 	journalID := ""
 	journaled := false
+	providerCompatibility := msg.SourceChainID == "" && msg.ToAgent == "" && msg.ToProvider != ""
+	var providerJournal *memory.MemoryRecord
 	if s.shouldAutoJournalPipeline(msg) {
 		elapsed := ""
 		if msg.ClaimedAt != nil {
@@ -1678,8 +1764,12 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 			"[Pipeline] Local agent pipeline completed. Result received (%d chars)%s. Untrusted request and result content omitted from memory.",
 			len(req.Result), elapsed,
 		)
-		journalID = s.autoJournalPipeline(r.Context(), summary)
-		journaled = journalID != ""
+		if providerCompatibility {
+			providerJournal = s.prepareAutoJournalPipeline(r.Context(), summary)
+		} else {
+			journalID = s.autoJournalPipeline(r.Context(), summary)
+			journaled = journalID != ""
+		}
 	}
 
 	// Complete the pipeline. Foreign work atomically writes the result and its
@@ -1730,6 +1820,15 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 				r.Context(), pipeID, agentID, req.ClaimantSessionID, req.Result, event)
 			return messageErr
 		})
+	} else if msg.ToAgent == "" && msg.ToProvider != "" {
+		providerStore, ok := pipeStore.(providerMessageSessionVerifier)
+		if !ok {
+			completeErr = store.ErrPipelineUnsupported
+		} else {
+			idempotentReplay, journalID, completeErr = providerStore.CompleteProviderMessageWithSession(
+				r.Context(), agentID, pipeID, req.ClaimantSessionID, req.Result, providerJournal)
+			journaled = journalID != ""
+		}
 	} else {
 		completeErr = pipeStore.CompletePipeline(r.Context(), pipeID, agentID, req.Result, journalID)
 	}
@@ -1740,10 +1839,10 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 			return
 		case errors.Is(completeErr, store.ErrMessageClaimedByOtherSession):
 			writeProblemTyped(w, http.StatusConflict, messageClaimSessionProblemType, "Claimed by another session",
-				"Another session of this agent holds this federated message claim. Use sage_message_handoff after deciding that claimant is stale.")
+				"Another session of this agent holds this message claim. Use sage_message_handoff after deciding that claimant is stale.")
 			return
 		case errors.Is(completeErr, store.ErrMessageReplyConflict):
-			writeProblem(w, http.StatusConflict, "Reply conflict", "This federated message already has a different reply.")
+			writeProblem(w, http.StatusConflict, "Reply conflict", "This message already has a different reply.")
 			return
 		}
 		writeProblem(w, http.StatusConflict, "Completion failed", completeErr.Error())
@@ -1755,7 +1854,7 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.OnEvent != nil {
+	if s.OnEvent != nil && (!providerCompatibility || !idempotentReplay) {
 		// `summary` deliberately NOT reused here. It carries the pipe id, the
 		// result length and the elapsed duration, which the JOURNAL legitimately
 		// records — that entry is an authorized memory, not a broadcast. The
@@ -1767,6 +1866,9 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 		"status":     "completed",
 		"journal_id": journalID,
 		"journaled":  journaled,
+	}
+	if msg.SourceChainID == "" && msg.ToAgent == "" && msg.ToProvider != "" {
+		response["idempotent_replay"] = idempotentReplay
 	}
 	if replyEventID != "" {
 		response["reply_event_id"] = replyEventID
@@ -1786,6 +1888,12 @@ func (s *Server) callerCanViewPipe(ctx context.Context, callerID string, msg *st
 		return true
 	}
 	if msg.DestinationChainID == "" && callerID == msg.ToAgent {
+		return true
+	}
+	// A provider-addressed row becomes exact-agent-owned when its claim CAS
+	// succeeds. Preserve that authority even if the agent's mutable provider
+	// profile changes before it finishes or revisits the retained result.
+	if msg.DestinationChainID == "" && msg.ClaimedBy != "" && callerID == msg.ClaimedBy {
 		return true
 	}
 	if msg.DestinationChainID == "" && msg.ToProvider != "" && s.agentStore != nil {
@@ -2123,6 +2231,22 @@ func (s *Server) autoJournalPipeline(ctx context.Context, summary string) string
 		return ""
 	}
 
+	record := s.prepareAutoJournalPipeline(ctx, summary)
+	if record == nil {
+		return ""
+	}
+	if err := offchain.InsertMemory(ctx, record); err != nil {
+		s.logger.Warn().Err(err).Msg("pipeline auto-journal: failed to insert memory")
+		return ""
+	}
+
+	return record.MemoryID
+}
+
+// prepareAutoJournalPipeline builds the best-effort legacy journal without
+// mutating storage. Provider compatibility completion passes this record into
+// its completion transaction so only the fresh CAS winner can insert it.
+func (s *Server) prepareAutoJournalPipeline(ctx context.Context, summary string) *memory.MemoryRecord {
 	memoryID := generateUUID()
 	contentHash := sha256.Sum256([]byte(summary))
 
@@ -2148,12 +2272,7 @@ func (s *Server) autoJournalPipeline(ctx context.Context, summary string) string
 		}
 	}
 
-	if err := offchain.InsertMemory(ctx, record); err != nil {
-		s.logger.Warn().Err(err).Msg("pipeline auto-journal: failed to insert memory")
-		return ""
-	}
-
-	return memoryID
+	return record
 }
 
 // generatePipeID creates the durable identifier shared by the canonical

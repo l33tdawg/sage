@@ -130,7 +130,7 @@ test('v11.18 user, recovery, federation, and SDK guides stay aligned', () => {
   assert.doesNotMatch(architecture, /Default TTL:\*\* 60 minutes/);
   assert.match(architecture, /sage_message_send/);
   assert.match(read('docs/reference/mcp-tools.md'), /message_inbox_unread/);
-  assert.match(read('docs/reference/mcp-tools.md'), /call `sage_messages_receive`/);
+  assert.match(read('docs/reference/mcp-tools.md'), /call `sage_inbox`/);
   assert.match(read('internal/mcp/tools.go'), /Canonical Messages remain durable and queryable/);
   assert.doesNotMatch(read('internal/mcp/tools.go'), /History is retained only for the normal transient message window/);
   assert.match(roadmap, /v11\.18\.0 completion ledger/);

@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/l33tdawg/sage/internal/memory"
 )
 
 const (
@@ -131,6 +133,17 @@ func (s *SQLiteStore) migrateMessages(ctx context.Context) error {
 		WHERE source_chain_id!='' AND destination_chain_id=''
 		  AND to_agent!='' AND to_provider='' AND status='claimed'`); err != nil {
 		return fmt.Errorf("backfill federated message claim fences: %w", err)
+	}
+	// Provider-addressed legacy inbox rows were claimed on behalf of one concrete
+	// agent but predated session receipts. Preserve that exact claimed_by owner
+	// behind an explicit legacy fence so recovery requires a deliberate CAS
+	// handoff instead of an unsafe typed-404 fallback.
+	if _, err := s.writeExecContext(ctx, `INSERT OR IGNORE INTO message_fetch_receipts
+		(message_id,receiver_agent_id,claimant_session_id)
+		SELECT pipe_id,claimed_by,'legacy' FROM pipeline_messages
+		WHERE source_chain_id='' AND destination_chain_id=''
+		  AND to_agent='' AND to_provider!='' AND status='claimed' AND claimed_by!=''`); err != nil {
+		return fmt.Errorf("backfill provider message claim fences: %w", err)
 	}
 	// v11.17.8 stamped the old 24-hour pipeline TTL onto canonical msg-* rows.
 	// Extend still-live inbox/outbox items during upgrade so a recipient that
@@ -615,7 +628,7 @@ func (s *SQLiteStore) ReceiveLocalMessages(ctx context.Context, agentID, provide
 	return items, replayed, err
 }
 
-// CountClaimedLocalMessagesElsewhere returns only an exact-recipient scalar.
+// CountClaimedLocalMessagesElsewhere returns only an exact claimed-owner scalar.
 // It deliberately queries the authoritative claim rows rather than a bounded
 // history page, so older stranded claims cannot disappear behind newer work.
 // No message identifier, sender, intent, payload, or claimant identity crosses
@@ -633,11 +646,88 @@ func (s *SQLiteStore) CountClaimedLocalMessagesElsewhere(
 		FROM pipeline_messages p
 		JOIN message_fetch_receipts r
 		  ON r.message_id=p.pipe_id AND r.receiver_agent_id=?
-		WHERE p.to_agent=? AND p.to_provider='' AND p.destination_chain_id=''
+		WHERE p.claimed_by=? AND p.destination_chain_id=''
+		  AND ((p.to_agent=? AND p.to_provider='') OR
+		       (p.source_chain_id='' AND p.to_agent='' AND p.to_provider!=''))
 		  AND p.status='claimed' AND p.completed_at IS NULL
+		  AND p.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		  AND r.claimant_session_id!=?`,
-		receiverID, receiverID, claimantSessionID).Scan(&count)
+		receiverID, receiverID, receiverID, claimantSessionID).Scan(&count)
 	return count, err
+}
+
+// GetClaimedMessagesElsewhere makes the exact scalar actionable without
+// widening the content boundary. It returns only CAS handoff metadata for the
+// signed recipient, ordered by a stable exclusive (created_at, message_id)
+// keyset. The extra row is used only to report truncation.
+func (s *SQLiteStore) GetClaimedMessagesElsewhere(
+	ctx context.Context, receiverID, claimantSessionID string, limit int,
+	afterCreatedAt, afterMessageID string,
+) ([]ClaimedElsewhereMessage, int, bool, error) {
+	receiverID = strings.TrimSpace(receiverID)
+	claimantSessionID = strings.TrimSpace(claimantSessionID)
+	afterCreatedAt = strings.TrimSpace(afterCreatedAt)
+	afterMessageID = strings.TrimSpace(afterMessageID)
+	if receiverID == "" || claimantSessionID == "" || len(claimantSessionID) > MaxMessageClaimantSessionBytes ||
+		limit < 1 || limit > 20 || ((afterCreatedAt == "") != (afterMessageID == "")) {
+		return nil, 0, false, ErrMessageNotFound
+	}
+	if afterCreatedAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, afterCreatedAt); err != nil {
+			return nil, 0, false, ErrMessageNotFound
+		}
+	}
+	count, err := s.CountClaimedLocalMessagesElsewhere(ctx, receiverID, claimantSessionID)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	query := `SELECT p.pipe_id,r.claimant_session_id,p.created_at,p.claimed_at,p.expires_at,
+		CASE WHEN p.source_chain_id!='' THEN 1 ELSE 0 END
+		FROM pipeline_messages p
+		JOIN message_fetch_receipts r
+		  ON r.message_id=p.pipe_id AND r.receiver_agent_id=?
+		WHERE p.claimed_by=? AND p.destination_chain_id=''
+		  AND ((p.to_agent=? AND p.to_provider='') OR
+		       (p.source_chain_id='' AND p.to_agent='' AND p.to_provider!=''))
+		  AND p.status='claimed' AND p.completed_at IS NULL
+		  AND p.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		  AND r.claimant_session_id!=?`
+	args := []any{receiverID, receiverID, receiverID, claimantSessionID}
+	if afterCreatedAt != "" {
+		query += ` AND (p.created_at>? OR (p.created_at=? AND p.pipe_id>?))`
+		args = append(args, afterCreatedAt, afterCreatedAt, afterMessageID)
+	}
+	query += ` ORDER BY p.created_at ASC,p.pipe_id ASC LIMIT ?`
+	args = append(args, limit+1)
+	rows, err := s.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer rows.Close() //nolint:errcheck
+	items := make([]ClaimedElsewhereMessage, 0, limit+1)
+	for rows.Next() {
+		var item ClaimedElsewhereMessage
+		var createdAt, expiresAt string
+		var claimedAt *string
+		var foreign int
+		if err := rows.Scan(&item.MessageID, &item.ClaimantSessionID, &createdAt, &claimedAt, &expiresAt, &foreign); err != nil {
+			return nil, 0, false, err
+		}
+		item.CreatedAt = parseTime(createdAt)
+		item.CreatedAtCursor = createdAt
+		item.ClaimedAt = parseTimePtr(claimedAt)
+		item.ExpiresAt = parseTime(expiresAt)
+		item.Foreign = foreign != 0
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, false, err
+	}
+	truncated := len(items) > limit
+	if truncated {
+		items = items[:limit]
+	}
+	return items, count, truncated, nil
 }
 
 // GetOwnClaimedUnfinishedMessages is the non-claiming companion to canonical
@@ -656,12 +746,14 @@ func (s *SQLiteStore) GetOwnClaimedUnfinishedMessages(
 		FROM pipeline_messages p
 		JOIN message_fetch_receipts r
 		  ON r.message_id=p.pipe_id AND r.receiver_agent_id=?
-		WHERE p.to_agent=? AND p.to_provider='' AND p.destination_chain_id=''
+		WHERE p.claimed_by=? AND p.destination_chain_id=''
+		  AND ((p.to_agent=? AND p.to_provider='') OR
+		       (p.source_chain_id='' AND p.to_agent='' AND p.to_provider!=''))
 		  AND p.status='claimed' AND p.completed_at IS NULL
 		  AND p.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		  AND r.claimant_session_id=?
 		ORDER BY p.created_at ASC, p.pipe_id ASC LIMIT ?`,
-		receiverID, receiverID, claimantSessionID, limit)
+		receiverID, receiverID, receiverID, claimantSessionID, limit)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -706,11 +798,14 @@ func (s *SQLiteStore) HandoffLocalMessageClaim(ctx context.Context, receiverID, 
 		if err := tx.conn.QueryRowContext(ctx, `SELECT p.to_agent,p.to_provider,p.claimed_by,p.status,
 			p.source_chain_id,p.destination_chain_id,r.claimant_session_id
 			FROM pipeline_messages p JOIN message_fetch_receipts r ON r.message_id=p.pipe_id
-			WHERE p.pipe_id=? AND r.receiver_agent_id=?`, messageID, receiverID).
+			WHERE p.pipe_id=? AND r.receiver_agent_id=?
+			  AND p.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`, messageID, receiverID).
 			Scan(&addressed, &provider, &claimed, &status, &sourceChain, &destinationChain, &current); err != nil {
 			return ErrMessageNotFound
 		}
-		if addressed != receiverID || provider != "" || claimed != receiverID || status != "claimed" || destinationChain != "" {
+		exactRecipient := addressed == receiverID && provider == ""
+		legacyProvider := sourceChain == "" && addressed == "" && provider != ""
+		if (!exactRecipient && !legacyProvider) || claimed != receiverID || status != "claimed" || destinationChain != "" {
 			return ErrMessageNotFound
 		}
 		if current == toSessionID {
@@ -721,7 +816,11 @@ func (s *SQLiteStore) HandoffLocalMessageClaim(ctx context.Context, receiverID, 
 			return ErrMessageReceiveConflict
 		}
 		result, err := tx.writeExecContext(ctx, `UPDATE message_fetch_receipts SET claimant_session_id=?
-			WHERE message_id=? AND receiver_agent_id=? AND claimant_session_id=?`, toSessionID, messageID, receiverID, fromSessionID)
+			WHERE message_id=? AND receiver_agent_id=? AND claimant_session_id=?
+			  AND EXISTS (SELECT 1 FROM pipeline_messages p WHERE p.pipe_id=?
+			    AND p.status='claimed' AND p.completed_at IS NULL
+			    AND p.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+			toSessionID, messageID, receiverID, fromSessionID, messageID)
 		if err != nil {
 			return err
 		}
@@ -731,6 +830,150 @@ func (s *SQLiteStore) HandoffLocalMessageClaim(ctx context.Context, receiverID, 
 		return nil
 	})
 	return replayed, err
+}
+
+// ClaimProviderMessageWithSession atomically binds one local provider-routed
+// compatibility row to the concrete agent that won its inbox claim and to the
+// exact MCP session doing the work. Provider membership is authorized by the
+// REST layer immediately before this store mutation; the persisted claimed_by
+// identity becomes authoritative after the CAS succeeds.
+func (s *SQLiteStore) ClaimProviderMessageWithSession(ctx context.Context, receiverID, messageID, claimantSessionID string) error {
+	receiverID = strings.TrimSpace(receiverID)
+	claimantSessionID = strings.TrimSpace(claimantSessionID)
+	if receiverID == "" || messageID == "" || claimantSessionID == "" || len(claimantSessionID) > MaxMessageClaimantSessionBytes {
+		return ErrMessageNotFound
+	}
+	return s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		var addressed, provider, sourceChain, destinationChain, status string
+		if err := tx.conn.QueryRowContext(ctx, `SELECT to_agent,to_provider,source_chain_id,destination_chain_id,status
+			FROM pipeline_messages WHERE pipe_id=?
+			  AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`, messageID).
+			Scan(&addressed, &provider, &sourceChain, &destinationChain, &status); err != nil ||
+			addressed != "" || provider == "" || sourceChain != "" || destinationChain != "" || status != "pending" {
+			return ErrMessageNotFound
+		}
+		if err := tx.ClaimPipeline(ctx, messageID, receiverID); err != nil {
+			return err
+		}
+		_, err := tx.writeExecContext(ctx, `INSERT INTO message_fetch_receipts
+			(message_id,receiver_agent_id,claimant_session_id) VALUES(?,?,?)`,
+			messageID, receiverID, claimantSessionID)
+		return err
+	})
+}
+
+// VerifyProviderMessageClaimSession fences the retained local pipe completion
+// route after the canonical Messages facade has selected provider compatibility.
+// It performs no mutation and reveals a session mismatch only after exact
+// claimed_by ownership has been established.
+func (s *SQLiteStore) VerifyProviderMessageClaimSession(ctx context.Context, receiverID, messageID, claimantSessionID string) error {
+	receiverID = strings.TrimSpace(receiverID)
+	claimantSessionID = strings.TrimSpace(claimantSessionID)
+	if receiverID == "" || messageID == "" || claimantSessionID == "" || len(claimantSessionID) > MaxMessageClaimantSessionBytes {
+		return ErrMessageNotFound
+	}
+	var current string
+	err := s.conn.QueryRowContext(ctx, `SELECT r.claimant_session_id
+		FROM pipeline_messages p JOIN message_fetch_receipts r
+		  ON r.message_id=p.pipe_id AND r.receiver_agent_id=?
+		WHERE p.pipe_id=? AND p.source_chain_id='' AND p.destination_chain_id=''
+		  AND p.to_agent='' AND p.to_provider!='' AND p.claimed_by=? AND p.status='claimed'
+		  AND p.completed_at IS NULL
+		  AND p.expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`,
+		receiverID, messageID, receiverID).Scan(&current)
+	if err != nil {
+		return ErrMessageNotFound
+	}
+	if current != claimantSessionID {
+		return ErrMessageClaimedByOtherSession
+	}
+	return nil
+}
+
+// LookupProviderMessageReplyReplay validates an identical completed provider
+// retry and returns the authoritative journal attached by the fresh winner.
+func (s *SQLiteStore) LookupProviderMessageReplyReplay(
+	ctx context.Context, receiverID, messageID, claimantSessionID, result string,
+) (bool, string, error) {
+	if len(result) > MaxPipeContentBytes {
+		return false, "", ErrPipeResultTooLarge
+	}
+	var existingReceiver, existingHash string
+	if err := s.conn.QueryRowContext(ctx, `SELECT receiver_agent_id,result_hash
+		FROM message_replies WHERE message_id=?`, messageID).Scan(&existingReceiver, &existingHash); errors.Is(err, sql.ErrNoRows) {
+		return false, "", nil
+	} else if err != nil {
+		return false, "", err
+	}
+	if existingReceiver != receiverID {
+		return false, "", ErrMessageNotFound
+	}
+	openedHash, err := s.openMessageFingerprint(existingHash)
+	if err != nil {
+		return false, "", err
+	}
+	if openedHash != messageKeyHash(result) {
+		return false, "", ErrMessageReplyConflict
+	}
+	var currentSession, journalID string
+	err = s.conn.QueryRowContext(ctx, `SELECT r.claimant_session_id,p.journal_id
+		FROM pipeline_messages p JOIN message_fetch_receipts r
+		  ON r.message_id=p.pipe_id AND r.receiver_agent_id=?
+		WHERE p.pipe_id=? AND p.source_chain_id='' AND p.destination_chain_id=''
+		  AND p.to_agent='' AND p.to_provider!='' AND p.claimed_by=?`,
+		receiverID, messageID, receiverID).Scan(&currentSession, &journalID)
+	if err != nil {
+		return false, "", ErrMessageNotFound
+	}
+	if claimantSessionID == "" || currentSession != claimantSessionID {
+		return false, "", ErrMessageClaimedByOtherSession
+	}
+	return true, journalID, nil
+}
+
+// CompleteProviderMessageWithSession repeats provider ownership and the session
+// proof in the same transaction as the status CAS, result fingerprint, and any
+// legacy journal insert. Only the fresh completion can create that side effect;
+// an identical retry returns its authoritative journal ID.
+func (s *SQLiteStore) CompleteProviderMessageWithSession(
+	ctx context.Context, receiverID, messageID, claimantSessionID, result string, journal *memory.MemoryRecord,
+) (bool, string, error) {
+	if len(result) > MaxPipeContentBytes {
+		return false, "", ErrPipeResultTooLarge
+	}
+	var replayed bool
+	var journalID string
+	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
+		tx := txStore.(*SQLiteStore)
+		var lookupErr error
+		replayed, journalID, lookupErr = tx.LookupProviderMessageReplyReplay(ctx, receiverID, messageID, claimantSessionID, result)
+		if lookupErr != nil || replayed {
+			return lookupErr
+		}
+		if err := tx.VerifyProviderMessageClaimSession(ctx, receiverID, messageID, claimantSessionID); err != nil {
+			return err
+		}
+		// Provider compatibility completion owns its legacy auto-journal in this
+		// transaction. A concurrent identical retry therefore observes the winner's
+		// authoritative journal instead of creating a duplicate side effect.
+		if journal != nil {
+			if err := tx.InsertMemory(ctx, journal); err == nil {
+				journalID = journal.MemoryID
+			}
+		}
+		if err := tx.CompletePipeline(ctx, messageID, receiverID, result, journalID); err != nil {
+			return err
+		}
+		sealedHash, err := tx.sealMessageFingerprint(messageKeyHash(result))
+		if err != nil {
+			return err
+		}
+		_, err = tx.writeExecContext(ctx, `INSERT INTO message_replies(message_id,receiver_agent_id,result_hash)
+			VALUES(?,?,?)`, messageID, receiverID, sealedHash)
+		return err
+	})
+	return replayed, journalID, err
 }
 
 // BindFederatedMessageClaimSession attaches one concrete MCP session to an
@@ -930,10 +1173,10 @@ func (s *SQLiteStore) ReplyLocalMessage(ctx context.Context, receiverID, message
 			// session-fenced transport path. Returning a canonical local replay
 			// here would discard the original reply event id and turn a
 			// lost-response retry into a false local success.
-			var provider, claimed, sourceChain, destinationChain string
+			var addressed, provider, claimed, sourceChain, destinationChain string
 			if queryErr := tx.conn.QueryRowContext(ctx,
-				`SELECT to_provider,claimed_by,source_chain_id,destination_chain_id FROM pipeline_messages WHERE pipe_id=?`, messageID).
-				Scan(&provider, &claimed, &sourceChain, &destinationChain); queryErr != nil {
+				`SELECT to_agent,to_provider,claimed_by,source_chain_id,destination_chain_id FROM pipeline_messages WHERE pipe_id=?`, messageID).
+				Scan(&addressed, &provider, &claimed, &sourceChain, &destinationChain); queryErr != nil {
 				return ErrMessageNotFound
 			}
 			if provider == "" && claimed == receiverID && sourceChain != "" && destinationChain == "" {
@@ -947,15 +1190,28 @@ func (s *SQLiteStore) ReplyLocalMessage(ctx context.Context, receiverID, message
 				}
 				return ErrMessageFederatedCompatibilityScope
 			}
+			if addressed == "" && provider != "" && claimed == receiverID && sourceChain == "" && destinationChain == "" {
+				var currentSessionID string
+				if claimantSessionID == "" || tx.conn.QueryRowContext(ctx, `SELECT claimant_session_id FROM message_fetch_receipts
+					WHERE receiver_agent_id=? AND message_id=?`, receiverID, messageID).Scan(&currentSessionID) != nil {
+					return ErrMessageNotFound
+				}
+				if currentSessionID != claimantSessionID {
+					return ErrMessageClaimedByOtherSession
+				}
+				replayed = true
+				return nil
+			}
 			replayed = true
 			return nil
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
 		}
-		var provider, claimed, sourceChain, destinationChain string
+		var addressed, provider, claimed, sourceChain, destinationChain string
 		if queryErr := tx.conn.QueryRowContext(ctx,
-			`SELECT to_provider,claimed_by,source_chain_id,destination_chain_id FROM pipeline_messages WHERE pipe_id=?`, messageID).
-			Scan(&provider, &claimed, &sourceChain, &destinationChain); queryErr != nil {
+			`SELECT to_agent,to_provider,claimed_by,source_chain_id,destination_chain_id FROM pipeline_messages
+			 WHERE pipe_id=? AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`, messageID).
+			Scan(&addressed, &provider, &claimed, &sourceChain, &destinationChain); queryErr != nil {
 			return ErrMessageNotFound
 		}
 		// The public Messages facade shares identifiers with the retained
@@ -975,6 +1231,17 @@ func (s *SQLiteStore) ReplyLocalMessage(ctx context.Context, receiverID, message
 				return ErrMessageClaimedByOtherSession
 			}
 			return ErrMessageFederatedCompatibilityScope
+		}
+		if addressed == "" && provider != "" && claimed == receiverID && sourceChain == "" && destinationChain == "" {
+			var currentSessionID string
+			if claimantSessionID == "" || tx.conn.QueryRowContext(ctx, `SELECT claimant_session_id FROM message_fetch_receipts
+				WHERE receiver_agent_id=? AND message_id=?`, receiverID, messageID).Scan(&currentSessionID) != nil {
+				return ErrMessageNotFound
+			}
+			if currentSessionID != claimantSessionID {
+				return ErrMessageClaimedByOtherSession
+			}
+			return ErrMessageLegacyProviderCompatibilityScope
 		}
 		fetched, err := hasExactMessageFetch(ctx, tx, receiverID, messageID)
 		if err != nil || !fetched || provider != "" || claimed != receiverID || sourceChain != "" || destinationChain != "" {
