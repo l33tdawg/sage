@@ -111,6 +111,8 @@ func TestCanonicalMessageToolsSendReceiveReplyAndStatus(t *testing.T) {
 	require.Equal(t, "claude-code/sage", items[0]["from_registered_name"])
 	require.Equal(t, "confirmed", items[0]["read_status"])
 	require.Equal(t, claimantSessionID, items[0]["claimant_session_id"])
+	require.Contains(t, items[0]["reply_action"], "sage_message_reply")
+	require.Contains(t, items[0]["reply_action"], "do not substitute sage_message_send")
 	require.Equal(t, claimantSessionID, received.(map[string]any)["claimant_session_id"])
 	mu.Lock()
 	require.ElementsMatch(t, []string{"/v1/messages/local-a/read", "/v1/messages/local-b/read"}, readPaths)
@@ -192,6 +194,74 @@ func TestMessageReplyCannotFallbackAcrossSameAgentClaimantSessions(t *testing.T)
 	require.Equal(t, 2, canonicalCalls)
 	require.Zero(t, pipePreflightCalls)
 	require.Zero(t, legacyResultCalls)
+}
+
+func TestMessagesReceiveFreshTokenResurfacesOwnClaimedWork(t *testing.T) {
+	var claimantSessionID string
+	receiveCalls := 0
+	ownCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/own-claimed-unfinished", func(w http.ResponseWriter, r *http.Request) {
+		ownCalls++
+		claimantSessionID = r.URL.Query().Get("claimant_session_id")
+		if ownCalls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0, "limit": 2, "truncated": false})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items": []map[string]any{
+				{"message_id": "msg-a", "from_agent": "alice", "intent": "ask", "payload": "one", "claimant_session_id": claimantSessionID},
+				{"message_id": "msg-b", "from_agent": "alice", "intent": "ask", "payload": "two", "claimant_session_id": claimantSessionID},
+			},
+			"count": 2, "limit": 2, "truncated": false,
+		})
+	})
+	mux.HandleFunc("/v1/messages/receive", func(w http.ResponseWriter, _ *http.Request) {
+		receiveCalls++
+		if receiveCalls == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"items": []map[string]any{
+					{"message_id": "msg-a", "from_agent": "alice", "intent": "ask", "payload": "one", "claimant_session_id": claimantSessionID},
+					{"message_id": "msg-b", "from_agent": "alice", "intent": "ask", "payload": "two", "claimant_session_id": claimantSessionID},
+				},
+				"count": 2,
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	})
+	mux.HandleFunc("/v1/messages/read-batch", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []map[string]any{
+			{"message_id": "msg-a", "read_status": "confirmed"},
+			{"message_id": "msg-b", "read_status": "confirmed"},
+		}})
+	})
+	mux.HandleFunc("/v1/messages/claimed-elsewhere", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"claimed_elsewhere_count": 0, "items": []any{}, "limit": 5, "truncated": false,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, privateKey)
+
+	first, err := s.toolMessagesReceive(context.Background(), map[string]any{"receive_token": "first", "limit": 2})
+	require.NoError(t, err)
+	require.Equal(t, 2, first.(map[string]any)["count"])
+	require.Equal(t, 0, first.(map[string]any)["own_claimed_unfinished_count"])
+
+	second, err := s.toolMessagesReceive(context.Background(), map[string]any{"receive_token": "fresh", "limit": 2})
+	require.NoError(t, err)
+	response := second.(map[string]any)
+	require.Equal(t, 0, response["count"], "a fresh token must not relabel old claims as new work")
+	require.Empty(t, response["items"])
+	require.Equal(t, 2, response["own_claimed_unfinished_count"])
+	owned := response["own_claimed_unfinished"].([]map[string]any)
+	require.Equal(t, []string{"msg-a", "msg-b"}, []string{owned[0]["message_id"].(string), owned[1]["message_id"].(string)})
+	require.Contains(t, response["message"], "This inbox is not clear")
+	require.Equal(t, "clear", response["claimed_elsewhere_state"])
 }
 
 func TestPipeResultAliasCannotOmitOrBypassClaimantSession(t *testing.T) {
@@ -335,6 +405,102 @@ func TestMessageReplyUsesExplicitFederatedCompatibilityScope(t *testing.T) {
 	require.Equal(t, "reply-fed", response["reply_event_id"])
 	require.Equal(t, 1, canonicalCalls)
 	require.Equal(t, 1, legacyResultCalls)
+}
+
+func TestMessageReplyUsesExplicitLegacyProviderCompatibilityScope(t *testing.T) {
+	canonicalCalls := 0
+	legacyResultCalls := 0
+	var claimantSessions []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/msg-provider/reply", func(w http.ResponseWriter, r *http.Request) {
+		canonicalCalls++
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		claimantSession, _ := body["claimant_session_id"].(string)
+		require.NotEmpty(t, claimantSession)
+		claimantSessions = append(claimantSessions, claimantSession)
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"type": legacyProviderCompatibilityProblemType, "title": "Legacy provider reply path required",
+			"status": http.StatusConflict, "detail": "Use the session-fenced legacy provider reply path.",
+		})
+	})
+	mux.HandleFunc("/v1/pipe/msg-provider", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"pipe_id": "msg-provider", "status": "claimed"})
+	})
+	mux.HandleFunc("/v1/pipe/msg-provider/result", func(w http.ResponseWriter, r *http.Request) {
+		legacyResultCalls++
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		require.Equal(t, "done", body["result"])
+		require.Equal(t, claimantSessions[0], body["claimant_session_id"],
+			"the compatibility completion must preserve the canonical claimant-session fence")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, privateKey)
+
+	result, err := s.toolMessageReply(context.Background(), map[string]any{
+		"message_id": "msg-provider", "result": "done",
+	})
+	require.NoError(t, err)
+	response := result.(map[string]any)
+	require.Equal(t, "local", response["scope"])
+	require.Equal(t, "legacy_provider", response["compatibility_scope"])
+	require.Contains(t, response["message"], "completed the original message")
+	require.Contains(t, response["message"], "do not create a substitute")
+	require.Equal(t, 2, canonicalCalls,
+		"the compatibility helper rechecks the exact typed signal before using the retained endpoint")
+	require.Equal(t, 1, legacyResultCalls)
+	require.Len(t, claimantSessions, 2)
+	require.Equal(t, claimantSessions[0], claimantSessions[1])
+}
+
+func TestMessageReplyRejectsNearMissLegacyProviderCompatibilitySignals(t *testing.T) {
+	tests := []struct {
+		name        string
+		problemType string
+		bodyStatus  int
+		contentType string
+	}{
+		{name: "wrong type", problemType: "https://sage.dev/errors/409", bodyStatus: http.StatusConflict, contentType: "application/problem+json"},
+		{name: "wrong body status", problemType: legacyProviderCompatibilityProblemType, bodyStatus: http.StatusBadRequest, contentType: "application/problem+json"},
+		{name: "wrong content type", problemType: legacyProviderCompatibilityProblemType, bodyStatus: http.StatusConflict, contentType: "application/json"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			legacyResultCalls := 0
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/messages/msg-provider/reply", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", tc.contentType)
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"type": tc.problemType, "title": "Compatibility-like response",
+					"status": tc.bodyStatus, "detail": "This must not authorize fallback.",
+				})
+			})
+			mux.HandleFunc("/v1/pipe/msg-provider/result", func(w http.ResponseWriter, _ *http.Request) {
+				legacyResultCalls++
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "completed"})
+			})
+			ts := httptest.NewServer(mux)
+			t.Cleanup(ts.Close)
+			_, privateKey, err := ed25519.GenerateKey(nil)
+			require.NoError(t, err)
+			s := NewServer(ts.URL, privateKey)
+
+			_, err = s.toolMessageReply(context.Background(), map[string]any{
+				"message_id": "msg-provider", "result": "done",
+			})
+			require.Error(t, err)
+			require.ErrorContains(t, err, "Do not substitute sage_message_send")
+			require.Zero(t, legacyResultCalls, "only the exact canonical typed signal may authorize fallback")
+		})
+	}
 }
 
 func TestMessageSendSurfacesInboundThatArrivedAfterPriorEmptyPoll(t *testing.T) {
@@ -825,7 +991,8 @@ func TestUnifiedInboxKeepsFederatedWorkVisibleWhenCanonicalMessagesExist(t *test
 	turn := s.checkPipelineInbox(context.Background())
 	require.Equal(t, true, turn["message_inbox_unread"])
 	require.Equal(t, 2, turn["message_inbox_unread_count"])
-	require.Contains(t, turn["message_inbox_action"], "sage_messages_receive")
+	require.Contains(t, turn["message_inbox_action"], "sage_inbox")
+	require.NotContains(t, turn["message_inbox_action"], "sage_messages_receive")
 	require.NotContains(t, turn, "message_inbox")
 	mu.Lock()
 	require.Equal(t, []string{"2"}, legacyLimits,
@@ -1377,7 +1544,16 @@ func TestInboxUsesAuthoritativeClaimedElsewhereScalar(t *testing.T) {
 	})
 	mux.HandleFunc("/v1/messages/claimed-elsewhere", func(w http.ResponseWriter, r *http.Request) {
 		claimantSessionID = r.URL.Query().Get("claimant_session_id")
-		_ = json.NewEncoder(w).Encode(map[string]any{"claimed_elsewhere_count": 105})
+		require.Equal(t, "5", r.URL.Query().Get("limit"))
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"claimed_elsewhere_count": 105,
+			"items": []map[string]any{{
+				"message_id": "msg-oldest", "claimant_session_id": "dead-session",
+				"created_at": "2026-08-01T00:00:00Z", "claimed_at": "2026-08-01T00:01:00Z",
+				"expires_at": "2126-07-08T00:00:00Z", "foreign": false,
+			}},
+			"limit": 5, "truncated": true, "next_cursor": "opaque-next",
+		})
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
@@ -1393,9 +1569,99 @@ func TestInboxUsesAuthoritativeClaimedElsewhereScalar(t *testing.T) {
 	require.Equal(t, claimantSessionID, inbox["claimant_session_id"])
 	require.Equal(t, 105, inbox["claimed_elsewhere_count"])
 	require.Equal(t, "present", inbox["claimed_elsewhere_state"])
+	require.Equal(t, "available", inbox["claimed_elsewhere_recovery_state"])
+	require.Equal(t, true, inbox["claimed_elsewhere_truncated"])
+	require.Equal(t, "opaque-next", inbox["claimed_elsewhere_next_cursor"])
+	recovery := inbox["claimed_elsewhere_items"].([]map[string]any)
+	require.Len(t, recovery, 1)
+	require.Equal(t, "msg-oldest", recovery[0]["message_id"])
+	require.Equal(t, "dead-session", recovery[0]["claimant_session_id"])
+	require.NotContains(t, recovery[0], "payload")
+	require.NotContains(t, recovery[0], "intent")
+	require.NotContains(t, recovery[0], "sender_agent")
 	require.Contains(t, inbox["message"], "105 message(s)")
 	require.NotContains(t, inbox["message"], "inbox is clear")
 	require.Contains(t, inbox["claimed_elsewhere_action"], "sage_message_handoff")
+	require.Contains(t, inbox["claimed_elsewhere_action"], "opaque-next")
+}
+
+func TestMessageHistoryPagesClaimedElsewhereWithoutContent(t *testing.T) {
+	var claimantSessionID string
+	requests := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/messages/claimed-elsewhere", func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		claimantSessionID = r.URL.Query().Get("claimant_session_id")
+		require.Regexp(t, `^mcp-[0-9a-f]{32}$`, claimantSessionID)
+		require.Equal(t, "1", r.URL.Query().Get("limit"))
+		cursor := r.URL.Query().Get("cursor")
+		if cursor == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"claimed_elsewhere_count": 2,
+				"items": []map[string]any{{
+					"message_id": "msg-old", "claimant_session_id": "dead-a",
+					"created_at": "2026-08-01T00:00:00Z", "claimed_at": "2026-08-01T00:00:01Z",
+					"expires_at": "2126-07-08T00:00:00Z", "foreign": true,
+					"payload": "must not cross MCP", "intent": "must not cross MCP", "from_agent": "must not cross MCP",
+				}},
+				"limit": 1, "truncated": true, "next_cursor": "opaque/+cursor==",
+			})
+			return
+		}
+		require.Equal(t, "opaque/+cursor==", cursor)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"claimed_elsewhere_count": 2,
+			"items": []map[string]any{{
+				"message_id": "msg-newer", "claimant_session_id": "dead-b",
+				"created_at": "2026-08-02T00:00:00Z", "expires_at": "2126-07-09T00:00:00Z",
+				"foreign": false,
+			}},
+			"limit": 1, "truncated": false,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+	_, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer(ts.URL, privateKey)
+
+	first, err := s.toolMessageHistory(context.Background(), map[string]any{
+		"folder": "claimed_elsewhere", "limit": 1,
+	})
+	require.NoError(t, err)
+	firstPage := first.(map[string]any)
+	require.Equal(t, "claimed_elsewhere", firstPage["folder"])
+	require.Equal(t, 2, firstPage["claimed_elsewhere_count"])
+	require.Equal(t, true, firstPage["truncated"])
+	require.Equal(t, "opaque/+cursor==", firstPage["next_cursor"])
+	items := firstPage["items"].([]map[string]any)
+	require.Len(t, items, 1)
+	require.Equal(t, "msg-old", items[0]["message_id"])
+	require.Equal(t, "dead-a", items[0]["claimant_session_id"])
+	require.Equal(t, true, items[0]["foreign"])
+	require.Equal(t, true, items[0]["passive_history"])
+	for _, forbidden := range []string{"payload", "intent", "from_agent", "sender_agent", "result"} {
+		require.NotContains(t, items[0], forbidden)
+	}
+	require.Contains(t, firstPage["message"], "sage_message_handoff")
+	require.Contains(t, firstPage["message"], "opaque/+cursor==")
+
+	second, err := s.toolMessageHistory(context.Background(), map[string]any{
+		"folder": "claimed_elsewhere", "limit": 1, "cursor": firstPage["next_cursor"],
+	})
+	require.NoError(t, err)
+	secondPage := second.(map[string]any)
+	require.Equal(t, false, secondPage["truncated"])
+	require.NotContains(t, secondPage, "next_cursor")
+	require.Equal(t, "opaque/+cursor==", secondPage["cursor"])
+	require.Equal(t, "msg-newer", secondPage["items"].([]map[string]any)[0]["message_id"])
+	require.Equal(t, 2, requests)
+
+	_, err = s.toolMessageHistory(context.Background(), map[string]any{
+		"folder": "inbox", "cursor": "must-not-be-ignored",
+	})
+	require.ErrorContains(t, err, "valid only")
+	require.Equal(t, 2, requests, "generic history must reject a recovery cursor before HTTP")
 }
 
 func TestCanonicalMessageToolsRejectOutOfContractBoundsBeforeHTTP(t *testing.T) {

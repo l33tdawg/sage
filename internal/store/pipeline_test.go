@@ -563,7 +563,7 @@ func TestPurgePipelinesConservativelyFloorsSubMillisecondCutoff(t *testing.T) {
 	msg := &PipelineMessage{
 		PipeID: "pipe-after-whole-second-cutoff", FromAgent: "agent-alice", ToAgent: "agent-bob",
 		Intent: "test", Payload: "retain me", Status: "pending",
-		CreatedAt: cutoff.Add(-time.Hour), ExpiresAt: cutoff.Add(-time.Minute),
+		CreatedAt: cutoff.Add(-time.Hour), ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}
 	require.NoError(t, s.InsertPipeline(ctx, msg))
 	require.NoError(t, s.ClaimPipeline(ctx, msg.PipeID, msg.ToAgent))
@@ -655,7 +655,7 @@ func TestPurgePipelinesTreatsAmbiguousOrMalformedReadReceiptAsRetention(t *testi
 	cutoff := time.Date(2026, time.August, 9, 1, 2, 3, 500_000, time.UTC)
 	msg := &PipelineMessage{
 		PipeID: "pipe-read-receipt-retention", FromAgent: "agent-alice", ToAgent: "agent-bob",
-		Payload: "work", Status: "pending", CreatedAt: cutoff.Add(-time.Hour), ExpiresAt: cutoff.Add(time.Hour),
+		Payload: "work", Status: "pending", CreatedAt: cutoff.Add(-time.Hour), ExpiresAt: time.Now().UTC().Add(time.Hour),
 	}
 	require.NoError(t, s.InsertPipeline(ctx, msg))
 	require.NoError(t, s.ClaimPipeline(ctx, msg.PipeID, msg.ToAgent))

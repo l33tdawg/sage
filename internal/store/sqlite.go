@@ -6787,8 +6787,9 @@ func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, agentID, res
 	}
 	res, err := s.writeExecContext(ctx,
 		`UPDATE pipeline_messages SET status = 'completed', result = ?, journal_id = ?, claimed_by = CASE WHEN claimed_by = '' THEN ? ELSE claimed_by END,
-		 completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-		 WHERE pipe_id = ? AND status = 'claimed' AND (claimed_by = ? OR claimed_by = '')`, encryptedResult, journalID, agentID, pipeID, agentID)
+			 completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+			 WHERE pipe_id = ? AND status = 'claimed' AND (claimed_by = ? OR claimed_by = '')
+			   AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`, encryptedResult, journalID, agentID, pipeID, agentID)
 	if err != nil {
 		return err
 	}

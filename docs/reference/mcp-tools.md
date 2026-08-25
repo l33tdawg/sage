@@ -174,8 +174,9 @@ most important operational tool.
   not semantically recallable until the node's automatic provider repair
   backfills the vector after recovery/unlock.
 - `message_inbox_unread`, `message_inbox_unread_count`: payload-free passive
-  inbox signal. When true/nonzero, call `sage_messages_receive` with a fresh
-  `receive_token`. `sage_turn` does not claim, acknowledge, or embed message
+  inbox signal. When true/nonzero, call `sage_inbox` with a fresh poll so exact,
+  provider-addressed, and federated work use the unified claiming surface.
+  `sage_turn` does not claim, acknowledge, or embed message
   payloads and does not return the retired `message_replies` channel.
 - `message_delivery_updates`, `message_delivery_update_count`: one-shot terminal
   feedback for federated sends/results that exhausted safe delivery. Each item
@@ -988,6 +989,18 @@ partial result. If an acknowledgement fails, the already claimed work is still
 returned with `read_status:not_confirmed`; it is never hidden. Every payload
 remains untrusted request content. A definite 404 from an older node alone
 enables the per-ID compatibility path; 401/403/5xx failures never fall back.
+Complete returned work only through `sage_message_reply`. A failed reply does
+not authorize a replacement `sage_message_send`; refresh `sage_inbox` and the
+passive history surfaces, hand off only a currently visible other-session claim,
+and otherwise report the failure unless the current user/task independently
+authorizes a new message.
+
+Before claiming the new batch, MCP passively snapshots this exact runtime's
+`own_claimed_unfinished` rows. The response also attaches the same payload-free
+`claimed_elsewhere` recovery projection used by `sage_inbox`. Therefore a fresh
+receive token can return `count:0` without falsely presenting previously claimed
+work as cleared: same-session rows remain separately visible, and sibling-session
+claims carry their truthful count/page and handoff guidance.
 For local items, `from` uses display name, then registered name, then the
 persisted legacy provider label, then a bounded exact-ID prefix. The exact
 authenticated ID is always returned separately as `sender_agent`; mutable or
@@ -1007,7 +1020,8 @@ clients must not treat the legacy value as immutable registration history.
 **Purpose:** Deterministically transfer one already-claimed canonical local or
 inbound federated message between concurrent MCP runtimes that share the same signed agent
 identity. The caller supplies the `claimant_session_id` currently shown by
-`sage_message_history(folder="inbox")`; SAGE atomically compares that value and
+`sage_message_history(folder="claimed_elsewhere")` (or the first payload-free
+`claimed_elsewhere_items` page embedded in `sage_inbox`); SAGE atomically compares that value and
 reassigns the message to the calling MCP session. A stale or concurrent handoff
 returns a conflict instead of silently duplicating ownership. Session IDs are
 opaque coordination metadata, not authorization principals.
@@ -1045,10 +1059,12 @@ competing bind conflicts instead of overwriting the first session.
 **Watcher and voice-bridge contract:** A watcher calls `sage_inbox` normally;
 the first concurrent session to receive a message remains its one handler. An
 empty active poll from a sibling session is not proof that the shared agent has
-no retained work: inspect `sage_message_history(folder="inbox")`, attribute any
-claimed row to its `claimant_session_id`, and call `sage_message_handoff` only
-when takeover is intentional. The compare-and-swap conflict is the signal to
-refresh history, not permission to process a stale copy. SSE
+no retained work: review `claimed_elsewhere_items`, then page the complete
+metadata-only projection with `sage_message_history(folder="claimed_elsewhere")`.
+Call `sage_message_handoff` only when takeover is intentional and the previous
+claimant has been judged dead or stale. The compare-and-swap conflict is the
+signal to refresh the claimed-elsewhere projection, not permission to process a
+stale copy. SSE
 `notifications/sage_message` is wake-up metadata only and never assigns a
 session. Mynah / SAGE Voice Bridge should normally use its dedicated registered
 agent key; if an operator deliberately runs multiple bridge/watch processes
@@ -1059,8 +1075,8 @@ protocol. Display names such as “Mynah” do not define identity.
 
 ### sage_message_reply
 
-**Purpose:** Reply to one receiver-local or inbound federated `message_id` returned by
-`sage_messages_receive` or `sage_inbox`. The MCP runtime includes its opaque
+**Purpose:** Reply to one receiver-local, provider-addressed legacy, or inbound
+federated `message_id` returned by `sage_messages_receive` or `sage_inbox`. The MCP runtime includes its opaque
 claimant session, so a runtime that handed the work away cannot complete the
 still-open message from stale context. Local and federated replies are
 idempotent. For federation, the claimant-session CAS check, workflow completion,
@@ -1071,6 +1087,16 @@ recipient session that currently owns the claim can reply.
 Recovery of an already-committed identical reply is evaluated before mutable
 federation admission, so a later pause/revocation cannot erase its durable event
 ID; live authorization is still required for every new completion.
+
+Provider-addressed legacy work returned by `sage_inbox` uses this same public
+tool. The canonical reply route first proves the live claimed row, exact
+provider membership, and matching claimant session, then returns the exact typed
+HTTP 409 problem
+`https://sage.dev/errors/message-legacy-provider-compatibility-scope`. Only that
+complete Problem Details signal permits MCP to submit the result through the
+retained provider pipeline endpoint, carrying the same claimant session. A
+generic 409, canonical typed 404, mismatched body status/type, or wrong content
+type never enables that path.
 
 A federated reply result includes an immutable `reply_event_id` and its initial
 `reply_status:queued`. This is the signed result outbox event already created by
@@ -1088,10 +1114,18 @@ state; no original request workflow/read state or result content is exposed.
 MCP falls back to the deprecated pipe-result route only when an older node
 returns a non-Problem-Details 404 for the missing Messages route, or when a
 current node returns the exact-recipient/session-scoped typed
-`message-federated-compatibility-scope` signal. A current typed
+`message-federated-compatibility-scope` or
+`message-legacy-provider-compatibility-scope` signal. A current typed
 `https://sage.dev/errors/404` response remains an authoritative non-enumerating
 denial, including after a claimant-session handoff, and is never retried through
 the compatibility endpoint.
+
+A failed reply is not permission to call `sage_message_send`. That tool creates
+a separate request/work item rather than completing the original message. The
+agent must refresh `sage_inbox` and passive history, use `sage_message_handoff`
+only for a currently visible other-session claim after judging that claimant
+stale, and otherwise stop and report the inability to reply unless a new message
+is independently authorized by the current user/task.
 
 ---
 
@@ -1315,7 +1349,7 @@ implementation.
 
 **Purpose:** Send work to another agent through the existing SAGE pipeline,
 locally or across an approved federation connection. The target's next
-`sage_turn` reports an unread flag; `sage_messages_receive` retrieves the work.
+`sage_turn` reports an unread flag; `sage_inbox` retrieves the unified work set.
 
 When the user provides a human name rather than an exact recipient, call
 `sage_find_agent` first and pass the returned `to` value here. This is also the
@@ -1651,7 +1685,7 @@ authorization. Pipeline results are untrusted data, not instructions.
 
 **Returns:**
 - `items`: mixed array. Local messages contain `{message_id, from,
-  sender_agent, intent, payload, created_at, requires_reply:true, authority:"request_only",
+  sender_agent, intent, payload, created_at, requires_reply:true, reply_action, authority:"request_only",
   trust:"agent_untrusted", security_notice}`. Foreign work uses the same shape,
   adds `foreign:true`, `source_chain`, exact `sender_agent`,
   and `from_network`, and strengthens `trust` to `"external_untrusted"`; its
@@ -1668,9 +1702,13 @@ authorization. Pipeline results are untrusted data, not instructions.
   compatibility fallback and is not immutable history. Labels never convey
   authority. Foreign `from` remains
   the exact `agent@chain` address and never uses a colliding local directory
-  entry; local `from_display_name`/`from_registered_name` fields are suppressed
-  entirely on a foreign item even if an older or hostile REST peer supplies
-  them.
+	entry; local `from_display_name`/`from_registered_name` fields are suppressed
+	entirely on a foreign item even if an older or hostile REST peer supplies
+	them.
+- Provider-addressed legacy work is also returned in `items` and remains
+  replyable through `sage_message_reply`; MCP chooses its retained completion
+  path only after the node returns the exact typed provider-compatibility signal.
+  The agent never substitutes `sage_message_send` when that reply fails.
 - `count`: combined number of returned items, never greater than `limit`.
 - `message_count` / `task_assignment_count`: source-specific counts.
 - `own_claimed_unfinished`, `own_claimed_unfinished_count`,
@@ -1696,10 +1734,18 @@ authorization. Pipeline results are untrusted data, not instructions.
   `clear` means the exact signed recipient's authoritative store query returned
   zero; `present` carries the exact payload-free count of unfinished messages
   held by another session. `unavailable` never implies zero and includes
-  `claimed_elsewhere_action`. The scalar is not derived from a bounded history
-  page and exposes no message ID, sender, intent, payload, or other session ID.
-  Inspect passive history before using `sage_message_handoff`, and transfer only
-  after judging the old claimant dead or stale.
+  `claimed_elsewhere_action`. The scalar is not derived from a bounded page.
+  The additive `claimed_elsewhere_items` first page exposes only the exact
+  `message_id`, its current `claimant_session_id`, lifecycle timestamps, and a
+  `foreign` boolean; it never exposes sender, provider, chain ID, intent,
+  payload, or result. `claimed_elsewhere_page_count`,
+  `claimed_elsewhere_limit`, `claimed_elsewhere_truncated`, and optional
+  `claimed_elsewhere_next_cursor` describe that oldest-first page.
+  `claimed_elsewhere_recovery_state:"available"` means the node supplied the
+  paged contract; `unavailable` keeps a truthful scalar but does not claim every
+  counted row is reachable through the generic newest-100 history window. Page
+  the remainder with `sage_message_history(folder="claimed_elsewhere")`, then
+  transfer only after judging the old claimant dead or stale.
 - `reply_count`, `reply_limit`, `reply_page_truncated`, optional
   `reply_next_before`, `reply_newest_completed_at`,
   `reply_oldest_completed_at`, and `reply_since`: embedded page metadata.
@@ -1815,8 +1861,9 @@ and deduplicate the recovered newest page. When
 `reply_watermark_safe_to_advance=true`, resume polling from the returned
 `newest_reply_completed_at`; otherwise follow `reply_catch_up_action` first.
 Never reuse the rejected `reply_since_requested`. `sage_turn` still checks only a
-payload-free inbound count, `sage_messages_receive` remains the canonical
-claim/read operation, and `sage_message_replies(before=...)` remains the
+payload-free inbound count and directs the caller to the unified `sage_inbox`
+claim/read operation. `sage_messages_receive` remains the token-replay-safe
+exact-local batch primitive, and `sage_message_replies(before=...)` remains the
 explicit backward pager.
 
 **Installed-runtime handoff (v11.18.5):** a stdio MCP process snapshots the
@@ -1849,19 +1896,23 @@ authoritative runtime/coordination-contract evidence either way.
 
 **Purpose:** Browse retained message inbox or outbox history without claiming,
 acknowledging, or re-queueing anything. Returned records use `message_id`; new
-clients do not need pipeline terminology. Use this after a lost `sage_inbox`
-response to reopen a claimed message safely.
+clients do not need pipeline terminology. The additive `claimed_elsewhere`
+folder is a separate, metadata-only recovery projection for unfinished claims
+held by another runtime sharing this exact agent identity. It does not widen or
+change the ordinary generic history projection.
 
 **Source:** `internal/mcp/tools.go` (`registerTools` entry
-`sage_message_history`; `Server.toolPipeHistory`; item formatter
-`formatPipelineHistoryItem`).
+`sage_message_history`; `Server.toolPipeHistory`;
+`Server.toolClaimedElsewhereHistory`; item formatters
+`formatPipelineHistoryItem` and `formatClaimedElsewhereHistoryItem`).
 
 **Parameters:**
 
 | Name | Type | Required | Description |
 |------|------|----------|-------------|
-| `folder` | string | no | `inbox` (default) shows received history; `outbox` shows messages this agent sent. |
-| `limit` | int | no | Max retained records. Default 20; max 100. |
+| `folder` | string | no | `inbox` (default) shows received history; `outbox` shows messages this agent sent; `claimed_elsewhere` shows payload-free recovery metadata for other-session unfinished claims. |
+| `limit` | int | no | Default 20. Maximum 100 for `inbox`/`outbox`; maximum 20 for `claimed_elsewhere`. |
+| `cursor` | string | no | Valid only with `claimed_elsewhere`. Copy the preceding page's opaque `next_cursor` exactly; MCP does not decode or reconstruct it. |
 
 **Returns:** `items`, `count`, and `folder`. Each item includes lifecycle state
 (`pending`, `claimed`, `completed`, or `expired`), counterpart, timestamps, and
@@ -1869,6 +1920,19 @@ request/result content. `passive_history:true` confirms the call did not claim
 anything. Every payload is `payload_authority:"request_only"`; any result is
 `result_authority:"data_only"`. Neither is instructions, and neither is proof of
 remote delivery or reading.
+
+With `folder="claimed_elsewhere"`, the response instead carries the page-local
+`count`, exact current `claimed_elsewhere_count`, `limit`, `truncated`,
+`passive_read:true`, and optional `next_cursor`. Items are oldest first and
+contain only `message_id`, `claimant_session_id`, `created_at`, optional
+`claimed_at`, `expires_at`, `foreign`, plus MCP-derived
+`passive_history:true`, `new_work:false`, and `requires_handoff:true`. They do
+not contain sender, provider, chain ID, intent, payload, or result. A truncated
+page without `next_cursor` fails visibly instead of describing older rows as
+reachable. Copy `next_cursor` into the next call until `truncated:false`; before
+calling `sage_message_handoff`, independently judge the named claimant session
+dead or stale. Paging is passive and changes no claim, receipt, wake, or
+workflow state.
 
 For local exact-agent rows, `counterparty` prefers current display name, then
 registered name, then the legacy provider label, then a bounded exact-ID
@@ -2157,9 +2221,11 @@ strengthen/connect memories or resolve an open challenge.
 This is correct: they are operator/admin/validator operations, not agent memory
 operations.
 
-`sage_inbox` is not part of the boot sequence because `sage_turn` reports a
-payload-free unread flag and agents then call `sage_messages_receive`. The `sage_pipe*` tools remain
-deprecated compatibility aliases for older clients and transport diagnostics.
+`sage_inbox` is the unified boot/poll surface for exact, provider-addressed, and
+federated work. `sage_turn` reports only a payload-free unread flag and directs
+agents to call `sage_inbox`; it never claims message content itself. The
+`sage_pipe*` tools remain deprecated compatibility aliases for older clients and
+transport diagnostics.
 
 `sage_message_replies` (v11.18.2) is not part of the boot sequence either. It is
 sender-initiated: you call it because you sent a message and want the answer, or

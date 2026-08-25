@@ -518,6 +518,142 @@ func TestClaimedElsewhereCountIsExactBeyondOneHistoryPage(t *testing.T) {
 	count, err = s.CountClaimedLocalMessagesElsewhere(ctx, "mallory", "live-session")
 	require.NoError(t, err)
 	require.Zero(t, count, "another agent cannot use the scalar to observe Bob's claims")
+
+	seen := make(map[string]bool, total)
+	var afterCreatedAt string
+	var afterMessageID string
+	for {
+		page, exactTotal, truncated, pageErr := s.GetClaimedMessagesElsewhere(
+			ctx, "bob", "live-session", 20, afterCreatedAt, afterMessageID)
+		require.NoError(t, pageErr)
+		require.Equal(t, total, exactTotal)
+		for _, item := range page {
+			require.False(t, seen[item.MessageID], "keyset pages must not repeat rows")
+			require.Equal(t, "dead-session", item.ClaimantSessionID)
+			require.False(t, item.Foreign)
+			seen[item.MessageID] = true
+		}
+		if !truncated {
+			break
+		}
+		require.NotEmpty(t, page)
+		last := page[len(page)-1]
+		afterCreatedAt, afterMessageID = last.CreatedAtCursor, last.MessageID
+	}
+	require.Len(t, seen, total, "every exact counted claim must be recoverable past the history cap")
+
+	_, err = s.writeExecContext(ctx,
+		`UPDATE pipeline_messages SET expires_at='2000-01-01T00:00:00.000Z' WHERE pipe_id='msg-stranded-000'`)
+	require.NoError(t, err)
+	count, err = s.CountClaimedLocalMessagesElsewhere(ctx, "bob", "live-session")
+	require.NoError(t, err)
+	require.Equal(t, total-1, count, "past-TTL claims must agree with wake and own-claim visibility before the sweep")
+}
+
+func TestClaimedElsewhereRecoveryIncludesInboundFederatedWithoutContent(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	local := testLocalMessage("msg-local-elsewhere", "alice", "bob", "local private")
+	_, _, err := s.SendLocalMessage(ctx, "send-local-elsewhere", local)
+	require.NoError(t, err)
+	_, _, err = s.ReceiveLocalMessages(ctx, "bob", "", "receive-local-elsewhere", 1, "dead-local")
+	require.NoError(t, err)
+
+	foreign := testLocalMessage("msg-foreign-elsewhere", "remote-agent", "bob", "foreign private")
+	foreign.SourceChainID = "remote-chain"
+	foreign.SourcePipeID = "remote-message"
+	require.NoError(t, s.InsertPipeline(ctx, foreign))
+	require.NoError(t, s.ClaimFederatedMessageWithSession(ctx, "bob", foreign.PipeID, "dead-foreign"))
+
+	items, total, truncated, err := s.GetClaimedMessagesElsewhere(ctx, "bob", "live-session", 20, "", "")
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	require.False(t, truncated)
+	require.Len(t, items, 2)
+	byID := make(map[string]ClaimedElsewhereMessage, len(items))
+	for _, item := range items {
+		byID[item.MessageID] = item
+	}
+	require.False(t, byID[local.PipeID].Foreign)
+	require.Equal(t, "dead-local", byID[local.PipeID].ClaimantSessionID)
+	require.True(t, byID[foreign.PipeID].Foreign)
+	require.Equal(t, "dead-foreign", byID[foreign.PipeID].ClaimantSessionID)
+
+	items, total, truncated, err = s.GetClaimedMessagesElsewhere(ctx, "mallory", "live-session", 20, "", "")
+	require.NoError(t, err)
+	require.Zero(t, total)
+	require.False(t, truncated)
+	require.Empty(t, items)
+}
+
+func TestClaimedElsewhereCursorPreservesRawSameTimestampKey(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	const rawCreatedAt = "2026-08-25T00:00:00.000Z"
+	for _, id := range []string{"msg-same-a", "msg-same-b", "msg-same-c"} {
+		_, _, err := s.SendLocalMessage(ctx, "send-"+id, testLocalMessage(id, "alice", "bob", "private"))
+		require.NoError(t, err)
+	}
+	_, _, err := s.ReceiveLocalMessages(ctx, "bob", "", "receive-same", 3, "dead-session")
+	require.NoError(t, err)
+	_, err = s.writeExecContext(ctx,
+		`UPDATE pipeline_messages SET created_at=? WHERE pipe_id IN ('msg-same-a','msg-same-b','msg-same-c')`, rawCreatedAt)
+	require.NoError(t, err)
+
+	var cursorCreatedAt, cursorMessageID string
+	var seen []string
+	for {
+		page, total, truncated, pageErr := s.GetClaimedMessagesElsewhere(
+			ctx, "bob", "live-session", 1, cursorCreatedAt, cursorMessageID)
+		require.NoError(t, pageErr)
+		require.Equal(t, 3, total)
+		require.Len(t, page, 1)
+		require.Equal(t, rawCreatedAt, page[0].CreatedAtCursor,
+			"the opaque key must preserve the database's fixed-width timestamp")
+		seen = append(seen, page[0].MessageID)
+		if !truncated {
+			break
+		}
+		cursorCreatedAt, cursorMessageID = page[0].CreatedAtCursor, page[0].MessageID
+	}
+	require.Equal(t, []string{"msg-same-a", "msg-same-b", "msg-same-c"}, seen)
+}
+
+func TestExpiredClaimCannotBeRecoveredHandedOffOrRepliedBeforeSweep(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	_, _, err := s.SendLocalMessage(ctx, "send-expiry-race",
+		testLocalMessage("msg-expiry-race", "alice", "bob", "private"))
+	require.NoError(t, err)
+	_, _, err = s.ReceiveLocalMessages(ctx, "bob", "", "receive-expiry-race", 1, "dead-session")
+	require.NoError(t, err)
+	_, err = s.writeExecContext(ctx,
+		`UPDATE pipeline_messages SET expires_at='2000-01-01T00:00:00.000Z' WHERE pipe_id='msg-expiry-race'`)
+	require.NoError(t, err)
+
+	items, total, truncated, err := s.GetClaimedMessagesElsewhere(ctx, "bob", "live-session", 20, "", "")
+	require.NoError(t, err)
+	require.Zero(t, total)
+	require.False(t, truncated)
+	require.Empty(t, items)
+
+	_, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-expiry-race", "dead-session", "live-session")
+	require.ErrorIs(t, err, ErrMessageNotFound)
+	require.Error(t, s.CompletePipeline(ctx, "msg-expiry-race", "bob", "late-direct", ""))
+	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-expiry-race", "late", "dead-session")
+	require.ErrorIs(t, err, ErrMessageNotFound)
+
+	history, err := s.GetInboxHistory(ctx, "bob", "", 10)
+	require.NoError(t, err)
+	require.Len(t, history, 1)
+	require.Equal(t, "claimed", history[0].Status)
+	require.Equal(t, "dead-session", history[0].ClaimedSessionID)
+	changed, err := s.ExpirePipelines(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, changed)
+	expired, err := s.GetPipeline(ctx, "msg-expiry-race")
+	require.NoError(t, err)
+	require.Equal(t, "expired", expired.Status)
 }
 
 func TestOwnClaimedUnfinishedMessagesAreExactBoundedAndNonMutating(t *testing.T) {
@@ -590,6 +726,120 @@ func TestOwnClaimedUnfinishedMessagesReturnsBoundedListAndExactTotal(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, 3, total)
 	require.Len(t, items, 2)
+}
+
+func TestProviderAddressedClaimIsSessionBoundRecoverableAndCompatibilityScoped(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, s.InsertPipeline(ctx, &PipelineMessage{
+		PipeID: "msg-provider-session", FromAgent: "alice", ToProvider: "codex",
+		Intent: "review", Payload: "private provider request", Status: "pending",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+
+	require.NoError(t, s.ClaimProviderMessageWithSession(ctx, "bob", "msg-provider-session", "session-a"))
+	var claimedBy, claimantSession string
+	require.NoError(t, s.conn.QueryRowContext(ctx, `SELECT p.claimed_by,r.claimant_session_id
+		FROM pipeline_messages p JOIN message_fetch_receipts r ON r.message_id=p.pipe_id
+		WHERE p.pipe_id='msg-provider-session'`).Scan(&claimedBy, &claimantSession))
+	require.Equal(t, "bob", claimedBy)
+	require.Equal(t, "session-a", claimantSession)
+	require.NoError(t, s.VerifyProviderMessageClaimSession(ctx, "bob", "msg-provider-session", "session-a"))
+	require.ErrorIs(t, s.VerifyProviderMessageClaimSession(ctx, "bob", "msg-provider-session", "session-b"),
+		ErrMessageClaimedByOtherSession)
+
+	own, total, err := s.GetOwnClaimedUnfinishedMessages(ctx, "bob", "session-a", 20)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, own, 1)
+	require.Equal(t, "private provider request", own[0].Payload)
+
+	elsewhere, count, truncated, err := s.GetClaimedMessagesElsewhere(ctx, "bob", "session-b", 20, "", "")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+	require.False(t, truncated)
+	require.Len(t, elsewhere, 1)
+	require.Equal(t, "msg-provider-session", elsewhere[0].MessageID)
+	require.Equal(t, "session-a", elsewhere[0].ClaimantSessionID)
+	require.False(t, elsewhere[0].Foreign)
+
+	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-provider-session", "stale", "session-b")
+	require.ErrorIs(t, err, ErrMessageClaimedByOtherSession)
+	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-provider-session", "done", "session-a")
+	require.ErrorIs(t, err, ErrMessageLegacyProviderCompatibilityScope)
+
+	replayed, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg-provider-session", "session-a", "session-b")
+	require.NoError(t, err)
+	require.False(t, replayed)
+	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-provider-session", "done", "session-b")
+	require.ErrorIs(t, err, ErrMessageLegacyProviderCompatibilityScope)
+}
+
+func TestProviderAddressedCompletionChecksSessionInCompletionTransaction(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, s.InsertPipeline(ctx, &PipelineMessage{
+		PipeID: "msg-provider-complete", FromAgent: "alice", ToProvider: "codex",
+		Payload: "private", Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+	require.NoError(t, s.ClaimProviderMessageWithSession(ctx, "bob", "msg-provider-complete", "session-a"))
+	_, _, err := s.CompleteProviderMessageWithSession(
+		ctx, "bob", "msg-provider-complete", "session-b", "stale", nil)
+	require.ErrorIs(t, err, ErrMessageClaimedByOtherSession)
+	msg, err := s.GetPipeline(ctx, "msg-provider-complete")
+	require.NoError(t, err)
+	require.Equal(t, "claimed", msg.Status)
+	require.Empty(t, msg.Result)
+	replayed, journalID, err := s.CompleteProviderMessageWithSession(
+		ctx, "bob", "msg-provider-complete", "session-a", "done", nil)
+	require.NoError(t, err)
+	require.False(t, replayed)
+	require.Empty(t, journalID)
+	msg, err = s.GetPipeline(ctx, "msg-provider-complete")
+	require.NoError(t, err)
+	require.Equal(t, "completed", msg.Status)
+	require.Equal(t, "done", msg.Result)
+	replayed, journalID, err = s.CompleteProviderMessageWithSession(
+		ctx, "bob", "msg-provider-complete", "session-a", "done", nil)
+	require.NoError(t, err)
+	require.True(t, replayed)
+	require.Empty(t, journalID)
+	_, _, err = s.CompleteProviderMessageWithSession(
+		ctx, "bob", "msg-provider-complete", "session-a", "different", nil)
+	require.ErrorIs(t, err, ErrMessageReplyConflict)
+	replayed, err = s.ReplyLocalMessage(ctx, "bob", "msg-provider-complete", "done", "session-a")
+	require.NoError(t, err)
+	require.True(t, replayed, "canonical identical retry succeeds without another compatibility PUT")
+	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-provider-complete", "different", "session-a")
+	require.ErrorIs(t, err, ErrMessageReplyConflict)
+}
+
+func TestProviderAddressedClaimFenceBackfillsAsLegacy(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "provider-backfill.db")
+	s, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, s.InsertPipeline(ctx, &PipelineMessage{
+		PipeID: "msg-provider-backfill", FromAgent: "alice", ToProvider: "codex",
+		Payload: "private", Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+	require.NoError(t, s.ClaimPipeline(ctx, "msg-provider-backfill", "bob"))
+	require.NoError(t, s.Close())
+
+	s, err = NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, s.Close()) })
+	var receiver, claimantSession string
+	require.NoError(t, s.conn.QueryRowContext(ctx, `SELECT receiver_agent_id,claimant_session_id
+		FROM message_fetch_receipts WHERE message_id='msg-provider-backfill'`).Scan(&receiver, &claimantSession))
+	require.Equal(t, "bob", receiver)
+	require.Equal(t, "legacy", claimantSession)
+	count, err := s.CountClaimedLocalMessagesElsewhere(ctx, "bob", "session-new")
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 }
 
 func TestMessageReadRequiresExactRecipientFetchAndStatusIsSenderOnlyMetadata(t *testing.T) {

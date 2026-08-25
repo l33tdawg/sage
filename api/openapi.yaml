@@ -2016,6 +2016,57 @@ components:
         idempotent_replay:
           type: boolean
 
+    ClaimedElsewhereItem:
+      type: object
+      required: [message_id, claimant_session_id, created_at, expires_at, foreign]
+      description: >-
+        Passive exact-recipient recovery metadata for one still-actionable claim
+        held by another runtime. Sender, provider, chain ID, intent, payload, and
+        result are deliberately excluded.
+      properties:
+        message_id:
+          type: string
+        claimant_session_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Current compare-and-swap source fence for deliberate handoff.
+        created_at:
+          type: string
+          format: date-time
+        claimed_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        foreign:
+          type: boolean
+          description: True for inbound federated compatibility work; no chain identifier is exposed.
+
+    ClaimedElsewhereResponse:
+      type: object
+      required: [claimed_elsewhere_count, items, limit, truncated]
+      properties:
+        claimed_elsewhere_count:
+          type: integer
+          minimum: 0
+          description: Exact current total across all pages, excluding past-TTL claims.
+        items:
+          type: array
+          maxItems: 20
+          items:
+            $ref: "#/components/schemas/ClaimedElsewhereItem"
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 20
+        truncated:
+          type: boolean
+        next_cursor:
+          type: string
+          description: Opaque exclusive continuation, present only when truncated is true.
+
     MessageReplyRequest:
       type: object
       required: [result]
@@ -5022,6 +5073,54 @@ paths:
           description: The exact replay batch was purged or is incomplete; no later work was claimed.
         "429":
           description: The per-agent receive-token metadata quota is full.
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/messages/claimed-elsewhere:
+    get:
+      operationId: messagesClaimedElsewhere
+      summary: Passively page unfinished claims held by another claimant session.
+      description: >-
+        Requires a fresh nonce-bound signature from the exact recipient and this
+        runtime's opaque claimant session. The read is passive and exposes only
+        the metadata required for a later compare-and-swap handoff. It never
+        claims, acknowledges, refreshes, hands off, completes, or decrypts work.
+      tags: [Messages]
+      parameters:
+        - name: claimant_session_id
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 20
+            default: 5
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Opaque next_cursor copied exactly from the preceding page.
+      responses:
+        "200":
+          description: Exact total plus an oldest-first payload-free recovery page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClaimedElsewhereResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
 
