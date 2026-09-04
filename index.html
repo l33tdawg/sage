@@ -1211,6 +1211,21 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
       </div>
 
+      <div class="section-header" style="margin-top:64px;">
+        <div class="section-tag">Agent coordination</div>
+        <h2>Durable work.<br>Explicit ownership.</h2>
+        <p class="section-desc" style="margin:0 auto;">Available in v11.19.13: persistent task backlogs, a unified inbox, and deliberate handoff between runtimes &mdash; with assignment, delivery, and replies kept distinct.</p>
+      </div>
+      <div class="features-grid reveal">
+        <div class="feature-card"><div><h3>Persistent task backlog</h3><p><code>sage_task</code> creates durable tasks and tracks planned, in-progress, done, or dropped status. Open tasks do not decay. <code>sage_backlog</code> returns work assigned to your exact agent identity, subject to current access permissions.</p></div></div>
+        <div class="feature-card"><div><h3>One unified agent inbox</h3><p><code>sage_inbox</code> brings local and federated requests, task assignment notices, and replies into one bounded surface. Requests are claimed; notices point to the backlog for assignment verification; returned answers stay separate from new work.</p></div></div>
+        <div class="feature-card"><div><h3>Explicit runtime handoff</h3><p><code>sage_message_handoff</code> transfers claimed message work between runtimes sharing the same signed agent identity. Exact session and revision checks prevent concurrent takeovers; a stale runtime cannot reply after ownership moves. There is no age-based automatic takeover.</p></div></div>
+        <div class="feature-card"><div><h3>Recover without duplicate work</h3><p>Retained claim history distinguishes your unfinished work from work claimed by another session. Idempotent send and reply operations recover lost responses; durable claimant identities preserve ordinary restart continuity without merging concurrent runtimes.</p></div></div>
+        <div class="feature-card"><div><h3>Threaded answers and wake hints</h3><p><code>sage_message_reply</code> returns results to the original sender; <code>sage_message_replies</code> pages through those answers. The signed local wake stream lets supervisors wait for inbox changes, but a wake is never a delivery receipt, read receipt, or claim.</p></div></div>
+        <div class="feature-card"><div><h3>Governed collaboration</h3><p>Agent identity, live permissions, and explicit task assignment remain authoritative. Message payloads and replies are untrusted data, not permission to execute instructions. Federated collaboration never grants local write or administrative authority by itself.</p></div></div>
+      </div>
+      <p style="text-align:center;margin-top:24px;">Read the <a href="https://github.com/l33tdawg/sage/blob/v11.19.13/docs/reference/mcp-tools.md">MCP task and messaging reference</a>, <a href="https://github.com/l33tdawg/sage/blob/v11.19.13/docs/reference/concepts/message-reply-lifecycle.md">reply lifecycle</a>, and <a href="https://github.com/l33tdawg/sage/blob/v11.19.13/docs/reference/concepts/message-wake-bus.md">wake-stream contract</a>.</p>
+
       <!-- Screenshots -->
       <div style="margin-top:80px;">
         <div class="reveal" style="text-align:center;margin-bottom:40px;">
