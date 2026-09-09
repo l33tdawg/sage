@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-09):** **v11.19.18 is the current release.** CEREBRUM adds a federation connectome, live metadata activity, clearer pairing steps, and explicit memory-sharing drafts. Trusted paired nodes now discover and
+**Status (2026-09):** **v11.19.19 is the current release.** The gRPC-Go dependency is patched to v1.83.2 for CVE-2026-84445. CEREBRUM adds a federation connectome, live metadata activity, clearer pairing steps, and explicit memory-sharing drafts. Trusted paired nodes now discover and
 message eligible ordinary agents automatically, with memory sharing separately
 configured. It keeps safe registered-name addressing and
 reply-event visibility, the three-tab Access Controls redesign, five-minute
@@ -158,6 +158,10 @@ ceiling is app-v27.
 upgrade in place across all future releases. Routine personal-node upgrades
 remain automatic; the exceptional legacy-lineage repair is deliberately an
 explicit, reviewed operator ceremony rather than a silent mutation.
+
+## v11.19.19 release
+
+gRPC-Go v1.83.2 addresses the xDS missing-authority-header denial of service (CVE-2026-84445). No consensus change; app-v27 remains the ceiling.
 
 ## v11.19.18 release
 
