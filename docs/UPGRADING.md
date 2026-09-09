@@ -182,6 +182,7 @@ Use this to work out how far your chain has to climb.
 | v11.19.16 | Automatic trusted-node agent discovery and messaging when both peers are upgraded; memory sharing remains explicit and existing approved grants remain; searchable CEREBRUM directory and bulk/drag-and-drop Read/Copy drafts; no consensus change and app-v27 remains the ceiling |
 | v11.19.17 | Federation connectome, operator-only metadata activity stream, explicit viewed-node names, clearer pairing onboarding, and Read/Copy/removal drafts; existing trust and permissions preserved; no consensus change and app-v27 remains the ceiling |
 | v11.19.18 | Visible federation agent orbits and reliable interaction pause/resume; no consensus change and app-v27 remains the ceiling |
+| v11.19.19 | gRPC-Go v1.83.2 patches the xDS missing-authority-header denial of service (CVE-2026-84445); no consensus or storage migration and app-v27 remains the ceiling |
 
 ### v11.18.3 — the signer fence, and what it does *not* cover
 

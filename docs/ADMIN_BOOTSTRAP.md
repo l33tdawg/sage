@@ -1,6 +1,6 @@
 # CEREBRUM Root and agent approval
 
-<!-- Reconciled through SAGE v11.19.18/app-v27. -->
+<!-- Reconciled through SAGE v11.19.19/app-v27. -->
 
 This guide covers the current governed bootstrap and recovery workflow. The
 pre-app-v23 self-promotion and per-field permission APIs are retired and must

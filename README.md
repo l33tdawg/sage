@@ -48,7 +48,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.19.18`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.19.19`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -207,6 +207,14 @@ software updates, and encryption controls. Ordinary agent identity replacement
 uses re-enrollment; historical memory authorship is preserved.
 
 ---
+
+## What's New in v11.19.19
+
+**Security dependency update:** upgrades gRPC-Go from v1.83.1 to v1.83.2, addressing [CVE-2026-84445 / GHSA-2v4p-qf9q-27wj](https://github.com/grpc/grpc-go/security/advisories/GHSA-2v4p-qf9q-27wj). The upstream fix rejects HTTP/2 requests missing both `:authority` and `Host` headers, preventing a panic in xDS servers. SAGE's CometBFT servers use ordinary gRPC servers, but the dependency is patched for defense in depth.
+
+No consensus or storage migration; app-v27 remains the ceiling.
+
+Container: `ghcr.io/l33tdawg/sage:11.19.19`. SDK 11.19.19.
 
 ## What's New in v11.19.18
 

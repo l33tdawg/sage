@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.19.18 code (2026-09-02). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.19.19 code (2026-09-02). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
@@ -1047,7 +1047,7 @@ Sources: `internal/federation/node_contacts.go` (`buildNodeContactPage`,
 `api/rest/federation_handler.go` (`handleFederationAvailable`);
 `internal/store/pipeline_transport.go` (transport mode persistence).
 
-### Federation connectome and operator activity (v11.19.18)
+### Federation connectome and operator activity (v11.19.19)
 
 The Federation landing page provides a connectome and a text-equivalent List
 view. Each cluster is one trusted SAGE; agents are loaded through the existing
