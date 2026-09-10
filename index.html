@@ -1074,10 +1074,12 @@ footer a:hover { text-decoration: underline; }
         <div class="latest-note">
           Latest: <strong id="latest-version">v11.19.19</strong> &mdash; signed release assets
         </div>
-        <div id="minds-freed" class="download-counter" style="display:none;">
+        <div id="minds-freed" class="download-counter">
           <span class="download-counter-pill">
-            Downloads: <strong id="download-count">0</strong>
+            Package downloads: <strong id="download-count" data-count="8312" data-updated-at="2026-09-10T01:26:26Z">8,312</strong>
           </span>
+          <div id="download-status" class="latest-note" aria-live="polite">Last known count · Sep 10, 2026, 01:26 UTC</div>
+          <div class="latest-note">Public release installers and archives, including prereleases. Counts repeat and automated downloads, not unique installs.</div>
         </div>
       </div>
     </div>
@@ -1699,63 +1701,6 @@ function copyPrompt(box) {
   });
 }
 
-// ─── Download Counter + Latest Version ───
-(function() {
-  // HWM_FLOOR: the highest total ever observed, committed to the repo.
-  // GitHub download counts reset when releases are re-tagged/deleted.
-  // This floor guarantees the counter NEVER drops below the known peak,
-  // regardless of browser, device, or localStorage state.
-  // To update: set HWM_FLOOR to the current displayed counter value and
-  // GITHUB_AT_FLOOR to what GitHub reports right now (the two COUNTs below),
-  // both at time of commit. Do this every release — re-tagged assets reset
-  // GitHub's per-asset download_count, which drops github_now below the old
-  // floor and freezes the displayed number (the localStorage clamp pins it).
-  // Last updated: 2026-08-13 (re-baselined at v11.18.9: githubNow=8187, displayed total=8560)
-  const HWM_FLOOR = 8560;
-
-  // GITHUB_AT_FLOOR: what GitHub reported when HWM_FLOOR was recorded.
-  // New downloads = github_now - GITHUB_AT_FLOOR (only if positive).
-  const GITHUB_AT_FLOOR = 8187;
-
-  async function fetchAllReleases() {
-    const all = [];
-    let page = 1;
-    while (true) {
-      const r = await fetch('https://api.github.com/repos/l33tdawg/sage/releases?per_page=100&page=' + page);
-      const data = await r.json();
-      if (!Array.isArray(data) || data.length === 0) break;
-      all.push(...data);
-      if (data.length < 100) break;
-      page++;
-    }
-    return all;
-  }
-
-  fetchAllReleases().then(releases => {
-    if (!releases.length) return;
-    let githubNow = 0;
-    for (const rel of releases) for (const asset of (rel.assets || [])) githubNow += asset.download_count || 0;
-    // New downloads since the floor was recorded (clamped to 0 — re-tags can make this negative)
-    const newDownloads = Math.max(0, githubNow - GITHUB_AT_FLOOR);
-    let total = HWM_FLOOR + newDownloads;
-    // localStorage HWM as a per-browser safety net (covers mid-session re-tags)
-    const hwmKey = 'sage_minds_freed_hwm';
-    const prevHWM = parseInt(localStorage.getItem(hwmKey) || '0', 10);
-    if (total > prevHWM) { localStorage.setItem(hwmKey, total); }
-    else if (prevHWM > total) { total = prevHWM; }
-    if (total > 0) {
-      document.getElementById('download-count').textContent = total.toLocaleString();
-      document.getElementById('minds-freed').style.display = 'block';
-    }
-    const latest = releases.find(r => !r.prerelease && !r.draft);
-    if (latest) {
-      const el = document.getElementById('latest-version'); if (el) el.textContent = latest.tag_name;
-      // Keep the curated release heading paired with its static notes.
-      // Only the download badge follows GitHub's latest published release.
-    }
-  }).catch(() => {});
-})();
-
 // ─── Screenshot Lightbox ───
 const lbImages = [
   { src: 'screen-brain.png', caption: 'CEREBRUM MRI brain — memory focus, related notes, and the train-of-thought view' },
@@ -1789,5 +1734,6 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowRight') lightboxNav(e, 1);
 });
 </script>
+<script type="module" src="download-counter.mjs"></script>
 </body>
 </html>
