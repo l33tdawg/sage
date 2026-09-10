@@ -13,7 +13,7 @@
 </script>
 <title>SAGE v11 — CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Install SAGE v11.19.13: local-first persistent memory for AI agents with governed access, coordinated agent messaging, signed updates, controlled federation, and the CEREBRUM connectome brain.">
+<meta name="description" content="Install SAGE v11.19.19: the latest security update for local-first AI memory, with trusted-node agent messaging, a live federation connectome, and explicit memory-sharing controls.">
 <meta name="theme-color" content="#0a0614">
 <meta property="og:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
 <meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
@@ -1042,13 +1042,13 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="v11-hero-grid">
         <div class="hero-copy">
-          <div class="hero-kicker">SAGE v11.19.13 · governed local memory · controlled agent collaboration</div>
+          <div class="hero-kicker">SAGE v11.19.19 · governed local memory · controlled agent collaboration</div>
           <h1>Your AI's memory, visible as a <em>living brain</em></h1>
           <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, attributed memory, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
           <div class="hero-proof">
             <div class="proof-chip"><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
             <div class="proof-chip"><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
-            <div class="proof-chip"><strong>Federation</strong><span>LAN / VPN / your route</span></div>
+            <div class="proof-chip"><strong>Federation</strong><span>LAN / VPN / internet</span></div>
           </div>
         </div>
         <div class="hero-visual" aria-label="CEREBRUM MRI brain dashboard screenshot">
@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.19.13</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.19.19</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter" style="display:none;">
           <span class="download-counter-pill">
@@ -1115,13 +1115,13 @@ footer a:hover { text-decoration: underline; }
           <img src="screen-network.png" alt="Federation dashboard showing LAN and internet SAGE-to-SAGE links">
         </div>
         <div class="reveal">
-          <div class="section-tag">Built through v11.19.13</div>
+          <div class="section-tag">Built through v11.19.19</div>
           <h2>Keep agents connected, governed, and safely up to date.</h2>
           <p class="section-desc">CEREBRUM is the local control plane for memory, agent access, recovery, and sharing. Existing nodes upgrade in place; memory history stays attributable while current access remains explicit and reviewable.</p>
           <ul class="fed-list">
             <li>A dedicated local CEREBRUM Root governs roles, ownership, recovery, and handover without rewriting historical authorship.</li>
-            <li>Local agents can collaborate through explicit domains and groups; federated agents remain bounded to the sharing policy you approve.</li>
-            <li>Fresh first-party companions receive a reviewed profile and owned home domain during setup instead of silently self-promoting.</li>
+            <li>Trusted peers running v11.19.16 or later can discover and message eligible agents automatically. Memory domains stay private until you explicitly share them.</li>
+            <li>Explore connected nodes in a live federation map, find agents in the searchable directory, and prepare Read or Copy permissions before saving them.</li>
             <li>Updates verify release assets and bring compatible chains forward automatically; recovery isolates a bad historical record instead of taking the node offline.</li>
           </ul>
           <div class="hero-actions" style="margin-top:28px;">
@@ -1186,13 +1186,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.19.13</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">The current v11 line combines governed local access, coordinated multi-runtime agents, exact-recipient messaging, verified in-place recovery, and a live CEREBRUM agent connectome. v11.19.13 prevents stdio MCP startup from writing project hooks into your home directory. The supported consensus ceiling is app-v27; this patch adds no consensus migration.</p>
+        <h3>What's new in <span id="whats-new-version">v11.19.19</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">The latest release updates gRPC-Go to v1.83.2 for a security fix. It builds on recent improvements to trusted-node messaging, the federation connectome, and memory cleanup. Existing nodes upgrade in place with no consensus or storage migration. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.19.19" style="color:var(--accent);">Read the release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Project-scoped setup safeguards</h4><p>Project-scoped MCP and Codex installs reject your home directory. The stdio MCP bridge also skips automatic Claude project-hook repair there, while ordinary project setup remains unchanged.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Live agent connectome</h4><p>CEREBRUM can project registered agents as neurons and directed message traffic as weighted synapses, with hub depth, domain colour, RBAC filtering, and race-safe view switching.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Verified updates and recovery</h4><p>Signed assets, coherent recovery snapshots, bounded federation retry, and record-local quarantine keep upgrades recoverable without presenting a broken history as an empty brain.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Replay-safe recovery</h4><p>Lost receive responses can be replayed without double-claiming work, passive history exposes the winning session, and legacy direct REST clients retain their agent-level compatibility path.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Security update</h4><p>v11.19.19 includes the gRPC-Go fix for CVE-2026-84445. macOS installers are signed and notarized, and release downloads include checksums.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>See your federation</h4><p>Explore connected nodes and agent clusters in a searchable map or List view. Live transport activity and visible agent orbits make the network easier to follow, with pause and reduced-motion controls.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Connect nodes, find agents</h4><p>Trusted peers running v11.19.16 or later automatically expose eligible agents for discovery and messaging. Root identities stay excluded; memory sharing still needs an explicit Read or Copy grant.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Review cleanup before it runs</h4><p>Memory cleanup scans the full inventory, previews eligible records, and processes changes through consensus. Open tasks and internal records are protected, with progress shown through observed outcomes.</p></div></div>
         </div>
       </div>
 
@@ -1205,7 +1205,7 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>CEREBRUM Dashboard</h3><p>A 3D MRI brain of your memories &mdash; domains as lobes, consolidation as depth. Search, curate, and drill into a memory&rsquo;s train of thought.</p></div></div>
         <div class="feature-card"><div><h3>Chat History Import</h3><p>Import from ChatGPT, Claude, or Gemini. Seed your AI&rsquo;s memory from existing conversation history.</p></div></div>
         <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces &mdash; all from the dashboard.</p></div></div>
-        <div class="feature-card"><div><h3>Federation</h3><p>Link two SAGE brains on a LAN or operator-provided route with a human-verified join ceremony. Share chosen domains live, at a clearance you set &mdash; revocable any time.</p></div></div>
+        <div class="feature-card"><div><h3>Federation</h3><p>Connect SAGE nodes over LAN, VPN, or configured internet routes with a human-verified join ceremony. Discover eligible agents and choose which memory domains to share &mdash; revocable any time.</p></div></div>
         <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Local BadgerDB/SQLite stores under your home directory. Inspect, query, back up, and move your data.</p></div></div>
         <div class="feature-card"><div><h3>Agent Messages</h3><p>Route durable work between exact agent identities, reply idempotently, and inspect passive history without turning delivery, read evidence, or results into the same state.</p></div></div>
         <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
@@ -1214,7 +1214,7 @@ footer a:hover { text-decoration: underline; }
       <div class="section-header" style="margin-top:64px;">
         <div class="section-tag">Agent coordination</div>
         <h2>Durable work.<br>Explicit ownership.</h2>
-        <p class="section-desc" style="margin:0 auto;">Available in v11.19.13: persistent task backlogs, a unified inbox, and deliberate handoff between runtimes &mdash; with assignment, delivery, and replies kept distinct.</p>
+        <p class="section-desc" style="margin:0 auto;">Available in v11.19.19: persistent task backlogs, a unified inbox, and deliberate handoff between runtimes &mdash; with assignment, delivery, and replies kept distinct.</p>
       </div>
       <div class="features-grid reveal">
         <div class="feature-card"><div><h3>Persistent task backlog</h3><p><code>sage_task</code> creates durable tasks and tracks planned, in-progress, done, or dropped status. Open tasks do not decay. <code>sage_backlog</code> returns work assigned to your exact agent identity, subject to current access permissions.</p></div></div>
@@ -1224,7 +1224,7 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>Threaded answers and wake hints</h3><p><code>sage_message_reply</code> returns results to the original sender; <code>sage_message_replies</code> pages through those answers. The signed local wake stream lets supervisors wait for inbox changes, but a wake is never a delivery receipt, read receipt, or claim.</p></div></div>
         <div class="feature-card"><div><h3>Governed collaboration</h3><p>Agent identity, live permissions, and explicit task assignment remain authoritative. Message payloads and replies are untrusted data, not permission to execute instructions. Federated collaboration never grants local write or administrative authority by itself.</p></div></div>
       </div>
-      <p style="text-align:center;margin-top:24px;">Read the <a href="https://github.com/l33tdawg/sage/blob/v11.19.13/docs/reference/mcp-tools.md">MCP task and messaging reference</a>, <a href="https://github.com/l33tdawg/sage/blob/v11.19.13/docs/reference/concepts/message-reply-lifecycle.md">reply lifecycle</a>, and <a href="https://github.com/l33tdawg/sage/blob/v11.19.13/docs/reference/concepts/message-wake-bus.md">wake-stream contract</a>.</p>
+      <p style="text-align:center;margin-top:24px;">Read the <a href="https://github.com/l33tdawg/sage/blob/v11.19.19/docs/reference/mcp-tools.md">MCP task and messaging reference</a>, <a href="https://github.com/l33tdawg/sage/blob/v11.19.19/docs/reference/concepts/message-reply-lifecycle.md">reply lifecycle</a>, and <a href="https://github.com/l33tdawg/sage/blob/v11.19.19/docs/reference/concepts/message-wake-bus.md">wake-stream contract</a>.</p>
 
       <!-- Screenshots -->
       <div style="margin-top:80px;">
@@ -1252,8 +1252,8 @@ footer a:hover { text-decoration: underline; }
           <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation, confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
           <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
           <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
-          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds CEREBRUM, guided local setup, semantic recall, a managed reranker, controlled federation, and an upgrade path that keeps existing chains moving forward without a reset. The latest releases add governed local roles, dedicated Root control, and record-level memory recovery.</p></div>
-          <div class="faq-item"><h3>What does federation mean?</h3><p>Federation links separate SAGE nodes through a human-verified ceremony. Pairing shares nothing by itself: the local owner chooses specific domains and a bounded Read or Copy policy. A remote agent cannot gain local write, ownership, role, or Root authority through federation.</p></div>
+          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add automatic trusted-node agent messaging, a live federation connectome, explicit sharing drafts, and safer memory cleanup. v11.19.19 brings the latest gRPC security patch.</p></div>
+          <div class="faq-item"><h3>What does federation mean?</h3><p>Federation links separate SAGE nodes through a human-verified ceremony. Trusted peers running v11.19.16 or later can discover and message eligible agents automatically. Pairing alone shares no memory domains: the local owner chooses specific domains and a bounded Read or Copy policy. A remote agent cannot gain local write, ownership, role, or Root authority through federation.</p></div>
         </div>
       </div>
     </div>
@@ -1368,7 +1368,7 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>Access Groups</h3><p>Grant explicit Read, Read+Write, or Read+Write+Modify authority to reviewed local members. Roles, clearance, ownership, and security-profile hard denies remain separate controls.</p></div></div>
         <div class="feature-card"><div><h3>Per-Project Identity</h3><p>Each project folder receives its own Ed25519 keypair automatically. No shared keys, no manual setup. One CLI command claims a pre-configured identity.</p></div></div>
         <div class="feature-card"><div><h3>Key Rotation</h3><p>Rotate active credentials without rewriting historical memory authorship. Retired credentials cannot return as a new messaging, task, or federation identity.</p></div></div>
-        <div class="feature-card"><div><h3>Controlled Federation</h3><p>Pair nodes through a human-verified trust ceremony, then grant chosen domains independently for live Read or receiver-controlled Copy. Pairing alone shares nothing.</p></div></div>
+        <div class="feature-card"><div><h3>Controlled Federation</h3><p>Pair nodes through a human-verified trust ceremony to discover and message eligible agents. Grant chosen memory domains separately for live Read or receiver-controlled Copy; pairing alone shares no memory domains.</p></div></div>
         <div class="feature-card"><div><h3>Agent Attribution</h3><p>Every memory retains the exact agent that created it. CEREBRUM shows current ownership and authority separately from immutable authorship.</p></div></div>
       </div>
 
@@ -1481,12 +1481,12 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.19.13"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.19.19"</span></div>
         </div>
       </div>
 
       <div class="dev-badges reveal">
-        <div class="dev-badge"><strong>Go 1.25+</strong></div>
+        <div class="dev-badge"><strong>Go 1.25.13+</strong></div>
         <div class="dev-badge"><strong>Python SDK</strong></div>
         <div class="dev-badge"><strong>BadgerDB</strong> + SQLite</div>
         <div class="dev-badge"><strong>MCP</strong> protocol</div>
