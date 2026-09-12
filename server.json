@@ -6,11 +6,11 @@
     "url": "https://github.com/l33tdawg/sage",
     "source": "github"
   },
-  "version": "11.19.19",
+  "version": "11.19.20",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/l33tdawg/sage:11.19.19",
+      "identifier": "ghcr.io/l33tdawg/sage:11.19.20",
       "transport": {
         "type": "stdio"
       }
