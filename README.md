@@ -2,7 +2,7 @@
 
 **Persistent, consensus-validated memory infrastructure for AI agents.**
 
-SAGE gives AI agents institutional memory that persists across conversations, goes through BFT consensus validation, carries confidence scores, and decays naturally over time. Not a flat file. Not a vector DB bolted onto a chat app. Infrastructure — built on the same consensus primitives as distributed ledgers.
+SAGE gives AI agents institutional memory that persists across conversations, goes through consensus validation, carries confidence scores, and decays naturally over time. On a multi-validator network that validation is a BFT quorum; on a personal install it is the node's own signed vote. Not a flat file. Not a vector DB bolted onto a chat app. Infrastructure — built on the same consensus primitives as distributed ledgers.
 
 The architecture is described in [Paper 1: Agent Memory Infrastructure](papers/Paper1%20-%20Agent%20Memory%20Infrastructure%20-%20Byzantine-Resilient%20Institutional%20Memory%20for%20Multi-Agent%20Systems.pdf).
 

@@ -27,9 +27,15 @@ Presents a longitudinal study measuring whether consensus-validated institutiona
 ## Priority & Provenance
 
 All papers are timestamped via:
-- **Git commit history** — initial commit [`23b4593`](https://github.com/l33tdawg/sage/commit/23b45930b0dc097f56978a99f45a11c93571b60b) dated 2026-03-02
+- **Git commit history** — root commit of the published history, [`f2097605`](https://github.com/l33tdawg/sage/commit/f2097605e48f212512337c016c2cbcf0acdeeff9) dated 2026-03-02
 - **Zenodo DOI** — permanent, citable digital object identifiers (see below)
 - **GitHub Release** — tagged releases with SHA-256 checksums
+
+Reproducibility note: Papers 2 and 4 draw on the Level Up CTF experiment pipeline. The
+published tree carries `integrations/levelup/experiment_protocol.py` and `sage_bridge.py`;
+the pipeline's scripts and run records are excluded for IP reasons (see the Level Up
+Integration section of `.gitignore`), so the paper statistics cannot be re-derived from a
+fresh clone. The PDFs and the Zenodo records above are the citable artifacts.
 
 ## Zenodo DOIs
 

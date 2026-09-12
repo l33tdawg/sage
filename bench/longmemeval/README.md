@@ -15,7 +15,7 @@ Per-question rows and aggregate summary land in `bench/results/longmemeval-<git_
 
 ## Requirements
 
-- A running SAGE node reachable at `SAGE_API_URL` (default `http://localhost:8080`). Personal mode is fine — every write goes through the same BFT pipeline as production deployments.
+- A running SAGE node reachable at `SAGE_API_URL` (default `http://localhost:8080`). Personal mode is fine — every write goes through the same consensus pipeline as a multi-validator deployment; with one validator, admission is that node's own signed vote.
 - `OPENAI_API_KEY` exported.
 - Python 3.10+.
 - Optional: a local copy of the dataset to avoid HuggingFace download time (`LONGMEMEVAL_DATA_PATH=/path/to/longmemeval_s.json`).
@@ -86,6 +86,22 @@ Each results JSON has:
 ```
 
 Compare to previous runs by diffing `summary.overall` between two JSONs in `bench/results/`.
+
+## Committed results
+
+Three LongMemEval runs are committed under `bench/results/`:
+
+| File | Questions scored | R@5 | R@10 | MRR | Median query |
+|---|---|---|---|---|---|
+| `longmemeval-baseline-48e81ec.json` | 30 | 0.875 | 0.900 | 0.8833 | 0.23s |
+| `longmemeval-full-48e81ec.json` | 500 | 0.9053 | 0.9332 | 0.9041 | 0.39s |
+| `longmemeval-v71-full.json` (reranker on) | 499 | 0.8927 | 0.9461 | 0.8842 | 9.82s |
+
+The v7.1 run scored slightly lower on R@5 than the earlier full run (0.8927 vs 0.9053) at
+roughly 25x the median query latency. The two are not a clean ablation: v7.1 also enables
+query expansion (`expand_n: 3`), so the difference covers expansion plus reranking, not the
+reranker alone. The reranker ships off by default, and both full runs are committed as they
+ran rather than cherry-picked.
 
 ## Tuning knobs that affect the score
 
