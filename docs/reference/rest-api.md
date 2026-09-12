@@ -2618,7 +2618,7 @@ the result over the original agreement-bound return route
 | `source_chain_id` | string | for foreign work | Exact local reply-source chain returned as `reply_source_chain_id` by the pipe status preflight; prevents another node relabeling the signed result |
 | `claimant_session_id` | string | for foreign work; recommended for provider-addressed compatibility work | Opaque 1–128-byte session currently holding the claim. A provider-addressed row claimed by an older sessionless caller is fenced as `legacy`, and an omitted result session selects only that exact fence; it cannot bypass a named sibling session. |
 
-`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6743`, mapping `ErrPipeResultTooLarge` at `:6743-6744`).
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6765`, mapping `ErrPipeResultTooLarge` at `:6767-6768`).
 
 **Response** (HTTP 200):
 `{"status":"completed","journal_id":"<memory_id or empty>","journaled":true|false}`.

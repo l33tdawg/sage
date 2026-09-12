@@ -404,8 +404,14 @@ type MemoryStore interface {
 	GetTagsBatch(ctx context.Context, memoryIDs []string) (map[string][]string, error)
 	ListAllTags(ctx context.Context) ([]TagCount, error)
 	ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error)
-	// FindByContentHash checks if a committed memory with this content hash exists.
-	FindByContentHash(ctx context.Context, contentHash string) (bool, error)
+	// FindByContentHash reports whether a DIFFERENT memory (memory_id !=
+	// excludeMemoryID, which may be empty) that has left status='proposed'
+	// already carries this content hash. The candidate's own row never matches
+	// itself, and content that was already rejected or deprecated stays
+	// unsubmittable (sticky rejection). Other still-proposed rows are
+	// deliberately NOT duplicates: two concurrent identical submissions must
+	// not reject each other and leave the content with no surviving row.
+	FindByContentHash(ctx context.Context, contentHash, excludeMemoryID string) (bool, error)
 	// RepairSelfDupRejected resurrects memories wrongly deprecated by the voter
 	// dedup self-match bug: deprecated memories whose only recorded vote is selfID
 	// rejecting as "duplicate content" flip back to proposed (after flipChain
