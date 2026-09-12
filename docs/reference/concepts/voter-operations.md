@@ -135,3 +135,12 @@ disclosure one. If no replacement is needed, the removal path is
 `sage_remember(replaces_memory_id=...)`: it verifies the replacement is
 committed before challenging the old memory, so an interrupted correction may
 leave both records but never neither.
+
+The `dedup` check matches any **other** memory that has left `proposed` (validated,
+committed, challenged, or deprecated) carrying the same content hash. The candidate's
+own row is always excluded, and other still-`proposed` rows are ignored so two in-flight
+identical submissions cannot reject each other. Consequences: identical bytes are
+rejected again after a rejection or deprecation (sticky rejection — the removal path is
+`sage_forget`, and a corrected body must actually change the content to pass dedup), and
+a correction submitted via `sage_remember(replaces_memory_id=...)` therefore carries a
+new content hash.

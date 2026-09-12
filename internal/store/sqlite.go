@@ -481,6 +481,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		ON memories(domain_tag, status, memory_id)
 		WHERE status IN ('committed','challenged');
 	CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
+	-- Serves the voter's dedup lookup (FindByContentHash), evaluated once per
+	-- pending memory on a 2s poll. NOT partial: the predicate spans every
+	-- non-proposed status, so a committed-only partial index cannot serve it.
+	CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
 	-- Serves the CEREBRUM agent-as-lobe read: each agent's top memories by
 	-- confidence (WHERE submitting_agent = ? ORDER BY confidence_score DESC).
 	-- Composite so the per-agent seek is index-satisfiable (equality on the leading
@@ -1430,6 +1434,7 @@ func (s *SQLiteStore) migrateTaskSupport(ctx context.Context) {
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_task_status ON memories(task_status) WHERE task_status != ''`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_submitting_agent ON memories(submitting_agent, confidence_score)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_corroborations_memory_order ON corroborations(memory_id, created_at, agent_id, id)`)
 }
 
@@ -4970,25 +4975,34 @@ func (s *SQLiteStore) UpdateRedeployLog(ctx context.Context, id int64, status, e
 	return err
 }
 
-// FindByContentHash checks if a committed memory with this content hash exists.
-// The contentHash parameter is the hex-encoded SHA-256 hash of the content.
+// FindByContentHash reports whether a DIFFERENT memory that has left
+// status='proposed' already carries this content hash (hex-encoded SHA-256).
 //
-// The predicate MUST be committed-only. The voter's dedupCheck runs while the
-// candidate memory is itself sitting in this table with status='proposed', so the
-// previous predicate (status != 'deprecated') matched the candidate's OWN row —
-// every per-node vote became a self-inflicted "duplicate content" reject. On a
-// single-validator chain that reject was unanimous, so every memory was
-// deprecated on arrival (and on legacy multi-validator sets it wedged memories at
-// proposed). See RepairSelfDupRejected for the recovery path.
-func (s *SQLiteStore) FindByContentHash(ctx context.Context, contentHash string) (bool, error) {
+// Both halves of the predicate are load-bearing. The candidate's own row must
+// never match itself: the voter's dedupCheck runs while the candidate is itself
+// sitting in this table with status='proposed', and the pre-v10.1.0 predicate
+// matched that row, so every per-node vote became a self-inflicted "duplicate
+// content" reject — on a single-validator chain, unanimous, which deprecated
+// every memory on arrival (see RepairSelfDupRejected). And OTHER proposed rows
+// are not duplicates either: counting them would make two concurrent identical
+// submissions reject each other, leaving the content with no surviving row and
+// a rejected hash that blocks every later attempt to submit those bytes.
+//
+// Every post-proposal status counts. Committed/validated/challenged rows are
+// live copies; challenged and deprecated rows are the sticky half — identical
+// bytes must not re-enter through a fresh memory id after a rejection. A
+// genuine correction carries new content, hence a different hash, and stays
+// submittable.
+func (s *SQLiteStore) FindByContentHash(ctx context.Context, contentHash, excludeMemoryID string) (bool, error) {
 	hashBytes, err := hex.DecodeString(contentHash)
 	if err != nil {
 		return false, fmt.Errorf("decode content hash: %w", err)
 	}
 	var count int
 	err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memories WHERE content_hash = ? AND status = 'committed'`,
-		hashBytes).Scan(&count)
+		`SELECT COUNT(*) FROM memories
+		  WHERE content_hash = ? AND memory_id != ? AND status != 'proposed'`,
+		hashBytes, excludeMemoryID).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -5001,11 +5015,16 @@ func (s *SQLiteStore) FindByContentHash(ctx context.Context, contentHash string)
 // chain that unanimous reject deprecated it on arrival.
 //
 // A memory qualifies ONLY when its recorded vote history is exactly one vote —
-// selfID rejecting with the dedupCheck rationale — and it was never challenged.
-// That fingerprint cannot match legitimately deprecated memories: quorum
-// rejections on real multi-validator sets carry multiple votes, challenge
-// deprecations carry a challenges row, and the legacy 4-archetype era always
-// recorded 4 votes per memory.
+// selfID rejecting with the dedupCheck rationale — it was never challenged, and
+// NO other row shares its content hash. That fingerprint cannot match
+// legitimately deprecated memories: quorum rejections on real multi-validator
+// sets carry multiple votes, challenge deprecations carry a challenges row, the
+// legacy 4-archetype era always recorded 4 votes per memory, and a genuine
+// duplicate rejection always has the twin row it was rejected against. That
+// last clause matters now that the dedup predicate is no longer committed-only:
+// without it, every restart would resurrect genuine duplicate rejections (their
+// fingerprint is otherwise identical) and the widened lookup would re-reject
+// them, churning deprecated ↔ proposed forever.
 //
 // For each candidate, flipChain (the caller's chain-state flip, e.g. badger
 // status + vote-key cleanup) runs FIRST; only on its success does the mirror row
@@ -5023,7 +5042,10 @@ func (s *SQLiteStore) RepairSelfDupRejected(ctx context.Context, selfID string, 
 		  AND NOT EXISTS (SELECT 1 FROM validation_votes v2
 		              WHERE v2.memory_id = m.memory_id AND NOT (v2.validator_id = ?
 		                AND v2.decision = 'reject' AND v2.rationale LIKE 'duplicate content%'))
-		  AND NOT EXISTS (SELECT 1 FROM challenges c WHERE c.memory_id = m.memory_id)`,
+		  AND NOT EXISTS (SELECT 1 FROM challenges c WHERE c.memory_id = m.memory_id)
+		  AND NOT EXISTS (SELECT 1 FROM memories m2
+		              WHERE m2.content_hash = m.content_hash
+		                AND m2.memory_id != m.memory_id)`,
 		selfID, selfID)
 	if err != nil {
 		return 0, fmt.Errorf("repair self-dup-rejected: scan candidates: %w", err)

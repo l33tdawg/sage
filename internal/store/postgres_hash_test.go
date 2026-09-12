@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestPostgresFindByContentHashCommittedOnly(t *testing.T) {
+func TestPostgresFindByContentHashDedupPredicate(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	require.NoError(t, err)
 	t.Cleanup(mock.Close)
@@ -22,7 +22,8 @@ func TestPostgresFindByContentHashCommittedOnly(t *testing.T) {
 	hashBytes, err := hex.DecodeString(contentHash)
 	require.NoError(t, err)
 	query := regexp.QuoteMeta(
-		`SELECT EXISTS(SELECT 1 FROM memories WHERE content_hash = $1 AND status = 'committed')`,
+		`SELECT EXISTS(SELECT 1 FROM memories
+			WHERE content_hash = $1 AND memory_id::text <> $2 AND status <> 'proposed')`,
 	)
 
 	for _, test := range []struct {
@@ -30,15 +31,16 @@ func TestPostgresFindByContentHashCommittedOnly(t *testing.T) {
 		exists bool
 	}{
 		{name: "proposed candidate does not match itself", exists: false},
+		{name: "another proposed row does not block", exists: false},
 		{name: "committed memory matches", exists: true},
-		{name: "deprecated memory does not match", exists: false},
+		{name: "deprecated memory matches (sticky rejection)", exists: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			mock.ExpectQuery(query).
-				WithArgs(hashBytes).
+				WithArgs(hashBytes, "candidate-id").
 				WillReturnRows(pgxmock.NewRows([]string{"exists"}).AddRow(test.exists))
 
-			exists, findErr := store.FindByContentHash(context.Background(), contentHash)
+			exists, findErr := store.FindByContentHash(context.Background(), contentHash, "candidate-id")
 			require.NoError(t, findErr)
 			assert.Equal(t, test.exists, exists)
 		})
@@ -48,7 +50,7 @@ func TestPostgresFindByContentHashCommittedOnly(t *testing.T) {
 
 func TestPostgresFindByContentHashRejectsMalformedHash(t *testing.T) {
 	store := &PostgresStore{}
-	_, err := store.FindByContentHash(context.Background(), "not-hex")
+	_, err := store.FindByContentHash(context.Background(), "not-hex", "candidate-id")
 	require.ErrorContains(t, err, "decode content hash")
 }
 
@@ -82,16 +84,23 @@ func TestPostgresUpsertRefreshesContentHashLikeSQLite(t *testing.T) {
 
 // The dedup query is only cheap if an index covers it. voter.Run evaluates
 // FindByContentHash per pending memory on a 2s poll, against a table carrying
-// content TEXT plus a 768-dimension vector.
+// content TEXT plus a 768-dimension vector. The predicate is no longer
+// committed-only, so the migration must drop the legacy partial index and
+// install an unconditional one.
 func TestPostgresContentHashDedupIsIndexed(t *testing.T) {
-	var indexed bool
+	var droppedLegacy, indexedFull bool
 	for _, stmt := range postgresTaskAssignmentSchema {
-		if strings.Contains(stmt, "idx_memories_content_hash") {
-			indexed = true
-			require.Containsf(t, stmt, "status = 'committed'",
-				"the index must be partial on the same predicate FindByContentHash uses, got %q", stmt)
+		if strings.Contains(stmt, "DROP INDEX IF EXISTS idx_memories_content_hash") {
+			droppedLegacy = true
+		}
+		if strings.Contains(stmt, "idx_memories_content_hash_dedup") {
+			indexedFull = true
+			require.NotContainsf(t, stmt, "status =",
+				"the dedup index must not be partial on the status predicate it no longer matches, got %q", stmt)
 		}
 	}
-	require.True(t, indexed,
-		"existing Postgres databases need a content_hash index migration, not just deploy/init.sql")
+	require.True(t, droppedLegacy,
+		"existing Postgres databases carry the legacy committed-only partial index; the startup migration must drop it")
+	require.True(t, indexedFull,
+		"existing Postgres databases need an unconditional content_hash index, not just deploy/init.sql")
 }

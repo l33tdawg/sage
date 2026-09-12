@@ -466,9 +466,12 @@ var postgresTaskAssignmentSchema = []string{
 	// FindByContentHash became a live query in v11.11 (it previously returned a
 	// constant false), and voter.Run evaluates it per pending memory on a 2s
 	// poll. Without this index that is a sequential scan of a table carrying
-	// content TEXT plus a 768-dimension vector. Partial on status='committed'
-	// because that is exactly the predicate the dedup query uses.
-	`CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories (content_hash) WHERE status = 'committed'`,
+	// content TEXT plus a 768-dimension vector. The dedup predicate is no
+	// longer committed-only, so the legacy partial index must go: DROP IF
+	// EXISTS is a catalog no-op once migrated and nothing recreates that name;
+	// the replacement covers content_hash unconditionally.
+	`DROP INDEX IF EXISTS idx_memories_content_hash`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_content_hash_dedup ON memories (content_hash)`,
 	`CREATE TABLE IF NOT EXISTS agent_notifications (
 		notification_id TEXT PRIMARY KEY,
 		agent_id TEXT NOT NULL,
@@ -3128,20 +3131,25 @@ func (s *PostgresStore) ListMemoriesByTag(ctx context.Context, tag string, limit
 	return s.ListMemories(ctx, ListOptions{Tag: tag, Limit: limit, Offset: offset})
 }
 
-// FindByContentHash checks the same committed-only dedup predicate as SQLite.
-// The voter runs while its candidate is still proposed, so including proposed
-// rows would make every new memory look like a duplicate of itself.
-func (s *PostgresStore) FindByContentHash(ctx context.Context, contentHash string) (bool, error) {
+// FindByContentHash checks the same dedup predicate as SQLite: a DIFFERENT
+// memory that has left status='proposed' carries this content hash. The
+// candidate's own row is excluded (the voter runs while its candidate is still
+// proposed, so including that row would make every new memory look like a
+// duplicate of itself) and so are other proposed rows (two concurrent identical
+// submissions must not reject each other). Deprecated rows DO match, so
+// rejected bytes cannot re-enter through a fresh memory id.
+func (s *PostgresStore) FindByContentHash(ctx context.Context, contentHash, excludeMemoryID string) (bool, error) {
 	hashBytes, err := hex.DecodeString(contentHash)
 	if err != nil {
 		return false, fmt.Errorf("decode content hash: %w", err)
 	}
 	var exists bool
 	if err := s.db.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM memories WHERE content_hash = $1 AND status = 'committed')`,
-		hashBytes,
+		`SELECT EXISTS(SELECT 1 FROM memories
+			WHERE content_hash = $1 AND memory_id::text <> $2 AND status <> 'proposed')`,
+		hashBytes, excludeMemoryID,
 	).Scan(&exists); err != nil {
-		return false, fmt.Errorf("find committed content hash: %w", err)
+		return false, fmt.Errorf("find duplicate content hash: %w", err)
 	}
 	return exists, nil
 }

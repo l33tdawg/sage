@@ -1720,8 +1720,10 @@ func (s *SQLiteStore) ListSyncOriginIDs(ctx context.Context, originChainID, doma
 // idempotent duplicate (success); a match ONLY in different domains is the
 // cross-domain dup that gets rejected + surfaced, never silently moved.
 //
-// Domain-aware sibling of FindByContentHash (which is committed-only for the
-// same self-match reason documented there); content_hash is stored as raw
+// Domain-aware sibling of FindByContentHash. This one intentionally stays
+// committed-only — the sync gate compares committed state across chains — while
+// FindByContentHash answers the voter's local dedup question (any other row past
+// 'proposed', excluding the candidate itself). content_hash is stored as raw
 // bytes, so the hex parameter is decoded before comparison.
 func (s *SQLiteStore) FindCommittedByContentHashDomains(ctx context.Context, contentHash string) ([]CommittedHashMatch, error) {
 	hashBytes, err := hex.DecodeString(contentHash)
