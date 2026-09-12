@@ -4873,14 +4873,19 @@ func TestSageReflect_PartialStoreReportsFailure(t *testing.T) {
 	assert.NotContains(t, m["message"], "future self will thank you")
 }
 
-// Everything being a known duplicate is a legitimate no-op, not a failure.
+// Everything being a known duplicate is a legitimate no-op, not a failure. The
+// duplicate decision comes from the node's own dedup check rather than a
+// client-side similarity heuristic.
 func TestSageReflect_AllDuplicatesIsNotAnError(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"memories": []map[string]any{
-				{"content": "[Task Reflection] Shipped the release audit"},
+			"accepted": false,
+			"votes": []map[string]any{
+				{"validator": "dedup", "decision": "reject", "reason": "duplicate content (hash: 9f8e7d6c)"},
+				{"validator": "quality", "decision": "accept", "reason": "content meets quality threshold"},
+				{"validator": "consistency", "decision": "accept", "reason": "confidence consistent"},
 			},
 		})
 	})
@@ -4905,18 +4910,25 @@ func TestSageReflect_AllDuplicatesIsNotAnError(t *testing.T) {
 	assert.EqualValues(t, 1, m["skipped_duplicates"])
 }
 
-func TestSimilarMemoryExists(t *testing.T) {
+// The node owns the duplicate rule. A pre-validate rejection it names as `dedup`
+// is reported as a skip: nothing is stored and nothing is broadcast.
+func TestSageRememberSkipsNodeDedupRejection(t *testing.T) {
+	var submits int
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"memories": []map[string]any{
-				{
-					"content": "[DO] Always expand tilde paths before checking IsAbs in Go config files",
-				},
+			"accepted": false,
+			"votes": []map[string]any{
+				{"validator": "dedup", "decision": "reject", "reason": "duplicate content (hash: 1a2b3c4d)"},
+				{"validator": "quality", "decision": "accept", "reason": "content meets quality threshold"},
 			},
-			"total": 1,
 		})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, r *http.Request) {
+		submits++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"memory_id": "mem-dup", "status": "proposed"})
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -4924,14 +4936,78 @@ func TestSimilarMemoryExists(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(nil)
 	s := NewServer(ts.URL, priv)
 
-	// Substantially similar content — should match
-	assert.True(t, s.similarMemoryExists(context.Background(),
-		"[DO] Always expand tilde paths before checking IsAbs", "debugging"))
+	result, err := s.toolRemember(context.Background(), map[string]any{
+		"content": "[DO] Always expand tilde paths before checking IsAbs in Go config files",
+		"domain":  "debugging",
+	})
+	require.NoError(t, err)
 
-	// Completely different content — should not match (but this mock always returns the same list,
-	// so we test a string that has <60% word overlap)
-	assert.False(t, s.similarMemoryExists(context.Background(),
-		"[DON'T] Never use fmt.Println for production logging in server handlers", "debugging"))
+	m := result.(map[string]any)
+	assert.Equal(t, "skipped", m["status"])
+	assert.Equal(t, true, m["skipped"])
+	assert.Contains(t, m["reason"], "Identical content already exists in this domain")
+	assert.Contains(t, m["reason"], "duplicate content (hash: 1a2b3c4d)")
+	assert.Zero(t, submits, "a duplicate the node refused must not be broadcast")
+}
+
+// A near-duplicate is not a duplicate. The voter keys on the exact content hash,
+// so a memory that merely shares vocabulary with an existing one still lands —
+// the client no longer asks for a content page, let alone scores word overlap
+// against it. This is the regression the retired >60%-overlap heuristic had: it
+// silently dropped the second memory.
+func TestSageRememberNearDuplicateIsStillSubmitted(t *testing.T) {
+	var submits, listCalls int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"accepted": true,
+			"votes": []map[string]any{
+				{"validator": "dedup", "decision": "accept", "reason": "content is unique"},
+				{"validator": "quality", "decision": "accept", "reason": "content meets quality threshold"},
+			},
+		})
+	})
+	mux.HandleFunc("/v1/memory/list", func(w http.ResponseWriter, r *http.Request) {
+		listCalls++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"memories": []map[string]any{
+				{"content": "[DO] Always expand tilde paths before checking IsAbs in Go config files"},
+			},
+			"total": 1,
+		})
+	})
+	mux.HandleFunc("/v1/embed/info", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"semantic": false, "provider": "hash", "dimension": 768, "ready": true})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1, 0.2, 0.3}})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, r *http.Request) {
+		submits++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"memory_id": "mem-near", "status": "proposed"})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	result, err := s.toolRemember(context.Background(), map[string]any{
+		"content": "[DO] Always expand tilde paths before checking IsAbs",
+		"domain":  "debugging",
+	})
+	require.NoError(t, err)
+
+	m := result.(map[string]any)
+	assert.NotEqual(t, "skipped", m["status"])
+	assert.Equal(t, "mem-near", m["memory_id"])
+	assert.Equal(t, 1, submits)
+	assert.Zero(t, listCalls, "the client must not fetch content to score its own similarity")
 }
 
 func TestIsLowValueObservation(t *testing.T) {
