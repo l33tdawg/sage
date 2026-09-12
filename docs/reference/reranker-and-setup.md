@@ -647,7 +647,7 @@ any TEI-compatible server) with no SAGE-specific adapter; llama.cpp is the diale
 
 Each memory record carries an `embedding_provider` string recording **which embedder**
 produced its vector - distinct from `provider`, which is the submitting agent's LLM
-identity (`internal/memory/model.go:49-52`). The default legacy-compatible spaces are
+identity (`internal/memory/model.go:65-68`). The default legacy-compatible spaces are
 `ollama` (`nomic-embed-text`, 768 dimensions) and `hash` (768 dimensions); other
 model/dimension combinations use `provider:model:dimension` (or
 `provider:dimension`) via `embedding.SpaceID` (`internal/embedding/provider.go:53`).
@@ -657,7 +657,7 @@ admit only the exact active stamp (`internal/store/store.go:74-77`,
 `internal/store/sqlite.go:1370-1385`).
 
 **Why it is stamped at insert (v11 fix):** the off-chain record is stamped at insert
-time via `SupplementaryData.EmbeddingProvider` (`internal/memory/model.go:92-96`).
+time via `SupplementaryData.EmbeddingProvider` (`internal/memory/model.go:119-123`).
 Without it, every new memory would land at `embedding_provider = ''` and the dashboard
 would forever count it as "needs re-embed" even though its vector is already semantic
 (v11.0.2 release behavior).
