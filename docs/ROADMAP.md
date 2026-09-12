@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-09):** **v11.19.19 is the current release.** The gRPC-Go dependency is patched to v1.83.2 for CVE-2026-84445. CEREBRUM adds a federation connectome, live metadata activity, clearer pairing steps, and explicit memory-sharing drafts. Trusted paired nodes now discover and
+**Status (2026-09):** **v11.19.20 is the current release.** Voter dedup is sticky — rejected, challenged, or forgotten content cannot be re-admitted under a fresh memory id while genuine corrections still pass — and the dedup lookup is indexed on SQLite and Postgres. The gRPC-Go dependency is patched to v1.83.2 for CVE-2026-84445. CEREBRUM adds a federation connectome, live metadata activity, clearer pairing steps, and explicit memory-sharing drafts. Trusted paired nodes now discover and
 message eligible ordinary agents automatically, with memory sharing separately
 configured. It keeps safe registered-name addressing and
 reply-event visibility, the three-tab Access Controls redesign, five-minute
@@ -158,6 +158,10 @@ ceiling is app-v27.
 upgrade in place across all future releases. Routine personal-node upgrades
 remain automatic; the exceptional legacy-lineage repair is deliberately an
 explicit, reviewed operator ceremony rather than a silent mutation.
+
+## v11.19.20 release
+
+Voter dedup is sticky: another memory that has left `proposed` (validated, committed, challenged, or deprecated) blocks identical bytes from being re-admitted, the candidate's own row is always excluded, and concurrent identical submissions no longer reject each other. A correction still passes when its content changed. The dedup lookup is indexed on SQLite and Postgres (one-time Postgres index rebuild at first boot). README and reference docs qualify the consensus claims for single-validator personal installs. No consensus change; app-v27 remains the ceiling.
 
 ## v11.19.19 release
 

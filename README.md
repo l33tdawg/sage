@@ -48,7 +48,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.19.19`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.19.20`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -207,6 +207,18 @@ software updates, and encryption controls. Ordinary agent identity replacement
 uses re-enrollment; historical memory authorship is preserved.
 
 ---
+
+## What's New in v11.19.20
+
+**Dedup rejection is sticky.** Content that was rejected, challenged, or forgotten can no longer be re-admitted by submitting the identical bytes again: the voter's dedup lookup now matches any *other* memory that has left `proposed`, not just committed ones, while a candidate can never match its own row (the v10.1 self-match fix stays fixed). Two identical submissions racing each other no longer veto each other, and a correction still passes whenever its content actually changed.
+
+The dedup lookup — evaluated once per pending memory on the voter's two-second poll — is now indexed on both stores. SQLite gains a `content_hash` index; Postgres drops its legacy committed-only partial index at startup and rebuilds once, which can make the first boot after upgrade slower on a large `memories` table.
+
+Also in this release: the README, the `sage-memory` skill, and the reference docs qualify the BFT/consensus claims for single-validator personal installs, and the papers section now cites the true published provenance.
+
+No consensus change or chain migration; app-v27 remains the ceiling.
+
+Container: `ghcr.io/l33tdawg/sage:11.19.20`. SDK 11.19.20.
 
 ## What's New in v11.19.19
 
