@@ -173,8 +173,8 @@ most important operational tool.
 - `recalled`: array of relevant committed memories from the exact requested
   domain. Cross-domain rows are dropped client-side as a fail-closed safeguard.
 - `recalled_count`: number of recalled memories.
-- `stored`: `true` if observation was stored, `false` if skipped (duplicate or
-  low-value).
+- `stored`: `true` if observation was stored, `false` if skipped — either the
+  node's dedup check refused identical content, or the observation is low-value.
 - `skip_reason`: populated when `stored` is false.
 - `store_mode`: set to `no_vector` when the observation was committed but the
   node's selected embedder was unavailable, so the REST boundary queued it
@@ -287,7 +287,8 @@ went wrong (don'ts) to improve future performance.
 **Returns:**
 - `status: "reflected"`
 - `memories_stored`: count of new memories written.
-- `skipped_duplicates`: count of near-duplicate memories that were not stored.
+- `skipped_duplicates`: count of components the node's dedup check refused
+  because identical content already exists in the domain.
 - Returns `vault_locked` error if the Synaptic Ledger is locked.
 
 **Note:** Stored content is prefixed: `[Task Reflection] ...`, `[DO] ...`,
@@ -317,7 +318,7 @@ replacement first, old-memory challenge second.
 | `type` | string | no | `fact`, `observation`, `inference`, or `task`. Default: `observation`; a correction inherits the original type when omitted. |
 | `confidence` | number | no | Score 0–1. Default: 0.80. |
 | `tags` | string[] | no | User-defined labels (e.g. `important`, `project-x`). Git branch is auto-appended. |
-| `replaces_memory_id` | string | no | Live committed/challenged memory this content corrects. Bypasses similarity suppression for the intentional overlap. |
+| `replaces_memory_id` | string | no | Live committed/challenged memory this content corrects. The replacement is pre-validated like any other write, so a body byte-identical to its source is refused as a duplicate — the voter would have deprecated it — and the correction must actually change the content. |
 | `replacement_reason` | string | no | Audit reason used when challenging the old memory after the replacement commits. |
 
 **Returns:**
@@ -325,8 +326,11 @@ replacement first, old-memory challenge second.
 - A vectorless but committed write reports `embedding_queued: true`,
   `store_mode: "no_vector"`, `semantic_degraded: true`, and `degraded_reason`.
   The memory remains durable and is queued for automatic re-embedding.
-- `status: "skipped"` if a similar memory already exists in the domain (>60%
-  word overlap with an existing committed memory).
+- `status: "skipped"` when the node's own dedup check refuses the content
+  because those exact bytes already exist in the domain. That check is the one
+  the real vote applies (`POST /v1/memory/pre-validate` runs the same named
+  checks), it is sticky — a rejected or deprecated memory keeps its bytes out —
+  and a skipped write is never broadcast.
 - `status: "rejected"` with `votes` array if pre-validators reject the content.
 - Returns `vault_locked` error if the Synaptic Ledger is locked.
 - Uses the same typed effective-denial taxonomy as `sage_turn`: the MCP error

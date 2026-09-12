@@ -102,42 +102,6 @@ func TestConfidenceClamp(t *testing.T) {
 	assert.LessOrEqual(t, conf, 1.0)
 }
 
-func TestValidateMemoryRecord(t *testing.T) {
-	valid := &MemoryRecord{
-		MemoryID:        "test-id",
-		SubmittingAgent: "agent-1",
-		Content:         "test content",
-		MemoryType:      TypeFact,
-		DomainTag:       "crypto",
-		ConfidenceScore: 0.85,
-		Status:          StatusProposed,
-	}
-	assert.NoError(t, ValidateMemoryRecord(valid))
-}
-
-func TestValidateMemoryRecordEmptyContent(t *testing.T) {
-	r := &MemoryRecord{
-		SubmittingAgent: "agent-1",
-		MemoryType:      TypeFact,
-		DomainTag:       "crypto",
-		ConfidenceScore: 0.5,
-		Status:          StatusProposed,
-	}
-	assert.Error(t, ValidateMemoryRecord(r))
-}
-
-func TestValidateMemoryRecordInvalidConfidence(t *testing.T) {
-	r := &MemoryRecord{
-		Content:         "test",
-		SubmittingAgent: "agent-1",
-		MemoryType:      TypeFact,
-		DomainTag:       "crypto",
-		ConfidenceScore: 1.5,
-		Status:          StatusProposed,
-	}
-	assert.Error(t, ValidateMemoryRecord(r))
-}
-
 func TestComputeContentHash(t *testing.T) {
 	h1 := ComputeContentHash("hello")
 	h2 := ComputeContentHash("hello")

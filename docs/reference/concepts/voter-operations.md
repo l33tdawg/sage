@@ -144,3 +144,16 @@ rejected again after a rejection or deprecation (sticky rejection — the remova
 `sage_forget`, and a corrected body must actually change the content to pass dedup), and
 a correction submitted via `sage_remember(replaces_memory_id=...)` therefore carries a
 new content hash.
+
+That check lives in the voter, so it only covers paths that vote. A co-commit
+(`POST /v1/cocommit/submit`) commits on block inclusion and never consults the voter at
+all, so the same tombstone question is asked once more at the REST submission boundary
+(`api/rest/cocommit_handler.go`): a content hash another row already carried past
+`proposed` returns `409 Tombstoned content`, with the envelope's own `SharedID` excluded
+so an idempotent re-send is not refused by the row it wrote, and a projection error fails
+open rather than blocking the surface. Two limits are worth stating plainly. It is a
+submission-boundary check, not a consensus rule — a node broadcasting a co-commit
+transaction directly, without this node's REST surface, is not covered by it. And it
+sits here *because* the consensus path deliberately reads no off-chain state: the
+content-hash index lives in the serving projection, so a deterministic in-consensus
+version of this check would mean folding that index into the app hash.
