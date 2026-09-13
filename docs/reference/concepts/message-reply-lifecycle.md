@@ -1,4 +1,4 @@
-Reconciled against SAGE v11.19.19 code. Cite file:line or file + symbol when behavior is non-obvious.
+Reconciled against SAGE v11.19.20 code. Cite file:line or file + symbol when behavior is non-obvious.
 
 # Message and Reply Lifecycle — who can see a reply, and where
 

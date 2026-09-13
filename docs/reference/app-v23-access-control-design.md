@@ -1,6 +1,6 @@
 # App-v23 Access Control and Federation Design
 
-Status: implementation contract through SAGE v11.19.19.
+Status: implementation contract through SAGE v11.19.20.
 
 This document fixes the security and product invariants for app-v23. It is not
 permission to weaken an invariant to preserve app-v22 runtime behavior.
@@ -425,7 +425,7 @@ Runtime federation after app-v23 has no pre-v23 compatibility fallback.
 Negotiation rejects peers that do not support the v23 agent-delegated query
 protocol.
 
-The current v11.19.19 federation authorization layer is off-consensus and does
+The current v11.19.20 federation authorization layer is off-consensus and does
 not require a new application protocol. Every active trusted node connection is itself a
 pairwise federation group. Each operator explicitly exports the local ordinary
 agents that join that federation; the other SAGE does not create a matching

@@ -35,6 +35,10 @@ type CheckResult struct {
 
 // MemoryInput is the minimal projection of a memory the decider needs.
 type MemoryInput struct {
+	// MemoryID is the candidate's own memory id, excluded from the dedup lookup
+	// so a proposed candidate is never a duplicate of itself. Empty for
+	// pre-submit advisory calls that have no candidate row yet.
+	MemoryID    string
 	Content     string
 	ContentHash string // hex-encoded
 	Domain      string
@@ -42,12 +46,15 @@ type MemoryInput struct {
 	Confidence  float64
 }
 
-// DupChecker abstracts the local content-hash lookup (store.FindByContentHash).
-// It is a node-local read producing this node's opinion — never consensus state —
-// so different nodes disagreeing is fine; the quorum tally resolves it
-// deterministically.
+// DupChecker abstracts the local content-hash dedup lookup
+// (store.FindByContentHash). It is a node-local read producing this node's
+// opinion — never consensus state — so different nodes disagreeing is fine; the
+// quorum tally resolves it deterministically.
 type DupChecker interface {
-	FindByContentHash(ctx context.Context, contentHash string) (bool, error)
+	// FindByContentHash reports whether a DIFFERENT memory that has left
+	// status='proposed' already carries this content hash. excludeMemoryID
+	// (may be empty) is the candidate's own row.
+	FindByContentHash(ctx context.Context, contentHash, excludeMemoryID string) (bool, error)
 }
 
 // noisePatterns are low-value observation fingerprints rejected by the quality
@@ -91,7 +98,7 @@ func dedupCheck(ctx context.Context, dup DupChecker, m MemoryInput) CheckResult 
 	// `err == nil && exists` reject condition. A node never blocks a memory on its
 	// own store hiccup; the quorum still decides.
 	if dup != nil {
-		if exists, err := dup.FindByContentHash(ctx, m.ContentHash); err == nil && exists {
+		if exists, err := dup.FindByContentHash(ctx, m.ContentHash, m.MemoryID); err == nil && exists {
 			short := m.ContentHash
 			if len(short) > 8 {
 				short = short[:8]

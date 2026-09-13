@@ -809,39 +809,28 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		}
 	}
 
-	// Skip duplicates — don't store if a very similar memory already exists.
-	// Corrections intentionally overlap their source and must not be discarded
-	// by the ordinary >60% similarity guard.
-	if correctionSource == nil && s.similarMemoryExists(ctx, content, domain) {
-		return map[string]any{
-			"status":  "skipped",
-			"reason":  "A similar memory already exists in this domain.",
-			"domain":  domain,
-			"skipped": true,
-		}, nil
-	}
-
-	// Pre-validate against app validators (if endpoint exists).
-	preValidateReq, _ := json.Marshal(map[string]any{
-		"content":    content,
-		"domain":     domain,
-		"type":       memType,
-		"confidence": confidence,
-	})
-	var preValidateResp struct {
-		Accepted bool `json:"accepted"`
-		Votes    []struct {
-			Validator string `json:"validator"`
-			Decision  string `json:"decision"`
-			Reason    string `json:"reason"`
-		} `json:"votes"`
-	}
-	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/pre-validate", preValidateReq, &preValidateResp); err != nil {
-		// Pre-validate endpoint doesn't exist (older server) — fall through to normal submit.
-	} else if !preValidateResp.Accepted {
+	// The node owns the duplicate rule. Its pre-validate route runs the named
+	// checks the real vote applies — dedup on the exact content hash against the
+	// node's own store, quality, consistency — and computes the hash itself, so
+	// the client keeps no similarity heuristic of its own.
+	//
+	// An exact duplicate is reported as SKIPPED rather than rejected: nothing
+	// about the write is wrong, those bytes are already in the domain. A
+	// correction whose body is byte-identical to its source is the same case and
+	// needs no exemption from this check: the voter would deprecate it as a
+	// duplicate, so refusing it here is what the chain would have done anyway.
+	if pre, ok := s.preValidateMemory(ctx, content, domain, memType, confidence); ok && !pre.Accepted {
+		if pre.Duplicate {
+			return map[string]any{
+				"status":  "skipped",
+				"reason":  pre.duplicateReason(),
+				"domain":  domain,
+				"skipped": true,
+			}, nil
+		}
 		// Return structured rejection with vote details.
-		votes := make([]map[string]any, 0, len(preValidateResp.Votes))
-		for _, v := range preValidateResp.Votes {
+		votes := make([]map[string]any, 0, len(pre.Votes))
+		for _, v := range pre.Votes {
 			votes = append(votes, map[string]any{
 				"validator": v.Validator,
 				"decision":  v.Decision,
@@ -3074,13 +3063,18 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 
 	// Phase 2: Store — save this turn's observation as an episodic memory.
 	// Goes through consensus: submit → CheckTx → FinalizeBlock → Commit → auto-validator → committed.
-	// Skip duplicates — don't store if a very similar memory already exists in this domain.
+	// The node's dedup owns the duplicate decision (see preValidateMemory): an
+	// exact duplicate comes back as errMemoryDuplicate and is reported as a skip.
 	if observation != "" && domainResolutionErr != nil {
 		result["store_error"] = domainResolutionErr.Error()
-	} else if observation != "" && !isLowValueObservation(observation) &&
-		!s.similarMemoryExists(ctx, observation, writeDomain) {
+	} else if observation != "" && !isLowValueObservation(observation) {
 		if storeDegraded, err := s.storeMemory(ctx, observation, writeDomain, "observation", 0.80); err != nil {
-			result["store_error"] = err.Error()
+			if errors.Is(err, errMemoryDuplicate) {
+				result["stored"] = false
+				result["skip_reason"] = duplicateSkipReason
+			} else {
+				result["store_error"] = err.Error()
+			}
 		} else {
 			result["stored"] = true
 			if storeDegraded {
@@ -3652,12 +3646,12 @@ func (s *Server) toolReflect(ctx context.Context, params map[string]any) (any, e
 	// with memories_stored=0, so the agent believed the lesson was durable and
 	// only a caller that inspected the count ever noticed the loss.
 	store := func(content, memType string, confidence float64) {
-		if s.similarMemoryExists(ctx, content, domain) {
+		attempted++
+		storeDegraded, err := s.storeMemory(ctx, content, domain, memType, confidence)
+		if errors.Is(err, errMemoryDuplicate) {
 			skipped++
 			return
 		}
-		attempted++
-		storeDegraded, err := s.storeMemory(ctx, content, domain, memType, confidence)
 		if err != nil {
 			storeErrs = append(storeErrs, err.Error())
 			return
@@ -3677,8 +3671,10 @@ func (s *Server) toolReflect(ctx context.Context, params map[string]any) (any, e
 	}
 
 	// Nothing survived out of everything we tried: the reflection is lost. Return
-	// a tool error so the caller cannot mistake it for a successful write.
-	if stored == 0 && attempted > 0 {
+	// a tool error so the caller cannot mistake it for a successful write. A
+	// component the node refused as a duplicate is a skip, not a failure, so the
+	// condition is "everything failed" rather than "nothing was stored".
+	if stored == 0 && len(storeErrs) > 0 {
 		return nil, fmt.Errorf("reflection not stored in domain %q: %s",
 			domain, strings.Join(dedupeStrings(storeErrs), "; "))
 	}
@@ -4171,63 +4167,91 @@ func (s *Server) toolRename(ctx context.Context, params map[string]any) (any, er
 	}, nil
 }
 
-// similarMemoryExists checks if substantially similar content already exists in the
-// given domain. "Substantially similar" means >60% of significant words (length 4+)
-// from the new content appear in an existing memory.
-func (s *Server) similarMemoryExists(ctx context.Context, content, domain string) bool {
-	q := url.Values{}
-	q.Set("domain", domain)
-	q.Set("status", "committed")
-	q.Set("limit", "50")
-	if s.provider != "" {
-		q.Set("provider", s.provider)
-	}
+// duplicateSkipReason is the caller-facing sentence for a write the node's
+// dedup refused. It reads the same on every path that reports a skip.
+const duplicateSkipReason = "Identical content already exists in this domain."
 
-	path := "/v1/memory/list?" + q.Encode()
-	var listResp struct {
-		Memories []struct {
-			Content string `json:"content"`
-		} `json:"memories"`
-	}
-	if err := s.doSignedJSON(ctx, "GET", path, nil, &listResp); err != nil {
-		return false
-	}
+// errMemoryDuplicate marks the one pre-validate rejection that is a no-op
+// rather than a failure: the node's dedup check refused the candidate because
+// those exact bytes already exist in the domain (or were already rejected or
+// deprecated — the predicate is sticky), so there is nothing to store and
+// nothing wrong with the write. Callers report a skip.
+var errMemoryDuplicate = errors.New("identical content already exists in this domain")
 
-	newWords := significantWords(content)
-	if len(newWords) == 0 {
-		return false
-	}
-
-	for _, m := range listResp.Memories {
-		existingLower := strings.ToLower(m.Content)
-		matches := 0
-		for _, w := range newWords {
-			if strings.Contains(existingLower, w) {
-				matches++
-			}
-		}
-		if float64(matches)/float64(len(newWords)) > 0.60 {
-			return true
-		}
-	}
-	return false
+// preValidateVote is one named check as the node's pre-validate route reported it.
+type preValidateVote struct {
+	Validator string `json:"validator"`
+	Decision  string `json:"decision"`
+	Reason    string `json:"reason"`
 }
 
-// significantWords extracts lowercase words of length 4+ from text for similarity comparison.
-func significantWords(text string) []string {
-	lower := strings.ToLower(text)
-	words := strings.Fields(lower)
-	var significant []string
-	seen := map[string]bool{}
-	for _, w := range words {
-		// Strip common punctuation
-		w = strings.Trim(w, ".,;:!?\"'()[]{}—-")
-		if len(w) >= 4 && !seen[w] {
-			seen[w] = true
-			significant = append(significant, w)
+// preValidateResult is the node's own verdict for one candidate memory.
+type preValidateResult struct {
+	Accepted bool
+	// Duplicate is the dedup check specifically: identical bytes already exist.
+	Duplicate bool
+	Votes     []preValidateVote
+}
+
+// duplicateReason is the caller-facing explanation for a skipped duplicate.
+func (r preValidateResult) duplicateReason() string {
+	if reason := r.reasonFor("dedup"); reason != "" {
+		return fmt.Sprintf("%s Node dedup: %s.", duplicateSkipReason, reason)
+	}
+	return duplicateSkipReason
+}
+
+// reasonFor returns the rejection reason the named check gave, if any.
+func (r preValidateResult) reasonFor(validator string) string {
+	for _, v := range r.Votes {
+		if v.Validator == validator && v.Decision == "reject" {
+			return v.Reason
 		}
 	}
-	return significant
+	return ""
+}
+
+// rejectReasons lists every rejecting check as "name: reason".
+func (r preValidateResult) rejectReasons() []string {
+	reasons := make([]string, 0, len(r.Votes))
+	for _, v := range r.Votes {
+		if v.Decision == "reject" {
+			reasons = append(reasons, fmt.Sprintf("%s: %s", v.Validator, v.Reason))
+		}
+	}
+	return reasons
+}
+
+// preValidateMemory asks the node whether its real voter checks would accept
+// this content. The route runs decision.go's named checks — dedup on the exact
+// content hash against the node's own store, quality, consistency — and the node
+// computes the content hash itself, so this is the same rule its vote applies
+// and the client keeps no similarity heuristic of its own.
+//
+// ok=false means the route is unavailable (an older node, or a transport
+// error): the caller submits and lets consensus decide, exactly as it did
+// before the route existed.
+func (s *Server) preValidateMemory(ctx context.Context, content, domain, memType string, confidence float64) (res preValidateResult, ok bool) {
+	req, _ := json.Marshal(map[string]any{
+		"content":    content,
+		"domain":     domain,
+		"type":       memType,
+		"confidence": confidence,
+	})
+	var resp struct {
+		Accepted bool              `json:"accepted"`
+		Votes    []preValidateVote `json:"votes"`
+	}
+	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/pre-validate", req, &resp); err != nil {
+		return preValidateResult{}, false
+	}
+	res = preValidateResult{Accepted: resp.Accepted, Votes: resp.Votes}
+	for _, v := range resp.Votes {
+		if v.Validator == "dedup" && v.Decision == "reject" {
+			res.Duplicate = true
+		}
+	}
+	return res, true
 }
 
 // isLowValueObservation returns true if the observation is too short or matches
@@ -4279,32 +4303,15 @@ func markEmbeddingQueuedResult(result map[string]any, queued bool) {
 }
 
 func (s *Server) storeMemory(ctx context.Context, content, domain, memType string, confidence float64) (degraded bool, err error) {
-	// Step 1: Pre-validate against app validators (if endpoint exists).
-	preValidateReq, _ := json.Marshal(map[string]any{
-		"content":    content,
-		"domain":     domain,
-		"type":       memType,
-		"confidence": confidence,
-	})
-	var preValidateResp struct {
-		Accepted bool `json:"accepted"`
-		Votes    []struct {
-			Validator string `json:"validator"`
-			Decision  string `json:"decision"`
-			Reason    string `json:"reason"`
-		} `json:"votes"`
-	}
-	if err := s.doSignedJSON(ctx, "POST", "/v1/memory/pre-validate", preValidateReq, &preValidateResp); err != nil {
-		// If pre-validate endpoint doesn't exist (older server), fall through to normal submit.
-		// Only block on actual rejection responses.
-	} else if !preValidateResp.Accepted {
-		var reasons []string
-		for _, v := range preValidateResp.Votes {
-			if v.Decision == "reject" {
-				reasons = append(reasons, fmt.Sprintf("%s: %s", v.Validator, v.Reason))
-			}
+	// Step 1: Ask the node whether its real checks would accept this. The node
+	// owns the rule (see preValidateMemory). A rejection it names as `dedup` is a
+	// no-op rather than a failure, so callers distinguish it with
+	// errors.Is(err, errMemoryDuplicate) and report a skip.
+	if pre, ok := s.preValidateMemory(ctx, content, domain, memType, confidence); ok && !pre.Accepted {
+		if pre.Duplicate {
+			return false, errMemoryDuplicate
 		}
-		return false, fmt.Errorf("memory rejected by validators: %s", strings.Join(reasons, "; "))
+		return false, fmt.Errorf("memory rejected by validators: %s", strings.Join(pre.rejectReasons(), "; "))
 	}
 
 	// Step 2: Current nodes advertise that submit mints the authoritative vector,

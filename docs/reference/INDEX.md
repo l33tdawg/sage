@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.19.19. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.19.20. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -209,7 +209,7 @@ are recorded here because agents may have cached them.
   `sage_message_replies`, or `sage_message_history(folder="outbox")` for the
   untruncated text.
 
-## Related docs (reconciled through v11.19.19)
+## Related docs (reconciled through v11.19.20)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 

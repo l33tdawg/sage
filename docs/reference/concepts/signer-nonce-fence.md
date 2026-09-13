@@ -1,6 +1,6 @@
 # The signer fence — same-key nonce ordering, and the hole that is still open
 
-**Status: v11.19.19. This document states a KNOWN RESIDUAL that this release does
+**Status: v11.19.20. This document states a KNOWN RESIDUAL that this release does
 not close. Read the "What is still broken" section before you rely on anything
 here.**
 
@@ -171,7 +171,7 @@ A `kill -9`, a power cut, or a crash during the original RPC can still lose the
 fence. **Closing that needs durable pre-broadcast intent** — the exact bytes and
 hash recorded *before* the send, cleared only on a proven fate, reloaded and
 reconciled *before* any nonce is allocated on startup. That is persistence work
-and is **not in v11.19.19**.
+and is **not in v11.19.20**.
 
 The residual is covered by an executable test:
 `TestRestartWhileFencedLosesTheTransaction` in

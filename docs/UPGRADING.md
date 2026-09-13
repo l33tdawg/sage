@@ -183,6 +183,7 @@ Use this to work out how far your chain has to climb.
 | v11.19.17 | Federation connectome, operator-only metadata activity stream, explicit viewed-node names, clearer pairing onboarding, and Read/Copy/removal drafts; existing trust and permissions preserved; no consensus change and app-v27 remains the ceiling |
 | v11.19.18 | Visible federation agent orbits and reliable interaction pause/resume; no consensus change and app-v27 remains the ceiling |
 | v11.19.19 | gRPC-Go v1.83.2 patches the xDS missing-authority-header denial of service (CVE-2026-84445); no consensus or storage migration and app-v27 remains the ceiling |
+| v11.19.20 | Voter dedup is sticky: rejected, challenged, or forgotten content cannot re-enter under a fresh memory id, a candidate never self-matches, concurrent identical submissions no longer veto each other, and corrections still pass when the content changed; the content_hash dedup lookup gains an index on SQLite and Postgres (one-time Postgres rebuild at first boot); no consensus change and app-v27 remains the ceiling |
 
 ### v11.18.3 — the signer fence, and what it does *not* cover
 

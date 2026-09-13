@@ -84,7 +84,7 @@ func (f *fakeStore) GetPendingByDomainPage(_ context.Context, _ string, limit, o
 	end := min(len(f.pending), offset+limit)
 	return f.pending[offset:end], nil
 }
-func (f *fakeStore) FindByContentHash(_ context.Context, h string) (bool, error) {
+func (f *fakeStore) FindByContentHash(_ context.Context, h, _ string) (bool, error) {
 	return f.dups[h], nil
 }
 func (f *fakeStore) OldestProposedCreatedAt(_ context.Context) (time.Time, bool, error) {

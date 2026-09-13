@@ -339,6 +339,7 @@ func voteOnPendingMemoriesResult(
 			}
 			contentHash := hex.EncodeToString(mem.ContentHash)
 			decision := Decide(ctx, store, MemoryInput{
+				MemoryID:    mem.MemoryID,
 				Content:     mem.Content,
 				ContentHash: contentHash,
 				Domain:      mem.DomainTag,

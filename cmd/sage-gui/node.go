@@ -1709,7 +1709,9 @@ func runServe(startupProof string) (rerr error) {
 	// Wire pre-validate function into both dashboard and REST API. This is the
 	// advisory pre-vote display; it delegates to voter.DecideVerbose so it shows the
 	// EXACT named checks (dedup/quality/consistency) the node's real vote applies —
-	// one rule set, no second drifting copy.
+	// one rule set, no second drifting copy. No candidate row exists yet at
+	// pre-validate time, so no memory id is excluded: any committed, challenged,
+	// or rejected row with this hash reports duplicate.
 	preValidate := func(content, contentHash, domain, memType string, confidence float64) []web.PreValidateVote {
 		_, checks := voter.DecideVerbose(ctx, sqliteStore, voter.MemoryInput{
 			Content: content, ContentHash: contentHash, Domain: domain, MemType: memType, Confidence: confidence,

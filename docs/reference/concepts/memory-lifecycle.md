@@ -12,11 +12,11 @@ A SAGE memory begins as an agent-signed REST request and ends as a consensus-com
 
 ## Status Model
 
-Defined in `internal/memory/model.go:10-16`.
+Defined in `internal/memory/model.go:22-31`.
 
 ```
 proposed
-   ├── validated   (intermediate — used by internal app-validator path)
+   ├── validated   (declared, no writer — see the note below)
    │      ├── committed
    │      └── deprecated
    ├── committed   (quorum reached)
@@ -37,6 +37,20 @@ Valid transitions (`internal/memory/lifecycle.go:9-14`):
 | challenged  | committed, deprecated        |
 
 `deprecated` is terminal — no forward transition exists.
+
+`validated` is the one status nothing writes. It stays in the enum because
+`IsValidStatus` and the on-chain hash re-anchor accept it, so a chain that
+already carries the value still decodes and replays byte-identically — but no
+path produces it: not the submit transaction, not the voter, not the dashboard,
+not the SDK. Recall filters hard-code `status IN ('committed','challenged')`, so
+a row in that state is invisible to agents rather than ranked low. Treat it as
+reserved wire surface rather than a lifecycle step; adding a writer means moving
+the read filters in the same change.
+
+The transition map above is documentation and SQLite hygiene, as its own comment
+says (`internal/memory/lifecycle.go`): consensus writes statuses imperatively and
+runs no transition check, so the table describes the states the chain can reach
+rather than a gate it passes through.
 
 ---
 
@@ -163,11 +177,21 @@ returns the memory to `committed`, making it eligible for the projection again.
 | Embedding vector (supplementary) | Process-local SupplementaryCache → PostgreSQL | Staged in-process pre-broadcast; only the receiving node has it in cache. |
 | Knowledge triples               | PostgreSQL (off-chain) | Staged via SupplementaryCache, flushed in Commit.                                            |
 
+Two sinks in this table are write-only today. **Knowledge triples** are accepted
+by `POST /v1/memory/submit` and by the Python SDK, and stored in the serving
+projection — and nothing reads them back: there is no route, no `SELECT` and no
+SDK method for retrieval (`memory_links`, by contrast, has both writers and the
+`POST /v1/memory/links` reader). **`access_logs`** is written on
+`memory_reinstate` and on the `TxTypeAccessQuery` path, and likewise has no
+reader and no pruning. Both persist so the history survives a projection replay;
+retrieving them today means reading the SQLite/PostgreSQL table directly, and
+neither is covered by the app hash.
+
 ---
 
 ## Memory Types and Confidence Semantics
 
-Defined in `internal/tx/types.go:74-79` (wire) and `internal/memory/model.go:22-26` (model):
+Defined in `internal/tx/types.go:74-79` (wire) and `internal/memory/model.go:38-42` (model):
 
 | Type        | Wire byte | Intended use                              | Suggested initial confidence |
 |-------------|-----------|-------------------------------------------|------------------------------|
