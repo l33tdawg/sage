@@ -43,12 +43,13 @@ type SQLiteStore struct {
 	vault                 atomic.Pointer[vault.Vault] // nil = no encryption; hot-swapped when CEREBRUM unlocks
 	vaultExpected         atomic.Bool                 // true = encryption should be active; reject writes if vault nil
 	vaultGeneration       *atomic.Uint64              // shared by tx clones; defeats lock/unlock ABA in audited snapshot tokens
-	decryptWarnOnce       sync.Once                   // gates the one-time decryption failure warning
-	writeMu               sync.Mutex                  // serializes ALL writes to prevent SQLITE_BUSY
-	syncPolicyGate        *sync.RWMutex               // shared with tx clones; linearizes consent vs egress
-	syncOriginGate        *sync.RWMutex               // shared with tx clones; linearizes copy provenance vs re-forward scans
-	agentContactGate      *sync.RWMutex               // shared with tx clones; linearizes advertised agent identity/availability
-	agentContactWriteHeld bool                        // true only on a RunInAgentContactTx-scoped clone
+	vaultPublicationMu    sync.RWMutex
+	decryptWarnOnce       sync.Once     // gates the one-time decryption failure warning
+	writeMu               sync.Mutex    // serializes ALL writes to prevent SQLITE_BUSY
+	syncPolicyGate        *sync.RWMutex // shared with tx clones; linearizes consent vs egress
+	syncOriginGate        *sync.RWMutex // shared with tx clones; linearizes copy provenance vs re-forward scans
+	agentContactGate      *sync.RWMutex // shared with tx clones; linearizes advertised agent identity/availability
+	agentContactWriteHeld bool          // true only on a RunInAgentContactTx-scoped clone
 	// federationAuthorizationMutationHook publishes/cancels the bounded
 	// per-peer linked delivery lease before a local consent, guest-link, or
 	// agent-availability mutation. Empty chain means the mutation can affect
@@ -116,9 +117,31 @@ const encPrefix = "enc::"
 // in internal/mcp/tools.go which detects this marker substring.
 const ErrTextSearchVaultEncryptedMsg = "text search unavailable: content is vault-encrypted; this node is in semantic-only mode"
 
-// SetVault attaches an encryption vault to the store.
-// When set, memory content is encrypted on write and decrypted on read.
+// SetVault attaches (or detaches) an encryption vault without changing whether
+// encryption is expected. Use SetVaultExpected to change that requirement alone,
+// or ActivateVault to publish both atomically.
 func (s *SQLiteStore) SetVault(v *vault.Vault) {
+	s.vaultPublicationMu.Lock()
+	defer s.vaultPublicationMu.Unlock()
+	s.storeVaultLocked(v)
+}
+
+// ActivateVault publishes an unlocked vault and marks encryption as expected in
+// one publication-lock section: the requirement first, then the vault, so no
+// reader can observe an attached vault on a store that does not yet require
+// encryption. Unlock and enable paths for a serving projection must use this
+// instead of calling SetVaultExpected and SetVault separately. A nil vault
+// leaves encryption expected, which is the fail-closed locked state.
+func (s *SQLiteStore) ActivateVault(v *vault.Vault) {
+	s.vaultPublicationMu.Lock()
+	defer s.vaultPublicationMu.Unlock()
+	s.vaultExpected.Store(true)
+	s.storeVaultLocked(v)
+}
+
+// storeVaultLocked swaps the vault pointer and ticks the generation counter.
+// Callers must hold vaultPublicationMu.
+func (s *SQLiteStore) storeVaultLocked(v *vault.Vault) {
 	s.vault.Store(v)
 	if s.vaultGeneration != nil {
 		s.vaultGeneration.Add(1)
@@ -167,6 +190,8 @@ func (s *SQLiteStore) VaultActive() bool {
 // VaultExpected marks that encryption should be active. When true and the vault
 // is nil (locked), writes are rejected rather than silently going plaintext.
 func (s *SQLiteStore) SetVaultExpected(expected bool) {
+	s.vaultPublicationMu.Lock()
+	defer s.vaultPublicationMu.Unlock()
 	changed := s.vaultExpected.Swap(expected) != expected
 	if changed && s.vaultGeneration != nil {
 		s.vaultGeneration.Add(1)
@@ -276,7 +301,7 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 	dsn := dbPath +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(15000)" +
-		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=synchronous(FULL)" +
 		"&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -294,13 +319,27 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 	for _, p := range []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=15000",
-		"PRAGMA synchronous=NORMAL",
+		"PRAGMA synchronous=FULL",
 		"PRAGMA foreign_keys=ON",
 	} {
 		if _, pragErr := db.ExecContext(ctx, p); pragErr != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("apply %s: %w", p, pragErr)
 		}
+	}
+	var journalMode string
+	var synchronous int
+	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("verify journal mode: %w", err)
+	}
+	if err := db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&synchronous); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("verify synchronous mode: %w", err)
+	}
+	if synchronous != 2 || (journalMode != "wal" && dbPath != ":memory:") {
+		_ = db.Close()
+		return nil, errors.New("SQLite durability configuration unavailable")
 	}
 
 	s := &SQLiteStore{
@@ -880,6 +919,12 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	}
 	if err := s.migrateMessages(ctx); err != nil {
 		return fmt.Errorf("migrate canonical messages: %w", err)
+	}
+	if err := s.migrateWorkflowJournal(ctx); err != nil {
+		return fmt.Errorf("migrate workflow journal: %w", err)
+	}
+	if err := s.migratePrivateMedia(ctx); err != nil {
+		return fmt.Errorf("migrate private media: %w", err)
 	}
 	s.migratePipelineTransport(ctx)
 	if _, err := s.writeExecContext(ctx, `UPDATE pipeline_transport_outbox
@@ -5250,6 +5295,13 @@ func (s *SQLiteStore) runInTx(ctx context.Context, contactMutation bool, fn func
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	if err := fn(s.transactionClone(tx, contactMutation)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) transactionClone(tx *sql.Tx, contactMutation bool) *SQLiteStore {
 	txStore := &SQLiteStore{
 		conn: tx, dbPath: s.dbPath,
 		vaultGeneration: s.vaultGeneration,
@@ -5260,10 +5312,7 @@ func (s *SQLiteStore) runInTx(ctx context.Context, contactMutation bool, fn func
 	}
 	txStore.vault.Store(s.vault.Load())
 	txStore.vaultExpected.Store(s.vaultExpected.Load())
-	if err := fn(txStore); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return txStore
 }
 
 // --- Preferences ---

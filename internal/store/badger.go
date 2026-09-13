@@ -131,7 +131,8 @@ func (s *authorizationMutationHookState) acquire() (
 
 // BadgerStore manages on-chain state in BadgerDB.
 type BadgerStore struct {
-	db *badger.DB
+	db                  *badger.DB
+	publicMemoryChanged map[string]struct{}
 
 	// domainOwnershipGate (historical name) linearizes publication of every
 	// HasAccessMultiOrg input — ownership, direct grants, org membership and
@@ -283,6 +284,9 @@ func (s *BadgerStore) txnSetPrimitive(txn *badger.Txn, key, value []byte) error 
 		}
 	}
 	err := txn.Set(key, value)
+	if err == nil {
+		s.trackPublicMemoryChange(key)
+	}
 	if err == nil && isCanonicalMemoryProjectionKey(key) {
 		s.canonicalMemoryProjectionMutated = true
 	}
@@ -350,6 +354,9 @@ func (s *BadgerStore) txnDelete(txn *badger.Txn, key []byte) error {
 		}
 	}
 	err := txn.Delete(key)
+	if err == nil {
+		s.trackPublicMemoryChange(key)
+	}
 	if err == nil && isCanonicalMemoryProjectionKey(key) {
 		s.canonicalMemoryProjectionMutated = true
 	}
@@ -1326,7 +1333,7 @@ func (s *BadgerStore) GetState(key string) ([]byte, error) {
 // keys, but exact exclusion remains defence in depth for verification/recovery
 // paths that inspect bytes before an ordinary writable constructor runs.
 func isIndexBackfillProgressKey(key []byte) bool {
-	return consensuskeys.IsAppHashExcludedLocalKey(key)
+	return consensuskeys.IsAppHashExcludedLocalKey(key) || bytes.HasPrefix(key, publicStagePrefix)
 }
 
 func (s *BadgerStore) visitPromotedAppV23Stage(

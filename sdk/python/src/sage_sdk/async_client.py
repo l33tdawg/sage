@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -13,6 +14,18 @@ from sage_sdk.client import (
     _httpx_verify,
     _looks_like_org_id,
     _receipt_batch_proof_item,
+    _workflow_parse_response,
+    _workflow_put_body,
+    _WorkflowGuardUnset,
+    _WORKFLOW_GUARD_UNSET,
+    _workflow_list_params,
+    _workflow_parse_page,
+    _PRIVATE_MEDIA_MAX,
+    _private_media_jpeg,
+    _private_media_headers,
+    _private_media_length,
+    _private_media_metadata,
+    _private_media_download_headers,
 )
 from sage_sdk.exceptions import SageAPIError, SageNotFoundError
 from sage_sdk.models import (
@@ -50,6 +63,8 @@ from sage_sdk.models import (
     MessageReceiveResponse,
     MessageSendResponse,
     MessageStatusResponse,
+    MessageStorageStatus,
+    PrivateMediaMetadata,
     PendingMemoriesResponse,
     PipeDeliveryUpdatesResponse,
     PipeInboxResponse,
@@ -66,6 +81,10 @@ from sage_sdk.models import (
     TaskStatus,
     TimelineResponse,
     VoteRequest,
+    WorkflowJournalRecord,
+    WorkflowJournalGuard,
+    WorkflowJournalPage,
+    _workflow_record_id,
 )
 
 
@@ -78,11 +97,15 @@ class AsyncSageClient:
         identity: AgentIdentity,
         timeout: float = 30.0,
         ca_cert: str | bool | None = None,
+        *,
+        trust_env: bool = True,
     ) -> None:
+        if type(trust_env) is not bool:
+            raise TypeError("trust_env must be a bool")
         self._base_url = base_url.rstrip("/")
         self._identity = identity
         verify = _httpx_verify(ca_cert)
-        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout, verify=verify)
+        self._client = httpx.AsyncClient(base_url=self._base_url, timeout=timeout, verify=verify, trust_env=trust_env)
 
     async def _request(
         self,
@@ -566,9 +589,18 @@ class AsyncSageClient:
         ttl_minutes: int | None = None,
         source_chain_id: str | None = None,
         destination_chain_id: str | None = None,
+        *,
+        idempotency_key: str | None = None,
     ) -> PipeSendResponse:
         """Send a message through the agent pipeline."""
+        if idempotency_key is not None:
+            if type(idempotency_key) is not str:
+                raise TypeError("idempotency_key must be a string or None")
+            if not idempotency_key.strip() or len(idempotency_key.encode("utf-8")) > 256:
+                raise ValueError("idempotency_key must be nonblank and at most 256 UTF-8 bytes")
         body: dict[str, Any] = {"payload": payload}
+        if idempotency_key is not None:
+            body["idempotency_key"] = idempotency_key
         if to_agent is not None:
             body["to_agent"] = to_agent
         if to_provider is not None:
@@ -672,6 +704,75 @@ class AsyncSageClient:
 
     # --- Canonical local Messages (v11.17) ------------------------------------
 
+    async def _private_media_request(self, method: str, identifier: str, body: bytes | None) -> bytes:
+        path = "/v1/private-media/" + identifier
+        headers = self._identity.sign_request(method, path, body)
+        headers["Accept-Encoding"] = "identity"
+        if body is not None:
+            headers["Content-Type"] = "image/jpeg"
+        maximum = 4096 if method == "PUT" else _PRIVATE_MEDIA_MAX
+        content_type = "application/json" if method == "PUT" else "image/jpeg"
+        try:
+            async with self._client.stream(method, path, content=body, headers=headers, follow_redirects=False) as response:
+                _private_media_headers(response, content_type, maximum)
+                digest = _private_media_download_headers(response, self._identity.agent_id, identifier) if method == "GET" else None
+                received = bytearray()
+                if response.is_stream_consumed:
+                    if len(response.content) > maximum:
+                        raise ValueError("private media response exceeds bounds")
+                    received.extend(response.content)
+                else:
+                    async for chunk in response.aiter_raw():
+                        if len(chunk) > maximum - len(received):
+                            raise ValueError("private media response exceeds bounds")
+                        received.extend(chunk)
+                if digest is not None and hashlib.sha256(received).hexdigest() != digest:
+                    raise ValueError("private media response digest mismatch")
+                return _private_media_length(response, bytes(received))
+        except httpx.HTTPError:
+            raise SageAPIError(status_code=0, detail="private media transport failed") from None
+
+    async def private_media_put(self, object_id: str, jpeg: bytes) -> PrivateMediaMetadata:
+        """Create an immutable vault JPEG; identical replay only, no retries."""
+        identifier = _workflow_record_id(object_id)
+        _private_media_jpeg(jpeg)
+        body = await self._private_media_request("PUT", identifier, jpeg)
+        return _private_media_metadata(body, self._identity.agent_id, identifier, jpeg)
+
+    async def private_media_get(self, object_id: str) -> bytes:
+        """Read a bounded original JPEG; no readiness or provenance claim."""
+        identifier = _workflow_record_id(object_id)
+        return _private_media_jpeg(await self._private_media_request("GET", identifier, None))
+
+    async def workflow_get(self, record_id: str) -> WorkflowJournalRecord:
+        """Read exact actor-owned auxiliary state; errors never mean empty state."""
+        identifier = _workflow_record_id(record_id)
+        response = await self._request("GET", "/v1/workflows/" + identifier)
+        return self._workflow_response(response, identifier)
+
+    async def workflow_list(self, *, after: str | None = None, limit: int = 20) -> WorkflowJournalPage:
+        """Discover actor-owned records; no automatic pagination or snapshot claim."""
+        params = _workflow_list_params(after, limit)
+        response = await self._request("GET", "/v1/workflows", params=params)
+        return _workflow_parse_page(response, self._identity.agent_id, after, limit)
+
+    async def workflow_put(self, record_id: str, kind: str, expected_revision: int, payload: Any, *, guard: dict[str, Any] | WorkflowJournalGuard | _WorkflowGuardUnset = _WORKFLOW_GUARD_UNSET) -> WorkflowJournalRecord:
+        """CAS auxiliary state; reconcile ambiguous updates with GET, not retry."""
+        identifier, body = _workflow_put_body(record_id, kind, expected_revision, payload, guard=guard)
+        response = await self._request("PUT", "/v1/workflows/" + identifier, json=body)
+        return self._workflow_response(response, identifier)
+
+    def _workflow_response(self, response: httpx.Response, identifier: str) -> WorkflowJournalRecord:
+        record = _workflow_parse_response(response)
+        if record.record_id != identifier or record.agent_id != self._identity.agent_id:
+            raise ValueError("workflow response identity mismatch")
+        return record
+
+    async def message_storage_status(self) -> MessageStorageStatus:
+        """Read signed storage metadata without enabling capabilities or retrying."""
+        resp = await self._request("GET", "/v1/messages/storage")
+        return MessageStorageStatus.model_validate(resp.json())
+
     async def message_send(
         self,
         to_agent: str,
@@ -679,8 +780,12 @@ class AsyncSageClient:
         idempotency_key: str,
         intent: str | None = None,
         ttl_minutes: int | None = None,
+        *,
+        require_encrypted_storage: bool = False,
     ) -> MessageSendResponse:
         """Durably send one same-node message with caller-scoped idempotency."""
+        if type(require_encrypted_storage) is not bool:
+            raise TypeError("require_encrypted_storage must be a bool")
         body: dict[str, Any] = {
             "to_agent": to_agent,
             "payload": payload,
@@ -690,6 +795,8 @@ class AsyncSageClient:
             body["intent"] = intent
         if ttl_minutes is not None:
             body["ttl_minutes"] = ttl_minutes
+        if require_encrypted_storage:
+            body["require_encrypted_storage"] = True
         resp = await self._request("POST", "/v1/messages", json=body)
         return MessageSendResponse.model_validate(resp.json())
 

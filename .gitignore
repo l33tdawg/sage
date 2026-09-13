@@ -90,6 +90,8 @@ venv/
 tests/
 !desktop/SAGECerebrumNative/Tests/
 !desktop/SAGECerebrumNative/Tests/**
+!sdk/python/tests/
+!sdk/python/tests/*.py
 
 # Protobuf generated
 internal/proto/sagepb/*.go

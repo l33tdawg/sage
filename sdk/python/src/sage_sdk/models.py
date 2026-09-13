@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+import json
+import math
+import re
+from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -530,6 +534,157 @@ class PipeResultResponse(BaseModel):
 
 
 # --- Canonical local Messages models (v11.17) ---
+
+WORKFLOW_MAX_REVISION = 9007199254740991
+WORKFLOW_MAX_PAYLOAD = 16384
+
+
+def _workflow_record_id(value: str) -> str:
+    if type(value) is not str or len(value) != 36:
+        raise ValueError("record_id must be a canonical nonzero UUID")
+    parsed = UUID(value)
+    if parsed.int == 0 or str(parsed) != value:
+        raise ValueError("record_id must be a canonical nonzero UUID")
+    return value
+
+
+def _workflow_payload(value: Any) -> Any:
+    visited = 0
+
+    def validate(item: Any, depth: int) -> None:
+        nonlocal visited
+        visited += 1
+        if depth > 64 or visited > WORKFLOW_MAX_PAYLOAD:
+            raise ValueError("workflow payload exceeds bounds")
+        if type(item) is str:
+            if len(item.encode("utf-8")) > WORKFLOW_MAX_PAYLOAD:
+                raise ValueError("workflow payload exceeds bounds")
+        elif type(item) is dict:
+            for key, child in item.items():
+                if type(key) is not str:
+                    raise ValueError("workflow payload keys must be strings")
+                validate(key, depth + 1)
+                validate(child, depth + 1)
+        elif type(item) is list:
+            for child in item:
+                validate(child, depth + 1)
+        elif item is None or type(item) in (bool, int):
+            return
+        elif type(item) is not float or not math.isfinite(item):
+            raise ValueError("workflow payload must be strict JSON")
+
+    validate(value, 0)
+    encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":"), allow_nan=False)
+    if len(encoded.encode("utf-8")) > WORKFLOW_MAX_PAYLOAD:
+        raise ValueError("workflow payload exceeds 16384 encoded bytes")
+    return value
+
+
+class _WorkflowWireModel(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", populate_by_name=False)
+
+    def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump(*args, **kwargs)
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        kwargs.setdefault("by_alias", True)
+        return super().model_dump_json(*args, **kwargs)
+
+
+class PrivateMediaMetadata(_WorkflowWireModel):
+    """Immutable local vault object metadata, not provenance or readiness."""
+
+    schema_: Literal["sage.private-media.v1"] = Field(alias="schema")
+    agent_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    object_id: str
+    revision: int = Field(ge=1, le=1)
+    length: int = Field(ge=1, le=2097152)
+    digest: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("object_id")
+    @classmethod
+    def validate_object_id(cls, value: str) -> str:
+        return _workflow_record_id(value)
+
+
+class WorkflowJournalGuard(_WorkflowWireModel):
+    """Same-actor control revision condition for a conversation session write."""
+
+    record_id: str
+    expected_revision: int = Field(ge=1, le=WORKFLOW_MAX_REVISION)
+
+    @field_validator("record_id")
+    @classmethod
+    def validate_record_id(cls, value: str) -> str:
+        return _workflow_record_id(value)
+
+
+class WorkflowJournalRecord(_WorkflowWireModel):
+    """Actor-bound auxiliary untrusted state; never a send or approval receipt."""
+
+    schema_: Literal["sage.workflow-journal.v1"] = Field(alias="schema")
+    agent_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    record_id: str
+    revision: int = Field(ge=1, le=WORKFLOW_MAX_REVISION)
+    kind: Literal["mesh_outbound", "mesh_inbound", "public_proposal", "conversation_control", "conversation_session"]
+    payload: Any
+    trust: Literal["untrusted_auxiliary"]
+
+    @field_validator("record_id")
+    @classmethod
+    def validate_record_id(cls, value: str) -> str:
+        return _workflow_record_id(value)
+
+    @field_validator("payload")
+    @classmethod
+    def validate_payload(cls, value: Any) -> Any:
+        return _workflow_payload(value)
+
+
+class WorkflowJournalPage(_WorkflowWireModel):
+    """Bounded actor-owned page; consecutive pages are not a snapshot."""
+
+    schema_: Literal["sage.workflow-journal.v1"] = Field(alias="schema")
+    items: list[WorkflowJournalRecord] = Field(max_length=50)
+    next_after: str | None
+    has_more: bool
+
+    @model_validator(mode="after")
+    def validate_cursor(self) -> WorkflowJournalPage:
+        identifiers = [item.record_id for item in self.items]
+        if identifiers != sorted(set(identifiers)):
+            raise ValueError("workflow page identifiers must be unique and ordered")
+        if self.has_more:
+            if not identifiers or self.next_after != identifiers[-1]:
+                raise ValueError("workflow cursor must match the last item")
+        elif self.next_after is not None:
+            raise ValueError("terminal workflow page must have no cursor")
+        return self
+
+
+class MessageStorageStatus(BaseModel):
+    """Strict storage evidence, not an authorization or activation decision."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    schema: Literal["sage.message-storage.v1"]
+    instance_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    agent_id: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    encryption_expected: bool
+    vault_active: bool
+    vault_generation: str = Field(min_length=1, max_length=20)
+    stable: bool
+    canonical_send_idempotency: bool
+    encrypted_send_admission: bool
+
+    @field_validator("vault_generation")
+    @classmethod
+    def validate_vault_generation(cls, value: str) -> str:
+        if re.fullmatch(r"0|[1-9][0-9]*", value) is None or int(value) > 18446744073709551615:
+            raise ValueError("vault_generation must be a canonical uint64 decimal string")
+        return value
+
 
 class MessageSendResponse(BaseModel):
     message_id: str

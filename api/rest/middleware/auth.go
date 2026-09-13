@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/rs/zerolog/log"
 )
@@ -93,6 +94,18 @@ const maxTimestampSkew = 5 * time.Minute
 
 const defaultAuthenticatedBodyLimit = 1 << 20
 
+func authenticatedBodyLimit(r *http.Request) int64 {
+	const prefix = "/v1/private-media/"
+	if r.Method == http.MethodPut && r.URL.RawQuery == "" && r.URL.EscapedPath() == r.URL.Path && strings.HasPrefix(r.URL.Path, prefix) {
+		identifier := strings.TrimPrefix(r.URL.Path, prefix)
+		parsed, err := uuid.Parse(identifier)
+		if err == nil && parsed != uuid.Nil && parsed.String() == identifier {
+			return 2 << 20
+		}
+	}
+	return defaultAuthenticatedBodyLimit
+}
+
 // Ed25519AuthMiddleware validates Ed25519 signature authentication via headers:
 //   - X-Agent-ID:  hex-encoded Ed25519 public key
 //   - X-Signature: hex-encoded Ed25519 signature
@@ -153,18 +166,15 @@ func Ed25519AuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Read and buffer the request body for signature verification. Every
-		// authenticated route is capped at 1 MiB. The reserved federation Write
-		// route returns 501 before parsing and receives no preview-era headroom.
 		var body []byte
 		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, defaultAuthenticatedBodyLimit)
+			r.Body = http.MaxBytesReader(w, r.Body, authenticatedBodyLimit(r))
 			body, err = io.ReadAll(r.Body)
 			if err != nil {
 				var maxBytesErr *http.MaxBytesError
 				if errors.As(err, &maxBytesErr) {
 					writeProblem(w, http.StatusRequestEntityTooLarge, "Request body too large",
-						"Authenticated request bodies are limited to 1 MiB.")
+						"The authenticated request body exceeds its route limit.")
 					return
 				}
 				log.Error().Err(err).Msg("failed to read request body for auth")

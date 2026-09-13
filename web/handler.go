@@ -503,7 +503,7 @@ func (h *DashboardHandler) publishUnlockedVault(v *vault.Vault, passphrase strin
 	if !ok {
 		return errors.New("serving projection does not support vault publication")
 	}
-	vs.SetVault(v)
+	vs.ActivateVault(v)
 	if h.OnVaultUnlocked != nil {
 		h.OnVaultUnlocked(passphrase)
 	}

@@ -18,6 +18,27 @@ import (
 
 const messageNotFoundTitle = "Message not found"
 
+type encryptedStorageRequirement struct {
+	required bool
+	seen     bool
+}
+
+func (value *encryptedStorageRequirement) UnmarshalJSON(raw []byte) error {
+	if value.seen {
+		return errors.New("duplicate require_encrypted_storage")
+	}
+	value.seen = true
+	switch strings.TrimSpace(string(raw)) {
+	case "true":
+		value.required = true
+	case "false":
+		value.required = false
+	default:
+		return errors.New("require_encrypted_storage must be boolean")
+	}
+	return nil
+}
+
 func canonicalMessageStore(s *Server) (store.MessageStore, bool) {
 	messageStore, ok := s.store.(store.MessageStore)
 	return messageStore, ok
@@ -51,11 +72,12 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ToAgent        string `json:"to_agent"`
-		Intent         string `json:"intent"`
-		Payload        string `json:"payload"`
-		TTLMinutes     *int   `json:"ttl_minutes"`
-		IdempotencyKey string `json:"idempotency_key"`
+		ToAgent                 string                      `json:"to_agent"`
+		Intent                  string                      `json:"intent"`
+		Payload                 string                      `json:"payload"`
+		TTLMinutes              *int                        `json:"ttl_minutes"`
+		IdempotencyKey          string                      `json:"idempotency_key"`
+		RequireEncryptedStorage encryptedStorageRequirement `json:"require_encrypted_storage"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -95,6 +117,10 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 	}
 	messageStore, ok := canonicalMessageStore(s)
 	if !ok {
+		if req.RequireEncryptedStorage.required {
+			writeProblem(w, http.StatusServiceUnavailable, "Message storage unavailable", "Encrypted message storage required.")
+			return
+		}
 		writeProblem(w, http.StatusNotImplemented, "Messages unavailable", "The active store does not support canonical messages.")
 		return
 	}
@@ -118,13 +144,24 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 	if ttl > 0 {
 		lifetime = time.Duration(ttl) * time.Minute
 	}
-	msg, replayed, err := messageStore.SendLocalMessage(r.Context(), req.IdempotencyKey, &store.PipelineMessage{
+	send := messageStore.SendLocalMessage
+	if req.RequireEncryptedStorage.required {
+		sqlite, supported := s.store.(*store.SQLiteStore)
+		if !supported || sqlite == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "Message storage unavailable", "Encrypted message storage required.")
+			return
+		}
+		send = sqlite.SendEncryptedLocalMessage
+	}
+	msg, replayed, err := send(r.Context(), req.IdempotencyKey, &store.PipelineMessage{
 		PipeID: generatePipeID(), FromAgent: senderID, FromProvider: fromProvider,
 		ToAgent: req.ToAgent, Intent: req.Intent, Payload: req.Payload,
 		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(lifetime),
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, store.ErrEncryptedMessageStorageRequired):
+			writeProblem(w, http.StatusServiceUnavailable, "Message storage unavailable", "Encrypted message storage required.")
 		case errors.Is(err, store.ErrMessageIdempotencyConflict):
 			writeProblem(w, http.StatusConflict, "Idempotency key conflict",
 				"That idempotency key was already used for a different message.")

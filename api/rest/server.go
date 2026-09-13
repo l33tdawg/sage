@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -38,6 +39,8 @@ import (
 type EventCallback func(eventType, memoryID, domain, content string, data any)
 
 type Server struct {
+	privateMedia atomic.Pointer[store.PrivateMediaStore]
+
 	router      chi.Router
 	cometbftRPC string
 	store       store.MemoryStore
@@ -60,7 +63,8 @@ type Server struct {
 	messageNotifier               func(AgentMessageNotification)
 	messageWakeMu                 sync.Mutex
 	messageWake                   *messageWakeBroker
-	messageWakeHeartbeat          time.Duration   // zero uses the production default; tests may shorten it
+	messageWakeHeartbeat          time.Duration // zero uses the production default; tests may shorten it
+	messageStorage                messageStorageBinding
 	suppCache                     SuppCacheWriter // Bridges off-chain data (embeddings) to ABCI for consensus-first writes
 	mempool                       *mempoolSampler // TTL-cached CometBFT mempool depth for backpressure signals
 	taskIdempotencyMu             sync.Mutex
@@ -697,6 +701,9 @@ func (s *Server) setupRouter() chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware
+	r.Use(messageStorageNoStore)
+	r.Use(workflowJournalNoStore)
+	r.Use(privateMediaNoStore)
 	r.Use(middleware.RequestLogger)
 	r.Use(middleware.RateLimitMiddleware())
 	corsOrigins := []string{"*"}
@@ -847,6 +854,12 @@ func (s *Server) setupRouter() chi.Router {
 		r.Group(func(r chi.Router) {
 			r.Use(s.appV23PipelineAgentBoundary)
 			r.Post("/v1/messages", s.handleMessageSend)
+			r.Get("/v1/messages/storage", s.handleMessageStorageStatus)
+			r.Get("/v1/workflows", s.handleListWorkflowJournal)
+			r.Get("/v1/workflows/{uuid}", s.handleGetWorkflowJournal)
+			r.Put("/v1/workflows/{uuid}", s.handlePutWorkflowJournal)
+			r.Get("/v1/private-media/{uuid}", s.handleGetPrivateMedia)
+			r.Put("/v1/private-media/{uuid}", s.handlePutPrivateMedia)
 			r.Get("/v1/messages/wake", s.handleMessageWake)
 			r.Get("/v1/messages/wake-state", s.handleMessageWakeState)
 			r.Get("/v1/inbox/activity-state", s.handleInboxActivityState)

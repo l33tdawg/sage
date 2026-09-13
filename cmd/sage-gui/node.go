@@ -510,6 +510,12 @@ func runServe(startupProof string) (rerr error) {
 		_ = sqliteStore.Close()
 	}()
 
+	privateMedia, closePrivateMedia, mediaErr := configurePrivateMediaStore(ctx, cfg.PrivateMedia, sqliteStore, sqlitePath, newPrivateMediaSpaceProbe)
+	if mediaErr != nil {
+		return fmt.Errorf("configure private media: %w", mediaErr)
+	}
+	defer closePrivateMedia()
+
 	// Created before the ABCI app so canonical scoped-projection recovery can
 	// publish a fail-closed readiness state during construction.
 	health := metrics.NewHealthChecker()
@@ -1227,6 +1233,7 @@ func runServe(startupProof string) (rerr error) {
 
 	// Create REST server
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger, embedProvider)
+	restServer.SetPrivateMediaStore(privateMedia)
 	// This runtime's Comet home is authoritative. Close the legacy env-loaded
 	// gateway before attempting that explicit key so a stale VALIDATOR_KEY_FILE
 	// can never survive a failed home-key load.

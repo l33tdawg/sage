@@ -2195,6 +2195,147 @@ they do not promise a dedicated high-level visual treatment for every event.
 Route-local message wake, MCP, and wizard SSE protocols are intentionally
 outside this registry.
 
+### Auxiliary workflow journal (current source)
+
+`GET /v1/workflows/{uuid}` and `PUT /v1/workflows/{uuid}` require an exact,
+fresh nonce-bound ordinary-agent signature, the post-v23 pipeline-agent boundary,
+and concrete SQLite storage with an expected active vault. Actor identity comes
+only from authentication. UUIDs must be canonical, lowercase, and nonzero.
+
+PUT requires the three fields shown below; it additionally accepts one optional
+`guard` object, described below. Existing three-field requests are unchanged:
+```json
+{"kind":"mesh_outbound","expected_revision":0,"payload":{"example":"untrusted auxiliary state"}}
+```
+Kinds: `mesh_outbound`, `mesh_inbound`, `public_proposal`,
+`conversation_control`, `conversation_session`. Payload is strict JSON
+at most 16384 bytes; duplicate/unknown outer fields and duplicate nested payload
+keys are rejected. Revisions are exact JSON integers, not booleans, strings,
+nulls, or floats. Zero creates; updates require exact current revision. The
+maximum resulting revision is `9007199254740991`, so that value cannot itself
+be used as `expected_revision`. Create replay is allowed only at revision 1
+with byte-identical kind/payload; ambiguous updates require GET reconciliation.
+
+Optional conversation revision guard:
+```json
+{"kind":"conversation_session","expected_revision":0,"payload":{"example":"untrusted auxiliary state"},"guard":{"record_id":"9726bde5-5f3d-49f0-b420-33a16875b59c","expected_revision":1}}
+```
+Omission means no guard; explicitly supplied `null` is invalid. The guard must
+be an object with exactly `record_id` and `expected_revision`; duplicate keys
+(including escaped aliases), unknown fields, and missing fields are rejected.
+Its UUID must be canonical lowercase/nonzero, distinct from the target UUID.
+Its revision is a canonical decimal JSON integer from 1 through
+`9007199254740991` inclusive; booleans, null, quoted integers, fractions,
+exponent notation, and negative zero are not accepted. The target revision
+retains its existing stricter upper bound because a successful write increments it.
+
+Guards are permitted only for `conversation_session` targets. The source is
+looked up only under the authenticated actor and must decrypt/bind as
+`conversation_control` at the exact requested revision. The guard check and
+target CAS share one vault-protected SQL transaction; the control record is
+not modified. Guard checks also apply to revision-1 create replays. Missing,
+stale, other-actor-only, or wrong-kind control records produce 409 with no
+target mutation; corrupted controls produce 503, never false absence. Invalid
+guard shape/UUID/revision, self-guards, and guards on other target kinds produce
+400. Locked or encryption-disabled storage produces 503. A guard checks a
+revision, **not the meaning of consent fields or permission to submit memory**;
+auxiliary payloads remain untrusted. This adds no batch write, suppression,
+publication, canonical-proposal idempotency, or automatic retry operation.
+
+The request-body bound remains 16896 bytes (16384 payload bytes plus 512 bytes
+of envelope allowance), including any guard. SDKs must sign the full exact PUT
+body including the guard, omit the field for unguarded requests, and preserve
+the existing seven-field response shape. Do not send an actor ID in either
+object. Conflicts and uncertain outcomes require explicit reconciliation;
+GET of a target alone does not grant fresh dispatch authority after opt-out.
+
+GET and PUT return HTTP 200 with exactly `schema="sage.workflow-journal.v1"`,
+`agent_id`, `record_id`, `revision`, `kind`, `payload`, and
+`trust="untrusted_auxiliary"`. There is no delete operation or send side effect.
+
+`GET /v1/workflows` discovers only the caller's encrypted records, ordered by
+UUID. Optional query fields are `after` (exclusive canonical UUID; empty/omitted
+starts the scan) and `limit` (canonical integer 1–50, default 20). Duplicate or
+unknown query fields, actor/kind filters, and GET bodies are rejected. Response:
+```json
+{"schema":"sage.workflow-journal.v1","items":[],"next_after":null,"has_more":false}
+```
+Items use the seven-field record shape. With `has_more=true`, `next_after` is
+the last returned UUID. Corruption fails the page rather than producing partial
+or false-empty results. Separate pages are not a consistent snapshot; concurrent
+inserts before the cursor require a new scan.
+
+Responses are `Cache-Control: no-store`. Invalid requests are 400, genuinely
+absent caller-owned records 404, CAS/kind conflicts 409, size violations 413,
+actor/node quota exhaustion 429, and locked/corrupt/unsupported storage 503.
+The store seals actor/UUID/revision/kind/payload using the existing SAGE vault;
+this is not canonical memory, verified foreign provenance, public approval,
+history migration, or an E2E guarantee. No new key or activation is provided.
+Sources: `api/rest/workflow_journal_handler.go`,
+`internal/store/workflow_journal.go`, and routes in `api/rest/server.go`.
+
+### Private original JPEG objects (current source, disabled by default)
+
+`PUT /v1/private-media/{uuid}` and `GET /v1/private-media/{uuid}` require an
+exact fresh nonce-bound ordinary-agent signature and the post-v23 active local
+agent boundary. Root and pending agents cannot use this surface. Actor identity
+comes only from authentication; UUIDs must be canonical, lowercase, and nonzero.
+Query parameters and encoded-path aliases are rejected.
+
+PUT signs the **original raw JPEG request bytes**, not JSON or base64. Require
+exactly one `Content-Type: image/jpeg` and no `Content-Encoding`. The maximum
+body is 2097152 bytes; only PUT on this exact canonical route receives the
+2 MiB authenticated-body allowance. Other authenticated routes retain 1 MiB.
+JPEG validation checks bounded headers (8-bit baseline/progressive, 1 or 3
+components, at most 1920 by 1080), not raster decoding. Original bytes, including
+embedded metadata, are preserved. PUT is create-only (implicit expected revision
+zero); identical-byte replay returns the same metadata, while replacement of
+the caller's existing object with different bytes returns 409.
+
+PUT returns HTTP 200 with exactly six fields:
+```json
+{"schema":"sage.private-media.v1","agent_id":"<lowercase hex public key>","object_id":"<canonical UUID>","revision":1,"length":1234,"digest":"<lowercase SHA-256 of original JPEG>"}
+```
+After successful exact authentication, UUID validation, and backend binding,
+responses carry `X-SAGE-Private-Media-Schema: sage.private-media.v1`, including
+actual missing-object 404. An unknown-router 404 lacks this marker; it is not
+evidence that a private object is absent. Unconfigured backend responses also
+lack the marker.
+
+GET requires an empty body and returns HTTP 200 raw `image/jpeg`, with the
+original byte length in `Content-Length`, caller actor in `X-SAGE-Agent-ID`,
+requested UUID in `X-SAGE-Media-ID`, and lowercase original-byte SHA-256 in
+`X-SAGE-Media-SHA256`. It verifies authenticated row binding,
+length, digest, and JPEG headers before exposing bytes. Another actor's object
+is not visible. Every private-media response, including authentication errors,
+has `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+
+Invalid UUID/JPEG/query/body is 400; authentication/authority failures are
+401/403; genuinely missing caller-owned objects are 404; conflicting bytes 409;
+oversize 413; unsupported content type/encoding 415; actor/node quota exhaustion
+429. Unconfigured, disabled, locked, corrupt, or unavailable storage and uncertain
+free-space admission return generic 503, never a fabricated 404. Following an
+ambiguous PUT failure, reconcile with GET or retry identical bytes under the same
+UUID with a fresh signature/nonce; do not generate a replacement object ID.
+
+`sage-gui` startup calls `Server.SetPrivateMediaStore` with an explicitly
+configured `store.NewPrivateMediaStore` only when the operator's `private_media`
+configuration enables it; otherwise the injected backend is nil. It uses the
+existing SQLite store, explicit positive actor/node ciphertext-byte and object
+quotas, a positive free-space reserve, and a native Linux/Darwin filesystem probe.
+Enabled provisioning on unsupported platforms fails closed. See
+`docs/PRIVATE_MEDIA_PROVISIONING.md` for the exact configuration and probe limits.
+No HTTP configuration or autonomous activation exists; nil or
+disabled injection fails closed. The probe runs outside vault/database locks;
+its free-space observation is not a filesystem reservation. Bytes are sealed by
+the existing SAGE vault before SQL persistence, with vault-write admission held
+through commit. This auxiliary local storage is not canonical memory, foreign
+provenance, E2E encryption, automatic history migration, or secure deletion.
+There is no list/delete API, new key, key export, or plaintext file staging.
+
+Sources: `api/rest/private_media_handler.go`, `api/rest/middleware/auth.go`,
+`internal/store/private_media.go`, and routes in `api/rest/server.go`.
+
 ### Canonical local Messages service (v11.17)
 
 The `/v1/messages` operations are one service over the existing
@@ -2204,6 +2345,7 @@ principal.
 
 | Route | Contract |
 |---|---|
+| `GET /v1/messages/storage` | Exact signed active ordinary agent; no-store, payload-free storage observation. See the strict response and security boundary below. |
 | `POST /v1/messages` | Exact-local-agent send. Requires `to_agent`, `payload`, and a 1–256-byte caller-scoped `idempotency_key`; optional `intent` and `ttl_minutes` 0–1440. Omitted/0 is durable until handled; 1–1440 requests explicit expiry. Exact retry returns the original `message_id`; same key/different request is HTTP 409. |
 | `GET /v1/messages/wake` | Exact-caller payload-free catch-up/SSE. Requires a 1–128-byte `consumer_id`; accepts `after_seq` or matching `Last-Event-ID`. Events use `id:<seq>` and data exactly `{version,seq,pending}`, where `pending` means unfinished canonical work (`pending` or `claimed`). If unfinished work remains at the supplied cursor, reconnect immediately replays that same sequence as state catch-up. One exact agent has one active consumer lease; same-consumer reconnect supersedes its stale stream, while a different live consumer receives HTTP 409. |
 | `GET /v1/messages/wake-state` | Exact-caller lease-free payload-free snapshot returning exactly `{version,seq,pending}`. It reads the same durable unfinished-work state as the wake stream without acquiring, replacing, or releasing the live consumer lease; intended for short-lived host hooks that compare a monotonic cursor. |
@@ -2218,6 +2360,47 @@ principal.
 | `PUT /v1/messages/read-batch` | One fresh exact-recipient request acknowledges 1–20 already-fetched exact message IDs. Every item is authorized independently and returns `confirmed` or a generic per-item failure; one failure never rolls back independent successes. Exact replay is idempotent. |
 | `GET /v1/messages/{message_id}/status` | Exact sender only, payload-free metadata projection. Returns independent transport/read/workflow state and never decrypts content/proofs. |
 | `GET /v1/messages/replies/{reply_event_id}/status` | Exact federated replier only. Returns payload-free outbound result-event transport state. It is not another inbox request and exposes no original-message workflow/read status or result content. |
+
+#### Storage observation and encrypted send admission (current source)
+
+`GET /v1/messages/storage` returns exactly:
+
+```json
+{
+  "schema": "sage.message-storage.v1",
+  "instance_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "encryption_expected": true,
+  "vault_active": true,
+  "vault_generation": "1",
+  "stable": true,
+  "canonical_send_idempotency": true,
+  "encrypted_send_admission": true
+}
+```
+
+IDs are lowercase 64-hex strings; generation is a canonical uint64 decimal
+string. All flags are booleans. `agent_id` is the authenticated caller;
+`instance_id` is randomly bound to this server/store instance, not a chain ID or
+durable identity. The route requires exact signed admission, emits
+`Cache-Control: no-store`, and returns 503 when the supported store/protocol
+observation is unavailable. Missing routes/fields are not positive evidence.
+The operator must separately authenticate and pin the endpoint to its chain.
+
+`POST /v1/messages` additionally accepts optional strict boolean
+`require_encrypted_storage` (omitted/false preserves existing behavior). True
+requires supported SQLite encrypted admission: encryption must be expected
+and the vault active while the vault-publication read lock spans canonical
+send/idempotency handling. Unsupported or unavailable encrypted admission is
+503; invalid/non-boolean/duplicate flag values are 400. A prior metadata read
+alone does not close the race; clients requiring this property must check the
+advertised capability and send the flag. Never assume an older server enforces it.
+
+These are source contracts, not deployment/activation evidence, an audit or
+migration of historical plaintext messages, or a recipient-only E2E guarantee.
+Sources: `api/rest/message_storage_status.go:handleMessageStorageStatus`,
+`api/rest/messages_handler.go:handleMessageSend`, and
+`internal/store/message_storage_status.go:SendEncryptedLocalMessage`.
 
 Deprecated exact-local `GET /v1/pipe/inbox` and explicit
 `PUT /v1/pipe/{pipe_id}/claim` use the same session-aware claim transaction as
@@ -2347,6 +2530,14 @@ Send a pipeline message to another agent or provider.
 | `payload` | string | yes | Arbitrary content |
 | `ttl_minutes` | int | no | 0–1440. With `idempotency_key`, omitted/0 is durable until handled; without a key, the legacy route defaults omitted/0 to 1440 minutes. Values 1–1440 request explicit expiry. |
 | `idempotency_key` | string | no | Caller-scoped 1–256-byte token. Exact retry returns the original row; reusing the key for different content is HTTP 409. Omit only when replay protection is not required. |
+
+Python sync/async `pipe_send(..., idempotency_key=...)` exposes this existing
+field without automatic retries; omitted/`None` leaves the legacy body unchanged.
+For federated exact-agent sends, `handlePipeSend` uses
+`SQLiteStore.SendFederatedMessage` to atomically persist the original message,
+transport event, and sender-scoped idempotency binding. This is not a radio
+endpoint or proof of remote delivery; provider-addressed routing does not gain
+the canonical exact-agent idempotency guarantee.
 
 For a local send, the target must be registered here. For a federated send,
 call `/v1/pipe/resolve` first and sign its exact `source_chain_id`, `to_agent`,

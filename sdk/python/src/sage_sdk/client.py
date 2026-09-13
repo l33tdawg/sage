@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json as json_mod
 import ssl
 from typing import Any, Literal
@@ -11,7 +12,7 @@ from urllib.parse import quote
 import httpx
 
 from sage_sdk.auth import AgentIdentity
-from sage_sdk.exceptions import SageAPIError, SageNotFoundError
+from sage_sdk.exceptions import SageAPIError, SageAuthError, SageNotFoundError
 from sage_sdk.models import (
     AgentDirectoryResponse,
     AgentDomainAccessSample,
@@ -47,6 +48,8 @@ from sage_sdk.models import (
     MessageReceiveResponse,
     MessageSendResponse,
     MessageStatusResponse,
+    MessageStorageStatus,
+    PrivateMediaMetadata,
     PendingMemoriesResponse,
     PipeDeliveryUpdatesResponse,
     PipeInboxResponse,
@@ -63,7 +66,163 @@ from sage_sdk.models import (
     TaskStatus,
     TimelineResponse,
     VoteRequest,
+    WorkflowJournalRecord,
+    WorkflowJournalGuard,
+    WorkflowJournalPage,
+    WORKFLOW_MAX_REVISION,
+    _workflow_payload,
+    _workflow_record_id,
 )
+
+
+_PRIVATE_MEDIA_MAX = 2097152
+
+
+def _private_media_jpeg(jpeg: bytes) -> bytes:
+    if type(jpeg) is not bytes or not 4 <= len(jpeg) <= _PRIVATE_MEDIA_MAX or not jpeg.startswith(b"\xff\xd8") or not jpeg.endswith(b"\xff\xd9"):
+        raise ValueError("invalid private media JPEG")
+    offset, components = 2, 0
+    while offset < len(jpeg) - 2:
+        if jpeg[offset] != 255:
+            break
+        while offset < len(jpeg) and jpeg[offset] == 255:
+            offset += 1
+        if offset >= len(jpeg):
+            break
+        marker = jpeg[offset]
+        offset += 1
+        if marker in (0, 1, 216, 217) or 208 <= marker <= 215 or offset + 2 > len(jpeg) - 2:
+            break
+        length = int.from_bytes(jpeg[offset:offset + 2], "big")
+        if length < 2 or offset + length > len(jpeg) - 2:
+            break
+        segment = jpeg[offset + 2:offset + length]
+        offset += length
+        if marker in (192, 194):
+            if components or len(segment) < 6:
+                break
+            height, width = int.from_bytes(segment[1:3], "big"), int.from_bytes(segment[3:5], "big")
+            components = segment[5]
+            if segment[0] != 8 or components not in (1, 3) or len(segment) != 6 + 3 * components or not 1 <= width <= 1920 or not 1 <= height <= 1080:
+                break
+        elif 192 <= marker <= 207 and marker not in (196, 200, 204):
+            break
+        if marker == 218:
+            if components and segment and 1 <= segment[0] <= components and len(segment) == 4 + 2 * segment[0] and offset < len(jpeg) - 2:
+                return jpeg
+            break
+    raise ValueError("invalid private media JPEG")
+
+
+def _private_media_headers(response: httpx.Response, content_type: str, maximum: int) -> None:
+    marked = response.headers.get_list("x-sage-private-media-schema") == ["sage.private-media.v1"]
+    if response.status_code != 200:
+        if response.status_code == 404 and not marked:
+            raise SageAPIError(status_code=503, detail="private media unavailable")
+        error = SageNotFoundError if response.status_code == 404 else SageAuthError if response.status_code in (401, 403) else SageAPIError
+        raise error(status_code=response.status_code, detail="private media request failed")
+    if not marked or response.headers.get_list("cache-control") != ["no-store"] or response.headers.get_list("x-content-type-options") != ["nosniff"]:
+        raise ValueError("invalid private media response")
+    if response.headers.get_list("content-type") != [content_type] or response.headers.get_list("content-encoding"):
+        raise ValueError("invalid private media response")
+    lengths = response.headers.get_list("content-length")
+    if lengths and (len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or len(lengths[0]) > 10 or not 1 <= int(lengths[0]) <= maximum):
+        raise ValueError("invalid private media response length")
+
+
+def _private_media_length(response: httpx.Response, body: bytes) -> bytes:
+    length = response.headers.get("content-length")
+    if length is not None and int(length) != len(body):
+        raise ValueError("invalid private media response length")
+    return body
+
+
+def _private_media_download_headers(response: httpx.Response, actor: str, identifier: str) -> str:
+    digests = response.headers.get_list("x-sage-media-sha256")
+    if response.headers.get_list("x-sage-agent-id") != [actor] or response.headers.get_list("x-sage-media-id") != [identifier] or len(response.headers.get_list("content-length")) != 1 or len(digests) != 1 or len(digests[0]) != 64 or any(char not in "0123456789abcdef" for char in digests[0]):
+        raise ValueError("private media response binding mismatch")
+    return digests[0]
+
+
+def _private_media_metadata(body: bytes, actor: str, identifier: str, jpeg: bytes) -> PrivateMediaMetadata:
+    def unique(pairs: list[tuple[str, Any]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("invalid private media metadata")
+            result[key] = value
+        return result
+    try:
+        record = PrivateMediaMetadata.model_validate(json_mod.loads(body.decode("utf-8"), object_pairs_hook=unique))
+    except (ValueError, TypeError, RecursionError):
+        raise ValueError("invalid private media metadata") from None
+    if record.agent_id != actor or record.object_id != identifier or record.length != len(jpeg) or record.digest != hashlib.sha256(jpeg).hexdigest():
+        raise ValueError("private media metadata mismatch")
+    return record
+
+
+class _WorkflowGuardUnset:
+    pass
+
+
+_WORKFLOW_GUARD_UNSET = _WorkflowGuardUnset()
+
+
+def _workflow_put_body(record_id: str, kind: str, expected_revision: int, payload: Any, *, guard: dict[str, Any] | WorkflowJournalGuard | _WorkflowGuardUnset = _WORKFLOW_GUARD_UNSET) -> tuple[str, dict]:
+    identifier = _workflow_record_id(record_id)
+    if type(kind) is not str or kind not in ("mesh_outbound", "mesh_inbound", "public_proposal", "conversation_control", "conversation_session"):
+        raise ValueError("invalid workflow kind")
+    if type(expected_revision) is not int or not 0 <= expected_revision < WORKFLOW_MAX_REVISION:
+        raise ValueError("expected_revision must be a JSON-safe nonnegative integer below the revision cap")
+    _workflow_payload(payload)
+    body = {"kind": kind, "expected_revision": expected_revision, "payload": payload}
+    if guard is not _WORKFLOW_GUARD_UNSET:
+        if kind != "conversation_session":
+            raise ValueError("workflow guard requires conversation_session")
+        condition = guard.model_dump() if isinstance(guard, WorkflowJournalGuard) else guard
+        if type(condition) is not dict:
+            raise ValueError("workflow guard must be an object")
+        condition = WorkflowJournalGuard.model_validate(condition).model_dump()
+        if condition["record_id"] == identifier:
+            raise ValueError("workflow guard cannot reference the target record")
+        body["guard"] = condition
+    return identifier, body
+
+
+def _workflow_parse_response(response: httpx.Response) -> WorkflowJournalRecord:
+    return WorkflowJournalRecord.model_validate(_workflow_response_json(response, 131072))
+
+
+def _workflow_response_json(response: httpx.Response, maximum: int) -> Any:
+    if len(response.content) > maximum:
+        raise ValueError("workflow response exceeds bounds")
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate workflow response field")
+            result[key] = value
+        return result
+
+    return json_mod.loads(response.content.decode("utf-8"), object_pairs_hook=unique)
+
+
+def _workflow_list_params(after: str | None, limit: int) -> dict:
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError("workflow page limit must be an integer from 1 to 50")
+    params = {}
+    if after is not None:
+        params["after"] = _workflow_record_id(after)
+    params["limit"] = limit
+    return params
+
+
+def _workflow_parse_page(response: httpx.Response, actor: str, after: str | None, limit: int) -> WorkflowJournalPage:
+    page = WorkflowJournalPage.model_validate(_workflow_response_json(response, 8 * 1024 * 1024))
+    if len(page.items) > limit or any(item.agent_id != actor or after is not None and item.record_id <= after for item in page.items):
+        raise ValueError("workflow page actor or cursor mismatch")
+    return page
 
 
 def _receipt_batch_proof_item(identity: AgentIdentity, item: dict[str, Any]) -> dict[str, Any]:
@@ -155,11 +314,15 @@ class SageClient:
         identity: AgentIdentity,
         timeout: float = 30.0,
         ca_cert: str | bool | None = None,
+        *,
+        trust_env: bool = True,
     ) -> None:
+        if type(trust_env) is not bool:
+            raise TypeError("trust_env must be a bool")
         self._base_url = base_url.rstrip("/")
         self._identity = identity
         verify = _httpx_verify(ca_cert)
-        self._client = httpx.Client(base_url=self._base_url, timeout=timeout, verify=verify)
+        self._client = httpx.Client(base_url=self._base_url, timeout=timeout, verify=verify, trust_env=trust_env)
 
     def _request(
         self,
@@ -665,9 +828,18 @@ class SageClient:
         ttl_minutes: int | None = None,
         source_chain_id: str | None = None,
         destination_chain_id: str | None = None,
+        *,
+        idempotency_key: str | None = None,
     ) -> PipeSendResponse:
         """Send a message through the agent pipeline."""
+        if idempotency_key is not None:
+            if type(idempotency_key) is not str:
+                raise TypeError("idempotency_key must be a string or None")
+            if not idempotency_key.strip() or len(idempotency_key.encode("utf-8")) > 256:
+                raise ValueError("idempotency_key must be nonblank and at most 256 UTF-8 bytes")
         body: dict[str, Any] = {"payload": payload}
+        if idempotency_key is not None:
+            body["idempotency_key"] = idempotency_key
         if to_agent is not None:
             body["to_agent"] = to_agent
         if to_provider is not None:
@@ -771,6 +943,71 @@ class SageClient:
 
     # --- Canonical local Messages (v11.17) ------------------------------------
 
+    def _private_media_request(self, method: str, identifier: str, body: bytes | None) -> bytes:
+        path = "/v1/private-media/" + identifier
+        headers = self._identity.sign_request(method, path, body)
+        headers["Accept-Encoding"] = "identity"
+        if body is not None:
+            headers["Content-Type"] = "image/jpeg"
+        maximum = 4096 if method == "PUT" else _PRIVATE_MEDIA_MAX
+        content_type = "application/json" if method == "PUT" else "image/jpeg"
+        try:
+            with self._client.stream(method, path, content=body, headers=headers, follow_redirects=False) as response:
+                _private_media_headers(response, content_type, maximum)
+                digest = _private_media_download_headers(response, self._identity.agent_id, identifier) if method == "GET" else None
+                received = bytearray()
+                chunks = [response.content] if response.is_stream_consumed else response.iter_raw()
+                for chunk in chunks:
+                    if len(chunk) > maximum - len(received):
+                        raise ValueError("private media response exceeds bounds")
+                    received.extend(chunk)
+                if digest is not None and hashlib.sha256(received).hexdigest() != digest:
+                    raise ValueError("private media response digest mismatch")
+                return _private_media_length(response, bytes(received))
+        except httpx.HTTPError:
+            raise SageAPIError(status_code=0, detail="private media transport failed") from None
+
+    def private_media_put(self, object_id: str, jpeg: bytes) -> PrivateMediaMetadata:
+        """Create an immutable vault JPEG; identical replay only, no retries."""
+        identifier = _workflow_record_id(object_id)
+        _private_media_jpeg(jpeg)
+        body = self._private_media_request("PUT", identifier, jpeg)
+        return _private_media_metadata(body, self._identity.agent_id, identifier, jpeg)
+
+    def private_media_get(self, object_id: str) -> bytes:
+        """Read a bounded original JPEG; no readiness or provenance claim."""
+        identifier = _workflow_record_id(object_id)
+        return _private_media_jpeg(self._private_media_request("GET", identifier, None))
+
+    def workflow_get(self, record_id: str) -> WorkflowJournalRecord:
+        """Read exact actor-owned auxiliary state; errors never mean empty state."""
+        identifier = _workflow_record_id(record_id)
+        response = self._request("GET", "/v1/workflows/" + identifier)
+        return self._workflow_response(response, identifier)
+
+    def workflow_list(self, *, after: str | None = None, limit: int = 20) -> WorkflowJournalPage:
+        """Discover actor-owned records; no automatic pagination or snapshot claim."""
+        params = _workflow_list_params(after, limit)
+        response = self._request("GET", "/v1/workflows", params=params)
+        return _workflow_parse_page(response, self._identity.agent_id, after, limit)
+
+    def workflow_put(self, record_id: str, kind: str, expected_revision: int, payload: Any, *, guard: dict[str, Any] | WorkflowJournalGuard | _WorkflowGuardUnset = _WORKFLOW_GUARD_UNSET) -> WorkflowJournalRecord:
+        """CAS auxiliary state; reconcile ambiguous updates with GET, not retry."""
+        identifier, body = _workflow_put_body(record_id, kind, expected_revision, payload, guard=guard)
+        response = self._request("PUT", "/v1/workflows/" + identifier, json=body)
+        return self._workflow_response(response, identifier)
+
+    def _workflow_response(self, response: httpx.Response, identifier: str) -> WorkflowJournalRecord:
+        record = _workflow_parse_response(response)
+        if record.record_id != identifier or record.agent_id != self._identity.agent_id:
+            raise ValueError("workflow response identity mismatch")
+        return record
+
+    def message_storage_status(self) -> MessageStorageStatus:
+        """Read signed storage metadata without enabling capabilities or retrying."""
+        resp = self._request("GET", "/v1/messages/storage")
+        return MessageStorageStatus.model_validate(resp.json())
+
     def message_send(
         self,
         to_agent: str,
@@ -778,8 +1015,12 @@ class SageClient:
         idempotency_key: str,
         intent: str | None = None,
         ttl_minutes: int | None = None,
+        *,
+        require_encrypted_storage: bool = False,
     ) -> MessageSendResponse:
         """Durably send one same-node message with caller-scoped idempotency."""
+        if type(require_encrypted_storage) is not bool:
+            raise TypeError("require_encrypted_storage must be a bool")
         body: dict[str, Any] = {
             "to_agent": to_agent,
             "payload": payload,
@@ -789,6 +1030,8 @@ class SageClient:
             body["intent"] = intent
         if ttl_minutes is not None:
             body["ttl_minutes"] = ttl_minutes
+        if require_encrypted_storage:
+            body["require_encrypted_storage"] = True
         resp = self._request("POST", "/v1/messages", json=body)
         return MessageSendResponse.model_validate(resp.json())
 
