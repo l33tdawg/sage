@@ -160,7 +160,13 @@ for i in $(seq 0 $((NUM_VALIDATORS - 1))); do
     sed -i.bak 's/allow_duplicate_ip = false/allow_duplicate_ip = true/' "$CONFIG"
 
     # Set block time
-    sed -i.bak 's/timeout_commit = ".*"/timeout_commit = "3s"/' "$CONFIG"
+    # Block time is a DEVNET knob, not a consensus rule: every validator in this
+    # throwaway network carries the same value, so AppHash agreement is unaffected.
+    # A long ladder climb (app-v8..app-v27 activates one rung at a time, each with
+    # a 200-block floor) is ~4.5h at the 3s default; a harness that has to walk
+    # the ladder sets SAGE_TESTNET_TIMEOUT_COMMIT, e.g. 300ms, and the same climb
+    # takes ~25 min. Never used by production nodes.
+    sed -i.bak "s/timeout_commit = \".*\"/timeout_commit = \"${SAGE_TESTNET_TIMEOUT_COMMIT:-3s}\"/" "$CONFIG"
 
     # How long a /broadcast_tx_commit caller waits for inclusion before the node
     # answers with its own error. Left at upstream's 10s this expires before a
