@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>(S)AGE — Privacy Policy</title>
+<title>(S)AGE | Privacy Policy</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
@@ -41,20 +41,22 @@ code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-si
 <body>
 <div class="container">
   <h1>Privacy Policy</h1>
-  <p class="updated">Last updated: August 13, 2026</p>
+  <p class="updated">Last updated: September 19, 2026</p>
 
-  <p><strong>(S)AGE — (S)overeign Agent Governed Experience</strong> is an open-source, local-first AI memory system. This policy covers both the (S)AGE desktop application and the (S)AGE Memory browser extension.</p>
+  <p><strong>(S)AGE ((S)overeign Agent Governed Experience)</strong> is an open-source, local-first AI memory system. This policy covers both the (S)AGE desktop application and the (S)AGE Memory browser extension.</p>
 
   <h2>The short version</h2>
   <p><strong>Your data stays local by default.</strong> (S)AGE runs on your computer with no required SAGE cloud account or product telemetry. Data leaves the node only when you explicitly configure federation, synchronization, an AI connector, an external embedding or reranking provider, or another network integration.</p>
 
   <h2>What data is stored</h2>
   <ul>
-    <li><strong>AI memories</strong> — stored in local BadgerDB/SQLite stores at <code>~/.sage/</code> on your computer</li>
-    <li><strong>Encryption keys</strong> — Ed25519 signing keys generated locally, stored locally</li>
-    <li><strong>Extension settings</strong> — your (S)AGE server URL (default: localhost:8080), stored in browser local storage</li>
+    <li><strong>AI memories</strong>: stored in local BadgerDB/SQLite stores at <code>~/.sage/</code> on your computer</li>
+    <li><strong>Agent working state</strong>: private media and workflow journal entries your agents store on the node, held in the same local stores</li>
+    <li><strong>Snapshots</strong>: scheduled backups under <code>~/.sage/data/snapshots/</code>, encrypted with your vault passphrase</li>
+    <li><strong>Encryption keys</strong>: Ed25519 signing keys and your vault passphrase, generated locally and never transmitted</li>
+    <li><strong>Extension settings</strong>: your (S)AGE server URL (default: localhost:8080), stored in browser local storage</li>
   </ul>
-  <p>If you enabled encryption during setup, all memories are AES-256-GCM encrypted at rest.</p>
+  <p>If you enabled encryption during setup, memories and agent working state are AES-256-GCM encrypted at rest.</p>
 
   <h2>What data is NOT collected</h2>
   <ul>
@@ -68,11 +70,11 @@ code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-si
 
   <h2>Browser extension permissions</h2>
   <ul>
-    <li><strong>activeTab</strong> — to inject the (S)AGE sidebar into AI chat pages</li>
-    <li><strong>storage</strong> — to save your server URL and cryptographic keys locally in the browser</li>
-    <li><strong>scripting</strong> — to inject the content script that provides the sidebar and tool integration</li>
-    <li><strong>Host access to localhost:8080</strong> — to communicate with your local (S)AGE server</li>
-    <li><strong>Host access to chatgpt.com</strong> — to inject the content script on ChatGPT pages</li>
+    <li><strong>activeTab</strong>: to inject the (S)AGE sidebar into AI chat pages</li>
+    <li><strong>storage</strong>: to save your server URL and cryptographic keys locally in the browser</li>
+    <li><strong>scripting</strong>: to inject the content script that provides the sidebar and tool integration</li>
+    <li><strong>Host access to localhost:8080</strong>: to communicate with your local (S)AGE server</li>
+    <li><strong>Host access to chatgpt.com</strong>: to inject the content script on ChatGPT pages</li>
   </ul>
 
   <h2>Network requests</h2>

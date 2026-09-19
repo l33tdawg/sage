@@ -369,8 +369,8 @@ p code, li code {
 <div class="container">
   <div class="hero">
     <h1>Connect Your AI to SAGE</h1>
-    <p>Give your AI a permanent memory in under 2 minutes. Works with any AI that supports MCP &mdash; Claude, ChatGPT, DeepSeek, Gemini, Mistral, Cursor, local models, and more.</p>
-    <span class="hero-note"><strong>MCP</strong> = Model Context Protocol &mdash; the standard way AI apps connect to local tools.</span>
+    <p>Give your AI a permanent memory in under 2 minutes. Works with any AI that supports MCP: Claude, ChatGPT, DeepSeek, Gemini, Mistral, Cursor, local models, and more.</p>
+    <span class="hero-note"><strong>MCP</strong> = Model Context Protocol, the standard way AI apps connect to local tools.</span>
   </div>
 
   <!-- Quick visual overview -->
@@ -446,7 +446,7 @@ p code, li code {
     <div class="step">
       <span class="step-num">3</span>
       <h3>Restart Claude Desktop</h3>
-      <p>Quit and reopen Claude Desktop. You should see a tools icon (hammer) in the chat &mdash; click it to verify SAGE tools are listed.</p>
+      <p>Quit and reopen Claude Desktop. You should see a tools icon (hammer) in the chat. Click it to verify SAGE tools are listed.</p>
     </div>
 
     <div class="step">
@@ -455,7 +455,7 @@ p code, li code {
       <p>Start a new conversation and type:</p>
       <pre><code>Initialize your SAGE memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
       <div class="info-box success" style="margin-top:12px;">
-        <strong>Done.</strong> Claude will initialise its memory and begin learning from every conversation &mdash; projects, preferences, and insights persist across sessions.
+        <strong>Done.</strong> Claude will initialise its memory and begin learning from every conversation. Projects, preferences, and insights persist across sessions.
       </div>
     </div>
   </div>
@@ -489,7 +489,7 @@ sage-gui mcp install</code><button class="copy-btn" onclick="copyCode(this)">Cop
       <p>Tell Claude:</p>
       <pre><code>Initialize your SAGE memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
       <div class="info-box success" style="margin-top:12px;">
-        <strong>Done.</strong> Claude Code will now build persistent memory across coding sessions &mdash; debugging insights, project context, preferences.
+        <strong>Done.</strong> Claude Code will now build persistent memory across coding sessions: debugging insights, project context, preferences.
       </div>
       <div class="info-box" style="margin-top:12px;">
         <strong>Tip:</strong> Add a <code>CLAUDE.md</code> file to your project containing: <em>&ldquo;Call sage_turn every turn to maintain persistent memory.&rdquo;</em> This ensures the memory lifecycle runs reliably across sessions.
@@ -509,7 +509,7 @@ sage-gui mcp install</code><button class="copy-btn" onclick="copyCode(this)">Cop
     <h3 style="color:var(--bright);margin-bottom:16px;font-size:1.1rem;">Option A: OAuth Connector via the CEREBRUM Wizard (recommended)</h3>
 
     <div class="info-box success" style="margin-left:0;margin-bottom:24px;">
-      <strong>Recommended for users with a domain on Cloudflare.</strong> The wizard handles tunnel creation, OAuth wiring, and bearer minting in six clicks. ChatGPT&rsquo;s MCP connector is currently available on ChatGPT Plus, Pro, Team, and Enterprise (an OpenAI subscription requirement &mdash; SAGE itself remains free and open source).
+      <strong>Recommended for users with a domain on Cloudflare.</strong> The wizard handles tunnel creation, OAuth wiring, and bearer minting in six clicks. ChatGPT&rsquo;s MCP connector is currently available on ChatGPT Plus, Pro, Team, and Enterprise (an OpenAI subscription requirement; SAGE itself remains free and open source).
     </div>
 
     <div class="step">
@@ -524,17 +524,17 @@ sage-gui mcp install</code><button class="copy-btn" onclick="copyCode(this)">Cop
       <p>The wizard walks through:</p>
       <ol style="margin-left:20px;line-height:1.9;">
         <li>Verify <code>cloudflared</code> is installed (one-click install via Homebrew on macOS, static binary on Linux, <code>winget</code> on Windows).</li>
-        <li>Cloudflare login &mdash; opens your browser for OAuth, then waits for the cert file.</li>
-        <li>Pick a hostname &mdash; subdomain plus a Cloudflare zone selected from a dropdown of your active zones.</li>
-        <li>Tunnel orchestration &mdash; creates the tunnel, registers the DNS record, writes the cloudflared config (<code>~/.cloudflared/config.yml</code> on macOS/Linux, <code>%USERPROFILE%\.cloudflared\config.yml</code> on Windows) with a strict path-allowlist ingress, installs autostart (launchd on macOS, systemd on Linux &mdash; Windows users add a service in step 3 below), and verifies reachability.</li>
+        <li>Cloudflare login: opens your browser for OAuth, then waits for the cert file.</li>
+        <li>Pick a hostname: subdomain plus a Cloudflare zone selected from a dropdown of your active zones.</li>
+        <li>Tunnel orchestration: creates the tunnel, registers the DNS record, writes the cloudflared config (<code>~/.cloudflared/config.yml</code> on macOS/Linux, <code>%USERPROFILE%\.cloudflared\config.yml</code> on Windows) with a strict path-allowlist ingress, installs autostart (launchd on macOS, systemd on Linux; Windows users add a service in step 3 below), and verifies reachability.</li>
         <li>Pick the agent identity the connection should run as.</li>
-        <li>Mint a bearer token &mdash; shown once, with one-click copy buttons for every field ChatGPT&rsquo;s connector form requires.</li>
+        <li>Mint a bearer token: shown once, with one-click copy buttons for every field ChatGPT&rsquo;s connector form requires.</li>
       </ol>
       <div class="info-box" style="margin-top:12px;">
-        <strong>Local-first.</strong> The wizard is pure local orchestration &mdash; no SAGE-hosted relay, no phone-home. The tunnel runs under your Cloudflare account; the SAGE project never sees the traffic.
+        <strong>Local-first.</strong> The wizard is pure local orchestration. No SAGE-hosted relay, no phone-home. The tunnel runs under your Cloudflare account; the SAGE project never sees the traffic.
       </div>
       <div class="info-box warn" style="margin-top:12px;">
-        <strong>Windows users.</strong> Step 1 uses <code>winget install --id Cloudflare.cloudflared</code>. If <code>winget</code> isn&rsquo;t available (older Windows 10), grab <code>cloudflared-windows-amd64.exe</code> from <a href="https://github.com/cloudflare/cloudflared/releases" style="color:var(--accent);">the cloudflared releases page</a>, rename to <code>cloudflared.exe</code>, drop it on your PATH (e.g. <code>C:\Windows\System32</code>), then re-run step 1. After the wizard finishes, the tunnel won&rsquo;t auto-respawn on reboot until you register it as a Windows service &mdash; see step 3.
+        <strong>Windows users.</strong> Step 1 uses <code>winget install --id Cloudflare.cloudflared</code>. If <code>winget</code> isn&rsquo;t available (older Windows 10), grab <code>cloudflared-windows-amd64.exe</code> from <a href="https://github.com/cloudflare/cloudflared/releases" style="color:var(--accent);">the cloudflared releases page</a>, rename to <code>cloudflared.exe</code>, drop it on your PATH (e.g. <code>C:\Windows\System32</code>), then re-run step 1. After the wizard finishes, the tunnel won&rsquo;t auto-respawn on reboot until you register it as a Windows service; see step 3.
       </div>
     </div>
 
@@ -606,7 +606,7 @@ Environment:
   <!-- ========== Other AIs ========== -->
   <div id="other" class="tab-content">
     <div class="info-box" style="margin-left:0;margin-bottom:24px;">
-      <strong>SAGE works with any AI that supports MCP</strong> (Model Context Protocol). This includes DeepSeek, Gemini, Mistral, Cursor, Windsurf, Cody, LM Studio, and any tool adopting the standard &mdash; cloud or local. The setup is the same pattern: point the MCP config at <code>sage-gui mcp</code>.
+      <strong>SAGE works with any AI that supports MCP</strong> (Model Context Protocol). This includes DeepSeek, Gemini, Mistral, Cursor, Windsurf, Cody, LM Studio, and any tool adopting the standard, cloud or local. The setup is the same pattern: point the MCP config at <code>sage-gui mcp</code>.
     </div>
 
     <div class="step">
@@ -618,7 +618,7 @@ Environment:
     <div class="step">
       <span class="step-num">2</span>
       <h3>Add SAGE</h3>
-      <p>The config is the same everywhere &mdash; just change the <code>SAGE_PROVIDER</code> to match your tool:</p>
+      <p>The config is the same everywhere. Just change the <code>SAGE_PROVIDER</code> to match your tool:</p>
       <pre><code>{
   "mcpServers": {
     "sage": {
@@ -650,7 +650,7 @@ Environment:
 
     <div class="faq-item">
       <h4>"SAGE tools don't appear"</h4>
-      <p>Make sure SAGE is running &mdash; check <code>http://localhost:8080/ui/</code> in your browser. If the CEREBRUM loads, SAGE is running. Also verify the path to <code>sage-gui</code> in your config is correct.</p>
+      <p>Make sure SAGE is running. Check <code>http://localhost:8080/ui/</code> in your browser. If the CEREBRUM loads, SAGE is running. Also verify the path to <code>sage-gui</code> in your config is correct.</p>
     </div>
 
     <div class="faq-item">
@@ -675,7 +675,7 @@ Environment:
 
     <div class="faq-item">
       <h4>Can I switch from ChatGPT to Claude (or vice versa)?</h4>
-      <p>Absolutely. SAGE is model-agnostic &mdash; your memories belong to you, not to any provider. Just add the config to your new tool and your AI picks up where the last one left off. Facts are shared across providers automatically.</p>
+      <p>Absolutely. SAGE is model-agnostic. Your memories belong to you, not to any provider. Just add the config to your new tool and your AI picks up where the last one left off. Facts are shared across providers automatically.</p>
     </div>
   </div>
 
