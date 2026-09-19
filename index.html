@@ -1042,9 +1042,9 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="v11-hero-grid">
         <div class="hero-copy">
-          <div class="hero-kicker">SAGE v11.23.2 · governed local memory · controlled agent collaboration</div>
-          <h1>Your AI's memory, visible as a <em>living brain</em></h1>
-          <p class="hero-sub">One local memory node for Claude Code, Codex, Cursor, Windsurf and any MCP-capable agent. Semantic recall, attributed memory, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
+          <div class="hero-kicker">SAGE v11.23.2 · durable memory for AI agents</div>
+          <h1>Your agent shouldn't start from <em>zero</em> every session</h1>
+          <p class="hero-sub">SAGE keeps durable memory outside the model: what you decided, what broke, what you already ruled out. Your agent opens a session with that context instead of a blank slate, so you spend turns on the work instead of re-explaining it. Works with Claude Code, Codex, Cursor and anything MCP-capable.</p>
           <div class="hero-proof">
             <div class="proof-chip"><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
             <div class="proof-chip"><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
@@ -1084,6 +1084,33 @@ footer a:hover { text-decoration: underline; }
       </div>
     </div>
   </section>
+
+  <!-- Why it matters -->
+  <div class="section" style="background: linear-gradient(180deg, var(--void) 0%, var(--deep) 50%, var(--void) 100%); padding: 60px 0;">
+    <div class="container">
+      <div class="section-tag">Why it matters</div>
+      <h2>Your agents work better when they don't start over.</h2>
+      <p class="section-desc">We run our own agents on it. The note one session leaves about why a decision went a certain way is what the next session reads before it touches that code.</p>
+      <div class="value-grid reveal">
+        <div class="value-card">
+          <h3>It starts informed</h3>
+          <p>A session opens, reads what earlier sessions learned, and gets to work. Your agent stops spending its first turns reconstructing where things stand.</p>
+        </div>
+        <div class="value-card">
+          <h3>Decisions stay decided</h3>
+          <p>Rejected approaches and settled calls are recorded with the reasoning behind them, so an agent that never saw the thread doesn't re-open a question you already closed.</p>
+        </div>
+        <div class="value-card">
+          <h3>Context you don't re-feed</h3>
+          <p>Recall returns the few memories that matter instead of the whole history, so the context you pay for carries decisions rather than repeated background. Not every session gets cheaper. Fewer of them start by re-reading the same story.</p>
+        </div>
+        <div class="value-card">
+          <h3>One memory, every tool</h3>
+          <p>Claude Code, Codex, Cursor and anything MCP-capable read the same local node, so a decision made in one shows up in the next. Switch tools without starting over.</p>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <section class="v11-home-band">
     <div class="container">
