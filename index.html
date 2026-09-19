@@ -147,7 +147,7 @@ h2 {
 }
 .section-desc {
   font-size: 1.1rem; color: var(--muted);
-  max-width: 560px; line-height: 1.7;
+  max-width: 780px; line-height: 1.7;
 }
 
 /* ─── Buttons ─── */
@@ -339,8 +339,8 @@ h1 em {
   column-gap: 12px;
   align-items: start;
 }
-.ico { display: block; width: 22px; height: 22px; filter: drop-shadow(0 0 7px rgba(167,139,250,0.3)); }
-.proof-chip .ico { grid-row: span 2; width: 28px; height: 28px; margin-top: 1px; }
+.ico { display: block; width: 32px; height: 32px; filter: drop-shadow(0 0 7px rgba(167,139,250,0.3)); }
+.proof-chip .ico { grid-row: span 2; width: 38px; height: 38px; margin-top: 1px; }
 .proof-chip strong {
   display: block;
   color: var(--bright);
@@ -409,6 +409,7 @@ h1 em {
   gap: 24px;
   align-items: center;
 }
+.install-row > * { min-width: 0; }
 .install-note {
   border: 1px solid rgba(167,139,250,0.12);
   border-radius: 12px;
@@ -485,14 +486,14 @@ h1 em {
   text-transform: uppercase; letter-spacing: 0.1em; font-family: var(--font-mono);
 }
 .free-prompt-box {
-  display: inline-flex; align-items: center; gap: 12px;
+  display: flex; align-items: flex-start; gap: 12px;
   padding: 14px 24px; background: var(--surface);
   border: 1px solid var(--border); border-radius: 12px;
-  max-width: 620px; margin: 0 auto; cursor: pointer;
+  max-width: min(620px, 100%); margin: 0 auto; cursor: pointer;
   transition: all 0.25s ease; position: relative;
 }
 .free-prompt-box:hover { border-color: var(--accent); box-shadow: 0 0 30px rgba(124,58,237,0.15); }
-.free-prompt-text { font-size: 0.92rem; color: var(--bright); line-height: 1.5; text-align: left; flex: 1; }
+.free-prompt-text { font-size: 0.92rem; color: var(--bright); line-height: 1.5; text-align: left; flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .free-prompt-text em { color: #22c55e; font-style: normal; font-weight: 600; }
 .free-prompt-copy {
   flex-shrink: 0; padding: 6px 14px; background: var(--raised);
@@ -539,7 +540,7 @@ h1 em {
 }
 .value-card:hover { background: rgba(167,139,250,0.06); border-color: rgba(167,139,250,0.15); transform: translateY(-2px); }
 .value-card-icon { font-size: 1.8rem; margin-bottom: 12px; }
-.value-card-icon .ico { width: 30px; height: 30px; margin: 0 auto; }
+.value-card-icon .ico { width: 48px; height: 48px; margin: 0 auto; }
 .value-card h3 { font-size: 0.95rem; font-weight: 600; color: var(--bright); margin-bottom: 6px; }
 .value-card p { font-size: 0.82rem; color: var(--muted); line-height: 1.55; }
 
@@ -576,7 +577,7 @@ h1 em {
   text-align: left; line-height: 1.35;
 }
 .faq-q:focus-visible { outline: 2px solid rgba(167,139,250,0.55); outline-offset: 4px; border-radius: 6px; }
-.faq-chev { flex: 0 0 auto; width: 18px; height: 18px; color: var(--accent); transition: transform 0.3s ease; }
+.faq-chev { flex: 0 0 auto; width: 22px; height: 22px; color: var(--accent); transition: transform 0.3s ease; }
 .faq-item.open .faq-chev { transform: rotate(180deg); }
 .faq-a { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.32s ease; }
 .faq-item.open .faq-a { grid-template-rows: 1fr; }
