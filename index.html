@@ -58,6 +58,10 @@ body {
   overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
 }
+/* Links carry the accent colour, and a followed one reads white rather than the
+   browser's default blue-violet, which is unreadable on this background. */
+a { color: var(--accent); }
+a:visited { color: #ffffff; }
 
 /* ─── Neural Canvas Background ─── */
 .neural-canvas {
@@ -324,29 +328,30 @@ h1 em {
   margin: 22px 0 22px;
   max-width: 620px;
 }
+.v11-hero-grid .hero-proof { grid-column: 1 / -1; max-width: none; margin: 34px 0 0; gap: 14px; }
 .proof-chip {
-  padding: 10px 12px;
+  padding: 14px 16px;
   border: 1px solid rgba(167,139,250,0.12);
   border-radius: 10px;
   background: rgba(17,11,34,0.74);
   display: grid;
   grid-template-columns: auto 1fr;
-  column-gap: 9px;
+  column-gap: 12px;
   align-items: start;
 }
 .ico { display: block; width: 22px; height: 22px; filter: drop-shadow(0 0 7px rgba(167,139,250,0.3)); }
-.proof-chip .ico { grid-row: span 2; width: 20px; height: 20px; margin-top: 1px; }
+.proof-chip .ico { grid-row: span 2; width: 28px; height: 28px; margin-top: 1px; }
 .proof-chip strong {
   display: block;
   color: var(--bright);
-  font-size: 0.9rem;
+  font-size: 1rem;
   line-height: 1.2;
 }
 .proof-chip span {
   display: block;
   color: var(--muted);
-  font-size: 0.72rem;
-  margin-top: 3px;
+  font-size: 0.8rem;
+  margin-top: 5px;
 }
 .hero-visual {
   position: relative;
@@ -1134,17 +1139,17 @@ footer a:hover { text-decoration: underline; }
           <div class="hero-kicker">SAGE v11.23.2 · durable memory for AI agents</div>
           <h1>Your agent shouldn't start from <em>zero</em> every session</h1>
           <p class="hero-sub">SAGE keeps durable memory outside the model: what you decided, what broke, what you already ruled out. Your agent opens a session with that context instead of a blank slate, so you spend turns on the work instead of re-explaining it. Works with Claude Code, Codex, Cursor and anything MCP-capable.</p>
-          <div class="hero-proof">
-            <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-local"></use></svg><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
-            <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-recall"></use></svg><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
-            <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-federation"></use></svg><strong>Federation</strong><span>LAN / VPN / internet</span></div>
-          </div>
         </div>
         <div class="hero-visual" aria-label="CEREBRUM MRI brain dashboard screenshot">
           <button class="hero-shot" onclick="openLightbox(0)" aria-label="Open CEREBRUM MRI screenshot">
             <img src="screen-brain.png" alt="CEREBRUM MRI brain dashboard with memory nodes inside a 3D brain">
             <span class="hero-shot-label">CEREBRUM MRI</span>
           </button>
+        </div>
+        <div class="hero-proof">
+          <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-local"></use></svg><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
+          <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-recall"></use></svg><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
+          <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-federation"></use></svg><strong>Federation</strong><span>LAN / VPN / internet</span></div>
         </div>
       </div>
       <div class="hero-cta-strip">
