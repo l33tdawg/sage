@@ -1044,7 +1044,7 @@ footer a:hover { text-decoration: underline; }
         <div class="hero-copy">
           <div class="hero-kicker">SAGE v11.23.2 · governed local memory · controlled agent collaboration</div>
           <h1>Your AI's memory, visible as a <em>living brain</em></h1>
-          <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, attributed memory, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
+          <p class="hero-sub">One local memory node for Claude Code, Codex, Cursor, Windsurf and any MCP-capable agent. Semantic recall, attributed memory, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
           <div class="hero-proof">
             <div class="proof-chip"><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
             <div class="proof-chip"><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
@@ -1091,7 +1091,7 @@ footer a:hover { text-decoration: underline; }
         <div>
           <div class="section-tag">Install in minutes</div>
           <h2>Download it, open CEREBRUM, connect your AI.</h2>
-          <p class="section-desc">v11 is dashboard-first. The onboarding flow handles semantic memory, AI-tool connection, and setup recovery without making users edit config files by hand.</p>
+          <p class="section-desc">v11 is dashboard-first. Setup walks you through semantic memory, connecting your AI tools, and recovering a half-finished install, so you don't have to hand-edit config files.</p>
         </div>
         <div class="install-note">
           <h3>Or tell your AI to connect itself</h3>
@@ -1183,7 +1183,7 @@ footer a:hover { text-decoration: underline; }
       <div class="reveal" style="text-align:center;">
         <div class="section-tag">Capabilities</div>
         <h2>Memory infrastructure for AI agents</h2>
-        <p class="section-desc" style="margin:0 auto;">Governed institutional memory: validated by BFT consensus, scored by confidence, decay-aware over time.</p>
+        <p class="section-desc" style="margin:0 auto;">Governed institutional memory: a BFT quorum on a network, your node's own signed vote on a personal install. Confidence-scored, and decay-aware.</p>
       </div>
 
       <!-- What's New -->
@@ -1251,7 +1251,7 @@ footer a:hover { text-decoration: underline; }
         </div>
         <div class="faq-grid reveal">
           <div class="faq-item"><h3>What is SAGE?</h3><p>SAGE is local memory infrastructure for AI agents. It gives tools like Claude Code, Codex, Cursor, Windsurf, and Claude Desktop a persistent memory server they can use through MCP or REST.</p></div>
-          <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation, confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
+          <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation (a network quorum, or your node's own vote), confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
           <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
           <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
           <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.23.2 makes that activation work on chains whose older public records predate it.</p></div>
