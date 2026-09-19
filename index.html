@@ -329,7 +329,13 @@ h1 em {
   border: 1px solid rgba(167,139,250,0.12);
   border-radius: 10px;
   background: rgba(17,11,34,0.74);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 9px;
+  align-items: start;
 }
+.ico { display: block; width: 22px; height: 22px; filter: drop-shadow(0 0 7px rgba(167,139,250,0.3)); }
+.proof-chip .ico { grid-row: span 2; width: 20px; height: 20px; margin-top: 1px; }
 .proof-chip strong {
   display: block;
   color: var(--bright);
@@ -528,6 +534,7 @@ h1 em {
 }
 .value-card:hover { background: rgba(167,139,250,0.06); border-color: rgba(167,139,250,0.15); transform: translateY(-2px); }
 .value-card-icon { font-size: 1.8rem; margin-bottom: 12px; }
+.value-card-icon .ico { width: 30px; height: 30px; margin: 0 auto; }
 .value-card h3 { font-size: 0.95rem; font-weight: 600; color: var(--bright); margin-bottom: 6px; }
 .value-card p { font-size: 0.82rem; color: var(--muted); line-height: 1.55; }
 
@@ -552,11 +559,24 @@ h1 em {
 .feature-card p { font-size: 0.88rem; color: var(--muted); line-height: 1.6; }
 .faq-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 36px; }
 .faq-item {
-  padding: 24px; background: rgba(167,139,250,0.02);
+  padding: 4px 22px 0; background: rgba(167,139,250,0.02);
   border: 1px solid rgba(167,139,250,0.08); border-radius: 14px;
+  transition: background 0.3s, border-color 0.3s;
 }
-.faq-item h3 { font-size: 0.98rem; color: var(--bright); margin-bottom: 8px; }
-.faq-item p { font-size: 0.86rem; color: var(--muted); line-height: 1.6; }
+.faq-item:hover { background: rgba(167,139,250,0.045); border-color: rgba(167,139,250,0.16); }
+.faq-q {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  width: 100%; padding: 18px 0; margin: 0; background: none; border: 0; cursor: pointer;
+  font-family: inherit; font-size: 0.98rem; font-weight: 600; color: var(--bright);
+  text-align: left; line-height: 1.35;
+}
+.faq-q:focus-visible { outline: 2px solid rgba(167,139,250,0.55); outline-offset: 4px; border-radius: 6px; }
+.faq-chev { flex: 0 0 auto; width: 18px; height: 18px; color: var(--accent); transition: transform 0.3s ease; }
+.faq-item.open .faq-chev { transform: rotate(180deg); }
+.faq-a { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.32s ease; }
+.faq-item.open .faq-a { grid-template-rows: 1fr; }
+.faq-a > p { overflow: hidden; margin: 0; font-size: 0.86rem; color: var(--muted); line-height: 1.6; }
+.faq-item.open .faq-a > p { padding-bottom: 20px; }
 
 /* ─── What's New Banner ─── */
 .whats-new { background: linear-gradient(135deg, rgba(124,58,237,0.08), rgba(244,114,182,0.05)); border: 1px solid rgba(167,139,250,0.15); border-radius: 16px; padding: 32px; margin-top: 48px; }
@@ -1009,6 +1029,75 @@ footer a:hover { text-decoration: underline; }
 </head>
 <body>
 
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <defs>
+    <linearGradient id="sageNode" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#c4b5fd"/>
+      <stop offset="0.55" stop-color="#a78bfa"/>
+      <stop offset="1" stop-color="#2dd4bf"/>
+    </linearGradient>
+  </defs>
+  <symbol id="i-local" viewBox="0 0 24 24">
+    <rect x="2.8" y="5" width="18.4" height="14" rx="3.6" fill="none" stroke="url(#sageNode)" stroke-width="1.5"/>
+    <circle cx="8.6" cy="12" r="2.7" fill="url(#sageNode)"/>
+    <path d="M14.3 9.9h3.5M14.3 14.1h3.5" fill="none" stroke="url(#sageNode)" stroke-width="1.4" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-recall" viewBox="0 0 24 24">
+    <path d="M14 7.9a6.4 6.4 0 0 1 0 8.2" fill="none" stroke="url(#sageNode)" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M17.4 5.4a10.4 10.4 0 0 1 0 13.2" fill="none" stroke="url(#sageNode)" stroke-width="1.2" stroke-linecap="round" opacity="0.6"/>
+    <circle cx="9.6" cy="12" r="2.9" fill="url(#sageNode)"/>
+    <circle cx="20.8" cy="12" r="1.35" fill="url(#sageNode)" opacity="0.9"/>
+  </symbol>
+  <symbol id="i-federation" viewBox="0 0 24 24">
+    <path d="M6.3 16.6 10.7 8.2" fill="none" stroke="url(#sageNode)" stroke-width="1.4" stroke-linecap="round"/>
+    <path d="M13.5 8 17.9 14.6" fill="none" stroke="url(#sageNode)" stroke-width="1.4" stroke-linecap="round"/>
+    <path d="M6.1 18.5c4.5 2.5 10.3 1.5 13.3-2.3" fill="none" stroke="url(#sageNode)" stroke-width="1.1" stroke-linecap="round" stroke-dasharray="2 3" opacity="0.75"/>
+    <circle cx="12" cy="5.6" r="2.5" fill="url(#sageNode)"/>
+    <circle cx="4.7" cy="18.2" r="2" fill="none" stroke="url(#sageNode)" stroke-width="1.5"/>
+    <circle cx="19.4" cy="16.1" r="2" fill="none" stroke="url(#sageNode)" stroke-width="1.5"/>
+  </symbol>
+  <symbol id="i-informed" viewBox="0 0 24 24">
+    <path d="M6.2 3.4h7.6l4 4v13.2H6.2z" fill="none" stroke="url(#sageNode)" stroke-width="1.5" stroke-linejoin="round"/>
+    <path d="M13.8 3.4v4.1h4" fill="none" stroke="url(#sageNode)" stroke-width="1.3" stroke-linejoin="round"/>
+    <path d="M9.2 11.6h6M9.2 14.6h3.4" fill="none" stroke="url(#sageNode)" stroke-width="1.4" stroke-linecap="round"/>
+    <circle cx="16.5" cy="17.7" r="2.9" fill="url(#sageNode)"/>
+  </symbol>
+  <symbol id="i-decided" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="8.6" fill="none" stroke="url(#sageNode)" stroke-width="1.5"/>
+    <path d="M8.2 12.3l2.6 2.6 5-5.4" fill="none" stroke="url(#sageNode)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+  </symbol>
+  <symbol id="i-context" viewBox="0 0 24 24">
+    <path d="M4.2 4.4h15.6l-5.4 6.5v8.3h-4.8v-8.3z" fill="none" stroke="url(#sageNode)" stroke-width="1.5" stroke-linejoin="round"/>
+    <circle cx="12" cy="16.2" r="1.9" fill="url(#sageNode)"/>
+  </symbol>
+  <symbol id="i-onememory" viewBox="0 0 24 24">
+    <path d="M12 6.6v2.6M12 14.8v2.6M6.6 12h2.6M14.8 12h2.6" fill="none" stroke="url(#sageNode)" stroke-width="1.4" stroke-linecap="round"/>
+    <circle cx="12" cy="12" r="3" fill="url(#sageNode)"/>
+    <circle cx="12" cy="4.6" r="1.6" fill="none" stroke="url(#sageNode)" stroke-width="1.4"/>
+    <circle cx="12" cy="19.4" r="1.6" fill="none" stroke="url(#sageNode)" stroke-width="1.4"/>
+    <circle cx="4.6" cy="12" r="1.6" fill="none" stroke="url(#sageNode)" stroke-width="1.4"/>
+    <circle cx="19.4" cy="12" r="1.6" fill="none" stroke="url(#sageNode)" stroke-width="1.4"/>
+  </symbol>
+  <symbol id="i-key" viewBox="0 0 24 24">
+    <circle cx="9.4" cy="9.4" r="5.1" fill="none" stroke="url(#sageNode)" stroke-width="1.6"/>
+    <circle cx="9.4" cy="9.4" r="1.9" fill="url(#sageNode)"/>
+    <path d="M13.2 13.2 19.6 19.6" fill="none" stroke="url(#sageNode)" stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M17.6 17.6l-1.9 1.9M15.4 15.4l-1.7 1.7" fill="none" stroke="url(#sageNode)" stroke-width="1.6" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-signed" viewBox="0 0 24 24">
+    <path d="M12 2.9 20 6v6.1c0 4.5-3.4 7.6-8 9.1-4.6-1.5-8-4.6-8-9.1V6z" fill="none" stroke="url(#sageNode)" stroke-width="1.5" stroke-linejoin="round"/>
+    <circle cx="12" cy="11" r="2.6" fill="url(#sageNode)"/>
+    <path d="M12 13.5v3.2" fill="none" stroke="url(#sageNode)" stroke-width="1.4" stroke-linecap="round"/>
+  </symbol>
+  <symbol id="i-clients" viewBox="0 0 24 24">
+    <path d="M8.4 8.4 11 10.8M15.6 8.4 13 10.8M12 15.4v-2.1" fill="none" stroke="url(#sageNode)" stroke-width="1.3" stroke-linecap="round"/>
+    <circle cx="12" cy="12.4" r="2.6" fill="url(#sageNode)"/>
+    <rect x="4.9" y="4.9" width="3.4" height="3.4" rx="1" fill="none" stroke="url(#sageNode)" stroke-width="1.3"/>
+    <circle cx="16.1" cy="6.6" r="1.8" fill="none" stroke="url(#sageNode)" stroke-width="1.3"/>
+    <path d="M12 17.3 13.9 20.5h-3.8z" fill="none" stroke="url(#sageNode)" stroke-width="1.2" stroke-linejoin="round"/>
+  </symbol>
+</svg>
+
 <canvas class="neural-canvas" id="neural"></canvas>
 
 <!-- Nav -->
@@ -1046,9 +1135,9 @@ footer a:hover { text-decoration: underline; }
           <h1>Your agent shouldn't start from <em>zero</em> every session</h1>
           <p class="hero-sub">SAGE keeps durable memory outside the model: what you decided, what broke, what you already ruled out. Your agent opens a session with that context instead of a blank slate, so you spend turns on the work instead of re-explaining it. Works with Claude Code, Codex, Cursor and anything MCP-capable.</p>
           <div class="hero-proof">
-            <div class="proof-chip"><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
-            <div class="proof-chip"><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
-            <div class="proof-chip"><strong>Federation</strong><span>LAN / VPN / internet</span></div>
+            <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-local"></use></svg><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
+            <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-recall"></use></svg><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
+            <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-federation"></use></svg><strong>Federation</strong><span>LAN / VPN / internet</span></div>
           </div>
         </div>
         <div class="hero-visual" aria-label="CEREBRUM MRI brain dashboard screenshot">
@@ -1093,18 +1182,22 @@ footer a:hover { text-decoration: underline; }
       <p class="section-desc">We run our own agents on it. The note one session leaves about why a decision went a certain way is what the next session reads before it touches that code.</p>
       <div class="value-grid reveal">
         <div class="value-card">
+          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-informed"></use></svg></div>
           <h3>It starts informed</h3>
           <p>A session opens, reads what earlier sessions learned, and gets to work. Your agent stops spending its first turns reconstructing where things stand.</p>
         </div>
         <div class="value-card">
+          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-decided"></use></svg></div>
           <h3>Decisions stay decided</h3>
           <p>Rejected approaches and settled calls are recorded with the reasoning behind them, so an agent that never saw the thread doesn't re-open a question you already closed.</p>
         </div>
         <div class="value-card">
+          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-context"></use></svg></div>
           <h3>Context you don't re-feed</h3>
           <p>Recall returns the few memories that matter instead of the whole history, so the context you pay for carries decisions rather than repeated background. Not every session gets cheaper. Fewer of them start by re-reading the same story.</p>
         </div>
         <div class="value-card">
+          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-onememory"></use></svg></div>
           <h3>One memory, every tool</h3>
           <p>Claude Code, Codex, Cursor and anything MCP-capable read the same local node, so a decision made in one shows up in the next. Switch tools without starting over.</p>
         </div>
@@ -1167,18 +1260,22 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="value-grid reveal">
         <div class="value-card">
+          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-local"></use></svg></div>
           <h3>Local by Default</h3>
           <p>No required cloud account or telemetry. Memories stay under <code>~/.sage/</code> unless you explicitly enable federation, sync, or a connector.</p>
         </div>
         <div class="value-card">
+          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg></div>
           <h3>AES-256 Encrypted</h3>
           <p>Optional encryption at rest. If your laptop is stolen or synced to the cloud, nothing is readable.</p>
         </div>
         <div class="value-card">
+          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-signed"></use></svg></div>
           <h3>Tamper-Evident</h3>
           <p>Every memory is digitally signed. Full audit trail. Verify nothing has been altered or injected.</p>
         </div>
         <div class="value-card">
+          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-clients"></use></svg></div>
           <h3>Works With Any MCP Client</h3>
           <p>Claude, Cursor, Cline, DeepSeek, Gemini, LM Studio, Ollama. Any model, any provider.</p>
         </div>
@@ -1277,17 +1374,50 @@ footer a:hover { text-decoration: underline; }
           <h2>Questions before you install</h2>
         </div>
         <div class="faq-grid reveal">
-          <div class="faq-item"><h3>What is SAGE?</h3><p>SAGE is local memory infrastructure for AI agents. It gives tools like Claude Code, Codex, Cursor, Windsurf, and Claude Desktop a persistent memory server they can use through MCP or REST.</p></div>
-          <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation (a network quorum, or your node's own vote), confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
-          <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
-          <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
-          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.23.2 makes that activation work on chains whose older public records predate it.</p></div>
-          <div class="faq-item"><h3>What does federation mean?</h3><p>Federation links separate SAGE nodes through a human-verified ceremony. Trusted peers running v11.19.16 or later can discover and message eligible agents automatically. Pairing alone shares no memory domains: the local owner chooses specific domains and a bounded Read or Copy policy. A remote agent can't gain local write, ownership, role, or Root authority through federation.</p></div>
-          <div class="faq-item"><h3>Do I need an account, or a paid plan?</h3><p>Neither. SAGE is Apache 2.0 and runs on your machine with no SAGE account, no telemetry and no metered tier. The ChatGPT connector is the one piece with an upstream requirement: it needs a ChatGPT plan that includes MCP connectors, which is an OpenAI subscription, not a SAGE one.</p></div>
-          <div class="faq-item"><h3>What does it need to run?</h3><p>One binary, plus an embedding provider. Setup points it at Ollama on the same machine; <code>SAGE_EMBEDDING_PROVIDER</code>, <code>SAGE_EMBEDDING_BASE_URL</code> and <code>SAGE_EMBEDDING_MODEL</code> point it somewhere else instead. The reranker installs itself on first use, and macOS, Linux and Windows builds ship from every release.</p></div>
-          <div class="faq-item"><h3>Does it work offline?</h3><p>Storage, recall and the dashboard are local, so they keep working with the network down. Only the flows you configure reach out: federation, a Cloudflare tunnel for ChatGPT, or a remote embedding or reranking provider.</p></div>
-          <div class="faq-item"><h3>How do I back it up or move it?</h3><p><code>sage-gui backup --full</code> writes a complete stopped-node archive and <code>restore --from</code> puts it back, on this machine or another one. The node also takes scheduled snapshots under <code>~/.sage/data/snapshots/</code>, encrypted with your vault passphrase.</p></div>
-          <div class="faq-item"><h3>Can I delete a memory?</h3><p>You can deprecate one with <code>sage_forget</code> or from the dashboard, and it stops appearing in recall. It is not erased from the chain: the audit trail is the point, so a forgotten memory is recorded as forgotten rather than quietly dropped.</p></div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>What is SAGE?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>SAGE is local memory infrastructure for AI agents. It gives tools like Claude Code, Codex, Cursor, Windsurf, and Claude Desktop a persistent memory server they can use through MCP or REST.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>Is this just a vector database?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>No. SAGE stores memories with signatures, consensus validation (a network quorum, or your node's own vote), confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>Where does my data live?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>Which AI tools can use it?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>What changed in v11?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.23.2 makes that activation work on chains whose older public records predate it.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>What does federation mean?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>Federation links separate SAGE nodes through a human-verified ceremony. Trusted peers running v11.19.16 or later can discover and message eligible agents automatically. Pairing alone shares no memory domains: the local owner chooses specific domains and a bounded Read or Copy policy. A remote agent can't gain local write, ownership, role, or Root authority through federation.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>Do I need an account, or a paid plan?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>Neither. SAGE is Apache 2.0 and runs on your machine with no SAGE account, no telemetry and no metered tier. The ChatGPT connector is the one piece with an upstream requirement: it needs a ChatGPT plan that includes MCP connectors, which is an OpenAI subscription, not a SAGE one.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>What does it need to run?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>One binary, plus an embedding provider. Setup points it at Ollama on the same machine; <code>SAGE_EMBEDDING_PROVIDER</code>, <code>SAGE_EMBEDDING_BASE_URL</code> and <code>SAGE_EMBEDDING_MODEL</code> point it somewhere else instead. The reranker installs itself on first use, and macOS, Linux and Windows builds ship from every release.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>Does it work offline?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>Storage, recall and the dashboard are local, so they keep working with the network down. Only the flows you configure reach out: federation, a Cloudflare tunnel for ChatGPT, or a remote embedding or reranking provider.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>How do I back it up or move it?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p><code>sage-gui backup --full</code> writes a complete stopped-node archive and <code>restore --from</code> puts it back, on this machine or another one. The node also takes scheduled snapshots under <code>~/.sage/data/snapshots/</code>, encrypted with your vault passphrase.</p></div>
+        </div>
+          <div class="faq-item">
+          <button class="faq-q" type="button" aria-expanded="false"><span>Can I delete a memory?</span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
+          <div class="faq-a"><p>You can deprecate one with <code>sage_forget</code> or from the dashboard, and it stops appearing in recall. It is not erased from the chain: the audit trail is the point, so a forgotten memory is recorded as forgotten rather than quietly dropped.</p></div>
+        </div>
         </div>
       </div>
     </div>
@@ -1603,6 +1733,25 @@ footer a:hover { text-decoration: underline; }
 </footer>
 
 <script>
+// FAQ disclosure: click to expose an answer. The first one starts open so the
+// section does not read as a wall of closed rows.
+(function () {
+  const items = document.querySelectorAll('.faq-item');
+  items.forEach(function (item) {
+    const btn = item.querySelector('.faq-q');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      const open = item.classList.toggle('open');
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+  });
+  if (items.length) {
+    items[0].classList.add('open');
+    const first = items[0].querySelector('.faq-q');
+    if (first) first.setAttribute('aria-expanded', 'true');
+  }
+})();
+
 // ─── Tab Navigation ───
 // Scroll-reveal observer — declared before switchTab() so that a #hash deep-link
 // (e.g. reloading the page while on #features) does not call switchTab() before
