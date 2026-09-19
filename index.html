@@ -13,7 +13,7 @@
 </script>
 <title>SAGE v11 — CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Install SAGE v11.19.19: the latest security update for local-first AI memory, with trusted-node agent messaging, a live federation connectome, and explicit memory-sharing controls.">
+<meta name="description" content="Install SAGE v11.23.2: governed local-first memory for AI agents, with consensus-validated recall, encrypted agent working state, controlled federation, and in-place upgrades.">
 <meta name="theme-color" content="#0a0614">
 <meta property="og:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
 <meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
@@ -1042,7 +1042,7 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="v11-hero-grid">
         <div class="hero-copy">
-          <div class="hero-kicker">SAGE v11.19.19 · governed local memory · controlled agent collaboration</div>
+          <div class="hero-kicker">SAGE v11.23.2 · governed local memory · controlled agent collaboration</div>
           <h1>Your AI's memory, visible as a <em>living brain</em></h1>
           <p class="hero-sub">SAGE gives Claude Code, Codex, Cursor, Windsurf, and any MCP-capable agent one local memory node: semantic recall, attributed memory, encrypted storage, and a CEREBRUM dashboard built around the 3D MRI brain.</p>
           <div class="hero-proof">
@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.19.19</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.23.2</strong> &mdash; signed release assets
         </div>
         <div id="minds-freed" class="download-counter">
           <span class="download-counter-pill">
@@ -1117,7 +1117,7 @@ footer a:hover { text-decoration: underline; }
           <img src="screen-network.png" alt="Federation dashboard showing LAN and internet SAGE-to-SAGE links">
         </div>
         <div class="reveal">
-          <div class="section-tag">Built through v11.19.19</div>
+          <div class="section-tag">Built through v11.23.2</div>
           <h2>Keep agents connected, governed, and safely up to date.</h2>
           <p class="section-desc">CEREBRUM is the local control plane for memory, agent access, recovery, and sharing. Existing nodes upgrade in place; memory history stays attributable while current access remains explicit and reviewable.</p>
           <ul class="fed-list">
@@ -1188,13 +1188,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.19.19</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">The latest release updates gRPC-Go to v1.83.2 for a security fix. It builds on recent improvements to trusted-node messaging, the federation connectome, and memory cleanup. Existing nodes upgrade in place with no consensus or storage migration. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.19.19" style="color:var(--accent);">Read the release notes &rarr;</a></p>
+        <h3>What's new in <span id="whats-new-version">v11.23.2</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">The 11.23 line activates app-v28 — the sparse public-memory Merkle commitment, and a co-commit rule enforced by consensus rather than only at the node's REST boundary — and 11.23.2 makes that activation complete on a chain whose older public records predate the fork. Existing nodes upgrade in place, with no chain reset and no transaction-type change. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.23.2" style="color:var(--accent);">Read the release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Security update</h4><p>v11.19.19 includes the gRPC-Go fix for CVE-2026-84445. macOS installers are signed and notarized, and release downloads include checksums.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>See your federation</h4><p>Explore connected nodes and agent clusters in a searchable map or List view. Live transport activity and visible agent orbits make the network easier to follow, with pause and reduced-motion controls.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Connect nodes, find agents</h4><p>Trusted peers running v11.19.16 or later automatically expose eligible agents for discovery and messaging. Root identities stay excluded; memory sharing still needs an explicit Read or Copy grant.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Review cleanup before it runs</h4><p>Memory cleanup scans the full inventory, previews eligible records, and processes changes through consensus. Open tasks and internal records are protected, with progress shown through observed outcomes.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>App-v28 activates</h4><p>The public-memory commitment becomes AppHash-covered and the co-commit rule moves into consensus, so a memory the quorum already rejected cannot have its exact bytes re-admitted by any submission path. Personal nodes walk the rung automatically, in place.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>An activation that could finish</h4><p>v11.23.2 fixes the case where an older chain could not open the fork at all: legacy public records whose content hash had been erased by a historical lifecycle transition now stay out of the committed public set instead of aborting the activation block on every replay.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Encrypted agent working state</h4><p>Private media and a compare-and-swap workflow journal live encrypted on your node, reachable only from inside the agent boundary — and the node reports its storage posture honestly rather than silently storing plaintext.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Upgrades are deliberate</h4><p>An App version panel and an explicit upgrade vote make a consensus fork something you choose, and a node killed mid-submission remembers the abandoned transaction instead of re-seeding nonces past it.</p></div></div>
         </div>
       </div>
 
@@ -1216,7 +1216,7 @@ footer a:hover { text-decoration: underline; }
       <div class="section-header" style="margin-top:64px;">
         <div class="section-tag">Agent coordination</div>
         <h2>Durable work.<br>Explicit ownership.</h2>
-        <p class="section-desc" style="margin:0 auto;">Available in v11.19.19: persistent task backlogs, a unified inbox, and deliberate handoff between runtimes &mdash; with assignment, delivery, and replies kept distinct.</p>
+        <p class="section-desc" style="margin:0 auto;">Available in v11: persistent task backlogs, a unified inbox, and deliberate handoff between runtimes &mdash; with assignment, delivery, and replies kept distinct.</p>
       </div>
       <div class="features-grid reveal">
         <div class="feature-card"><div><h3>Persistent task backlog</h3><p><code>sage_task</code> creates durable tasks and tracks planned, in-progress, done, or dropped status. Open tasks do not decay. <code>sage_backlog</code> returns work assigned to your exact agent identity, subject to current access permissions.</p></div></div>
@@ -1226,7 +1226,7 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>Threaded answers and wake hints</h3><p><code>sage_message_reply</code> returns results to the original sender; <code>sage_message_replies</code> pages through those answers. The signed local wake stream lets supervisors wait for inbox changes, but a wake is never a delivery receipt, read receipt, or claim.</p></div></div>
         <div class="feature-card"><div><h3>Governed collaboration</h3><p>Agent identity, live permissions, and explicit task assignment remain authoritative. Message payloads and replies are untrusted data, not permission to execute instructions. Federated collaboration never grants local write or administrative authority by itself.</p></div></div>
       </div>
-      <p style="text-align:center;margin-top:24px;">Read the <a href="https://github.com/l33tdawg/sage/blob/v11.19.19/docs/reference/mcp-tools.md">MCP task and messaging reference</a>, <a href="https://github.com/l33tdawg/sage/blob/v11.19.19/docs/reference/concepts/message-reply-lifecycle.md">reply lifecycle</a>, and <a href="https://github.com/l33tdawg/sage/blob/v11.19.19/docs/reference/concepts/message-wake-bus.md">wake-stream contract</a>.</p>
+      <p style="text-align:center;margin-top:24px;">Read the <a href="https://github.com/l33tdawg/sage/blob/v11.23.2/docs/reference/mcp-tools.md">MCP task and messaging reference</a>, <a href="https://github.com/l33tdawg/sage/blob/v11.23.2/docs/reference/concepts/message-reply-lifecycle.md">reply lifecycle</a>, and <a href="https://github.com/l33tdawg/sage/blob/v11.23.2/docs/reference/concepts/message-wake-bus.md">wake-stream contract</a>.</p>
 
       <!-- Screenshots -->
       <div style="margin-top:80px;">
@@ -1254,7 +1254,7 @@ footer a:hover { text-decoration: underline; }
           <div class="faq-item"><h3>Is this just a vector database?</h3><p>No. SAGE stores memories with signatures, consensus validation, confidence scoring, decay, clearance, domain permissions, full-text search, semantic recall, and optional local reranking.</p></div>
           <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
           <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
-          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add automatic trusted-node agent messaging, a live federation connectome, explicit sharing drafts, and safer memory cleanup. v11.19.19 brings the latest gRPC security patch.</p></div>
+          <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.23.2 makes that activation work on chains whose older public records predate it.</p></div>
           <div class="faq-item"><h3>What does federation mean?</h3><p>Federation links separate SAGE nodes through a human-verified ceremony. Trusted peers running v11.19.16 or later can discover and message eligible agents automatically. Pairing alone shares no memory domains: the local owner chooses specific domains and a bounded Read or Copy policy. A remote agent cannot gain local write, ownership, role, or Root authority through federation.</p></div>
         </div>
       </div>
@@ -1483,7 +1483,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">&nbsp; Dashboard: http://localhost:8080/ui/</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Or use the Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.19.19"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=11.23.2"</span></div>
         </div>
       </div>
 
