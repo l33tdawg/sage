@@ -700,248 +700,14 @@ h1 em {
 
 /* ─── Privacy Visual ─── */
 .privacy-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 48px; align-items: center; margin-top: 48px; }
-.privacy-visual { position: relative; display: flex; justify-content: center; align-items: center; min-height: 260px; }
-.privacy-brain {
-  position: relative;
-  width: min(390px, 100%);
-  min-height: 330px;
-  font-family: var(--font-mono);
-}
-.privacy-brain::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 330px;
-  height: 330px;
-  transform: translate(-50%, -50%);
-  border: 1px solid rgba(45,212,191,0.08);
-  border-radius: 50%;
-}
-.privacy-brain::after {
-  content: '';
-  position: absolute;
-  left: 50%;
-  bottom: 32px;
-  width: 268px;
-  height: 22px;
-  transform: translateX(-50%);
-  background: radial-gradient(ellipse, rgba(45,212,191,0.26), transparent 70%);
-  border-radius: 50%;
-}
-.scanner-frame {
-  position: absolute;
-  left: 50%;
-  top: 18px;
-  width: 300px;
-  height: 254px;
-  transform: translateX(-50%);
-  border: 1px solid rgba(45,212,191,0.16);
-  border-radius: 42px;
-  background:
-    linear-gradient(90deg, rgba(45,212,191,0.06) 1px, transparent 1px) 0 0 / 34px 34px,
-    linear-gradient(0deg, rgba(125,211,252,0.045) 1px, transparent 1px) 0 0 / 34px 34px,
-    radial-gradient(circle at 50% 50%, rgba(45,212,191,0.12), transparent 58%),
-    rgba(2,6,23,0.3);
-  box-shadow:
-    0 0 42px rgba(45,212,191,0.1),
-    inset 0 0 46px rgba(14,165,233,0.08);
-  overflow: hidden;
-}
-.scanner-frame::before,
-.scanner-frame::after {
-  content: '';
-  position: absolute;
-  top: 18px;
-  bottom: 18px;
-  width: 2px;
-  border-radius: 999px;
-  background: linear-gradient(180deg, transparent, rgba(125,211,252,0.58), rgba(45,212,191,0.4), transparent);
-  box-shadow: 0 0 16px rgba(45,212,191,0.22);
-}
-.scanner-frame::before { left: 22px; }
-.scanner-frame::after { right: 22px; }
-.scanner-grid {
-  position: absolute;
-  inset: 18px 20px;
-  border-radius: 30px;
-  border: 1px solid rgba(125,211,252,0.12);
-}
-.scanner-grid::before {
-  content: '';
-  position: absolute;
-  left: 19px;
-  right: 19px;
-  top: 14px;
-  bottom: 14px;
-  background:
-    repeating-linear-gradient(90deg, transparent 0 18px, rgba(125,211,252,0.2) 18px 19px, transparent 19px 36px),
-    repeating-linear-gradient(0deg, transparent 0 18px, rgba(45,212,191,0.14) 18px 19px, transparent 19px 36px);
-  opacity: 0.32;
-  mask-image: radial-gradient(ellipse at center, black 0 54%, transparent 78%);
-}
-.scanner-bed {
-  position: absolute;
-  left: 50%;
-  top: 49%;
-  width: 236px;
-  height: 182px;
-  transform: translate(-50%, -50%);
-  border-radius: 46% 54% 48% 52% / 56% 55% 45% 44%;
-  background:
-    radial-gradient(ellipse at 35% 42%, rgba(45,212,191,0.14), transparent 42%),
-    radial-gradient(ellipse at 66% 43%, rgba(125,211,252,0.12), transparent 40%),
-    radial-gradient(ellipse at 50% 72%, rgba(167,139,250,0.08), transparent 34%);
-  filter: drop-shadow(0 0 22px rgba(45,212,191,0.26));
-}
-.brain-scan-svg {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-}
-.brain-scan-svg .brain-fill {
-  fill: rgba(8,47,73,0.3);
-  stroke: rgba(125,211,252,0.72);
-  stroke-width: 1.05;
-}
-.brain-scan-svg .brain-fold {
-  fill: none;
-  stroke: rgba(45,212,191,0.62);
-  stroke-width: 0.82;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.9;
-}
-.brain-scan-svg .brain-midline {
-  fill: none;
-  stroke: rgba(167,139,250,0.58);
-  stroke-width: 0.9;
-  stroke-dasharray: 4 7;
-}
-.scan-beam {
-  position: absolute;
-  left: 24px;
-  right: 24px;
-  height: 54px;
-  top: 18px;
-  border-radius: 999px;
-  background:
-    linear-gradient(180deg, transparent, rgba(125,211,252,0.04) 16%, rgba(45,212,191,0.5) 48%, rgba(125,211,252,0.12) 56%, transparent),
-    linear-gradient(90deg, transparent, rgba(125,211,252,0.92), rgba(45,212,191,0.92), transparent);
-  mix-blend-mode: screen;
-  filter: blur(0.2px);
-  box-shadow:
-    0 0 28px rgba(45,212,191,0.46),
-    0 0 64px rgba(125,211,252,0.24);
-  animation: scanner-sweep 4.2s ease-in-out infinite;
-}
-.scan-beam::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 24px;
-  height: 3px;
-  border-radius: 999px;
-  background: rgba(226,232,240,0.9);
-  box-shadow: 0 0 18px rgba(125,211,252,0.78);
-}
-.scan-readout {
-  position: absolute;
-  left: 50%;
-  bottom: 14px;
-  transform: translateX(-50%);
-  display: grid;
-  grid-template-columns: repeat(12, 7px);
-  gap: 5px;
-}
-.scan-readout span {
-  width: 7px;
-  height: 18px;
-  border-radius: 999px;
-  background: rgba(45,212,191,0.18);
-  animation: scanner-bars 1.8s ease-in-out infinite;
-}
-.scan-readout span:nth-child(2n) { animation-delay: -0.3s; }
-.scan-readout span:nth-child(3n) { animation-delay: -0.7s; }
-.scan-readout span:nth-child(4n) { animation-delay: -1.1s; }
-.scan-focus {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 254px;
-  height: 192px;
-  transform: translate(-50%, -48%);
-  border: 1px solid rgba(167,139,250,0.2);
-  border-radius: 50%;
-  box-shadow: inset 0 0 32px rgba(167,139,250,0.08);
-}
-.brain-node {
-  position: absolute;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #7dd3fc;
-  box-shadow: 0 0 12px rgba(125,211,252,0.85);
-  animation: brain-node-pulse 2.8s ease-in-out infinite;
-}
-.brain-node:nth-child(1) { left: 106px; top: 86px; background: #fb7185; animation-delay: -0.2s; }
-.brain-node:nth-child(2) { left: 168px; top: 94px; background: #f59e0b; animation-delay: -0.8s; }
-.brain-node:nth-child(3) { left: 190px; top: 142px; background: #2dd4bf; animation-delay: -1.4s; }
-.brain-node:nth-child(4) { left: 136px; top: 172px; background: #a78bfa; animation-delay: -2s; }
-.brain-node:nth-child(5) { left: 86px; top: 132px; background: #22c55e; animation-delay: -2.4s; }
-.brain-caption {
-  position: absolute;
-  left: 50%;
-  bottom: 0;
-  transform: translateX(-50%);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid rgba(45,212,191,0.22);
-  border-radius: 10px;
-  background: rgba(2,6,23,0.58);
-  color: var(--teal);
-  font-size: 0.68rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  white-space: nowrap;
-  box-shadow: 0 0 24px rgba(45,212,191,0.1);
-}
-.brain-caption::before {
-  content: '';
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--teal);
-  box-shadow: 0 0 12px var(--teal);
-}
-@keyframes scanner-sweep {
-  0%, 100% { transform: translateY(6px); opacity: 0.62; }
-  48%, 52% { opacity: 1; }
-  50% { transform: translateY(162px); }
-}
-@keyframes brain-node-pulse {
-  0%, 100% { transform: scale(0.84); opacity: 0.62; }
-  50% { transform: scale(1.35); opacity: 1; }
-}
-@keyframes scanner-bars {
-  0%, 100% { opacity: 0.22; transform: scaleY(0.42); }
-  50% { opacity: 0.9; transform: scaleY(1); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .scan-beam,
-  .scan-readout span,
-  .brain-node {
-    animation: none;
-  }
-}
+.privacy-grid > * { min-width: 0; }
+.privacy-visual { position: relative; display: flex; justify-content: center; align-items: center; min-height: 260px; min-width: 0; }
+.privacy-visual .dev-install { width: 100%; max-width: 100%; }
 .privacy-points { display: flex; flex-direction: column; gap: 20px; }
 .privacy-point { display: flex; gap: 14px; align-items: flex-start; padding: 18px; background: rgba(167,139,250,0.03); border: 1px solid rgba(167,139,250,0.08); border-radius: 12px; transition: all 0.3s; }
 .privacy-point:hover { background: rgba(167,139,250,0.06); border-color: rgba(167,139,250,0.15); }
 .privacy-icon { width: 36px; height: 36px; border-radius: 9px; background: rgba(167,139,250,0.1); display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 1.1rem; }
+.privacy-icon .ico { width: 22px; height: 22px; }
 .privacy-point h3 { font-size: 0.95rem; font-weight: 600; color: var(--bright); margin-bottom: 3px; }
 .privacy-point p { font-size: 0.85rem; color: var(--muted); line-height: 1.55; }
 
@@ -1750,6 +1516,11 @@ footer a:hover { text-decoration: underline; }
             <h3>Python SDK</h3>
             <p><code>sage-agent-sdk</code> wraps the same API in <strong>94 methods</strong>, sync and async, including durable task idempotency and the agent-access helpers. <code>pip install "sage-agent-sdk&gt;=11.23.2"</code></p>
           </div>
+          <div class="value-card">
+            <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-graph"></use></svg></div>
+            <h3>OpenAPI spec</h3>
+            <p>The whole REST surface ships as <code>api/openapi.yaml</code> in the repo, so you can generate a typed client in any language instead of hand-writing the nonce, signature and retry plumbing yourself.</p>
+          </div>
         </div>
       </div>
 
@@ -1781,39 +1552,24 @@ footer a:hover { text-decoration: underline; }
         </div>
         <div class="privacy-grid reveal">
           <div class="privacy-visual">
-            <div class="privacy-brain" aria-label="Animated CEREBRUM MRI scanner examining a local memory brain">
-              <div class="scanner-frame" aria-hidden="true">
-                <div class="scanner-grid"></div>
-                <div class="scan-focus"></div>
-                <div class="scanner-bed">
-                  <svg class="brain-scan-svg" viewBox="0 0 236 182" role="img" aria-label="Top-down CEREBRUM brain scan">
-                    <path class="brain-fill" d="M118 13c-23 0-43 7-57 20-12 11-20 25-23 42-16 7-25 21-25 39 0 20 14 35 34 39 4 11 13 18 25 21 14 3 29-1 42-13l4-4 5 4c13 12 28 16 42 13 12-3 21-10 25-21 20-4 34-19 34-39 0-18-9-32-25-39-3-17-11-31-23-42-15-13-35-20-58-20Z"/>
-                    <path class="brain-midline" d="M119 21c-3 14-2 29 0 43 2 15 1 28-2 40-3 14-2 29 2 50"/>
-                    <path class="brain-fold" d="M72 33c-11 9-17 19-17 31M91 28c-9 13-8 26 2 39M63 53c13-7 28-8 42-2M45 75c16-8 34-7 49 2M35 99c17-6 36-2 52 10M49 126c14-10 30-10 45-2M72 151c9-12 19-20 32-24"/>
-                    <path class="brain-fold" d="M164 33c11 9 17 19 17 31M145 28c9 13 8 26-2 39M173 53c-13-7-28-8-42-2M191 75c-16-8-34-7-49 2M201 99c-17-6-36-2-52 10M187 126c-14-10-30-10-45-2M164 151c-9-12-19-20-32-24"/>
-                    <path class="brain-fold" d="M101 38c-13 13-17 29-11 47M135 38c14 13 17 29 11 47M83 82c15 7 24 18 28 35M153 82c-15 7-24 18-28 35M93 119c-15 4-25 13-30 27M143 119c15 4 25 13 30 27"/>
-                    <path class="brain-fold" d="M73 107c10-12 24-17 41-14M163 107c-10-12-24-17-41-14M99 67c8 8 12 18 12 32M137 67c-8 8-12 18-12 32M61 88c7 3 13 8 17 16M175 88c-7 3-13 8-17 16"/>
-                  </svg>
-                </div>
-                <div class="scan-beam"></div>
-                <div class="brain-node"></div>
-                <div class="brain-node"></div>
-                <div class="brain-node"></div>
-                <div class="brain-node"></div>
-                <div class="brain-node"></div>
-                <div class="scan-readout">
-                  <span></span><span></span><span></span><span></span><span></span><span></span>
-                  <span></span><span></span><span></span><span></span><span></span><span></span>
-                </div>
+            <div class="dev-install">
+              <div class="dev-install-bar"><div class="terminal-dot"></div><div class="terminal-dot"></div><div class="terminal-dot"></div><span>~/.sage</span></div>
+              <div class="dev-install-body">
+                <div><span class="cmd">data/badger/</span>   <span class="comment"># consensus state</span></div>
+                <div><span class="cmd">data/sage.db</span>   <span class="comment"># serving projection</span></div>
+                <div><span class="cmd">data/snapshots/</span> <span class="comment"># scheduled, encrypted</span></div>
+                <div><span class="cmd">data/cometbft/</span>  <span class="comment"># block store and state</span></div>
+                <div><span class="cmd">agents/</span>        <span class="comment"># per-project Ed25519 keys</span></div>
+                <div><span class="cmd">vault.key</span>      <span class="comment"># recovery key, never uploaded</span></div>
+                <div><span class="cmd">config.yaml</span></div>
               </div>
-              <div class="brain-caption">CEREBRUM MRI - active brain scan</div>
             </div>
           </div>
           <div class="privacy-points">
-            <div class="privacy-point"><div><h3>Local by Default</h3><p>No required cloud account or telemetry. Memories stay in <code>~/.sage/</code> unless you explicitly choose to share them.</p></div></div>
-            <div class="privacy-point"><div><h3>Fully Inspectable</h3><p>Local data stores under <code>~/.sage/</code>. Inspect them, query them, back them up, move them.</p></div></div>
-            <div class="privacy-point"><div><h3>Tamper-Evident</h3><p>Every memory is digitally signed with your local key. Full audit trail.</p></div></div>
-            <div class="privacy-point"><div><h3>AES-256 Encrypted at Rest</h3><p>Optional encryption for the memory vault. If your machine is stolen, the on-disk memories remain unreadable.</p></div></div>
+            <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-local"></use></svg></div><div><h3>Local by Default</h3><p>No required cloud account or telemetry. Memories stay in <code>~/.sage/</code> unless you explicitly choose to share them.</p></div></div>
+            <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-terminal"></use></svg></div><div><h3>Fully Inspectable</h3><p>Local data stores under <code>~/.sage/</code>. Inspect them, query them, back them up, move them.</p></div></div>
+            <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-signed"></use></svg></div><div><h3>Tamper-Evident</h3><p>Every memory is digitally signed with your local key. Full audit trail.</p></div></div>
+            <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg></div><div><h3>AES-256 Encrypted at Rest</h3><p>Optional encryption for the memory vault. If your machine is stolen, the on-disk memories remain unreadable.</p></div></div>
           </div>
         </div>
       </div>
