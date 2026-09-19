@@ -11,11 +11,11 @@
   gtag('js', new Date());
   gtag('config', 'G-Y9LD21QVEQ');
 </script>
-<title>SAGE v11 — CEREBRUM Memory Brain for AI Agents</title>
+<title>SAGE v11 | CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
 <meta name="description" content="Install SAGE v11.23.2: governed local-first memory for AI agents, with consensus-validated recall, encrypted agent working state, controlled federation, and in-place upgrades.">
 <meta name="theme-color" content="#0a0614">
-<meta property="og:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
+<meta property="og:title" content="SAGE v11 | CEREBRUM Memory Brain for AI Agents">
 <meta property="og:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://l33tdawg.github.io/sage/">
@@ -23,7 +23,7 @@
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="SAGE v11 — CEREBRUM Memory Brain for AI Agents">
+<meta name="twitter:title" content="SAGE v11 | CEREBRUM Memory Brain for AI Agents">
 <meta name="twitter:description" content="Local-first AI memory with the CEREBRUM MRI brain, semantic recall, managed reranking, and guided LAN or internet federation.">
 <meta name="twitter:image" content="https://l33tdawg.github.io/sage/og-image.png">
 <style>
@@ -1072,7 +1072,7 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="latest-note">
-          Latest: <strong id="latest-version">v11.23.2</strong> &mdash; signed release assets
+          Latest: <strong id="latest-version">v11.23.2</strong> &middot; signed release assets
         </div>
         <div id="minds-freed" class="download-counter">
           <span class="download-counter-pill">
@@ -1149,11 +1149,11 @@ footer a:hover { text-decoration: underline; }
         </div>
         <div class="value-card">
           <h3>Tamper-Evident</h3>
-          <p>Every memory is digitally signed. Full audit trail &mdash; verify nothing has been altered or injected.</p>
+          <p>Every memory is digitally signed. Full audit trail. Verify nothing has been altered or injected.</p>
         </div>
         <div class="value-card">
           <h3>Works With Any MCP Client</h3>
-          <p>Claude, Cursor, Cline, DeepSeek, Gemini, LM Studio, Ollama &mdash; any model, any provider.</p>
+          <p>Claude, Cursor, Cline, DeepSeek, Gemini, LM Studio, Ollama. Any model, any provider.</p>
         </div>
       </div>
     </div>
@@ -1183,31 +1183,31 @@ footer a:hover { text-decoration: underline; }
       <div class="reveal" style="text-align:center;">
         <div class="section-tag">Capabilities</div>
         <h2>Memory infrastructure for AI agents</h2>
-        <p class="section-desc" style="margin:0 auto;">Governed institutional memory &mdash; validated by BFT consensus, scored by confidence, and decay-aware over time.</p>
+        <p class="section-desc" style="margin:0 auto;">Governed institutional memory: validated by BFT consensus, scored by confidence, decay-aware over time.</p>
       </div>
 
       <!-- What's New -->
       <div class="whats-new reveal">
         <h3>What's new in <span id="whats-new-version">v11.23.2</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">The 11.23 line activates app-v28 — the sparse public-memory Merkle commitment, and a co-commit rule enforced by consensus rather than only at the node's REST boundary — and 11.23.2 makes that activation complete on a chain whose older public records predate the fork. Existing nodes upgrade in place, with no chain reset and no transaction-type change. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.23.2" style="color:var(--accent);">Read the release notes &rarr;</a></p>
+        <p style="opacity:0.85;margin:0 0 24px 0;">The 11.23 line activates app-v28. Two things turn on: a sparse public-memory Merkle commitment, and a co-commit rule that consensus enforces instead of the node's REST boundary. 11.23.2 finishes the job for chains whose older public records predate the fork. Upgrades stay in place. No chain reset, no transaction-type change. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.23.2" style="color:var(--accent);">Read the release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>App-v28 activates</h4><p>The public-memory commitment becomes AppHash-covered and the co-commit rule moves into consensus, so a memory the quorum already rejected cannot have its exact bytes re-admitted by any submission path. Personal nodes walk the rung automatically, in place.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>App-v28 activates</h4><p>The public-memory commitment becomes AppHash-covered and the co-commit rule moves into consensus, so a memory the quorum already rejected can't have its exact bytes re-admitted by any submission path. Personal nodes walk the rung automatically, in place.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>An activation that could finish</h4><p>v11.23.2 fixes the case where an older chain could not open the fork at all: legacy public records whose content hash had been erased by a historical lifecycle transition now stay out of the committed public set instead of aborting the activation block on every replay.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Encrypted agent working state</h4><p>Private media and a compare-and-swap workflow journal live encrypted on your node, reachable only from inside the agent boundary — and the node reports its storage posture honestly rather than silently storing plaintext.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Encrypted agent working state</h4><p>Private media and a compare-and-swap workflow journal live encrypted on your node, reachable only from inside the agent boundary. The node also reports its storage posture, so a plaintext downgrade shows up instead of staying quiet.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Upgrades are deliberate</h4><p>An App version panel and an explicit upgrade vote make a consensus fork something you choose, and a node killed mid-submission remembers the abandoned transaction instead of re-seeding nonces past it.</p></div></div>
         </div>
       </div>
 
       <div class="features-grid reveal">
-        <div class="feature-card"><div><h3>Persistent Memory</h3><p>Memories persist across every conversation &mdash; projects, preferences, decisions, prior outcomes. Nothing is lost between sessions.</p></div></div>
+        <div class="feature-card"><div><h3>Persistent Memory</h3><p>Memories persist across every conversation: projects, preferences, decisions, prior outcomes. Nothing is lost between sessions.</p></div></div>
         <div class="feature-card"><div><h3>Governed Knowledge</h3><p>Memories are validated before being committed. Spurious data is filtered out; corroborated data is reinforced.</p></div></div>
-        <div class="feature-card"><div><h3>Confidence Scoring</h3><p>Memories strengthen with corroboration and decay without reinforcement &mdash; analogous to human episodic memory.</p></div></div>
+        <div class="feature-card"><div><h3>Confidence Scoring</h3><p>Memories strengthen with corroboration and decay without reinforcement, much like to human episodic memory.</p></div></div>
         <div class="feature-card"><div><h3>Semantic Search + Reranker</h3><p>Recall by meaning with local embeddings, then re-score with a self-installing local reranker. Everything on your machine.</p></div></div>
         <div class="feature-card"><div><h3>Learns From Outcomes</h3><p>Stores what worked and what failed. Published research shows agents with this feedback loop improve measurably over time.</p></div></div>
-        <div class="feature-card"><div><h3>CEREBRUM Dashboard</h3><p>A 3D MRI brain of your memories &mdash; domains as lobes, consolidation as depth. Search, curate, and drill into a memory&rsquo;s train of thought.</p></div></div>
+        <div class="feature-card"><div><h3>CEREBRUM Dashboard</h3><p>A 3D MRI brain of your memories: domains as lobes, consolidation as depth. Search, curate, and drill into a memory&rsquo;s train of thought.</p></div></div>
         <div class="feature-card"><div><h3>Chat History Import</h3><p>Import from ChatGPT, Claude, or Gemini. Seed your AI&rsquo;s memory from existing conversation history.</p></div></div>
-        <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces &mdash; all from the dashboard.</p></div></div>
-        <div class="feature-card"><div><h3>Federation</h3><p>Connect SAGE nodes over LAN, VPN, or configured internet routes with a human-verified join ceremony. Discover eligible agents and choose which memory domains to share &mdash; revocable any time.</p></div></div>
+        <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces, all from the dashboard.</p></div></div>
+        <div class="feature-card"><div><h3>Federation</h3><p>Connect SAGE nodes over LAN, VPN, or configured internet routes with a human-verified join ceremony. Discover eligible agents and choose which memory domains to share, revocable any time.</p></div></div>
         <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Local BadgerDB/SQLite stores under your home directory. Inspect, query, back up, and move your data.</p></div></div>
         <div class="feature-card"><div><h3>Agent Messages</h3><p>Route durable work between exact agent identities, reply idempotently, and inspect passive history without turning delivery, read evidence, or results into the same state.</p></div></div>
         <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
@@ -1216,12 +1216,12 @@ footer a:hover { text-decoration: underline; }
       <div class="section-header" style="margin-top:64px;">
         <div class="section-tag">Agent coordination</div>
         <h2>Durable work.<br>Explicit ownership.</h2>
-        <p class="section-desc" style="margin:0 auto;">Available in v11: persistent task backlogs, a unified inbox, and deliberate handoff between runtimes &mdash; with assignment, delivery, and replies kept distinct.</p>
+        <p class="section-desc" style="margin:0 auto;">Available in v11: persistent task backlogs, a unified inbox, and deliberate handoff between runtimes, with assignment, delivery, and replies kept distinct.</p>
       </div>
       <div class="features-grid reveal">
-        <div class="feature-card"><div><h3>Persistent task backlog</h3><p><code>sage_task</code> creates durable tasks and tracks planned, in-progress, done, or dropped status. Open tasks do not decay. <code>sage_backlog</code> returns work assigned to your exact agent identity, subject to current access permissions.</p></div></div>
+        <div class="feature-card"><div><h3>Persistent task backlog</h3><p><code>sage_task</code> creates durable tasks and tracks planned, in-progress, done, or dropped status. Open tasks don't decay. <code>sage_backlog</code> returns work assigned to your exact agent identity, subject to current access permissions.</p></div></div>
         <div class="feature-card"><div><h3>One unified agent inbox</h3><p><code>sage_inbox</code> brings local and federated requests, task assignment notices, and replies into one bounded surface. Requests are claimed; notices point to the backlog for assignment verification; returned answers stay separate from new work.</p></div></div>
-        <div class="feature-card"><div><h3>Explicit runtime handoff</h3><p><code>sage_message_handoff</code> transfers claimed message work between runtimes sharing the same signed agent identity. Exact session and revision checks prevent concurrent takeovers; a stale runtime cannot reply after ownership moves. There is no age-based automatic takeover.</p></div></div>
+        <div class="feature-card"><div><h3>Explicit runtime handoff</h3><p><code>sage_message_handoff</code> transfers claimed message work between runtimes sharing the same signed agent identity. Exact session and revision checks prevent concurrent takeovers; a stale runtime can't reply after ownership moves. There is no age-based automatic takeover.</p></div></div>
         <div class="feature-card"><div><h3>Recover without duplicate work</h3><p>Retained claim history distinguishes your unfinished work from work claimed by another session. Idempotent send and reply operations recover lost responses; durable claimant identities preserve ordinary restart continuity without merging concurrent runtimes.</p></div></div>
         <div class="feature-card"><div><h3>Threaded answers and wake hints</h3><p><code>sage_message_reply</code> returns results to the original sender; <code>sage_message_replies</code> pages through those answers. The signed local wake stream lets supervisors wait for inbox changes, but a wake is never a delivery receipt, read receipt, or claim.</p></div></div>
         <div class="feature-card"><div><h3>Governed collaboration</h3><p>Agent identity, live permissions, and explicit task assignment remain authoritative. Message payloads and replies are untrusted data, not permission to execute instructions. Federated collaboration never grants local write or administrative authority by itself.</p></div></div>
@@ -1255,7 +1255,7 @@ footer a:hover { text-decoration: underline; }
           <div class="faq-item"><h3>Where does my data live?</h3><p>On your machine by default. Memories live under <code>~/.sage/</code> in local BadgerDB/SQLite stores, with optional AES-256 encryption at rest. There is no required cloud account.</p></div>
           <div class="faq-item"><h3>Which AI tools can use it?</h3><p>Any AI tool that can run an MCP server or call a local REST API. The dashboard can write config for common clients, and the Python package is <code>sage-agent-sdk</code>.</p></div>
           <div class="faq-item"><h3>What changed in v11?</h3><p>v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.23.2 makes that activation work on chains whose older public records predate it.</p></div>
-          <div class="faq-item"><h3>What does federation mean?</h3><p>Federation links separate SAGE nodes through a human-verified ceremony. Trusted peers running v11.19.16 or later can discover and message eligible agents automatically. Pairing alone shares no memory domains: the local owner chooses specific domains and a bounded Read or Copy policy. A remote agent cannot gain local write, ownership, role, or Root authority through federation.</p></div>
+          <div class="faq-item"><h3>What does federation mean?</h3><p>Federation links separate SAGE nodes through a human-verified ceremony. Trusted peers running v11.19.16 or later can discover and message eligible agents automatically. Pairing alone shares no memory domains: the local owner chooses specific domains and a bounded Read or Copy policy. A remote agent can't gain local write, ownership, role, or Root authority through federation.</p></div>
         </div>
       </div>
     </div>
@@ -1291,7 +1291,7 @@ footer a:hover { text-decoration: underline; }
           <div class="step-num">03</div>
           <div class="step-icon"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
           <h3>Use Your AI</h3>
-          <p>Your AI uses memory tools automatically. Projects, preferences, decisions &mdash; persisted across every session.</p>
+          <p>Your AI uses memory tools automatically. Projects, preferences, decisions, persisted across every session.</p>
         </div>
       </div>
 
@@ -1316,7 +1316,7 @@ footer a:hover { text-decoration: underline; }
         <div class="reveal" style="text-align:center;">
           <div class="section-tag">Switching Providers?</div>
           <h2>Take your memories<br>with you</h2>
-          <p class="section-desc" style="margin:0 auto;">Changing AI providers shouldn't mean starting from zero. SAGE is model-agnostic &mdash; your data belongs to you.</p>
+          <p class="section-desc" style="margin:0 auto;">Changing AI providers shouldn't mean starting from zero. SAGE is model-agnostic. Your data belongs to you.</p>
         </div>
         <div class="migrate-grid reveal">
           <div class="migrate-card">
@@ -1429,7 +1429,7 @@ footer a:hover { text-decoration: underline; }
       <div class="papers-grid reveal">
         <a href="https://doi.org/10.5281/zenodo.18888597" class="paper" target="_blank" rel="noopener" style="border-color:rgba(167,139,250,0.2);">
           <span class="paper-num" style="background:rgba(167,139,250,0.2);">IV</span>
-          <div class="paper-info"><h3>Longitudinal Learning &mdash; the core finding</h3><p>AI agents with memory get better over time. Without memory, they don't learn at all.</p></div>
+          <div class="paper-info"><h3>Longitudinal Learning, the core finding</h3><p>AI agents with memory get better over time. Without memory, they don't learn at all.</p></div>
           <span class="paper-arrow">&rarr;</span>
         </a>
         <a href="https://doi.org/10.5281/zenodo.18856774" class="paper" target="_blank" rel="noopener">
@@ -1439,12 +1439,12 @@ footer a:hover { text-decoration: underline; }
         </a>
         <a href="https://doi.org/10.5281/zenodo.18856845" class="paper" target="_blank" rel="noopener">
           <span class="paper-num">III</span>
-          <div class="paper-info"><h3>Institutional Memory as Organizational Knowledge</h3><p>Agents that learn their jobs from experience, not instructions &mdash; the &ldquo;new hire&rdquo; problem solved</p></div>
+          <div class="paper-info"><h3>Institutional Memory as Organizational Knowledge</h3><p>Agents that learn their jobs from experience, not instructions. The new hire problem, solved.</p></div>
           <span class="paper-arrow">&rarr;</span>
         </a>
         <a href="https://doi.org/10.5281/zenodo.18856658" class="paper" target="_blank" rel="noopener">
           <span class="paper-num">I</span>
-          <div class="paper-info"><h3>Agent Memory Infrastructure</h3><p>The full architecture: BFT consensus, multi-validator, RBAC, federation &mdash; for teams and enterprises</p></div>
+          <div class="paper-info"><h3>Agent Memory Infrastructure</h3><p>The full architecture: BFT consensus, multi-validator, RBAC, federation, for teams and enterprises</p></div>
           <span class="paper-arrow">&rarr;</span>
         </a>
       </div>
@@ -1562,11 +1562,11 @@ footer a:hover { text-decoration: underline; }
 <footer>
   <div class="container">
     <p>
-      <strong>SAGE</strong> &mdash; Persistent Memory for AI<br>
+      <strong>SAGE</strong> &middot; Persistent Memory for AI<br>
       Created by <a href="https://github.com/l33tdawg">Dhillon Andrew Kannabhiran</a><br>
       Code: <a href="https://github.com/l33tdawg/sage/blob/main/LICENSE">Apache License 2.0</a> &middot; Papers: <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>
     </p>
-    <p class="footer-tribute">A tribute to <a href="http://phenoelit.darklab.org/fx.html">Felix 'FX' Lindner</a> &mdash; who showed us <strong>how much further curiosity can go.</strong></p>
+    <p class="footer-tribute">A tribute to <a href="http://phenoelit.darklab.org/fx.html">Felix 'FX' Lindner</a>, who showed us <strong>how much further curiosity can go.</strong></p>
   </div>
 </footer>
 
@@ -1703,10 +1703,10 @@ function copyPrompt(box) {
 
 // ─── Screenshot Lightbox ───
 const lbImages = [
-  { src: 'screen-brain.png', caption: 'CEREBRUM MRI brain — memory focus, related notes, and the train-of-thought view' },
-  { src: 'screen-network.png', caption: 'Federation — LAN and internet SAGE-to-SAGE links with a consent-gated join ceremony' },
-  { src: 'screen-config.png', caption: 'Recall Engine — Semantic setup, managed reranker, and recall tuning' },
-  { src: 'screen-overview.png', caption: 'Overview — chain health, agents, federation, embeddings, and update status' },
+  { src: 'screen-brain.png', caption: 'CEREBRUM MRI brain, showing memory focus, related notes, and the train-of-thought view' },
+  { src: 'screen-network.png', caption: 'Federation, with LAN and internet SAGE-to-SAGE links with a consent-gated join ceremony' },
+  { src: 'screen-config.png', caption: 'Recall Engine: semantic setup, managed reranker, and recall tuning' },
+  { src: 'screen-overview.png', caption: 'Overview showing chain health, agents, federation, embeddings, and update status' },
 ];
 let lbIdx = 0;
 function openLightbox(idx) {
