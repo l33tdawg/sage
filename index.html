@@ -272,6 +272,26 @@ h1 em {
   margin-top: 10px;
   animation: fadeUp 0.6s ease-out both;
 }
+.cta-meta {
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
+  gap: 12px 20px; margin-top: 22px;
+}
+.cta-version { font-size: 0.85rem; color: var(--muted); }
+.cta-version strong { color: var(--accent); }
+.cta-count {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  padding: 8px 20px; border-radius: 999px;
+  background: rgba(34,197,94,0.1); border: 1px solid rgba(34,197,94,0.25);
+  color: #4ade80; font-size: 0.85rem;
+}
+.cta-count strong { font-size: 1.02rem; font-weight: 700; }
+.cta-count > span { color: rgba(74,222,128,0.85); }
+.cta-fineprint {
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
+  gap: 6px 10px; max-width: 1000px; margin: 14px auto 0;
+  font-size: 0.72rem; line-height: 1.5; color: rgba(148,143,170,0.78); text-align: center;
+}
+.cta-fineprint-sep { opacity: 0.4; }
 .download-counter-pill {
   display: inline-flex;
   align-items: center;
@@ -1166,16 +1186,18 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-Windows-Setup.exe" class="badge-link">Windows</a>
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
-        <div class="latest-note">
-          Latest: <strong id="latest-version">v11.23.2</strong> &middot; signed release assets
-        </div>
-        <div id="minds-freed" class="download-counter">
-          <span class="download-counter-pill">
-            Package downloads: <strong id="download-count" data-count="8312" data-updated-at="2026-09-10T01:26:26Z">8,312</strong>
+        <div class="cta-meta">
+          <span class="cta-version">Latest <strong id="latest-version">v11.23.2</strong> &middot; signed assets</span>
+          <span class="cta-count" id="minds-freed">
+            <strong id="download-count" data-count="8312" data-updated-at="2026-09-10T01:26:26Z">8,312</strong>
+            <span>package downloads</span>
           </span>
-          <div id="download-status" class="latest-note" aria-live="polite">Last known count · Sep 10, 2026, 01:26 UTC</div>
-          <div class="latest-note">Public release installers and archives, including prereleases. Counts repeat and automated downloads, not unique installs.</div>
         </div>
+        <p class="cta-fineprint">
+          <span id="download-status" aria-live="polite">Last known count &middot; Sep 10, 2026, 01:26 UTC</span>
+          <span class="cta-fineprint-sep" aria-hidden="true">&middot;</span>
+          <span>Prereleases, repeats and automated downloads included; not unique installs.</span>
+        </p>
       </div>
     </div>
   </section>
