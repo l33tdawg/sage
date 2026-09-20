@@ -8,7 +8,19 @@ export const SNAPSHOT_FILE = 'downloads.json';
 export const REFRESH_AFTER_MS = 26 * 60 * 60 * 1000;
 const PACKAGE_FILE = /\.(?:dmg|exe|msi|pkg|deb|rpm|appimage|zip|tar\.gz|tgz|tar\.xz)$/i;
 const API = 'https://api.github.com/repos/l33tdawg/sage/releases';
-const VERSION = /^v\d+\.\d+\.\d+$/;
+const VERSION = /^v(\d+)\.(\d+)\.(\d+)$/;
+
+function rank(tag) {
+  const match = VERSION.exec(tag ?? '');
+  return match ? match.slice(1, 4).map(Number) : null;
+}
+
+function higher(candidate, current) {
+  for (let index = 0; index < candidate.length; index++) {
+    if (candidate[index] !== current[index]) return candidate[index] > current[index];
+  }
+  return false;
+}
 
 export function validSnapshot(value, now = Date.now()) {
   return value?.version === 1 && Number.isSafeInteger(value.count) && value.count >= 0
@@ -27,6 +39,7 @@ export async function fetchReleaseStats(fetchImpl, signal) {
   const assets = new Map();
   const seenReleases = new Set();
   let latest;
+  let latestRank = null;
   for (let page = 1; page <= 100; page++) {
     const response = await fetchImpl(`${API}?per_page=100&page=${page}`, { signal });
     if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
@@ -41,8 +54,14 @@ export async function fetchReleaseStats(fetchImpl, signal) {
       if (!seenReleases.has(release.id)) newReleases++;
       seenReleases.add(release.id);
       if (release.draft) continue;
-      if (!latest && release.prerelease === false && VERSION.test(release.tag_name)) {
-        latest = release.tag_name;
+      // The API orders releases by creation, not by version, so the newest stable tag is the
+      // highest version seen rather than the first one that looks stable.
+      if (release.prerelease === false) {
+        const candidate = rank(release.tag_name);
+        if (candidate && (!latestRank || higher(candidate, latestRank))) {
+          latest = release.tag_name;
+          latestRank = candidate;
+        }
       }
       for (const asset of release.assets) {
         if (typeof asset.name !== 'string') throw new Error('Invalid asset name');
@@ -140,11 +159,19 @@ export function startCounter(documentRef, fetchImpl, storage) {
         status.textContent = state === 'checking' ? 'Checking for updates…' : 'Unavailable · Try again later';
       }
       if (latest) {
-        const version = documentRef.getElementById('latest-version');
-        if (version) version.textContent = latest;
+        applyVersions(documentRef, latest);
       }
     },
   });
+}
+
+// Every version stamp on the page carries one of these markers, so the number in the hero pill,
+// the CTA chip, the "built through" tag and the SDK pins all come from the latest release.
+export function applyVersions(documentRef, latest) {
+  if (!VERSION.test(latest ?? '')) return;
+  const bare = latest.slice(1);
+  for (const element of documentRef.querySelectorAll?.('[data-sage-version]') ?? []) element.textContent = latest;
+  for (const element of documentRef.querySelectorAll?.('[data-sage-version-bare]') ?? []) element.textContent = bare;
 }
 
 if (typeof document !== 'undefined') {

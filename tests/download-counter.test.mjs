@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  CACHE_KEY, REFRESH_AFTER_MS, SNAPSHOT_FILE, cachedSnapshot, fetchPublishedSnapshot, fetchReleaseStats, refreshCounter,
+  CACHE_KEY, REFRESH_AFTER_MS, SNAPSHOT_FILE, applyVersions, cachedSnapshot, fetchPublishedSnapshot,
+  fetchReleaseStats, refreshCounter, startCounter,
 } from '../download-counter.mjs';
 
 const at = Date.parse('2026-09-10T02:00:00Z');
@@ -21,6 +22,17 @@ function memoryStore(snapshot) {
   const values = new Map(snapshot ? [[CACHE_KEY, JSON.stringify(snapshot)]] : []);
   return { values, getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) };
 }
+function fakeDocument({ stamps = [], bare = [] } = {}) {
+  const elements = {
+    'download-count': { dataset: { count: '8803', updatedAt: '2026-09-10T01:26:26Z' }, textContent: '8,803' },
+    'download-status': { textContent: '' },
+  };
+  return {
+    elements,
+    getElementById: id => elements[id] ?? null,
+    querySelectorAll: selector => selector === '[data-sage-version]' ? stamps : bare,
+  };
+}
 
 test('counts packages across stable and prerelease releases, excluding drafts and sidecars', async () => {
   const result = await fetchReleaseStats(async () => response([
@@ -29,7 +41,39 @@ test('counts packages across stable and prerelease releases, excluding drafts an
     release(3, [asset(6, 'private.exe', 99)], { draft: true }),
     release(4, [asset(7, 'cli.zip', 2), asset(8, 'SAGE.AppImage', 1)]),
   ]));
-  assert.deepEqual(result, { count: 15, latest: 'v1.0.1' });
+  assert.deepEqual(result, { count: 15, latest: 'v1.0.4' });
+});
+
+test('the newest stable version wins, not the first stable release in creation order', async () => {
+  const result = await fetchReleaseStats(async () => response([
+    release(9, [], { tag_name: 'v11.23.9' }),
+    release(10, [], { tag_name: 'v11.23.10' }),
+    release(11, [], { tag_name: 'v11.24.0-rc.1', prerelease: true }),
+    release(12, [], { tag_name: 'v9.0.0' }),
+  ]));
+  assert.equal(result.latest, 'v11.23.10');
+  const none = await fetchReleaseStats(async () => response([release(1, [], { tag_name: 'nightly' })]));
+  assert.equal(none.latest, undefined);
+});
+
+test('every version stamp on the page follows the latest release', async () => {
+  const stamps = [{ textContent: 'v11.23.2' }, { textContent: 'v11.23.2' }];
+  const bare = [{ textContent: '11.23.2' }, { textContent: '11.23.2' }];
+  const documentRef = fakeDocument({ stamps, bare });
+  await startCounter(documentRef, async url => url === SNAPSHOT_FILE
+    ? snapshotResponse({ version: 1, count: 8803, latest: 'v11.23.10', updatedAt: new Date().toISOString() })
+    : missing, null);
+  assert.deepEqual(stamps.map(element => element.textContent), ['v11.23.10', 'v11.23.10']);
+  assert.deepEqual(bare.map(element => element.textContent), ['11.23.10', '11.23.10']);
+  assert.equal(documentRef.elements['download-count'].textContent, '8,803');
+  assert.match(documentRef.elements['download-status'].textContent, /^Updated /);
+});
+
+test('a snapshot without a usable version leaves the stamps alone', async () => {
+  const stamps = [{ textContent: 'v11.23.2' }];
+  applyVersions(fakeDocument({ stamps }), 'nightly');
+  applyVersions(fakeDocument({ stamps }), undefined);
+  assert.equal(stamps[0].textContent, 'v11.23.2');
 });
 
 test('paginates fully and counts overlapping asset IDs once', async () => {
