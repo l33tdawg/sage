@@ -1,12 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CACHE_KEY, cachedSnapshot, fetchReleaseStats, refreshCounter } from '../download-counter.mjs';
+import {
+  CACHE_KEY, REFRESH_AFTER_MS, SNAPSHOT_FILE, cachedSnapshot, fetchPublishedSnapshot, fetchReleaseStats, refreshCounter,
+} from '../download-counter.mjs';
 
 const at = Date.parse('2026-09-10T02:00:00Z');
 const fallback = { version: 1, count: 8312, updatedAt: '2026-09-10T01:26:26Z' };
 const asset = (id, name, download_count) => ({ id, name, download_count });
 const release = (id, assets = [], extra = {}) => ({ id, assets, draft: false, prerelease: false, tag_name: `v1.0.${id}`, ...extra });
 const response = data => ({ ok: true, json: async () => data });
+const snapshotResponse = data => ({ ok: true, json: async () => data });
+const missing = { ok: false, status: 404 };
+// The page asks for downloads.json first; these stubs answer that and route the rest to GitHub.
+const published = (data, status = 200) => async url => {
+  assert.equal(url, SNAPSHOT_FILE);
+  return status === 200 ? snapshotResponse(data) : { ok: false, status };
+};
+const liveOnly = handler => async url => url === SNAPSHOT_FILE ? missing : handler(url);
 function memoryStore(snapshot) {
   const values = new Map(snapshot ? [[CACHE_KEY, JSON.stringify(snapshot)]] : []);
   return { values, getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) };
@@ -34,13 +44,70 @@ test('paginates fully and counts overlapping asset IDs once', async () => {
   assert.match(urls[1], /page=2$/);
 });
 
+test('the published snapshot is preferred and costs GitHub no API call', async () => {
+  const storage = memoryStore();
+  const rendered = [];
+  const urls = [];
+  const result = await refreshCounter({ storage, fallback, now: () => at, render: (...args) => rendered.push(args),
+    fetchImpl: async url => { urls.push(url); return snapshotResponse({ version: 1, count: 8803, latest: 'v11.23.2', updatedAt: '2026-09-10T01:00:00Z' }); },
+  });
+  assert.deepEqual(result, { version: 1, count: 8803, updatedAt: '2026-09-10T01:00:00Z' });
+  assert.deepEqual(urls, [SNAPSHOT_FILE]);
+  assert.deepEqual(rendered.map(x => x[1]), ['checking', 'snapshot']);
+  assert.deepEqual(rendered.at(-1)[2], 'v11.23.2');
+  assert.deepEqual(JSON.parse(storage.getItem(CACHE_KEY)), result);
+});
+
+test('a missing or invalid published snapshot falls through to the live API', async () => {
+  for (const fetchImpl of [
+    liveOnly(async () => response([release(1, [asset(1, 'app.dmg', 42)])])),
+    async url => url === SNAPSHOT_FILE
+      ? snapshotResponse({ version: 1, count: '8803', latest: 'v11.23.2', updatedAt: '2026-09-10T01:00:00Z' })
+      : response([release(1, [asset(1, 'app.dmg', 42)])]),
+  ]) {
+    const rendered = [];
+    const result = await refreshCounter({ storage: memoryStore(), fallback, now: () => at, render: (...args) => rendered.push(args), fetchImpl });
+    assert.equal(result.count, 42);
+    assert.equal(rendered.at(-1)[1], 'live');
+  }
+});
+
+test('a late published snapshot is shown, then replaced by a live refresh', async () => {
+  const late = { version: 1, count: 8700, latest: 'v11.23.1', updatedAt: new Date(at - REFRESH_AFTER_MS - 60_000).toISOString() };
+  const rendered = [];
+  const result = await refreshCounter({ storage: memoryStore(), fallback, now: () => at, render: (...args) => rendered.push(args),
+    fetchImpl: async url => url === SNAPSHOT_FILE ? snapshotResponse(late) : response([release(1, [asset(1, 'app.dmg', 8801)])]),
+  });
+  assert.equal(result.count, 8801);
+  assert.deepEqual(rendered.map(x => x[1]), ['checking', 'delayed', 'live']);
+});
+
+test('a late published snapshot survives a failed live refresh', async () => {
+  const late = { version: 1, count: 8700, latest: 'v11.23.1', updatedAt: new Date(at - REFRESH_AFTER_MS - 60_000).toISOString() };
+  const rendered = [];
+  const result = await refreshCounter({ storage: memoryStore(), fallback, now: () => at, render: (...args) => rendered.push(args),
+    fetchImpl: async url => url === SNAPSHOT_FILE ? snapshotResponse(late) : { ok: false, status: 403 },
+  });
+  assert.equal(result.count, 8700);
+  assert.equal(rendered.at(-1)[1], 'delayed');
+});
+
+test('fetchPublishedSnapshot rejects an ageing-invalid payload', async () => {
+  for (const value of [null, { version: 1, count: -1, updatedAt: '2026-09-10T01:00:00Z' }, { version: 1, count: 1, updatedAt: '2099-01-01' }]) {
+    await assert.rejects(() => fetchPublishedSnapshot(published(value)), /Invalid published snapshot/);
+  }
+  await assert.rejects(() => fetchPublishedSnapshot(published({}, 500)), /Snapshot HTTP 500/);
+  const ok = await fetchPublishedSnapshot(published({ version: 1, count: 7, latest: 'not-a-version', updatedAt: '2026-09-10T01:00:00Z' }));
+  assert.deepEqual(ok, { snapshot: { version: 1, count: 7, updatedAt: '2026-09-10T01:00:00Z' }, latest: undefined });
+});
+
 test('partial pagination failure preserves last known good cache', async () => {
   const cached = { version: 1, count: 8400, updatedAt: '2026-09-10T01:40:00Z' };
   const storage = memoryStore(cached);
   let calls = 0;
   const rendered = [];
   const result = await refreshCounter({ storage, fallback, now: () => at, render: (...args) => rendered.push(args),
-    fetchImpl: async () => ++calls === 1 ? response(Array.from({ length: 100 }, (_, i) => release(i + 1))) : { ok: false, status: 403 },
+    fetchImpl: liveOnly(async () => ++calls === 1 ? response(Array.from({ length: 100 }, (_, i) => release(i + 1))) : { ok: false, status: 403 }),
   });
   assert.deepEqual(result, cached);
   assert.deepEqual(JSON.parse(storage.getItem(CACHE_KEY)), cached);
@@ -49,7 +116,7 @@ test('partial pagination failure preserves last known good cache', async () => {
 
 test('a lower fresh total replaces the cached maximum', async () => {
   const storage = memoryStore({ version: 1, count: 9000, updatedAt: '2026-09-10T01:40:00Z' });
-  const result = await refreshCounter({ storage, fallback, now: () => at, render() {}, fetchImpl: async () => response([release(1, [asset(1, 'app.dmg', 4)])]) });
+  const result = await refreshCounter({ storage, fallback, now: () => at, render() {}, fetchImpl: liveOnly(async () => response([release(1, [asset(1, 'app.dmg', 4)])])) });
   assert.equal(result.count, 4);
   assert.equal(JSON.parse(storage.getItem(CACHE_KEY)).count, 4);
 });
@@ -64,14 +131,19 @@ test('corrupt, future-dated, and older local caches fall back to published snaps
 test('blocked storage does not prevent fetching and displaying a live zero', async () => {
   const storage = { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } };
   const rendered = [];
-  const result = await refreshCounter({ storage, fallback, now: () => at, render: (...args) => rendered.push(args), fetchImpl: async () => response([]) });
+  const result = await refreshCounter({ storage, fallback, now: () => at, render: (...args) => rendered.push(args), fetchImpl: liveOnly(async () => response([])) });
   assert.equal(result.count, 0);
   assert.equal(rendered.at(-1)[1], 'live');
 });
 
 test('a timed-out request preserves the published fallback', async () => {
   const result = await refreshCounter({ fallback, now: () => at, timeoutMs: 10, render() {},
-    fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true })),
+    fetchImpl: (url, { signal }) => {
+      if (url === SNAPSHOT_FILE) return Promise.resolve(missing);
+      const aborted = () => new Error('aborted');
+      if (signal.aborted) return Promise.reject(aborted());
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(aborted()), { once: true }));
+    },
   });
   assert.deepEqual(result, fallback);
 });
@@ -84,7 +156,7 @@ test('HTTP errors, malformed JSON, invalid counts, and repeated pages never beco
     async () => response([release(1, [asset(1, 'app.exe', -1)])]),
     async () => response([release(1, [asset(1, 'app.exe', '20')])]),
     async () => response(Array.from({ length: 100 }, (_, i) => release(i + 1))),
-  ]) {
+  ].map(liveOnly)) {
     const storage = memoryStore(fallback);
     const result = await refreshCounter({ storage, fallback, now: () => at, render() {}, fetchImpl });
     assert.deepEqual(result, fallback);
