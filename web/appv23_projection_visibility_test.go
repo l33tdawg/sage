@@ -236,6 +236,11 @@ func newAppV23ProjectionRouteFixture(
 
 	handler := NewDashboardHandler(sqlStore, "test")
 	handler.BadgerStore = badgerStore
+	// Drain the handler's unowned background work BEFORE the store cleanups registered above run
+	// (t.Cleanup is LIFO): this fixture leaves RunBackground nil, so a projection audit runs in a real
+	// goroutine — and one that outlives the test touches a closed Badger DB and panics the whole test
+	// binary, which is how it reddened the suite from another test's teardown (2026-09-25).
+	t.Cleanup(handler.WaitBackground)
 	handler.AdminSigningKey = rootKey
 	handler.AppV23ActiveFn = func() bool { return true }
 	handler.ResolveAgentKeyFn = func(agentID string) (ed25519.PrivateKey, bool) {

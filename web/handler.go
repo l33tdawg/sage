@@ -92,12 +92,19 @@ type rerankerInfoProvider interface {
 type DashboardHandler struct {
 	cleanupMu          sync.Mutex
 	cleanupWorkerReady atomic.Bool
-	store              store.MemoryStore
-	prefStore          PreferencesStore
-	embedder           Embedder
-	SSE                *SSEBroadcaster
-	Version            string
-	BootID             string // unique per serve process; restart verification must observe a change
+	// backgroundWG counts goroutines started by runBackground when NO lifecycle owner was injected
+	// (the embedded and test handlers). Such a goroutine is otherwise unowned: it can outlive the
+	// stores its caller is about to close, and one touching a closed Badger DB panics the whole
+	// process — observed in this package's suite, where a projection-audit goroutine from one test
+	// tore down another test's store (2026-09-25). A caller that owns the stores drains with
+	// WaitBackground first.
+	backgroundWG sync.WaitGroup
+	store        store.MemoryStore
+	prefStore    PreferencesStore
+	embedder     Embedder
+	SSE          *SSEBroadcaster
+	Version      string
+	BootID       string // unique per serve process; restart verification must observe a change
 	// NodeOperatorAgentID is the identity actually held by HTTP MCP's signing
 	// key. OAuth/wizard bearer metadata must use this exact ID.
 	NodeOperatorAgentID string
@@ -483,7 +490,23 @@ func (h *DashboardHandler) runBackground(fn func(context.Context)) {
 		h.RunBackground(fn)
 		return
 	}
-	go fn(context.Background()) //nolint:gosec // embedded/test handler has no lifecycle owner
+	h.backgroundWG.Add(1)
+	go func() {
+		defer h.backgroundWG.Done()
+		fn(context.Background()) //nolint:gosec // embedded/test handler has no lifecycle owner
+	}()
+}
+
+// WaitBackground blocks until every goroutine started by runBackground WITHOUT an injected
+// RunBackground owner has returned.
+//
+// A caller that owns the handler's stores (a test, or an embedding without a lifecycle owner) MUST
+// call this before closing them: these goroutines are otherwise unowned, and one touching a closed
+// store panics the process rather than failing the request that started it. A handler with an injected
+// RunBackground hands its work to that owner, so nothing here is outstanding and this returns
+// immediately.
+func (h *DashboardHandler) WaitBackground() {
+	h.backgroundWG.Wait()
 }
 
 func (h *DashboardHandler) startPostUnlockRepairs() {
