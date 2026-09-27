@@ -74,15 +74,21 @@ func validateSimpleCommandArgs(args []string) error {
 		return fmt.Errorf("unknown argument %q for %s (see: sage-gui %s --help)", args[1], args[0], args[0])
 	case "mcp":
 		if args[1] == "install" {
-			for i := 2; i < len(args); i++ {
-				if args[i] == "--token" {
-					if i+1 >= len(args) || args[i+1] == "" {
+			wantToken := false
+			for _, arg := range args[2:] {
+				if wantToken {
+					if arg == "" {
 						return fmt.Errorf("mcp install --token requires a value")
 					}
-					i++
-				} else if !strings.HasPrefix(args[i], "--token=") || args[i] == "--token=" {
+					wantToken = false
+				} else if arg == "--token" {
+					wantToken = true
+				} else if !strings.HasPrefix(arg, "--token=") || arg == "--token=" {
 					return fmt.Errorf("unknown or incomplete argument for mcp install (see: sage-gui mcp install --help)")
 				}
+			}
+			if wantToken {
+				return fmt.Errorf("mcp install --token requires a value")
 			}
 			return nil
 		}

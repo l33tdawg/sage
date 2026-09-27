@@ -216,7 +216,8 @@ test('legacy pipe send documents canonical exact-local admission and replay', ()
   const wake = read('docs/reference/concepts/message-wake-bus.md');
   assert.match(rest, /HTTP 201 fresh; HTTP 200 exact keyed replay/);
   assert.match(rest, /HTTP 501 before insertion/);
-  assert.match(wake, /Provider-only and federated rows have no exact local recipient/);
+  assert.match(wake, /Provider-only and outbound federated rows do not allocate a local\s+recipient sequence/);
+  assert.match(wake, /Inbound federated sends do: `AdmitFederatedPipeline`/);
 });
 
 test('hybrid expansion authorization contract stays release-visible', () => {
