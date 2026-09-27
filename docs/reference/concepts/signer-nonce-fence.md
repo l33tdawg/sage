@@ -10,6 +10,9 @@ Source of truth: `internal/tx/nonce.go` (the lease),
 `internal/tx/nonce_fence.go` (the fence), `cmd/sage-gui/signer_fence_restart.go`
 (the restart veto).
 
+The typed committed-memory vote refusal described below is a development change
+after v11.23.10; it is not available in that release.
+
 ---
 
 ## The failure this exists to stop
@@ -77,13 +80,29 @@ went out**:
 | An indexed block result for that hash, non-zero code | **yes** | Consensus executed those bytes; they had their turn. |
 | The signer's committed nonce has **reached** the fenced allocation (equal, or above) | **yes** | Read from the allocator's own floor source. Consensus refuses a nonce that is not strictly above the committed one, so the bytes can never commit again — the same monotonicity argument as the code-4 row below, checked directly instead of through a re-submission. When it is EQUAL the fate label is `spent`: the floor cannot say whether these bytes committed or were overtaken, so no surface may claim the payload was lost. |
 | Re-submission refused with **CheckTx code 4** (nonce gate) | **yes** | For a positive nonce, the signer's committed nonce is monotone non-decreasing **on the chain**, so this refusal cannot un-happen there. For the nonce-zero sentinel, permanence instead comes from the already-activated app-v9 fork height: the rule cannot deactivate as height advances. Either way the bytes cannot commit *again*. Two caveats the code itself writes down: (a) positive-nonce code 4 proves supersession **or self-commit** — the gate is `nonce <= committed`, so a transaction that itself committed answers code 4 exactly like one overtaken by a higher nonce, and without the tx index the two are indistinguishable (see triage step 2); (b) a node-level rollback (snapshot restore, state-sync rewind) is the one event that can invalidate these monotonicity assumptions — accepted, because a restore invalidates the fence-holding process anyway. |
-| Re-submission refused with any other CheckTx code | **no** | It refuses *this* submission. The older copy will be judged against whatever state exists wherever it arrives. Codes 3 (nonce lookup), 112 (backpressure), authorization codes and even decode/signature codes (fork-gated) can all flip back. |
+| A signed memory vote receives code 13 with codespace `sage/memory-vote-committed/v1`, bound to its exact hash | **yes** | This typed refusal requires a complete canonical target submitted after app-v25 activation and already committed. Its ballot cannot return to proposed through normal consensus transitions. The original vote might itself have committed before the target closed, so the resolver rechecks the index and does not claim that the original vote was lost. Historical, missing, hashless, proposed and deprecated targets do not receive this proof. |
+| Re-submission refused with any other untyped CheckTx code | **no** | It refuses *this* submission. The older copy will be judged against whatever state exists wherever it arrives. Plain code 13, codes 3 (nonce lookup), 112 (backpressure), authorization codes and even decode/signature codes (fork-gated) can all flip back. |
 | `/tx` says "not found" | **no** | CometBFT indexes a transaction only once it is in a block, so this is indistinguishable from one sitting in a mempool about to commit. |
 | Duplicate already pending, mempool full, commit wait timed out | **no** | None is a verdict. |
 | Transport / decode / RPC fault | **no** | Not evidence. |
 | A deadline or retry budget expiring | **no** | A clock knows nothing about a transaction. |
 | The resolver panicking | **no** | Caller code failing is not an answer. Recovered, logged, fence kept, retried. |
 | No resolver wired, or no encoded bytes | **no** | Not having a way to ask is not evidence. |
+
+A stale-vote mempool filter and an indeterminate broadcast can otherwise leave
+a key held indefinitely: the vote's target commits, the filter refuses its exact
+bytes with code 13, and those bytes never reach a block that could supply an
+indexed verdict. The typed committed-memory refusal closes that narrow gap.
+It does not parse a log message or make general code-13 rejections permanent.
+CheckTx remains read-only and FinalizeBlock's existing vote rejection is unchanged.
+The proof assumes forward consensus state, like the nonce-floor proof; an
+out-of-band canonical-state rewind or local repair is not covered.
+
+Downstream stale-vote filters must run after the typed check and preserve its
+codespace. Older nodes that return plain code 13 continue to leave the fence held.
+Updating application files alone does not install this runtime fix or settle an
+already-running old binary's fence; rollout must preserve its durable intent and
+follow the validator maintenance procedure.
 
 A held fence therefore has **no timeout**. That is deliberate. A held fence fails
 **loudly** — `tx.ErrSignerFenced` at the call site, `nonce_fence` events in the

@@ -3580,6 +3580,13 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 	if err != nil {
 		return &abcitypes.ResponseCheckTx{Code: 3, Log: fmt.Sprintf("nonce lookup error: %v", err)}, nil
 	}
+	// Preserve nonce-gate precedence, then recognize the narrow permanent
+	// vote refusal before any downstream advisory stale-vote admission filter.
+	if parsedTx.Nonce > currentNonce {
+		if refusal := app.checkTxCommittedMemoryVote(parsedTx); refusal != nil {
+			return refusal, nil
+		}
+	}
 	// app-v9: reject the nonce-0 sentinel at mempool admission too, mirroring the
 	// consensus-path gate (processTx). Gated on the app-v9 fork via state.Height so
 	// pre-fork behaviour is unchanged.

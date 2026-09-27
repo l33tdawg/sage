@@ -45,9 +45,9 @@ import (
 //   - those bytes reached a BLOCK — committed, or executed and
 //     refused there. Either way they have had their turn.       -> lift
 //   - a re-submission of those bytes was refused for a reason
-//     that CANNOT UN-HAPPEN. In practice that is one reason:
-//     CheckTx code 4, the committed-nonce gate, which is
-//     monotone and therefore permanent everywhere.              -> lift
+//     that CANNOT UN-HAPPEN: the committed-nonce gate (code 4),
+//     or the typed post-app-v25 committed-memory vote gate.
+//     Both identify a monotone committed-state predicate.        -> lift
 //
 // "A non-zero CheckTx code" is NOT the second rule, and an earlier revision of
 // this file getting that wrong is why cometResubmitOutcome now carries a
@@ -2542,8 +2542,9 @@ const cometTxNotFoundRPCErrorCode = -32603
 type cometBroadcastCommit struct {
 	Result *struct {
 		CheckTx *struct {
-			Code *int   `json:"code"`
-			Log  string `json:"log"`
+			Code      *int   `json:"code"`
+			Log       string `json:"log"`
+			Codespace string `json:"codespace"`
 		} `json:"check_tx"`
 		TxResult *struct {
 			Code *int   `json:"code"`
@@ -2604,24 +2605,14 @@ func cometResolve(ctx context.Context, endpoint string, encoded []byte) (TxOutco
 		return outcome, nil
 	}
 
-	resubmitted, superseded, submitErr := cometResubmitOutcome(ctx, endpoint, encoded)
-	if superseded {
-		// The nonce gate answered code 4, which proves the lift is safe but NOT
-		// which of two fates happened: app-v9's gate is `nonce <= committed`, so
-		// a transaction that ITSELF committed answers code 4 exactly like one
-		// superseded by a higher nonce. The /tx lookup above ran BEFORE the
-		// re-submit, so the commit can have landed (or the indexer caught up) in
-		// the gap. Ask the index once more before settling on a fate: an indexed
-		// answer is real proof and carries the honest verdict — committed, or an
-		// in-block rejection with its actual reason — where the code-4 wording
-		// alone could tell an operator a committed change was refused, and they
-		// would redo it by hand and apply it twice. A recheck that fails or
-		// still finds nothing indexed (indexer="null" is a stock CometBFT
-		// config, and SAGE's join/state-sync tooling deletes tx_index.db)
-		// changes nothing: the lift stands on the nonce gate's permanence (the
-		// committed floor is monotone for positive nonces; nonce zero remains
-		// forbidden after the monotone app-v9 activation height), and the
-		// detail already says the two fates are indistinguishable.
+	resubmitted, needsIndexRecheck, submitErr := cometResubmitOutcome(ctx, endpoint, encoded)
+	if needsIndexRecheck {
+		// A permanent admission refusal proves the lift is safe, not whether
+		// the original transaction succeeded. A vote may itself have committed
+		// before its target closed, just as the code-4 nonce gate can reject a
+		// self-committed transaction. Recheck the index after the resubmission
+		// before choosing a fate label. If indexing is unavailable, preserve the
+		// typed proof and its explicit uncertainty about the original outcome.
 		if recheck, recheckErr := cometIndexedOutcome(ctx, endpoint, encoded, hash); recheckErr == nil &&
 			recheck.Verdict != TxVerdictUnresolved {
 			return recheck, nil
@@ -2779,7 +2770,7 @@ func cometIndexedOutcome(ctx context.Context, endpoint string, encoded []byte, h
 	}, nil
 }
 
-// checkTxNonceGateCode is the ONE CheckTx code this resolver accepts as proof.
+// checkTxNonceGateCode is the one CheckTx code accepted WITHOUT a codespace.
 //
 // internal/abci/app.go returns it from exactly two places, both inside app-v9's
 // replay gate: "nonce 0 not permitted" and "nonce too low: got N, expected > M".
@@ -2798,13 +2789,13 @@ const checkTxNonceGateCode = 4
 // promoting it to a verdict about the original is only sound when the reason
 // cannot un-happen.
 //
-// Only the nonce gate has that property, for two separately permanent reasons:
+// By numeric code alone, only the nonce gate has that property:
 // a positive nonce is refused only when the signer's committed nonce is already
 // at least that high, and that floor is MONOTONE NON-DECREASING; nonce zero is
 // refused once the monotone app-v9 activation height has enabled the sentinel
 // rule. Either refusal therefore remains true at every node, including for a
-// copy that surfaces from a peer mempool an hour later. Nothing else in SAGE's
-// CheckTx is monotone:
+// copy that surfaces from a peer mempool an hour later. Other numeric codes
+// alone do not identify a monotone predicate:
 //   - code 3 is a nonce LOOKUP error — a local store fault, transient by nature;
 //   - the app-v20 resource limit and code 112 are admission/backpressure, which
 //     is by definition temporary;
@@ -2814,7 +2805,8 @@ const checkTxNonceGateCode = 4
 //     app.go: the same bytes are Code 1 on one binary and Code 10 on another),
 //     so "statically invalid" is not static across an upgrade boundary.
 //
-// Everything except the nonce gate therefore leaves the fence UP. That costs
+// A separate typed codespace proves the narrow committed-memory vote case
+// (see isCommittedMemoryVoteRefusal). Every other refusal stays unresolved. That costs
 // liveness on a key whose transaction is genuinely dead and whose re-submit is
 // refused for some other reason — a loud, inspectable stall. Getting it wrong in
 // the other direction costs a transaction, silently, on some unrelated later
@@ -2832,12 +2824,11 @@ const checkTxNonceGateCode = 4
 func checkTxRefusalIsPermanent(code int) bool { return code == checkTxNonceGateCode }
 
 // cometResubmitOutcome re-broadcasts the identical bytes and maps what comes
-// back. superseded reports the one outcome that needs a second opinion: the
-// nonce gate refused the re-submit, so the caller must re-check the tx index
-// before settling on a fate label (see cometResolve).
+// back. needsIndexRecheck marks a permanent CheckTx refusal: the caller must
+// re-check the index before settling on a fate label (see cometResolve).
 //
 // The mapping:
-//   - CheckTx code 4 (the nonce gate) -> REJECTED, superseded=true. The gate is
+//   - CheckTx code 4 (the nonce gate) -> REJECTED, needsIndexRecheck=true. The gate is
 //     monotone, so these bytes can never commit AGAIN — that is the whole lift
 //     argument, and the outcome the re-submission engine is built to provoke.
 //     What code 4 does NOT say is whether they never committed or already
@@ -2847,7 +2838,11 @@ func checkTxRefusalIsPermanent(code int) bool { return code == checkTxNonceGateC
 //     claiming "a higher nonce has committed" here — as an earlier revision
 //     did — misreports a committed change as refused whenever the tx index
 //     cannot answer, and the operator redoes by hand work that already applied.
-//   - CheckTx non-zero, any other code -> UNRESOLVED. See
+//   - Code 13 + CheckTxCommittedMemoryVoteCodespace, bound to a signed memory
+//     vote -> REJECTED, needsIndexRecheck=true. The canonical post-v25 target
+//     cannot return to proposed, so these bytes cannot succeed again. This
+//     does not prove whether the original vote was recorded.
+//   - CheckTx non-zero, any other untyped refusal -> UNRESOLVED. See
 //     checkTxRefusalIsPermanent: it refuses THIS submission, not the copy that
 //     may still be in flight.
 //   - FinalizeBlock non-zero at a real height -> REJECTED. Reaching
@@ -2869,7 +2864,7 @@ func checkTxRefusalIsPermanent(code int) bool { return code == checkTxNonceGateC
 // a different transaction. So the hash is bound to sha256(encoded) before any
 // code is examined; a mismatch (or a missing hash) is UNRESOLVED — the fence
 // holds and the next attempt asks again.
-func cometResubmitOutcome(ctx context.Context, endpoint string, encoded []byte) (outcome TxOutcome, superseded bool, err error) {
+func cometResubmitOutcome(ctx context.Context, endpoint string, encoded []byte) (outcome TxOutcome, needsIndexRecheck bool, err error) {
 	wantHash := CometTxHash(encoded)
 	var res cometBroadcastCommit
 	resultOK, err := cometBroadcastJSON(ctx, "comet re-submit", endpoint, "broadcast_tx_commit", encoded, &res)
@@ -2904,6 +2899,14 @@ func cometResubmitOutcome(ctx context.Context, endpoint string, encoded []byte) 
 	}
 	if code := *res.Result.CheckTx.Code; code != 0 {
 		log := scrubFenceText(res.Result.CheckTx.Log, encoded)
+		if isCommittedMemoryVoteRefusal(code, res.Result.CheckTx.Codespace, encoded) {
+			return TxOutcome{
+				Verdict: TxVerdictRejected,
+				Detail: "re-submit refused by the committed canonical memory vote gate: " +
+					"these signed vote bytes cannot succeed again; whether the original vote " +
+					"was recorded is unknown without the tx index",
+			}, true, nil
+		}
 		if !checkTxRefusalIsPermanent(code) {
 			// Deliberately an UNRESOLVED outcome rather than a verdict. The
 			// fence stays up and reconciliation asks again, because this node
