@@ -105,10 +105,11 @@ func TestCometTxResolver_CommittedVoteProofRejectsOtherSignedActions(t *testing.
 		t.Run(name, func(t *testing.T) {
 			p := &ParsedTx{Type: TxTypeMemoryVote, Nonce: 42,
 				MemoryVote: &MemoryVote{MemoryID: "committed-canonical-memory", Decision: VoteDecisionAccept}}
-			if name == "other signed action" {
+			switch name {
+			case "other signed action":
 				p = &ParsedTx{Type: TxTypeMemorySubmit, Nonce: 42,
 					MemorySubmit: &MemorySubmit{MemoryID: "new-memory", Content: "new content", DomainTag: "general"}}
-			} else if name == "empty memory id" {
+			case "empty memory id":
 				p.MemoryVote.MemoryID = ""
 			}
 			if err := SignTx(p, key); err != nil {

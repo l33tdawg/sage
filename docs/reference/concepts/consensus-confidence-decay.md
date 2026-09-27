@@ -83,11 +83,11 @@ Commit called (after FinalizeBlock completes):
 
 ### Determinism Requirement
 
-`FinalizeBlock` delegates the historical deterministic state machine to `finalizeBlockUncommitted` (`app.go:3987`), whose declaration is preceded by the constraint: **"CRITICAL: No time.Now(), no map iteration without sorting, no goroutines, and no external I/O except the supplied BadgerStore view."** `req.Time` (block time from the proposer) is used for all timestamps.
+`FinalizeBlock` delegates the historical deterministic state machine to `finalizeBlockUncommitted` (`app.go:3993`), whose declaration is preceded by the constraint: **"CRITICAL: No time.Now(), no map iteration without sorting, no goroutines, and no external I/O except the supplied BadgerStore view."** `req.Time` (block time from the proposer) is used for all timestamps.
 
 ### Commit Ordering is Load-Bearing
 
-`Commit` (`app.go:10127+`) explains the flush ordering: PostgreSQL writes happen **before** `SaveState` updates the ABCI height in BadgerDB. If PostgreSQL fails, BadgerDB records the old height → CometBFT reads the behind height via `Info()` → replays the block on restart → `FinalizeBlock` re-populates `pendingWrites` → `Commit` retries. This ensures BadgerDB and PostgreSQL cannot permanently diverge.
+`Commit` (`app.go:10129+`) explains the flush ordering: PostgreSQL writes happen **before** `SaveState` updates the ABCI height in BadgerDB. If PostgreSQL fails, BadgerDB records the old height → CometBFT reads the behind height via `Info()` → replays the block on restart → `FinalizeBlock` re-populates `pendingWrites` → `Commit` retries. This ensures BadgerDB and PostgreSQL cannot permanently diverge.
 
 ---
 
@@ -160,7 +160,7 @@ PoE weights are computed at epoch boundaries and drive quorum vote weighting. Al
 const EpochInterval = 100  // blocks per epoch
 ```
 
-`IsEpochBoundary(height)` returns true when `height % 100 == 0 && height > 0`. At each boundary, `processEpoch` (`app.go:9845+`) recomputes weights for all validators.
+`IsEpochBoundary(height)` returns true when `height % 100 == 0 && height > 0`. At each boundary, `processEpoch` (`app.go:9848+`) recomputes weights for all validators.
 
 ### Weight Formula
 
@@ -258,7 +258,7 @@ Corroborations do not change the memory's `ConfidenceScore` column in PostgreSQL
 
 ## Corroboration via Consensus
 
-`POST /v1/memory/{id}/corroborate` → `TxTypeMemoryCorroborate` → `processMemoryCorroborate` (`app.go:7790+`):
+`POST /v1/memory/{id}/corroborate` → `TxTypeMemoryCorroborate` → `processMemoryCorroborate` (`app.go:7793+`):
 
 1. Verifies agent Ed25519 identity proof.
 2. Buffers a `Corroboration` row for PostgreSQL (via `pendingWrite{writeType:"corroborate"}`).
