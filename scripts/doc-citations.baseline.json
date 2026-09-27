@@ -31,6 +31,7 @@
   "docs/reference/concepts/rbac-orgs-federation.md|checkDomainAccess|memory_handler.go": 1,
   "docs/reference/concepts/rbac-orgs-federation.md|agentHasTopSecretClearance|memory_handler.go": 1,
   "docs/reference/concepts/rbac-orgs-federation.md|checkFederationAccess|badger.go": 1,
+  "docs/reference/environment-variables.md|writeGateFromEnv|cmd/sage-gui/write_gate.go": 8,
   "docs/reference/environment-variables.md|claudeChannelEnabled|mcp.go": 1,
   "docs/reference/environment-variables.md|runClaudeChannel|internal/mcp/claude_channel.go": 1,
   "docs/reference/environment-variables.md|EnableRESTClaudeChannel|internal/mcp/claude_wake_source.go": 1,

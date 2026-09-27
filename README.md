@@ -210,6 +210,8 @@ uses re-enrollment; historical memory authorship is preserved.
 
 ## What's New in v11.23.11
 
+**An optional memory-quality gate can hold uncertain memories for review.** Set `SAGE_HUNCH_URL` to enable a background judge for proposed memories, with domain include/exempt settings controlling which memory text reaches the service. Built-in checks still run on every vote, and Settings → Memory gate lets the operator accept or reject held memories. The gate is off by default, supports SQLite stores, and does not change consensus or recall. See the [memory-gate guide](docs/reference/write-gate.md) for configuration and limits. Thanks to [@ihubanov](https://github.com/ihubanov) for the contribution.
+
 **A provably stale memory vote can release its signer fence.** When a vote's target has already committed, a stale-vote mempool filter can reject every retry before it reaches an indexed block result. SAGE now recognizes a narrow, versioned refusal for complete canonical memories submitted after app-v25 activation. The resolver binds that refusal to the exact signed vote and rechecks the transaction index before reporting its outcome. Ordinary CheckTx 13 errors and historical or incomplete targets keep the fence held.
 
 **CLI help is inert.** Asking for `serve --help`, `setup --help`, or `mcp --help` returns usage before command dispatch, configuration, or instance locking, without creating home or project files.
