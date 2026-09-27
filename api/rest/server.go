@@ -649,6 +649,9 @@ func (s *Server) DisableValidatorSigningKey() {
 // every federation surface disabled.
 func (s *Server) SetFederation(f FederationService) {
 	s.federation = f
+	if source, ok := f.(interface{ SetMessageWakeNotifier(func(string, uint64)) }); ok {
+		source.SetMessageWakeNotifier(s.publishMessageWake)
+	}
 }
 
 // SetNodeOperatorID records the hex-encoded ed25519 public key that

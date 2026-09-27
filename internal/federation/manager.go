@@ -281,6 +281,7 @@ type Manager struct {
 	postV26ForNextTx    func() bool
 	postV8ForAccess     func() bool
 	messageNotifier     func(string, AgentMessageNotification)
+	messageWakeNotifier func(string, uint64)
 	logger              zerolog.Logger
 
 	// peerDialFn is the optional v11.6 connectivity seam. It may handle a

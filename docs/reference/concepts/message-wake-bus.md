@@ -2,8 +2,8 @@ Reconciled against the Wake Bus implementation on this branch. Cite file + symbo
 
 # Message Wake Bus
 
-The Wake Bus is a payload-free, exact-recipient hint that canonical local inbox
-work was durably inserted. It lets a long-running supervisor sleep between
+The Wake Bus is a payload-free, exact-recipient hint that local or inbound
+federated inbox work was durably inserted. It lets a long-running supervisor sleep between
 inbox polls without turning an in-memory notification into delivery, read,
 claim, presence, or workflow evidence.
 
@@ -24,9 +24,15 @@ sequence in one transaction without creating a replay mapping. After either
 fresh path commits, `handlePipeSend` (`api/rest/pipe_handler.go:648-1062`) publishes only the
 returned process-local non-zero generation. A keyed replay loads
 the original row without `WakeSeq`, so it neither advances nor republishes the
-generation. Provider-only and federated rows have no exact local recipient and
-do not allocate an exact-recipient sequence. If the active backend cannot
-perform atomic canonical admission, an exact-local pipe send fails with HTTP
+generation. Provider-only and outbound federated rows do not allocate a local
+recipient sequence. Inbound federated sends do: `AdmitFederatedPipeline`
+(`internal/store/pipeline_transport.go`) inserts the message, transport dedup
+binding, and exact local recipient's next sequence in one transaction. Duplicate
+redelivery advances nothing. After commit and release of authorization locks,
+`handlePipeEvent` publishes the returned generation through the REST wake bus
+attached by `Server.SetFederation`. This is independent of the HTTP-MCP bridge.
+
+If the active backend cannot perform atomic canonical admission, an exact-local pipe send fails with HTTP
 501 before inserting anything rather than creating a row wake consumers cannot
 observe as new.
 
@@ -36,12 +42,12 @@ observe as new.
 {"seq": 42, "pending": true}
 ```
 
-`pending` is an exact-recipient `EXISTS` check for unfinished canonical local
+`pending` is an exact-recipient `EXISTS` check for unfinished exact-recipient local and inbound federated
 rows: both `pending` and `claimed` work count until completion or expiry. A
 claim therefore cannot make the wake surface say the recipient has nothing to
 handle merely because another runtime currently owns it. Reading wake state
 changes nothing, and claim/read/reply paths do not rewrite the admission
-sequence. On upgrade, a recipient that already has unfinished canonical work
+sequence. On upgrade, a recipient that already has unfinished local or inbound federated work
 receives baseline sequence 1, so restart does not strand that work behind
 `after_seq=0`.
 
@@ -123,7 +129,8 @@ not evidence that the consumer is online or attended to an event.
 
 After receiving a wake, the supervisor calls the unified `sage_inbox` operation
 to claim exact, provider-addressed, or federated work. `sage_messages_receive`
-remains available for token-replay-safe exact-local batches. Only those existing
+remains available for token-replay-safe exact-local batches; its deliberate
+federated-row exclusion is unchanged. Federated work is claimed via `sage_inbox`. Only those existing
 claim operations affect message lifecycle state.
 
 ## Separate from dashboard and MCP transport SSE

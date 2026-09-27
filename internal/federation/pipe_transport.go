@@ -552,11 +552,12 @@ func (m *Manager) handlePipeEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var localPipeID string
+	var wakeSeq uint64
 	var duplicate bool
 	var err error
 	switch event.Kind {
 	case "send":
-		localPipeID, duplicate, err = m.admitPipeSend(r.Context(), ss, peer, &event)
+		localPipeID, duplicate, wakeSeq, err = m.admitPipeSend(r.Context(), ss, peer, &event)
 	case "result":
 		localPipeID, duplicate, err = m.applyPipeResult(r.Context(), ss, peer, &event)
 	default:
@@ -594,6 +595,7 @@ func (m *Manager) handlePipeEvent(w http.ResponseWriter, r *http.Request) {
 	unlock()
 	locksHeld = false
 	if event.Kind == "send" && !duplicate {
+		m.notifyMessageWake(event.TargetAgentID, wakeSeq)
 		m.notifyAdmittedMessage(event.TargetAgentID, AgentMessageNotification{
 			MessageID: localPipeID, FromAgent: event.SourceAgentID, CreatedAt: event.CreatedAt,
 		})
@@ -617,10 +619,10 @@ func (m *Manager) notifyAdmittedMessage(targetAgentID string, notification Agent
 	}()
 }
 
-func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity, event *PipeEvent) (string, bool, error) {
+func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity, event *PipeEvent) (string, bool, uint64, error) {
 	if event.OriginEventID != "" || event.SourcePipeID != "" || event.Payload == "" || event.Result != "" ||
 		event.TargetAgentID == "" {
-		return "", false, fmt.Errorf("send event shape is invalid")
+		return "", false, 0, fmt.Errorf("send event shape is invalid")
 	}
 	var contact *PipeContact
 	var err error
@@ -630,15 +632,15 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 		contact, err = m.authorizeInboundPipeContact(ctx, peer, event)
 	}
 	if err != nil {
-		return "", false, err
+		return "", false, 0, err
 	}
 	method, path, body, err := verifyPipelineAgentProof(event.Proof)
 	if err != nil || method != http.MethodPost || path != "/v1/pipe/send" {
-		return "", false, fmt.Errorf("send proof does not authorize the pipe endpoint: %w", err)
+		return "", false, 0, fmt.Errorf("send proof does not authorize the pipe endpoint: %w", err)
 	}
 	var signed signedPipeSendRequest
 	if decodeErr := decodeStrictPipeJSON(body, &signed); decodeErr != nil {
-		return "", false, fmt.Errorf("decode signed pipe send: %w", decodeErr)
+		return "", false, 0, fmt.Errorf("decode signed pipe send: %w", decodeErr)
 	}
 	targetMatches := signed.ToProvider == "" &&
 		signed.ToAgent == event.TargetAgentID &&
@@ -648,17 +650,17 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 		targetMatches = targetMatches && contact.AgentID == event.TargetAgentID
 	}
 	if signed.Payload != event.Payload || signed.Intent != event.Intent || !targetMatches {
-		return "", false, fmt.Errorf("signed send request does not match the pipeline event")
+		return "", false, 0, fmt.Errorf("signed send request does not match the pipeline event")
 	}
 	created := time.Unix(event.Proof.Timestamp, 0).UTC()
 	expires := created.Add(normalizedPipeTTL(signed.TTLMinutes))
 	now := time.Now().UTC()
 	if !event.CreatedAt.Equal(created) || !event.ExpiresAt.Equal(expires) || now.After(expires) || created.After(now.Add(maxTimestampSkew)) {
-		return "", false, fmt.Errorf("signed pipeline lifetime is invalid or expired")
+		return "", false, 0, fmt.Errorf("signed pipeline lifetime is invalid or expired")
 	}
 	localID, err := newImportedPipeID()
 	if err != nil {
-		return "", false, err
+		return "", false, 0, err
 	}
 	msg := &store.PipelineMessage{
 		PipeID: localID, FromAgent: event.SourceAgentID, ToAgent: event.TargetAgentID,
@@ -674,23 +676,23 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 	if event.LinkedRelation != nil {
 		msg.FederationLinkedRelation, err = json.Marshal(event.LinkedRelation)
 		if err != nil {
-			return "", false, ErrFederatedPipeInvalid
+			return "", false, 0, ErrFederatedPipeInvalid
 		}
 	}
 	switch event.ReceiptProtocolVersion {
 	case 0:
 		if event.ReceiptContentDigest != "" {
-			return "", false, fmt.Errorf("legacy send cannot carry receipt-v2 evidence")
+			return "", false, 0, fmt.Errorf("legacy send cannot carry receipt-v2 evidence")
 		}
 	case PipeReceiptVersion:
 		if m.postV26ForNextTx == nil || !m.postV26ForNextTx() ||
 			event.ReceiptContentDigest != pipeReceiptContentDigest(
 				event.EventID, event.SourceChainID, event.DestinationChainID, msg,
 			) {
-			return "", false, fmt.Errorf("receipt-v2 negotiation or content binding is invalid")
+			return "", false, 0, fmt.Errorf("receipt-v2 negotiation or content binding is invalid")
 		}
 	default:
-		return "", false, fmt.Errorf("unsupported receipt protocol version")
+		return "", false, 0, fmt.Errorf("unsupported receipt protocol version")
 	}
 	proofHash := PipelineProofHash(event.SourceChainID, event.Kind, event.Proof)
 	contentHash := pipeEventContentHash(event)
@@ -703,7 +705,8 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 		EventKind: event.Kind, RemotePipeID: event.EventID, ContentHash: contentHash[:], ProofHash: proofHash[:],
 		LocalPipeID: localID, Outcome: "accepted", ExpiresAt: expires.Add(maxTimestampSkew),
 	}
-	return ss.AdmitFederatedPipeline(ctx, msg, dedup)
+	id, duplicate, err := ss.AdmitFederatedPipeline(ctx, msg, dedup)
+	return id, duplicate, msg.WakeSeq, err
 }
 
 func (m *Manager) applyPipeResult(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity, event *PipeEvent) (string, bool, error) {
@@ -787,4 +790,20 @@ func (m *Manager) PushPipeEvent(ctx context.Context, remoteChainID string, event
 		return nil, fmt.Errorf("peer %s returned invalid pipeline status %q", remoteChainID, out.Status)
 	}
 	return &out, nil
+}
+
+// SetMessageWakeNotifier attaches the REST durable wake bus during boot, before
+// serving requests. This is separate from the legacy HTTP-MCP metadata bridge.
+func (m *Manager) SetMessageWakeNotifier(notify func(string, uint64)) {
+	m.messageWakeNotifier = notify
+}
+
+func (m *Manager) notifyMessageWake(agentID string, seq uint64) {
+	if m.messageWakeNotifier == nil || agentID == "" || seq == 0 {
+		return
+	}
+	// Notification failure must not reinterpret a committed admission. A fresh
+	// connection reads the durable sequence even if this acceleration is lost.
+	defer func() { _ = recover() }()
+	m.messageWakeNotifier(agentID, seq)
 }

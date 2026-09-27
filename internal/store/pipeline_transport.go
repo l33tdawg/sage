@@ -275,7 +275,8 @@ func validatePipelineTransportDedup(dedup *PipelineTransportDedup) error {
 }
 
 func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineMessage, dedup *PipelineTransportDedup) (localPipeID string, duplicate bool, err error) {
-	if msg == nil || msg.SourceChainID == "" || msg.SourcePipeID == "" || msg.DestinationChainID != "" {
+	if msg == nil || msg.SourceChainID == "" || msg.SourcePipeID == "" || msg.DestinationChainID != "" ||
+		strings.TrimSpace(msg.ToAgent) == "" || msg.ToProvider != "" || msg.Status != "pending" {
 		return "", false, fmt.Errorf("imported pipeline provenance is invalid")
 	}
 	if validationErr := validatePipelineTransportDedup(dedup); validationErr != nil {
@@ -316,6 +317,8 @@ func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineM
 			return "", false, validationErr
 		}
 	}
+	msg.WakeSeq = 0
+	var wakeSeq int64
 	err = s.runPipelineTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)
 		var existingHash []byte
@@ -374,9 +377,22 @@ func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineM
 			dedup.ProofHash, dedup.LocalPipeID, dedup.Outcome, formatTime(dedup.ExpiresAt)); execErr != nil {
 			return fmt.Errorf("insert pipeline transport dedup: %w", execErr)
 		}
+		if wakeErr := tx.conn.QueryRowContext(ctx,
+			`INSERT INTO message_wake_state(recipient_agent_id,seq) VALUES(?,1)
+			 ON CONFLICT(recipient_agent_id) DO UPDATE SET seq=message_wake_state.seq+1
+			 RETURNING seq`, msg.ToAgent).Scan(&wakeSeq); wakeErr != nil {
+			return wakeErr
+		}
+		if wakeSeq < 1 {
+			return errors.New("federated wake sequence did not advance")
+		}
 		localPipeID = msg.PipeID
 		return nil
 	})
+	// Publishable metadata is exposed only after the entire transaction commits.
+	if err == nil && !duplicate {
+		msg.WakeSeq = uint64(wakeSeq)
+	}
 	return localPipeID, duplicate, err
 }
 

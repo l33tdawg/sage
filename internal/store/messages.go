@@ -198,12 +198,12 @@ func (s *SQLiteStore) migrateMessages(ctx context.Context) error {
 		  AND strftime('%s',expires_at)=strftime('%s',created_at,'+24 hours')`); err != nil {
 		return fmt.Errorf("extend canonical message inbox retention: %w", err)
 	}
-	// An upgraded node may already hold canonical pending work. Give each exact
+	// An upgraded node may already hold local or inbound federated work. Give each exact
 	// recipient one durable baseline sequence so a fresh after_seq=0 consumer
 	// receives a catch-up event after restart rather than waiting for a new send.
 	if _, err := s.writeExecContext(ctx, `INSERT OR IGNORE INTO message_wake_state(recipient_agent_id,seq)
 		SELECT DISTINCT to_agent,1 FROM pipeline_messages
-		WHERE source_chain_id='' AND destination_chain_id='' AND to_provider=''
+		WHERE destination_chain_id='' AND to_provider=''
 		  AND to_agent<>'' AND status IN ('pending','claimed') AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')`); err != nil {
 		return fmt.Errorf("backfill canonical message wake state: %w", err)
 	}
@@ -433,7 +433,8 @@ func (s *SQLiteStore) AdmitLocalMessage(ctx context.Context, msg *PipelineMessag
 }
 
 // GetMessageWakeState returns only the authenticated caller's exact durable
-// wake sequence and whether unfinished canonical local work exists. Claimed
+// wake sequence and whether unfinished exact-recipient local or inbound
+// federated work exists. Claimed
 // work remains unfinished: a claimant session may crash, so claim ownership
 // alone cannot make the wake surface say the recipient has nothing to handle.
 // It never decrypts a message and does not claim, read, acknowledge, or mutate.
@@ -457,7 +458,7 @@ func (s *SQLiteStore) GetMessageWakeState(ctx context.Context, recipientID strin
 	var pending int
 	if err := s.conn.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM pipeline_messages
-		 WHERE source_chain_id='' AND destination_chain_id='' AND to_provider=''
+		 WHERE destination_chain_id='' AND to_provider=''
 		   AND to_agent=? AND status IN ('pending','claimed')
 		   AND expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now'))`, recipientID).Scan(&pending); err != nil {
 		return MessageWakeState{}, err

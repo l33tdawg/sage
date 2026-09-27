@@ -61,6 +61,13 @@ func TestHandlePipeEventSendVerifiesProofLifetimeContactAndDeduplicates(t *testi
 	m.messageNotifier = func(target string, notification AgentMessageNotification) {
 		wakes = append(wakes, wake{target: target, notification: notification})
 	}
+	var durableWakes []uint64
+	m.SetMessageWakeNotifier(func(target string, seq uint64) {
+		state, err := ss.GetMessageWakeState(ctx, target)
+		require.NoError(t, err)
+		require.Equal(t, store.MessageWakeState{Seq: seq, Pending: true}, state, "callback runs after durable commit")
+		durableWakes = append(durableWakes, seq)
+	})
 	peerOperator := newPeerOperatorID(t)
 	agreement := configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerOperator, "host", nil, 4)
 	owner := newPeerOperatorID(t)
@@ -136,6 +143,7 @@ func TestHandlePipeEventSendVerifiesProofLifetimeContactAndDeduplicates(t *testi
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&duplicate))
 	require.Equal(t, "duplicate", duplicate.Status)
 	require.Len(t, wakes, 1, "a duplicate federated admission must not wake the recipient again")
+	require.Equal(t, []uint64{1}, durableWakes)
 	require.NoError(t, ss.UpdateAgentStatus(ctx, unrelatedOwner, "inactive"))
 	rr = callPipeEvent(t, m, agreement, peerOperator, event)
 	require.Equal(t, http.StatusOK, rr.Code, "unrelated availability must not invalidate exact-target work: %s", rr.Body.String())
@@ -1238,4 +1246,10 @@ func TestSessionBoundReplyProofRemainsStrictAndSigned(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFederatedMessageWakeNotifierIsPanicSafe(t *testing.T) {
+	m := &Manager{}
+	m.SetMessageWakeNotifier(func(string, uint64) { panic("broken bridge") })
+	require.NotPanics(t, func() { m.notifyMessageWake("recipient", 1) })
 }

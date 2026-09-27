@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -415,4 +416,92 @@ func TestMessageWakeSSEEmitsHeartbeatWithoutInventingEvent(t *testing.T) {
 	require.Equal(t, ": heartbeat", scanner.Text())
 	require.True(t, scanner.Scan())
 	require.Empty(t, scanner.Text())
+}
+
+// Embedding the service contract keeps this test focused on boot-time wiring.
+type federationWakeSource struct {
+	FederationService
+	notify func(string, uint64)
+}
+
+func (f *federationWakeSource) SetMessageWakeNotifier(fn func(string, uint64)) { f.notify = fn }
+
+func TestFederatedMessageWakeBridgeFeedsRESTBroker(t *testing.T) {
+	s, _ := newPipeServer(t)
+	source := &federationWakeSource{}
+	s.SetFederation(source)
+	require.NotNil(t, source.notify)
+	bob, err := s.messageWakeBroker().acquire("bob", "runtime")
+	require.NoError(t, err)
+	defer bob.release()
+	other, err := s.messageWakeBroker().acquire("other", "runtime")
+	require.NoError(t, err)
+	defer other.release()
+	source.notify("bob", 7)
+	select {
+	case seq := <-bob.events:
+		require.Equal(t, uint64(7), seq)
+	case <-time.After(time.Second):
+		t.Fatal("federated admission did not reach live REST wake subscriber")
+	}
+	select {
+	case <-other.events:
+		t.Fatal("wake reached a different recipient")
+	default:
+	}
+}
+
+func TestFederatedMessageWakeSSELiveAndReconnect(t *testing.T) {
+	s, sqlite := newPipeServer(t)
+	bob := strings.Repeat("b", 64)
+	addMessageAgent(t, sqlite, bob)
+	source := &federationWakeSource{}
+	s.SetFederation(source)
+	server := httptest.NewServer(messageRouterAs(s, bob, true))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	open := func(cursor string) *http.Response {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/v1/messages/wake?consumer_id=runtime&after_seq="+cursor, nil)
+		require.NoError(t, err)
+		response, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, response.StatusCode)
+		return response
+	}
+	response := open("0") // subscribed before admission: must receive a live wake
+	defer response.Body.Close()
+	now := time.Now().UTC()
+	msg := &store.PipelineMessage{PipeID: "msg-fed-live", FromAgent: strings.Repeat("a", 64), ToAgent: bob,
+		SourceChainID: "peer", SourcePipeID: "remote-live", Status: "pending", Payload: "private federated work",
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour), FederationPolicyEpoch: "epoch",
+		FederationAgreementID: strings.Repeat("c", 64), FederationContactID: strings.Repeat("d", 64),
+		FederationContactRevision: strings.Repeat("e", 64)}
+	hash := sha256.Sum256([]byte("live-event"))
+	dedup := &store.PipelineTransportDedup{RemoteChainID: msg.SourceChainID, RemotePipeID: msg.SourcePipeID,
+		SourceAgentID: msg.FromAgent, TargetAgentID: bob, LocalPipeID: msg.PipeID, EventKind: "send",
+		PolicyEpoch: msg.FederationPolicyEpoch, AgreementID: msg.FederationAgreementID,
+		ContactID: msg.FederationContactID, ContactRevision: msg.FederationContactRevision,
+		ContentHash: hash[:], ProofHash: hash[:], Outcome: "accepted", ExpiresAt: msg.ExpiresAt}
+	_, duplicate, err := sqlite.AdmitFederatedPipeline(ctx, msg, dedup)
+	require.NoError(t, err)
+	require.False(t, duplicate)
+	source.notify(bob, msg.WakeSeq)
+	id, payload := readWakeEvent(t, response.Body)
+	require.Equal(t, "1", id)
+	want := map[string]any{"version": float64(1), "seq": float64(1), "pending": true}
+	require.Equal(t, want, payload, "no message content or provenance may leak through wake events")
+	require.NoError(t, response.Body.Close())
+	// Same-consumer reconnect supersedes the old lease and sees unfinished work
+	// at the same sequence without any further publication.
+	reconnected := open("1")
+	defer reconnected.Body.Close()
+	id, payload = readWakeEvent(t, reconnected.Body)
+	require.Equal(t, "1", id)
+	require.Equal(t, want, payload)
+	state := callMessageJSON(t, messageRouterAs(s, bob, true), http.MethodGet, "/v1/messages/wake-state", nil)
+	require.Equal(t, http.StatusOK, state.Code)
+	require.NoError(t, json.Unmarshal(state.Body.Bytes(), &payload))
+	require.Equal(t, want, payload)
 }

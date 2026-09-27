@@ -897,7 +897,7 @@ type PipelineMessage struct {
 	FederationReceiptContentDigest    string `json:"-"`
 	FederationReceiptRecipientChainID string `json:"-"`
 	// WakeSeq is the durable exact-recipient wake sequence allocated in the
-	// same transaction as a fresh canonical local inbox insertion. It is
+	// same transaction as a fresh local or inbound federated inbox insertion. It is
 	// process-local return metadata only and is never stored in the pipeline
 	// row or exposed as message/delivery/read evidence.
 	WakeSeq uint64 `json:"-"`
