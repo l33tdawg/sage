@@ -39,6 +39,13 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+	if handleCommandHelp(os.Args[1:]) {
+		return
+	}
+	if err := validateSimpleCommandArgs(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
 	if optionalCommandHandler != nil {
 		handled, optionalErr := optionalCommandHandler(os.Args[1:])
 		if handled {
