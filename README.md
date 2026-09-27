@@ -48,7 +48,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.10`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.11`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -207,6 +207,18 @@ software updates, and encryption controls. Ordinary agent identity replacement
 uses re-enrollment; historical memory authorship is preserved.
 
 ---
+
+## What's New in v11.23.11
+
+**A provably stale memory vote can release its signer fence.** When a vote's target has already committed, a stale-vote mempool filter can reject every retry before it reaches an indexed block result. SAGE now recognizes a narrow, versioned refusal for complete canonical memories submitted after app-v25 activation. The resolver binds that refusal to the exact signed vote and rechecks the transaction index before reporting its outcome. Ordinary CheckTx 13 errors and historical or incomplete targets keep the fence held.
+
+**CLI help is inert.** Asking for `serve --help`, `setup --help`, or `mcp --help` returns usage before command dispatch, configuration, or instance locking, without creating home or project files.
+
+**Inbound federated messages wake their exact local recipient.** Wake allocation commits atomically with message admission and transport deduplication. Duplicate or rolled-back deliveries cannot create extra wakes, and startup catches up existing unfinished inbound work.
+
+No consensus execution change, transaction-type change, upgrade height, or chain reset. AMID operators must preserve unresolved transaction identity and signed bytes during maintenance: `cmd/amid` does not wire the durable-intent restore hooks used by `sage-gui`, so restarting it is not a fence-recovery proof.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.11`. SDK 11.23.11.
 
 ## What's New in v11.23.10
 

@@ -78,7 +78,7 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/UPGRADING.md', '| v11.19.20 | Voter dedup is sticky'],
     ['docs/UPGRADING.md', '| v11.19.21 | Co-commit tombstones'],
     ['docs/UPGRADING.md', '| v11.20.0 | Encrypted agent working state'],
-    ['docs/UPGRADING.md', `| v${version} | A held signing key can no longer park the node's whole write path`],
+    ['docs/UPGRADING.md', `| v${version} | Typed committed-memory vote refusals can resolve signer fences`],
     ['docs/ROADMAP.md', `## v${version} release`],
     ['docs/UPGRADING.md', 'The recovery commands in this guide require SAGE v11.18.0 or later.'],
     ['docs/UPGRADING.md', '`backup --full`, `restore --from`,'],

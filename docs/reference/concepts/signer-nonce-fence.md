@@ -1,6 +1,6 @@
 # The signer fence — same-key nonce ordering, and what it cannot prove
 
-**Status: v11.23.10. This document describes a fence that survives the process
+**Status: v11.23.11. With the `sage-gui` entrypoint, the fence survives the process
 that raised it: a restart no longer loses the record, a restored fence re-reads
 its own proofs from the chain, and the one shape no proof can settle has an
 explicit operator exit that says so. Read "What the fence still cannot do" for
@@ -10,8 +10,13 @@ Source of truth: `internal/tx/nonce.go` (the lease),
 `internal/tx/nonce_fence.go` (the fence), `cmd/sage-gui/signer_fence_restart.go`
 (the restart veto).
 
-The typed committed-memory vote refusal described below is a development change
-after v11.23.10; it is not available in that release.
+The typed committed-memory vote refusal described below ships in v11.23.11.
+
+The durable-intent startup wiring and coordinated-restart guard described here
+apply to `sage-gui`. The current `cmd/amid` entrypoint does not install those
+hooks. AMID operators must preserve unresolved transaction identity and signed
+bytes separately and prove their fate before allowing signing after maintenance;
+restarting AMID alone does not restore or resolve its in-process fence.
 
 ---
 
