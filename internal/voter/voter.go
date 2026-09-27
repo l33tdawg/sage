@@ -43,6 +43,10 @@ type Config struct {
 	// backlog (sage-gui wires this). Optional and nil-safe: amid has no local
 	// health server and leaves it nil — the Prometheus gauges publish either way.
 	Health *metrics.HealthChecker
+	// Gate, when non-nil and the store implements GateStore, asks a Hunch judge
+	// about each proposed memory before voting (see Gate). Nil = the built-in
+	// checks only, exactly as before.
+	Gate *Gate
 }
 
 // App is the slice of *abci.SageApp the voter needs for the upgrade-proposal arm.
@@ -130,6 +134,17 @@ func Run(ctx context.Context, app App, store Store, cfg Config, logger zerolog.L
 	if cfg.Health != nil {
 		cfg.Health.SetVoterStatus(metrics.VoterStatus{Running: true, ValidatorID: selfID})
 		defer cfg.Health.SetVoterStatus(metrics.VoterStatus{Running: false, ValidatorID: selfID})
+	}
+
+	if cfg.Gate != nil && len(cfg.Gate.Judges) > 0 {
+		if gs, ok := store.(GateStore); ok {
+			cfg.Gate.Start(ctx, gs, logger)
+		} else {
+			logger.Warn().Msg("memory gate configured but this store cannot host it — built-in checks only")
+			cfg.Gate = nil
+		}
+	} else {
+		cfg.Gate = nil
 	}
 
 	logger.Info().
@@ -346,6 +361,19 @@ func voteOnPendingMemoriesResult(
 				MemType:     string(mem.MemoryType),
 				Confidence:  mem.ConfidenceScore,
 			})
+			if cfg.Gate != nil {
+				if gs, ok := store.(GateStore); ok {
+					outcome, gated := cfg.Gate.Apply(ctx, gs, mem, decision, logger)
+					if outcome == gateHold {
+						// Not judged yet, or held for operator review: no vote this
+						// tick. Judging happens in the background (Gate.Start).
+						continue
+					}
+					if outcome == gateOverride {
+						decision = gated
+					}
+				}
+			}
 			decStr := "reject"
 			if decision.Accept {
 				decStr = "accept"

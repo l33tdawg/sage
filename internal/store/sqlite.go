@@ -875,6 +875,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	s.migrateTaskPickup(ctx)
 	s.migrateTaskStatusUpdatedAt(ctx)
 	s.migrateTaskBoardPosition(ctx)
+	if err := s.migrateWriteGate(ctx); err != nil {
+		return err
+	}
 	if err := s.migrateTaskAssignmentNotifications(ctx); err != nil {
 		return fmt.Errorf("migrate task assignment notifications: %w", err)
 	}

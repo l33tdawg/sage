@@ -1259,3 +1259,24 @@ export async function rerankerSetupStop() {
 export function rerankerSetupInstallEngine() {
     return fetch(`${API_BASE}/v1/dashboard/reranker/setup/install-engine`, { method: 'POST' });
 }
+
+// Memory gate review queue (internal/voter.Gate).
+export async function fetchMemoryGateReviewQueue({ limit = 50, cursor = '' } = {}) {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set('cursor', cursor);
+    const res = await fetch(`${API_BASE}/v1/dashboard/memory/review-queue?${query}`);
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || 'the memory review queue is temporarily unavailable');
+    return payload;
+}
+
+export async function decideMemoryGateReview(memoryId, decision, note = '') {
+    const res = await fetch(`${API_BASE}/v1/dashboard/memory/${encodeURIComponent(memoryId)}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision, note }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || 'the review decision could not be saved');
+    return payload;
+}

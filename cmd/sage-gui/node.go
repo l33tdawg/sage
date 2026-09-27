@@ -1410,6 +1410,8 @@ func runServe(startupProof string) (rerr error) {
 	// lifecycle so every listener/store/consensus component drains before exec.
 	restartRequested = make(chan preparedRestartRequest, 1)
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
+	memoryGate := writeGateFromEnv(logger)
+	dashboard.SetMemoryGate(memoryGate)
 	dashboard.NodeOperatorAgentID = operatorAgentID
 	dashboard.RunBackground = func(fn func(context.Context)) {
 		startWorker(func() { fn(ctx) })
@@ -2370,8 +2372,9 @@ func runServe(startupProof string) (rerr error) {
 		}
 		// Health wired in so /ready's "voter" block tracks liveness + the
 		// proposed backlog (nil-safe: amid starts the voter without one).
+		gate := memoryGate
 		startWorker(func() {
-			voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: pollInterval, Health: health}, logger)
+			voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: pollInterval, Health: health, Gate: gate}, logger)
 		})
 	case cfg.Voter.Required:
 		// Normally unreachable — the pre-serve gate before StartChain already refused

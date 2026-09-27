@@ -38,6 +38,7 @@ import (
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
+	"github.com/l33tdawg/sage/internal/voter"
 )
 
 // errDeprecatedNoFTS forces handleListMemories onto the keyword pool-scan path
@@ -90,6 +91,8 @@ type rerankerInfoProvider interface {
 
 // DashboardHandler serves the CEREBRUM dashboard UI and its API endpoints.
 type DashboardHandler struct {
+	// memoryGate is the node's optional memory gate (nil = off); see write_gate.go.
+	memoryGate         atomic.Pointer[voter.Gate]
 	cleanupMu          sync.Mutex
 	cleanupWorkerReady atomic.Bool
 	// backgroundWG counts goroutines started by runBackground when NO lifecycle owner was injected
@@ -1348,6 +1351,12 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.With(h.cerebrumOperatorGate).
 				Get("/v1/dashboard/chain/scopes", h.handleChainScopes)
 			r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/export", h.handleExport)
+			// Memory-gate review queue (internal/voter.Gate): memories the judge was
+			// uncertain about wait here for the operator's decision.
+			r.With(h.cerebrumOperatorGate, h.appV23ProjectionBroadReadGate).
+				Get("/v1/dashboard/memory/review-queue", h.handleReviewQueue)
+			r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/memory/{id}/judgements", h.handleMemoryJudgements)
+			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/memory/{id}/review", h.handleReviewDecision)
 			r.With(h.cerebrumOperatorGate, h.appV23ProjectionBroadReadGate).
 				Get("/v1/dashboard/memory/timeline", h.handleTimeline)
 			r.With(h.cerebrumOperatorGate, h.appV23ProjectionBroadReadGate).
@@ -4822,6 +4831,11 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 		health["rest_addr"] = h.RESTAddr
 	}
 	health["signer_fences"] = signerFenceHealth(h.isCEREBRUMReadRequest(r))
+	if h.isCEREBRUMReadRequest(r) {
+		health["memory_gate"] = h.memoryGateStatus()
+	} else {
+		health["memory_gate"] = map[string]any{"enabled": h.memoryGate.Load() != nil}
+	}
 
 	// Embedder status. Before v6.8.8 the dashboard hard-coded an Ollama probe
 	// to localhost:11434, which painted "Ollama offline" any time the operator

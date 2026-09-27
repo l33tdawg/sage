@@ -15,6 +15,8 @@ import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
 import { buildUpdateBanner } from './update-banner.js';
 import { describeSignerFences, describeLastFenceResolution, fenceSummary } from './signer-fences.js';
+import { describeMemoryGate, reviewItemState } from './memory-gate.js';
+import { fetchMemoryGateReviewQueue, decideMemoryGateReview } from './api.js';
 import { computeReorderedColumn, applyColumnOrder } from './task-reorder.js';
 import { runSequential, summarizeClearedTasks, summarizeDroppedTasks, summarizeForgottenMemories } from './bulk-sequence.js';
 import { refreshTaskSnapshot } from './task-refresh.js';
@@ -5569,6 +5571,71 @@ function CleanupSettings() {
 // key — keeps everything, best when you have the key) or DEPRECATE (hide them).
 // One key per recover pass; re-run with another key for whatever remains. Renders
 // nothing when there's nothing unreadable and no action was taken.
+// MemoryGatePanel — the operator's review queue for the optional memory gate.
+// Memories the judges were unsure about are not voted on until decided here.
+function MemoryGatePanel() {
+    const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [err, setErr] = useState(null);
+    const [busyId, setBusyId] = useState('');
+    const [done, setDone] = useState({}); // memory_id -> decision
+
+    const load = async () => {
+        setLoading(true); setErr(null);
+        try { setData(await fetchMemoryGateReviewQueue({ limit: 50 })); }
+        catch (e) { setErr(e.message || String(e)); }
+        setLoading(false);
+    };
+    // The server pages past rows it may not show; follow its cursor to append.
+    const loadMore = async () => {
+        if (!data?.next_cursor) return;
+        setLoading(true); setErr(null);
+        try {
+            const next = await fetchMemoryGateReviewQueue({ limit: 50, cursor: data.next_cursor });
+            setData({ ...next, items: [...(data.items || []), ...(next.items || [])] });
+        } catch (e) { setErr(e.message || String(e)); }
+        setLoading(false);
+    };
+    useEffect(() => { load(); }, []);
+
+    const decide = async (id, decision) => {
+        setBusyId(id); setErr(null);
+        try { await decideMemoryGateReview(id, decision); setDone(d => ({ ...d, [id]: decision })); }
+        catch (e) { setErr(e.message || String(e)); }
+        setBusyId('');
+    };
+
+    const gate = describeMemoryGate(data?.gate);
+    const items = (data?.items || []).filter(it => !done[it.memory_id]);
+    const decided = Object.keys(done).length;
+    return html`
+        <div class="settings-section memory-gate-panel">
+            <h3 style="margin:0 0 6px;">${gate.headline}</h3>
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">${gate.detail}</div>
+            ${gate.enabled && html`<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">${gate.scope}</div>`}
+            ${loading && html`<div class="empty-state">Loading…</div>`}
+            ${err && html`<div class="import-error" style="margin:8px 0;">${err}</div>`}
+            ${!loading && gate.enabled && items.length === 0 && html`<div class="empty-state">Nothing is waiting for review.${decided ? ` ${decided} decided this session — the node applies each on its next vote.` : ''}</div>`}
+            ${!loading && items.map(it => {
+                const st = reviewItemState(it);
+                return html`
+                    <div class="memory-gate-item" style="border:1px solid var(--border);border-radius:6px;padding:10px;margin:8px 0;">
+                        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">${it.domain_tag || ''} ${it.memory_type ? '· ' + it.memory_type : ''} · held ${it.held_at ? new Date(it.held_at).toLocaleString() : ''}</div>
+                        <div style="white-space:pre-wrap;font-size:13px;margin-bottom:6px;">${st.text}</div>
+                        <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">${it.reason}</div>
+                        ${st.decidable && html`
+                            <div style="display:flex;gap:8px;">
+                                <button class="btn btn-primary" style="font-size:12px;padding:5px 12px;" disabled=${busyId === it.memory_id} onClick=${() => decide(it.memory_id, 'accept')}>Keep as memory</button>
+                                <button class="btn btn-danger" style="font-size:12px;padding:5px 12px;" disabled=${busyId === it.memory_id} onClick=${() => decide(it.memory_id, 'reject')}>Reject</button>
+                            </div>`}
+                    </div>`;
+            })}
+            ${!loading && data?.next_cursor && html`<button class="btn" style="font-size:11px;padding:4px 10px;margin:6px 6px 0 0;" onClick=${loadMore}>Load more</button>`}
+            ${!loading && html`<button class="btn" style="font-size:11px;padding:4px 10px;margin-top:6px;" onClick=${load}>Refresh</button>`}
+        </div>
+    `;
+}
+
 function UnreadableMemoriesPanel({ status, onChange, onBusy }) {
     const [mode, setMode] = useState('actions'); // actions | recover
     const [recoveryKey, setRecoveryKey] = useState('');
@@ -6791,6 +6858,7 @@ function SettingsPage({ onRunSetup, requestedTab }) {
         { id: 'recall', label: 'Recall', help: 'Semantic embedding, reranking, recall depth, confidence floor, and agent boot instructions.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>` },
         { id: 'security', label: 'Security', help: 'Encrypt the Synaptic Ledger and manage its passphrase and recovery key.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1L2 4v4c0 4 3 6 6 7 3-1 6-3 6-7V4L8 1z" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>` },
         { id: 'maintenance', label: 'Maintenance', help: 'Preview cleanup, export backups, restart the node, rerun setup, and change preferences.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M11 2a3 3 0 00-3 3.9L3 11v2h2l5.1-5A3 3 0 1011 2z" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linejoin="round"/></svg>` },
+        { id: 'memory-gate', label: 'Memory gate', help: 'Review memories the optional memory gate held, and see what it sends to its judge service.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 3h10v10H3z" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M5.5 8l2 2 3.5-4" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
         { id: 'updates', label: 'Updates', help: 'Check, install, and inspect SAGE software releases and build information.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/><path d="M3 12h10" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
     ];
 
@@ -7094,6 +7162,12 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                         </div>
                         ${html`<${AutostartToggle} />`}
                     </div>
+                </div>
+            `}
+
+            ${settingsTab === 'memory-gate' && html`
+                <div class="settings-tab-content">
+                    <${MemoryGatePanel} />
                 </div>
             `}
 
