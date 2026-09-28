@@ -163,7 +163,7 @@ explicit, reviewed operator ceremony rather than a silent mutation.
 
 The optional [memory gate](reference/write-gate.md) gains an evidence check for memories that overstate a source's date, attribution or certainty. MCP `sage_remember` accepts source text; REST uploads it separately from the signed submission so the chain receives only an evidence ID. Evidence is encrypted when the vault is enabled and sent to the configured judge service only for memories in the gate's scope.
 
-Active enrollment guards uploads. Evidence claims survive indeterminate submissions and are released after failures before sending. A 24-hour unresolved claim loses its text but keeps an expired marker: late arrival produces a held-for-review verdict, and the dashboard explains why support could not be checked. Review decisions revalidate readable content and evidence.
+Active enrollment guards uploads. Evidence claims survive indeterminate submissions and are released after failures before sending. If the memory has not appeared after 24 hours, its claim loses its text but keeps an expired marker: late arrival produces a held-for-review verdict, and the dashboard explains why support could not be checked. Evidence for an existing proposed memory is retained. Review decisions revalidate readable content and evidence.
 
 The gate stays experimental and off unless configured. The evidence check can be disabled separately. It does not authenticate sources or send evidence to other validators, and no consensus execution or app-version change is introduced. Reproducible evaluation on representative memories remains a follow-up before broader enablement.
 
