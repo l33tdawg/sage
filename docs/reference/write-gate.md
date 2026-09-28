@@ -154,15 +154,50 @@ server immediately before it is stored — the content must still be readable
 and the record must pass the same integrity check — so a stale page or an API
 client cannot decide a memory it could not have reviewed.
 
-## What leaves the node
+## Local judge and data boundary
 
 Only the **text** of proposed memories in scope — and, for a memory submitted
 with evidence, the evidence text — is sent to the configured judge service —
-no ids, domains, authors or other metadata. Scope is controlled by
+no ids, domains, authors or other metadata. SAGE permits only HTTP(S) on
+`localhost` or literal loopback IPs (`127.0.0.1`, `::1`). It rejects public and
+LAN endpoints, does not resolve arbitrary hostnames, ignores environment
+proxies, and does not follow redirects. Invalid configuration leaves the gate
+disabled and logs an error. Source: `internal/hunch/local.go`
+(`ValidateLocalURL`, `dialLoopback`, `localClient`) and
+`cmd/sage-gui/write_gate.go` (`writeGateFromEnv`).
+
+Scope is controlled by
 `SAGE_HUNCH_INCLUDE_DOMAINS` (only these domains) and
 `SAGE_HUNCH_EXEMPT_DOMAINS` (never these); the node logs the scope and the
 judge URL at startup, and the review screen repeats it. Content that cannot be
 produced in plaintext (a locked vault, a decryption failure) is never sent.
+
+### The model must also run locally
+
+The Hunch service is a separate trusted process. A loopback connection to it
+cannot prove where that process runs inference: SAGE does not inspect or
+control its outbound connections. A localhost proxy to a cloud model is not a
+local judge and is not a supported deployment. Keep the gate off until both
+the judge and its model backend have been verified as local; use network egress
+isolation for those processes when that boundary must be enforced independently
+of their configuration.
+
+Set Hunch's backend explicitly to a locally hosted model that supports its
+log-probability requirements. For example, for a model already running on this
+machine at port 8000:
+
+```sh
+export HUNCH_BACKEND_URL=http://127.0.0.1:8000
+export HUNCH_BACKEND_MODEL='your-locally-served-model-name'
+python -m hunch
+```
+
+Check any `hunch.toml` as well: Hunch configuration files can take precedence
+over environment variables. Do not rely on its automatic discovery of
+`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` or other general provider settings.
+Those may select a remote service. Hunch's [configuration documentation](https://github.com/ihubanov/hunch#configuration)
+describes its precedence and supported backends. Enable the SAGE gate only
+after verifying this setup, with `SAGE_HUNCH_URL=http://127.0.0.1:8791`.
 
 ## Judges are pluggable
 
@@ -192,7 +227,7 @@ conversation, should not be asked this question. List their domain prefixes in
 
 | Variable | Meaning |
 |---|---|
-| `SAGE_HUNCH_URL` | Hunch service base URL. **Unset = gate off.** |
+| `SAGE_HUNCH_URL` | HTTP(S) URL of a local Hunch service: `localhost` or a loopback IP only. Remote/LAN URLs are refused. **Unset or invalid = gate off.** |
 | `SAGE_HUNCH_API_KEY` | bearer key, if the service needs one |
 | `SAGE_HUNCH_MODELS` | comma-separated judge models, first one leads (empty = service default, one judge) |
 | `SAGE_HUNCH_POLICY` | `lead` (default) or `all` |

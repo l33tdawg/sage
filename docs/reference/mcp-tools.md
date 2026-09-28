@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.23.12.
+Reconciled against internal/mcp for SAGE v11.23.13.
 
 # SAGE MCP Tools Reference
 
@@ -320,7 +320,7 @@ replacement first, old-memory challenge second.
 | `tags` | string[] | no | User-defined labels (e.g. `important`, `project-x`). Git branch is auto-appended. |
 | `replaces_memory_id` | string | no | Live committed/challenged memory this content corrects. The replacement is pre-validated like any other write, so a body byte-identical to its source is refused as a duplicate — the voter would have deprecated it — and the correction must actually change the content. |
 | `replacement_reason` | string | no | Audit reason used when challenging the old memory after the replacement commits. |
-| `evidence` | string | no | Source text supporting the memory, up to 32 KiB; not accepted for task memories. Uploaded to the local node separately, with only its ID in the submission. An enabled memory gate can send this text to its configured judge service to check support. |
+| `evidence` | string | no | Source text supporting the memory, up to 32 KiB; not accepted for task memories. Uploaded to the local node separately, with only its ID in the submission. An enabled memory gate can send this text to its configured loopback judge service to check support; the service must also use a local model backend. |
 
 **Returns:**
 - `memory_id`, `status`, `tx_hash`, `domain`, `type`, `provider`, `tags`.

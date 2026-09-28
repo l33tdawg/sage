@@ -1,6 +1,6 @@
 # The signer fence — same-key nonce ordering, and what it cannot prove
 
-**Status: v11.23.12. With the `sage-gui` entrypoint, the fence survives the process
+**Status: v11.23.13. With the `sage-gui` entrypoint, the fence survives the process
 that raised it: a restart no longer loses the record, a restored fence re-reads
 its own proofs from the chain, and the one shape no proof can settle has an
 explicit operator exit that says so. Read "What the fence still cannot do" for

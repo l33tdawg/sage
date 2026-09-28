@@ -20,27 +20,39 @@ func gateVersionFromEnv(t *testing.T, env map[string]string) string {
 }
 
 func TestGateVersion_ChangesWithTheJudgeService(t *testing.T) {
-	a := gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": "http://judge-a.local:8791"})
-	b := gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": "http://judge-b.local:8791"})
+	a := gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": "http://127.0.0.1:8791"})
+	b := gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": "http://127.0.0.1:8792"})
 	require.NotEqual(t, a, b, "with no models configured, switching the service must invalidate cached verdicts")
-	require.Equal(t, a, gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": "http://judge-a.local:8791/"}),
+	require.Equal(t, a, gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": "http://127.0.0.1:8791/"}),
 		"the same service is the same identity")
 }
 
 func TestGateVersion_NeverDependsOnCredentials(t *testing.T) {
-	plain := gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": "https://judge.local/v"})
-	withSecrets := gateVersionFromEnv(t, map[string]string{
-		"SAGE_HUNCH_URL":     "https://user:hunter2@judge.local/v?token=abc123",
-		"SAGE_HUNCH_API_KEY": "sk-should-never-appear",
-	})
-	require.Equal(t, plain, withSecrets, "credentials, query and API key are not part of the identity")
-	for _, secret := range []string{"hunter2", "abc123", "sk-should-never-appear", "user"} {
-		require.False(t, strings.Contains(withSecrets, secret), "the cache version leaks %q", secret)
+	withoutKey := gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": "http://127.0.0.1:8791"})
+	withKey := gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": "http://127.0.0.1:8791", "SAGE_HUNCH_API_KEY": "sk-must-not-appear"})
+	require.Equal(t, withoutKey, withKey)
+	require.NotContains(t, withKey, "sk-must-not-appear")
+	// Invalid credential-bearing configuration is refused separately; the
+	// service identity helper must still never retain those credentials.
+	plain := judgeServiceIdentity("https://localhost/v")
+	withSecrets := judgeServiceIdentity("https://user:hunter2@localhost/v?token=abc123")
+	require.Equal(t, plain, withSecrets)
+	for _, secret := range []string{"hunter2", "abc123", "user"} {
+		require.False(t, strings.Contains(withSecrets, secret))
+	}
+}
+
+func TestWriteGateFromEnv_RejectsNonLocalJudge(t *testing.T) {
+	for _, raw := range []string{"https://judge.example", "http://192.168.1.2:8791", "http://0.0.0.0:8791", "https://user:secret@localhost:8791"} {
+		t.Run(raw, func(t *testing.T) {
+			t.Setenv("SAGE_HUNCH_URL", raw)
+			require.Nil(t, writeGateFromEnv(zerolog.Nop()))
+		})
 	}
 }
 
 func TestGateVersion_OperatorRevisionAndSettingsInvalidate(t *testing.T) {
-	base := map[string]string{"SAGE_HUNCH_URL": "http://judge.local:8791"}
+	base := map[string]string{"SAGE_HUNCH_URL": "http://127.0.0.1:8791"}
 	v0 := gateVersionFromEnv(t, base)
 	bumped := gateVersionFromEnv(t, map[string]string{"SAGE_HUNCH_URL": base["SAGE_HUNCH_URL"], "SAGE_HUNCH_JUDGE_REVISION": "2026-10-model-swap"})
 	require.NotEqual(t, v0, bumped, "a revision bump re-judges when a service's default model changes")
@@ -57,7 +69,7 @@ func TestDisplayJudgeURL_StripsCredentials(t *testing.T) {
 }
 
 func TestWriteGateFromEnv_EvidenceCheckIsOnByDefaultAndCanBeTurnedOff(t *testing.T) {
-	t.Setenv("SAGE_HUNCH_URL", "http://judge.local:8791")
+	t.Setenv("SAGE_HUNCH_URL", "http://127.0.0.1:8791")
 	t.Setenv("SAGE_HUNCH_MODELS", "m1,m2")
 	t.Setenv("SAGE_HUNCH_EVIDENCE", "")
 	on := writeGateFromEnv(zerolog.Nop())
