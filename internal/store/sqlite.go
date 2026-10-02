@@ -291,8 +291,9 @@ func (s *SQLiteStore) decryptEmbedding(data []byte) ([]byte, error) {
 	return decrypted, nil
 }
 
-// NewSQLiteStore creates a new SQLite-backed store.
-func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
+// openSQLiteDB applies and verifies the durability policy shared by serving
+// projections and the node-local signer-fence ledger.
+func openSQLiteDB(ctx context.Context, dbPath string) (*sql.DB, error) {
 	// modernc.org/sqlite uses `_pragma=name(value)` syntax. The older
 	// `_name=value` form (mattn/go-sqlite3) is silently ignored, which
 	// means prior deployments ran in rollback-journal mode with a zero
@@ -340,6 +341,15 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 	if synchronous != 2 || (journalMode != "wal" && dbPath != ":memory:") {
 		_ = db.Close()
 		return nil, errors.New("SQLite durability configuration unavailable")
+	}
+	return db, nil
+}
+
+// NewSQLiteStore creates a new SQLite-backed store.
+func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
+	db, err := openSQLiteDB(ctx, dbPath)
+	if err != nil {
+		return nil, err
 	}
 
 	s := &SQLiteStore{

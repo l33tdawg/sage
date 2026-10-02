@@ -34,7 +34,6 @@ import (
 	"github.com/l33tdawg/sage/internal/metrics"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
-	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/voter"
 	"github.com/l33tdawg/sage/web"
 )
@@ -55,7 +54,7 @@ func main() {
 	badgerPath := flag.String("badger-path", envOrDefault("BADGER_PATH", "data/sage.db"), "BadgerDB data path")
 	abciAddr := flag.String("abci-addr", envOrDefault("ABCI_ADDR", ""), "ABCI server listen address (e.g. tcp://0.0.0.0:26658). If set, runs as standalone ABCI server; otherwise embeds CometBFT in-process")
 	cometRPC := flag.String("comet-rpc", envOrDefault("COMET_RPC", "http://127.0.0.1:26657"), "CometBFT RPC endpoint for REST API tx broadcast")
-	validatorKeyFile := flag.String("validator-key-file", os.Getenv("VALIDATOR_KEY_FILE"), "priv_validator_key.json for the memory auto-voter and REST governance gateway in socket mode (in-process mode uses the key under --home). If unset in socket mode, no voter runs and governance mutations return 503")
+	validatorKeyFile := flag.String("validator-key-file", os.Getenv("VALIDATOR_KEY_FILE"), "priv_validator_key.json for the memory auto-voter and REST consensus signing in socket mode (in-process mode uses the key under --home). If unset in socket mode, no voter runs and REST validator signing is disabled")
 	cerebrumRootKeyFile := flag.String("cerebrum-root-key-file", os.Getenv("SAGE_CEREBRUM_ROOT_KEY_FILE"), "raw 32-byte seed or 64-byte Ed25519 CEREBRUM Root key used only to countersign local promoted-Admin actions (empty keeps delegated Admin REST actions disabled)")
 	governanceOperatorID := flag.String("governance-operator-id", os.Getenv("SAGE_GOVERNANCE_OPERATOR_ID"), "hex Ed25519 identity allowed to authorize this validator's REST governance mutations (empty disables them)")
 	requireVoter := flag.Bool("require-voter", envBoolOrDefault("VOTER_REQUIRED", false), "Exit non-zero at startup if the memory auto-voter cannot start (missing/unreadable/invalid validator key) instead of serving without a voter")
@@ -137,34 +136,18 @@ func main() {
 		logger.Warn().Msg(warn)
 	}
 
-	// Seed the replay-nonce allocator from the chain's committed nonces (same
-	// wiring as cmd/sage-gui/node.go): the app-v9 consensus gate rejects any tx
-	// whose nonce <= the signer's highest committed nonce, so a restarted amid
-	// voter must resume ABOVE the chain instead of trusting the wall clock to
-	// exceed it. Local badger read, keyed exactly like the consensus path
-	// (auth.PublicKeyToAgentID), consulted at most once per key. Liveness-only,
-	// never in the AppHash. GetNonce returns 0 for an unseen key -> no-op seed.
-	badgerStore := app.GetBadgerStore()
-	tx.SetNonceFloorFunc(func(pub ed25519.PublicKey) (uint64, bool) {
-		n, gerr := badgerStore.GetNonce(auth.PublicKeyToAgentID(pub))
-		if gerr != nil || n == 0 {
-			return 0, false
-		}
-		return n, true
-	})
-
 	health.SetPostgresHealth(true)
 	logger.Info().Msg("SAGE ABCI application created")
 
 	if *abciAddr != "" {
 		// ── Standalone ABCI server mode (Docker: separate CometBFT container) ──
-		runABCIServer(app, *abciAddr, *restAddr, *metricsAddr, *cometRPC, *validatorKeyFile, *cerebrumRootKeyFile, *governanceOperatorID, *tlsCert, *tlsKey, *tlsCA, *requireVoter, embedProvider, health, logger)
+		runABCIServer(app, *badgerPath, *abciAddr, *restAddr, *metricsAddr, *cometRPC, *validatorKeyFile, *cerebrumRootKeyFile, *governanceOperatorID, *tlsCert, *tlsKey, *tlsCA, *requireVoter, embedProvider, health, logger)
 	} else {
 		// ── In-process mode (single binary: ABCI + CometBFT embedded) ──
 		if *cometHome == "" {
 			logger.Fatal().Msg("CometBFT home directory is required in in-process mode (--home or COMETBFT_HOME)")
 		}
-		runInProcess(app, *cometHome, *restAddr, *metricsAddr, *cerebrumRootKeyFile, *governanceOperatorID, *tlsCert, *tlsKey, *tlsCA, *requireVoter, embedProvider, health, logger)
+		runInProcess(app, *badgerPath, *cometHome, *restAddr, *metricsAddr, *cerebrumRootKeyFile, *governanceOperatorID, *tlsCert, *tlsKey, *tlsCA, *requireVoter, embedProvider, health, logger)
 	}
 }
 
@@ -390,7 +373,7 @@ func bindExpectedGovernanceDomainFromRPCUntilReady(
 }
 
 // runABCIServer starts the ABCI app as a TCP server for an external CometBFT node.
-func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, cometRPC, validatorKeyFile, cerebrumRootKeyFile, governanceOperatorID, tlsCert, tlsKey, tlsCA string, requireVoter bool, embedProvider embedding.Provider, health *metrics.HealthChecker, logger zerolog.Logger) {
+func runABCIServer(app *sageabci.SageApp, badgerPath, abciAddr, restAddr, metricsAddr, cometRPC, validatorKeyFile, cerebrumRootKeyFile, governanceOperatorID, tlsCert, tlsKey, tlsCA string, requireVoter bool, embedProvider embedding.Provider, health *metrics.HealthChecker, logger zerolog.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cmtLogger := cmtlog.NewTMLogger(cmtlog.NewSyncWriter(os.Stdout))
@@ -399,6 +382,12 @@ func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, comet
 	if requireVoter {
 		requireVoterKeyOrExit(validatorKeyFile, logger)
 	}
+	closeFences, restored, err := prepareAMIDSignerFences(ctx, badgerPath, cometRPC, amidNonceFloor(app.GetBadgerStore()))
+	if err != nil {
+		logger.Fatal().Err(err).Msg("signer fence recovery failed; refusing to start AMID")
+	}
+	defer closeFences()
+	logger.Info().Int("restored_fences", restored).Msg("AMID signer fence ledger ready")
 
 	srv, err := abciserver.NewServer(abciAddr, "socket", app)
 	if err != nil {
@@ -454,7 +443,7 @@ func runABCIServer(app *sageabci.SageApp, abciAddr, restAddr, metricsAddr, comet
 }
 
 // runInProcess embeds CometBFT in the same process as the ABCI app.
-func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, cerebrumRootKeyFile, governanceOperatorID, tlsCert, tlsKey, tlsCA string, requireVoter bool, embedProvider embedding.Provider, health *metrics.HealthChecker, logger zerolog.Logger) {
+func runInProcess(app *sageabci.SageApp, badgerPath, cometHome, restAddr, metricsAddr, cerebrumRootKeyFile, governanceOperatorID, tlsCert, tlsKey, tlsCA string, requireVoter bool, embedProvider embedding.Provider, health *metrics.HealthChecker, logger zerolog.Logger) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cometCfg, err := loadCometConfig(cometHome)
@@ -469,6 +458,13 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, cereb
 	if requireVoter {
 		requireVoterKeyOrExit(cometCfg.PrivValidatorKeyFile(), logger)
 	}
+	cometRPC := fmt.Sprintf("http://127.0.0.1%s", cometCfg.RPC.ListenAddress[len("tcp://0.0.0.0"):])
+	closeFences, restored, err := prepareAMIDSignerFences(ctx, badgerPath, cometRPC, amidNonceFloor(app.GetBadgerStore()))
+	if err != nil {
+		logger.Fatal().Err(err).Msg("signer fence recovery failed; refusing to start AMID")
+	}
+	defer closeFences()
+	logger.Info().Int("restored_fences", restored).Msg("AMID signer fence ledger ready")
 
 	pv := privval.LoadFilePV(
 		cometCfg.PrivValidatorKeyFile(),
@@ -518,7 +514,6 @@ func runInProcess(app *sageabci.SageApp, cometHome, restAddr, metricsAddr, cereb
 	health.SetCometBFTHealth(true)
 
 	// In-process: CometBFT RPC is localhost
-	cometRPC := fmt.Sprintf("http://127.0.0.1%s", cometCfg.RPC.ListenAddress[len("tcp://0.0.0.0"):])
 	startServices(ctx, app, restAddr, metricsAddr, cometRPC, cometCfg.PrivValidatorKeyFile(), cerebrumRootKeyFile, governanceOperatorID, tlsCert, tlsKey, tlsCA, embedProvider, health, logger)
 
 	// In-process: the consensus key is right here under --home; the voter signs
@@ -557,11 +552,11 @@ func startServices(ctx context.Context, app *sageabci.SageApp, restAddr, metrics
 	// NewServer inherited from the compatibility env path before explicit load.
 	restServer.DisableValidatorSigningKey()
 	if validatorKeyFile == "" {
-		logger.Warn().Msg("REST governance disabled: validator key file is not configured")
+		logger.Warn().Msg("REST validator signing disabled: validator key file is not configured")
 	} else if validatorKey, keyErr := voter.LoadPrivValidatorKey(validatorKeyFile); keyErr != nil {
-		logger.Error().Err(keyErr).Str("key_file", validatorKeyFile).Msg("REST governance disabled: validator key is unusable")
+		logger.Error().Err(keyErr).Str("key_file", validatorKeyFile).Msg("REST validator signing disabled: validator key is unusable")
 	} else if keyErr = restServer.SetValidatorSigningKey(validatorKey); keyErr != nil {
-		logger.Error().Err(keyErr).Msg("REST governance disabled: validator key injection failed")
+		logger.Error().Err(keyErr).Msg("REST validator signing disabled: validator key injection failed")
 	}
 	if governanceOperatorID == "" {
 		logger.Warn().Msg("REST governance disabled: set --governance-operator-id / SAGE_GOVERNANCE_OPERATOR_ID")
