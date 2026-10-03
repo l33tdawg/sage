@@ -1996,8 +1996,8 @@ tool context; unknown, malformed or late cancellation emits no response.
 Cancellation never retries a mutation or proves that consensus did not commit
 it. Use the normal reconciliation contract for an indeterminate write. EOF and
 installed-runtime handoff drain already-dispatched requests before closing or
-transferring stdout (`internal/mcp/stdio_requests.go:13`,
-`internal/mcp/server.go:439`).
+transferring stdout (`Wait`, `internal/mcp/stdio_requests.go:87`;
+`Run`, `internal/mcp/server.go:439`).
 
 **Installed-runtime handoff (v11.18.5):** a stdio MCP process snapshots the
 exact executable that started it. If an in-place app/binary update replaces
