@@ -43,7 +43,7 @@ To reproduce the Go scores in an isolated directory:
 
 ```sh
 SAGE_JUDGE_QUALIFICATION_DIR=/tmp/sage-judge-qualification \
-  go test ./internal/ollamad -run '^TestJudgeQualificationPinnedRuntime$' \
+  go test -tags sage_judge_qualification ./internal/ollamad -run '^TestJudgeQualificationPinnedRuntime$' \
   -v -count=1 -timeout 50m
 ```
 

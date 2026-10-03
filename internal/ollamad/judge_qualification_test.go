@@ -1,3 +1,5 @@
+//go:build sage_judge_qualification
+
 package ollamad
 
 import (
