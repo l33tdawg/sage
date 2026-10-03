@@ -11,21 +11,21 @@
   gtag('js', new Date());
   gtag('config', 'G-Y9LD21QVEQ');
 </script>
-<title>SAGE v11 | CEREBRUM Memory Brain for AI Agents</title>
+<title>SAGE | Persistent memory for AI agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Install SAGE v11.23.14: governed local-first memory for AI agents, with consensus-validated recall, encrypted agent working state, controlled federation, and in-place upgrades.">
+<meta name="description" content="Persistent memory for AI agents. Keep project decisions and lessons across sessions with a local, open-source memory node, signed history and explicit access controls.">
 <meta name="theme-color" content="#0a0614">
-  <meta property="og:title" content="SAGE | Durable memory for AI agents">
-  <meta property="og:description" content="Your agent shouldn't start from zero every session. Durable memory outside the model: what you decided, what broke, what you already ruled out.">
+  <meta property="og:title" content="SAGE | Persistent memory for AI agents">
+  <meta property="og:description" content="Persistent memory for AI agents. Keep project decisions and lessons across sessions with a local, open-source memory node, signed history and explicit access controls.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://l33tdawg.github.io/sage/">
-<meta property="og:image" content="https://l33tdawg.github.io/sage/og-image.png">
+<meta property="og:image" content="https://l33tdawg.github.io/sage/assets/og-sage-home-20261003.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="SAGE | Durable memory for AI agents">
-  <meta name="twitter:description" content="Your agent shouldn't start from zero every session. Durable memory outside the model: what you decided, what broke, what you already ruled out.">
-<meta name="twitter:image" content="https://l33tdawg.github.io/sage/og-image.png">
+  <meta name="twitter:title" content="SAGE | Persistent memory for AI agents">
+  <meta name="twitter:description" content="Persistent memory for AI agents. Keep project decisions and lessons across sessions with a local, open-source memory node, signed history and explicit access controls.">
+<meta name="twitter:image" content="https://l33tdawg.github.io/sage/assets/og-sage-home-20261003.png">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
 
@@ -795,8 +795,16 @@ footer a:hover { text-decoration: underline; }
   .nav-tab { padding: 14px 20px; font-size: 0.9rem; }
 }
 </style>
+<link rel="preload" as="image" href="assets/sage-neural-hero.jpg">
+<link rel="stylesheet" href="brand.css">
+<link rel="canonical" href="https://l33tdawg.github.io/sage/">
+<meta property="og:site_name" content="SAGE">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:alt" content="SAGE wordmark and lavender neural brain. Stop re-explaining your project. Persistent memory for AI agents.">
+<meta name="twitter:image:alt" content="SAGE wordmark and lavender neural brain. Stop re-explaining your project. Persistent memory for AI agents.">
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
   <defs>
@@ -935,18 +943,20 @@ footer a:hover { text-decoration: underline; }
 <!-- Nav -->
 <nav>
   <div class="nav-inner">
-    <a href="#" class="nav-logo" onclick="switchTab('home');closeMobileNav();return false;">SAGE <span>GUI</span></a>
+    <a href="#" class="nav-logo" onclick="switchTab('home');closeMobileNav();return false;" aria-label="SAGE home"><img src="assets/sage-wordmark.svg" alt="SAGE" width="531" height="110"></a>
     <div class="nav-tabs" id="nav-tabs">
       <button class="nav-tab active" data-tab="home">Home</button>
+      <button class="nav-tab" data-tab="home" data-scroll="why-sage">Why SAGE</button>
       <button class="nav-tab" data-tab="features">Features</button>
       <button class="nav-tab" data-tab="features" data-scroll="faq">FAQ</button>
-      <button class="nav-tab" data-tab="connect">Connect</button>
+      <button class="nav-tab" data-tab="home" data-scroll="get-started">Get started</button>
       <button class="nav-tab" data-tab="network">Network</button>
       <button class="nav-tab" data-tab="research">Research</button>
       <button class="nav-tab" data-tab="developers">Developers</button>
     </div>
     <div class="nav-actions">
       <a href="https://github.com/l33tdawg/sage" class="nav-cta">GitHub</a>
+      <a href="https://github.com/l33tdawg/sage/releases/latest" class="nav-cta nav-download">Download</a>
     </div>
     <button class="nav-hamburger" aria-label="Toggle menu" aria-expanded="false" aria-controls="nav-tabs" onclick="toggleMobileNav(this)">
       <span></span><span></span><span></span>
@@ -957,177 +967,132 @@ footer a:hover { text-decoration: underline; }
 <!-- ════════════════════════════════════════════════════ -->
 <!-- TAB: HOME                                          -->
 <!-- ════════════════════════════════════════════════════ -->
+<main id="main" tabindex="-1">
 <div class="tab-content active" id="tab-home">
-
-  <section class="hero v11-hero">
+  <section class="brand-hero" aria-labelledby="hero-heading">
+    <img class="brand-hero-art" src="assets/sage-neural-hero.jpg" width="1672" height="941" alt="" fetchpriority="high" decoding="async">
     <div class="container">
-      <div class="v11-hero-grid">
-        <div class="hero-copy">
-          <div class="hero-kicker"><span>SAGE <span data-sage-version>v11.23.14</span> · durable memory for AI agents</span></div>
-          <h1>Your agent shouldn't start from <em>zero</em> every session</h1>
-          <p class="hero-sub">SAGE keeps durable memory outside the model: what you decided, what broke, what you already ruled out. Your agent opens a session with that context instead of a blank slate, so you spend turns on the work instead of re-explaining it. Works with Claude Code, Codex, Cursor and anything MCP-capable.</p>
-        </div>
-        <div class="hero-visual" aria-label="CEREBRUM MRI brain dashboard screenshot">
-          <button class="hero-shot" onclick="openLightbox(0)" aria-label="Open CEREBRUM MRI screenshot">
-            <img src="screen-brain.png" alt="CEREBRUM MRI brain dashboard with memory nodes inside a 3D brain">
-            <span class="hero-shot-label">CEREBRUM MRI</span>
-          </button>
-        </div>
-        <div class="hero-proof">
-          <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-local"></use></svg><strong>Local-first</strong><span>BadgerDB/SQLite + optional AES-256</span></div>
-          <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-recall"></use></svg><strong>Semantic recall</strong><span>Ollama + managed reranker</span></div>
-          <div class="proof-chip"><svg class="ico" aria-hidden="true"><use href="#i-federation"></use></svg><strong>Federation</strong><span>LAN / VPN / internet</span></div>
-        </div>
-      </div>
-      <div class="hero-cta-strip">
+      <div class="brand-hero-copy">
+        <p class="brand-eyebrow">Sovereign Agent Governed Experience</p>
+        <img class="brand-wordmark" src="assets/sage-wordmark.svg" width="531" height="110" alt="SAGE">
+        <h1 id="hero-heading">Stop re-explaining<br><em>your project.</em></h1>
+        <p class="brand-description">Give your AI agents a shared memory of the decisions you made, the approaches that failed and what to try next. Keep that context when you start a new session or switch tools.</p>
+        <p class="brand-compatibility">Claude Code &middot; Codex &middot; Cursor &middot; Any MCP-capable client</p>
         <div class="hero-actions">
-          <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Download SAGE
-          </a>
-          <button class="btn-secondary" onclick="switchTab('connect')">Connect Your AI</button>
+          <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">Download SAGE <span aria-hidden="true">&darr;</span></a>
+          <button class="btn-secondary" onclick="switchTab('home','get-started')">Get started</button>
+        </div>
+        <p class="brand-free">Free and open source. Runs on your machine.</p>
+      </div>
+      <div class="brand-assurance">
+        <span>Local by default</span><span>Signed memory history</span><span>You choose what to share</span>
+        <a href="#trust" onclick="switchTab('home','trust');return false;">Read the trust details &rarr;</a>
+      </div>
+      <div class="brand-release">
+        <div class="cta-meta">
+          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.23.14</strong> &middot; signed assets</span>
+          <span class="cta-count" id="minds-freed"><strong id="download-count" data-count="8939" data-updated-at="2026-10-03T06:48:45.386Z">8,939</strong><span>package downloads</span></span>
         </div>
         <div class="download-badges">
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-macOS-arm64.dmg" class="badge-link">macOS</a>
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-Windows-Setup.exe" class="badge-link">Windows</a>
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
-        <div class="cta-meta">
-          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.23.14</strong> &middot; signed assets</span>
-          <span class="cta-count" id="minds-freed">
-            <strong id="download-count" data-count="8939" data-updated-at="2026-10-03T06:48:45.386Z">8,939</strong>
-            <span>package downloads</span>
-          </span>
-        </div>
-        <p class="cta-fineprint">
-          <span id="download-status" aria-live="polite">Last known count &middot; Oct 3, 2026, 06:48 UTC</span>
-          <span class="cta-fineprint-sep" aria-hidden="true">&middot;</span>
-          <span>Prereleases, repeats and automated downloads included; not unique installs.</span>
-        </p>
+        <p class="cta-fineprint"><span id="download-status" aria-live="polite">Last known count</span><span class="cta-fineprint-sep" aria-hidden="true">&middot;</span><span>Includes repeats, prereleases and automated downloads. Not unique installs.</span></p>
       </div>
     </div>
   </section>
 
-  <!-- Why it matters -->
-  <div class="section" style="background: linear-gradient(180deg, var(--void) 0%, var(--deep) 50%, var(--void) 100%); padding: 60px 0;">
-    <div class="container">
-      <div class="section-tag">Why it matters</div>
-      <h2>Your agents work better when they don't start over.</h2>
-      <p class="section-desc">We run our own agents on it. The note one session leaves about why a decision went a certain way is what the next session reads before it touches that code.</p>
-      <div class="value-grid reveal">
-        <div class="value-card">
-          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-informed"></use></svg></div>
-          <h3>It starts informed</h3>
-          <p>A session opens, reads what earlier sessions learned, and gets to work. Your agent stops spending its first turns reconstructing where things stand.</p>
-        </div>
-        <div class="value-card">
-          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-decided"></use></svg></div>
-          <h3>Decisions stay decided</h3>
-          <p>Rejected approaches and settled calls are recorded with the reasoning behind them, so an agent that never saw the thread doesn't re-open a question you already closed.</p>
-        </div>
-        <div class="value-card">
-          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-context"></use></svg></div>
-          <h3>Context you don't re-feed</h3>
-          <p>Recall returns the few memories that matter instead of the whole history, so the context you pay for carries decisions rather than repeated background. Not every session gets cheaper. Fewer of them start by re-reading the same story.</p>
-        </div>
-        <div class="value-card">
-          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-onememory"></use></svg></div>
-          <h3>One memory, every tool</h3>
-          <p>Claude Code, Codex, Cursor and anything MCP-capable read the same local node, so a decision made in one shows up in the next. Switch tools without starting over.</p>
+  <section class="brand-section" aria-labelledby="benefit-heading">
+    <div class="container brand-benefit-layout">
+      <div>
+        <div class="section-tag">Between sessions</div>
+        <h2 id="benefit-heading">Pick up the work.<br>Keep the reasoning.</h2>
+        <p class="section-desc">The useful context is often what you already tried, ruled out or decided. SAGE makes those lessons available to the next session.</p>
+        <div class="brand-benefits">
+          <div class="brand-benefit"><h3>Keep the why</h3><p>Record the decision and its reasoning, so the next agent has more than the final answer.</p></div>
+          <div class="brand-benefit"><h3>Carry lessons between tools</h3><p>Connect your tools to the same SAGE node. Give authorized agents access to the project memories they need.</p></div>
+          <div class="brand-benefit"><h3>Review what it remembers</h3><p>Inspect a memory's author, confidence and status in CEREBRUM. Keep useful context; deprecate what no longer belongs in recall.</p></div>
         </div>
       </div>
-    </div>
-  </div>
-
-  <section class="v11-home-band">
-    <div class="container">
-      <div class="install-row">
-        <div>
-          <div class="section-tag">Install in minutes</div>
-          <h2>Download it, open CEREBRUM, connect your AI.</h2>
-          <p class="section-desc">v11 is dashboard-first. Semantic memory, AI-tool connection, and setup recovery all run from the dashboard. No hand-editing config files.</p>
-        </div>
-        <div class="install-note">
-          <h3>Or tell your AI to connect itself</h3>
-          <p>Click to copy the MCP bootstrap prompt and paste it into any agent session that can edit its project folder.</p>
-          <div class="free-prompt-box" onclick="copyPrompt(this)" title="Click to copy" style="margin-top:14px;">
-            <div class="free-prompt-text">Connect to SAGE persistent memory: fetch http://localhost:8080/v1/mcp-config and save the response as .mcp.json in this project root. Then restart your session and initialize SAGE memory.</div>
-            <button class="free-prompt-copy" onclick="event.stopPropagation(); copyPrompt(this.parentElement)">Copy</button>
-          </div>
-        </div>
-      </div>
-      <div class="home-screens reveal">
-        <div class="screenshot-thumb" onclick="openLightbox(0)"><img src="screen-brain.png" alt="CEREBRUM MRI brain" loading="lazy"><div class="screenshot-label">MRI Brain</div></div>
-        <div class="screenshot-thumb" onclick="openLightbox(2)"><img src="screen-config.png" alt="Recall Engine" loading="lazy"><div class="screenshot-label">Recall Engine</div></div>
-        <div class="screenshot-thumb" onclick="openLightbox(3)"><img src="screen-overview.png" alt="Overview dashboard" loading="lazy"><div class="screenshot-label">Overview</div></div>
+      <div class="memory-example" aria-label="Illustrative example of memory across sessions">
+        <div class="example-head"><span>Project memory</span><span>Illustrative example</span></div>
+        <div class="example-step"><small>A lesson worth keeping</small><blockquote>We ruled out a full rewrite. The adapter fix passed the integration checks.</blockquote></div>
+        <div class="example-step"><small>The next session</small><p><span class="example-arrow" aria-hidden="true">&rarr;</span>Recall the adapter decision and its evidence before proposing another rewrite.</p></div>
       </div>
     </div>
   </section>
 
-  <section class="federation-hero">
+  <section class="brand-section brand-comparison" id="why-sage" aria-labelledby="comparison-heading">
     <div class="container">
-      <div class="fed-hero-grid">
-        <div class="fed-panel reveal" onclick="openLightbox(1)">
-          <img src="screen-network.png" alt="Federation dashboard showing LAN and internet SAGE-to-SAGE links">
-        </div>
-        <div class="reveal">
-          <div class="section-tag"><span>Built through <span data-sage-version>v11.23.14</span></span></div>
-          <h2>Keep agents connected, governed, and safely up to date.</h2>
-          <p class="section-desc">CEREBRUM is the local control plane for memory, agent access, recovery, and sharing. Existing nodes upgrade in place; memory history stays attributable while current access remains explicit and reviewable.</p>
-          <ul class="fed-list">
-            <li>A dedicated local CEREBRUM Root governs roles, ownership, recovery, and handover without rewriting historical authorship.</li>
-            <li>Trusted peers running v11.19.16 or later can discover and message eligible agents automatically. Memory domains stay private until you explicitly share them.</li>
-            <li>Explore connected nodes in a live federation map, find agents in the searchable directory, and prepare Read or Copy permissions before saving them.</li>
-            <li>Updates verify release assets and bring compatible chains forward automatically; recovery isolates a bad historical record instead of taking the node offline.</li>
-          </ul>
-          <div class="hero-actions" style="margin-top:28px;">
-            <button class="btn-secondary" onclick="switchTab('network')">See federation details</button>
-            <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">Install v11</a>
-          </div>
-        </div>
+      <div class="comparison-intro">
+        <div><div class="section-tag">Why SAGE</div><h2 id="comparison-heading">Memory you can trace,<br>control and share.</h2></div>
+        <p class="section-desc">SAGE uses retrieval too. Its focus is the record around a memory: who contributed it, how it was admitted, and which agents may use it.</p>
+      </div>
+      <div class="comparison-grid">
+        <article class="comparison-card"><small>RAG pipelines</small><h3>Retrieve source material</h3><p>Find relevant information in documents and other data sources, then give it to a model as context. A useful foundation for answering questions about a corpus.</p><a href="https://docs.langchain.com/oss/python/deepagents/retrieval">Read the retrieval overview &rarr;</a></article>
+        <article class="comparison-card"><small>Agent memory systems</small><h3>Reuse earlier context</h3><p>Keep facts, conversation context or agent state across sessions. Systems such as Mem0, Zep and Letta take different approaches to that work.</p><a href="#comparison-sources" onclick="document.getElementById('comparison-sources').open=true;">Read the source docs &rarr;</a></article>
+        <article class="comparison-card"><small>SAGE</small><h3>Govern a shared memory</h3><p>Combine agent-signed writes, validation before commit, confidence and decay, and explicit access controls in a local memory node your tools can share.</p><a href="https://github.com/l33tdawg/sage/blob/main/docs/reference/concepts/memory-lifecycle.md">Inspect the memory lifecycle &rarr;</a></article>
+      </div>
+      <p class="brand-caveat">On a personal install, your node casts its own signed validation vote. On a multi-validator network, admission requires a quorum. These checks govern what gets committed; they do not guarantee that every remembered claim is true.</p>
+      <details class="comparison-details" id="comparison-sources">
+        <summary>How this comparison is grounded</summary>
+        <p>RAG describes a retrieval pattern, not a fixed product feature set. <a href="https://docs.mem0.ai/core-concepts/memory-operations/add">Mem0</a> extracts and stores reusable memories, <a href="https://help.getzep.com/v3/agent-memory-solution">Zep</a> builds temporal context graphs, and <a href="https://docs.letta.com/concepts/stateful-agents">Letta</a> preserves stateful agents. Local deployment, sharing and governance are available in other systems too. SAGE brings its particular combination together around a consensus-backed memory record. Choose based on the controls and workflow you need.</p>
+      </details>
+    </div>
+  </section>
+
+  <section class="brand-section brand-dashboard" aria-labelledby="dashboard-heading">
+    <div class="container">
+      <div class="dashboard-intro">
+        <div><div class="section-tag">Inside the product</div><h2 id="dashboard-heading">See what your agents remember.</h2></div>
+        <p class="section-desc">CEREBRUM is SAGE's local dashboard. Explore project memories, inspect records and manage agent access.</p>
+      </div>
+      <button class="dashboard-shot" onclick="openLightbox(0)" aria-label="Enlarge the CEREBRUM dashboard screenshot"><img src="screen-brain.png" width="1440" height="939" alt="CEREBRUM dashboard showing memories grouped inside its 3D brain view" loading="lazy" decoding="async"></button>
+      <p class="dashboard-caption">CEREBRUM dashboard screenshot. Appearance varies by release and configuration.</p>
+      <a class="brand-source" href="#features" onclick="switchTab('features');return false;">Explore SAGE's capabilities &rarr;</a>
+    </div>
+  </section>
+
+  <section class="brand-section brand-setup" id="get-started" aria-labelledby="setup-heading">
+    <div class="container">
+      <div class="section-tag">Get started</div><h2 id="setup-heading">Put SAGE to work.</h2>
+      <p class="section-desc">Install SAGE, connect your AI client, and let the agent use its memory tools as you work.</p>
+      <div class="setup-grid">
+        <div class="setup-step"><span class="setup-number">01</span><h3>Install SAGE</h3><p>Download for macOS, Windows or Linux. Open the local dashboard and set up the memory engine.</p></div>
+        <div class="setup-step"><span class="setup-number">02</span><h3>Connect your agent</h3><p>Use CEREBRUM to prepare the connection for your MCP-capable client. Follow the <a href="connect.html">connection guide</a> for your tool.</p></div>
+        <div class="setup-step"><span class="setup-number">03</span><h3>Keep useful experience</h3><p>Your agent can record lessons and recall relevant memories in later sessions. Inspect what it keeps from the dashboard.</p></div>
+      </div>
+      <div class="start-paths">
+        <article class="start-path"><span class="section-tag">For your AI tools</span><h3>Connect an agent.</h3><p>Set up Claude, Codex or another MCP client with SAGE's memory tools.</p><a class="btn-secondary" href="connect.html">Open the connection guide &rarr;</a></article>
+        <article class="start-path"><span class="section-tag">For developers</span><h3>Build memory into your app.</h3><p>Start with the Python SDK or signed REST API. Choose how your agent records and retrieves experience.</p><a class="btn-secondary" href="#developers" onclick="switchTab('developers');return false;">Open the developer quickstart &rarr;</a></article>
+      </div>
+      <p class="brand-fit"><strong>Use SAGE when your agents return to ongoing work.</strong> Project decisions, failed approaches and lessons from previous sessions are useful inputs. If you only need a one-off search through a set of documents, a RAG pipeline may already cover the job.</p>
+    </div>
+  </section>
+
+  <section class="brand-section brand-trust" id="trust" aria-labelledby="trust-heading">
+    <div class="container trust-layout">
+      <div>
+        <div class="section-tag">Under your control</div><h2 id="trust-heading">A memory system<br>you can inspect.</h2>
+        <p class="section-desc">Keep your memory node on your machine. Decide which agents can access it and which domains to share.</p>
+        <p class="trust-limits">SAGE supplies context to your model; it does not change the model's weights. Recall depends on the memories recorded, your configuration and the agent's use of its tools.</p>
+      </div>
+      <div class="trust-points">
+        <article class="trust-point"><h3>Local by default</h3><p>Memories live under <code>~/.sage/</code>. Optional federation, connectors and remote model providers can send data beyond your machine when you configure them.</p><a href="privacy.html">Read the privacy details</a></article>
+        <article class="trust-point"><h3>Optional vault encryption</h3><p>Enable the vault to encrypt memory contents at rest with AES-256-GCM. Keep the recovery key somewhere safe.</p><a href="https://github.com/l33tdawg/sage/blob/main/docs/GETTING_STARTED.md">Read the setup guide</a></article>
+        <article class="trust-point"><h3>Signed, attributable history</h3><p>Agent identity and content hashes bind memories to their recorded origin. Deprecating a memory removes it from recall while retaining the audit history.</p><a href="https://github.com/l33tdawg/sage/blob/main/docs/reference/concepts/memory-lifecycle.md">Read how memory changes</a></article>
+        <article class="trust-point"><h3>Open code and evidence</h3><p>Apache 2.0 source, published research and retrieval benchmark scripts are available to inspect. Results describe specific runs and configurations.</p><a href="#research" onclick="switchTab('research');return false;">Examine the research</a></article>
       </div>
     </div>
   </section>
 
-  <!-- Value props -->
-  <div class="section" style="background: linear-gradient(180deg, var(--void) 0%, var(--deep) 50%, var(--void) 100%); padding: 60px 0;">
+  <section class="brand-final" aria-labelledby="final-heading">
     <div class="container">
-      <div class="value-grid reveal">
-        <div class="value-card">
-          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-local"></use></svg></div>
-          <h3>Local by Default</h3>
-          <p>No required cloud account or telemetry. Memories stay under <code>~/.sage/</code> unless you explicitly enable federation, sync, or a connector.</p>
-        </div>
-        <div class="value-card">
-          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg></div>
-          <h3>AES-256 Encrypted</h3>
-          <p>Optional encryption at rest. If your laptop is stolen or synced to the cloud, nothing is readable.</p>
-        </div>
-        <div class="value-card">
-          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-signed"></use></svg></div>
-          <h3>Tamper-Evident</h3>
-          <p>Every memory is digitally signed. Full audit trail. Verify nothing has been altered or injected.</p>
-        </div>
-        <div class="value-card">
-          <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-clients"></use></svg></div>
-          <h3>Works With Any MCP Client</h3>
-          <p>Claude, Cursor, Cline, DeepSeek, Gemini, LM Studio, Ollama. Any model, any provider.</p>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- CTA -->
-  <section class="cta-section">
-    <div class="container reveal">
-      <div class="section-tag">Open Source &middot; Apache 2.0</div>
-      <h2>Get started</h2>
-      <p class="section-desc" style="margin:0 auto 40px;text-align:center;">Give your AI memory that persists across sessions, validates what it learns, and improves measurably over time.</p>
-      <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary" style="font-size:1.05rem;padding:16px 36px;">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Download SAGE
-      </a>
-      <p style="color:var(--muted);font-size:0.85rem;margin-top:16px;">macOS &middot; Windows &middot; Linux &middot; <a href="https://github.com/l33tdawg/sage" style="color:var(--accent);">Source on GitHub</a></p>
+      <div class="section-tag">Persistent memory for AI agents</div><h2 id="final-heading">Give the next session a head start.</h2>
+      <p>Keep the decisions and lessons your agents need to continue the work.</p>
+      <div class="hero-actions"><a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">Download SAGE <span aria-hidden="true">&darr;</span></a><a href="connect.html" class="btn-secondary">Read the connection guide</a></div>
+      <small>macOS &middot; Windows &middot; Linux &middot; Free &middot; Apache 2.0</small>
     </div>
   </section>
 </div>
@@ -1138,15 +1103,16 @@ footer a:hover { text-decoration: underline; }
 <div class="tab-content" id="tab-features">
   <div class="section">
     <div class="container">
-      <div class="reveal" style="text-align:center;">
+      <div class="reveal brand-tab-intro">
         <div class="section-tag">Capabilities</div>
         <h2>Memory infrastructure for AI agents</h2>
         <p class="section-desc" style="margin:0 auto;">Governed institutional memory: a BFT quorum on a network, your node's own signed vote on a personal install. Confidence-scored, and decay-aware.</p>
       </div>
 
       <!-- What's New -->
-      <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.23.2</span></h3>
+      <details class="whats-new reveal brand-release-notes">
+        <summary>Release notes: changes introduced in <span id="whats-new-version">v11.23.2</span></summary>
+        <div class="release-notes-body">
         <p style="opacity:0.85;margin:0 0 24px 0;">The 11.23 line activates app-v28. Two things turn on: a sparse public-memory Merkle commitment, and a co-commit rule that consensus enforces instead of the node's REST boundary. 11.23.2 finishes the job for chains whose older public records predate the fork. Upgrades stay in place. No chain reset, no transaction-type change. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.23.2" style="color:var(--accent);">Read the release notes &rarr;</a></p>
         <div class="new-features">
           <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>App-v28 activates</h4><p>The public-memory commitment becomes AppHash-covered and the co-commit rule moves into consensus, so a memory the quorum already rejected can't have its exact bytes re-admitted by any submission path. Personal nodes walk the rung automatically, in place.</p></div></div>
@@ -1154,14 +1120,15 @@ footer a:hover { text-decoration: underline; }
           <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Encrypted agent working state</h4><p>Private media and a compare-and-swap workflow journal live encrypted on your node, reachable only from inside the agent boundary. The node also reports its storage posture, so a plaintext downgrade shows up instead of staying quiet.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Upgrades are deliberate</h4><p>An App version panel and an explicit upgrade vote make a consensus fork something you choose, and a node killed mid-submission remembers the abandoned transaction instead of re-seeding nonces past it.</p></div></div>
         </div>
-      </div>
+        </div>
+      </details>
 
       <div class="features-grid reveal">
-        <div class="feature-card"><div><h3>Persistent Memory</h3><p>Memories persist across every conversation: projects, preferences, decisions, prior outcomes. Nothing is lost between sessions.</p></div></div>
-        <div class="feature-card"><div><h3>Governed Knowledge</h3><p>Memories are validated before being committed. Spurious data is filtered out; corroborated data is reinforced.</p></div></div>
-        <div class="feature-card"><div><h3>Confidence Scoring</h3><p>Memories strengthen with corroboration and decay without reinforcement, much like to human episodic memory.</p></div></div>
-        <div class="feature-card"><div><h3>Semantic Search + Reranker</h3><p>Recall by meaning with local embeddings, then re-score with a self-installing local reranker. Everything on your machine.</p></div></div>
-        <div class="feature-card"><div><h3>Learns From Outcomes</h3><p>Stores what worked and what failed. Published research shows agents with this feedback loop improve measurably over time.</p></div></div>
+        <div class="feature-card"><div><h3>Persistent Memory</h3><p>Recorded memories remain available across sessions, subject to their lifecycle and your access permissions. Keep project decisions, preferences and lessons from previous work.</p></div></div>
+        <div class="feature-card"><div><h3>Governed Knowledge</h3><p>Memories pass admission checks before commit. Signed votes, challenges and corroboration provide a reviewable lifecycle for the record.</p></div></div>
+        <div class="feature-card"><div><h3>Confidence Scoring</h3><p>Corroboration can reinforce a memory. Confidence can decay without reinforcement, helping recall favor useful context.</p></div></div>
+        <div class="feature-card"><div><h3>Semantic Search + Reranker</h3><p>Recall by meaning with embeddings, then re-score the results with a reranker. Choose local providers to keep that processing on your machine.</p></div></div>
+        <div class="feature-card"><div><h3>Learns From Outcomes</h3><p>Record what worked and what failed, then supply those lessons to later sessions. Published experiments examine the effects of this feedback loop.</p></div></div>
         <div class="feature-card"><div><h3>CEREBRUM Dashboard</h3><p>A 3D MRI brain of your memories: domains as lobes, consolidation as depth. Search, curate, and drill into a memory&rsquo;s train of thought.</p></div></div>
         <div class="feature-card"><div><h3>Chat History Import</h3><p>Import from ChatGPT, Claude, or Gemini. Seed your AI&rsquo;s memory from existing conversation history.</p></div></div>
         <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces, all from the dashboard.</p></div></div>
@@ -1234,7 +1201,7 @@ footer a:hover { text-decoration: underline; }
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-free"></use></svg><span>Do I need an account, or a paid plan?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p>Neither. SAGE is Apache 2.0 and runs on your machine with no SAGE account, no telemetry and no metered tier. The ChatGPT connector is the one piece with an upstream requirement: it needs a ChatGPT plan that includes MCP connectors, which is an OpenAI subscription, not a SAGE one.</p></div>
+          <div class="faq-a"><p>SAGE is Apache 2.0 and runs on your machine without a SAGE account or a metered tier. The app does not collect product usage analytics. Optional third-party services can have their own account requirements, costs and privacy policies. See the <a href="privacy.html">privacy details</a> and <a href="connect.html">connection guide</a>.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-package"></use></svg><span>What does it need to run?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
@@ -1242,11 +1209,11 @@ footer a:hover { text-decoration: underline; }
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-cloud-off"></use></svg><span>Does it work offline?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p>Storage, recall and the dashboard are local, so they keep working with the network down. Only the flows you configure reach out: federation, a Cloudflare tunnel for ChatGPT, or a remote embedding or reranking provider.</p></div>
+          <div class="faq-a"><p>After setup, storage and the dashboard run locally. Recall can work offline with local embedding and reranking providers. Downloads, updates, federation, a tunnel for ChatGPT and any remote providers need a connection.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-archive"></use></svg><span>How do I back it up or move it?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p><code>sage-gui backup --full</code> writes a complete stopped-node archive and <code>restore --from</code> puts it back, on this machine or another one. The node also takes scheduled snapshots under <code>~/.sage/data/snapshots/</code>, encrypted with your vault passphrase.</p></div>
+          <div class="faq-a"><p><code>sage-gui backup --full</code> writes a complete stopped-node archive and <code>restore --from</code> restores it on this machine or another one. Check the backup type before sharing it: a CEREBRUM JSON export is unencrypted even when the source ledger uses the vault. See the <a href="https://github.com/l33tdawg/sage/blob/main/docs/reference/reranker-and-setup.md">backup and recovery reference</a>.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-trash"></use></svg><span>Can I delete a memory?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
@@ -1264,10 +1231,10 @@ footer a:hover { text-decoration: underline; }
 <div class="tab-content" id="tab-connect">
   <div class="section">
     <div class="container">
-      <div class="reveal" style="text-align:center;">
+      <div class="reveal brand-tab-intro">
         <div class="section-tag">Getting Started</div>
         <h2>Three steps to get started</h2>
-        <p class="section-desc" style="margin:0 auto;">Install SAGE, paste the config into your AI client, and start working. Memory builds automatically across sessions.</p>
+        <p class="section-desc" style="margin:0 auto;">Install SAGE, connect your AI client, and start recording the project context you want to carry into later sessions.</p>
       </div>
 
       <div class="steps-grid reveal">
@@ -1287,7 +1254,7 @@ footer a:hover { text-decoration: underline; }
           <div class="step-num">03</div>
           <div class="step-icon"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></div>
           <h3>Use Your AI</h3>
-          <p>Your AI uses memory tools automatically. Projects, preferences, decisions, persisted across every session.</p>
+          <p>Once connected, your agent can use SAGE memory tools to record useful context and recall it in later sessions.</p>
         </div>
       </div>
 
@@ -1355,7 +1322,7 @@ footer a:hover { text-decoration: underline; }
 <div class="tab-content" id="tab-network">
   <div class="section">
     <div class="container">
-      <div class="reveal" style="text-align:center;">
+      <div class="reveal brand-tab-intro">
         <div class="section-tag">Multi-Agent Networks</div>
         <h2>Build your private<br>AI network</h2>
         <p class="section-desc" style="margin:0 auto;">SAGE starts as one local brain. When you need a team across projects, machines, or an organization, add agents from the dashboard.</p>
@@ -1412,30 +1379,30 @@ footer a:hover { text-decoration: underline; }
 <div class="tab-content" id="tab-research">
   <div class="section">
     <div class="container">
-      <div class="reveal" style="text-align:center;">
+      <div class="reveal brand-tab-intro">
         <div class="section-tag">Research</div>
-        <h2>Agents that learn from<br>experience, not instructions</h2>
-        <p class="section-desc" style="margin:0 auto;">AI agents with persistent memory get measurably better over time. Without memory, they show essentially zero improvement no matter how many sessions you run.</p>
+        <h2>Examine the evidence</h2>
+        <p class="section-desc" style="margin:0 auto;">The papers describe SAGE's architecture and experiments with persistent memory. Retrieval benchmarks measure how well a particular configuration finds relevant context; they do not guarantee the quality of every agent's answer.</p>
       </div>
 
       <div class="info-note reveal" style="margin-top:40px;margin-bottom:40px;border-left:3px solid var(--teal);">
-        <strong>Retrieval benchmarks.</strong> SAGE on LongMemEval-S (Wu et al., ICLR 2025, 500 questions): <strong>R@5 = 0.8927, R@10 = 0.9461, MRR = 0.8842</strong>. On LoCoMo (Maharana et al., ACL 2024, 1986 questions): <strong>R@5 = 0.6394, Hit@5 = 0.6954</strong>; scored via mem0's published LLM-judge harness: <strong>0.7656</strong>. Every write goes through BFT consensus; the local semantic recall and reranking stack ships in v11. Reproducers live in <a href="https://github.com/l33tdawg/sage/tree/main/bench" target="_blank" rel="noopener" style="color:var(--teal);">bench/</a>.
+        <strong>Retrieval benchmarks.</strong> The committed LongMemEval-S run scored 499 questions: <strong>R@5 = 0.8927, R@10 = 0.9461, MRR = 0.8842</strong>. The LoCoMo run scored 1,986 questions: <strong>R@5 = 0.6394, R@10 = 0.7324, MRR = 0.5790</strong>. Both used <code>text-embedding-3-small</code>, expansion of 3 and <code>bge-reranker-v2-m3</code> at revision <code>8d77afe</code>. These are retrieval results for those runs, not a general speed or answer-quality guarantee. Inspect the <a href="https://github.com/l33tdawg/sage/blob/main/bench/results/longmemeval-v71-full.json" target="_blank" rel="noopener" style="color:var(--teal);">LongMemEval run data</a>, <a href="https://github.com/l33tdawg/sage/blob/main/bench/results/locomo-8d77afe.json" target="_blank" rel="noopener" style="color:var(--teal);">LoCoMo run data</a> and <a href="https://github.com/l33tdawg/sage/tree/main/bench" target="_blank" rel="noopener" style="color:var(--teal);">benchmark reproducers</a>.
       </div>
 
       <div class="papers-grid reveal">
         <a href="https://doi.org/10.5281/zenodo.18888597" class="paper" target="_blank" rel="noopener" style="border-color:rgba(167,139,250,0.2);">
           <span class="paper-num" style="background:rgba(167,139,250,0.2);">IV</span>
-          <div class="paper-info"><h3>Longitudinal Learning, the core finding</h3><p>AI agents with memory get better over time. Without memory, they don't learn at all.</p></div>
+          <div class="paper-info"><h3>Longitudinal Learning, the core finding</h3><p>Reported experiments on repeated tasks with and without persistent memory.</p></div>
           <span class="paper-arrow">&rarr;</span>
         </a>
         <a href="https://doi.org/10.5281/zenodo.18856774" class="paper" target="_blank" rel="noopener">
           <span class="paper-num">II</span>
-          <div class="paper-info"><h3>Consensus-Validated Memory</h3><p>50-vs-50 controlled study: agents with governed memory outperform memoryless agents on complex tasks</p></div>
+          <div class="paper-info"><h3>Consensus-Validated Memory</h3><p>A reported controlled comparison of agents with governed memory and agents without it.</p></div>
           <span class="paper-arrow">&rarr;</span>
         </a>
         <a href="https://doi.org/10.5281/zenodo.18856845" class="paper" target="_blank" rel="noopener">
           <span class="paper-num">III</span>
-          <div class="paper-info"><h3>Institutional Memory as Organizational Knowledge</h3><p>Agents that learn their jobs from experience, not instructions. The new hire problem, solved.</p></div>
+          <div class="paper-info"><h3>Institutional Memory as Organizational Knowledge</h3><p>A study of persistent institutional knowledge in multi-agent work.</p></div>
           <span class="paper-arrow">&rarr;</span>
         </a>
         <a href="https://doi.org/10.5281/zenodo.18856658" class="paper" target="_blank" rel="noopener">
@@ -1454,75 +1421,73 @@ footer a:hover { text-decoration: underline; }
 <div class="tab-content" id="tab-developers">
   <div class="section">
     <div class="container">
-      <div class="reveal" style="text-align:center;">
+      <div class="reveal brand-tab-intro">
         <div class="section-tag">For Developers</div>
-        <h2>One binary.<br>Three ways in.</h2>
-        <p class="section-desc" style="margin:0 auto;">SAGE is a local consensus node with a memory API on top: BadgerDB for consensus state, SQLite for the serving projection, CometBFT underneath. Drive it from MCP over stdio, a signed REST API on <code>127.0.0.1:8080</code>, or the Python SDK.</p>
+        <h2>Give your agents<br>a memory API.</h2>
+        <p class="section-desc">Record useful experience, retrieve it in later sessions and inspect its origin. Connect through MCP, use the Python SDK, or call the signed REST API from your own application.</p>
+        <div class="developer-intro-actions"><a class="btn-primary" href="#python-quickstart">Try the Python quickstart &darr;</a><a href="https://github.com/l33tdawg/sage/blob/main/docs/reference/INDEX.md">Read the technical reference &rarr;</a></div>
       </div>
 
-      <div class="dev-install reveal">
-        <div class="dev-install-bar">
-          <div class="terminal-dot"></div><div class="terminal-dot"></div><div class="terminal-dot"></div>
-          <span>terminal</span>
+      <section class="developer-start" aria-labelledby="developer-start-heading">
+        <div class="section-tag">Developer quickstart</div><h2 id="developer-start-heading">Start with a running local node.</h2>
+        <div class="setup-grid">
+          <div class="setup-step"><span class="setup-number">01</span><h3>Open SAGE</h3><p><a href="https://github.com/l33tdawg/sage/releases/latest">Download the desktop app</a> and complete its setup in CEREBRUM. Check the node before starting another server.</p><pre class="quickstart-code" tabindex="0" aria-label="Check SAGE node health"><code>curl http://127.0.0.1:8080/health</code></pre><p class="quickstart-note">A healthy node returns <code>{"status":"healthy"}</code>.</p></div>
+          <div class="setup-step"><span class="setup-number">02</span><h3>Choose an integration</h3><p>Use MCP for an existing AI client. Use Python or REST when you're building an application. All three connect to your SAGE node.</p><a class="brand-source" href="#integration-paths">Compare the integration paths &darr;</a></div>
+          <div class="setup-step"><span class="setup-number">03</span><h3>Confirm agent access</h3><p>Complete agent enrollment and review its domain permissions in CEREBRUM. SDK and REST requests use that agent's identity to determine access.</p><a class="brand-source" href="https://github.com/l33tdawg/sage/blob/main/docs/reference/app-v23-access-control-design.md">Read the agent access guide &rarr;</a></div>
         </div>
-        <div class="dev-install-body">
-          <div><span class="comment"># Build from source (Go 1.26.8+)</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">git clone https://github.com/l33tdawg/sage.git && cd sage</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">go build -o sage-gui ./cmd/sage-gui</span></div>
-          <div>&nbsp;</div>
-          <div><span class="comment"># First run: unlocks the vault, writes MCP config, opens CEREBRUM</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">./sage-gui setup</span></div>
-          <div>&nbsp;</div>
-          <div><span class="comment"># Serve</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">./sage-gui serve</span></div>
-          <div><span class="output">REST       http://127.0.0.1:8080</span></div>
-          <div><span class="output">Dashboard  http://127.0.0.1:8080/ui/</span></div>
-          <div><span class="output">MCP stdio  ./sage-gui mcp</span></div>
-          <div>&nbsp;</div>
-          <div><span class="comment"># Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=<span data-sage-version-bare>11.23.14</span>"</span></div>
-        </div>
-      </div>
-
-      <div class="dev-badges reveal">
-        <div class="dev-badge"><strong>Go 1.26.8+</strong></div>
-        <div class="dev-badge"><strong>CometBFT</strong> v0.38</div>
-        <div class="dev-badge"><strong>BadgerDB</strong> + SQLite</div>
-        <div class="dev-badge"><strong>MCP</strong> stdio &middot; 34 tools</div>
-        <div class="dev-badge"><strong>Signed REST</strong> /v1</div>
-        <div class="dev-badge"><strong>Python SDK</strong> <span data-sage-version-bare>11.23.14</span></div>
-        <div class="dev-badge"><strong>Apache 2.0</strong></div>
-      </div>
+      </section>
 
       <!-- Integration surfaces -->
-      <div style="margin-top:60px;">
-        <div class="reveal" style="text-align:center;">
-          <div class="section-tag">Integration surfaces</div>
-          <h2>Pick the layer<br>that fits.</h2>
+      <section class="developer-paths" id="integration-paths" aria-labelledby="integration-heading">
+        <div class="reveal">
+          <div class="section-tag">Three ways to connect</div>
+          <h2 id="integration-heading">Choose the path that fits your project.</h2>
         </div>
-        <div class="value-grid reveal" style="margin-top:32px;">
+        <div class="developer-path-grid reveal">
           <div class="value-card">
             <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-terminal"></use></svg></div>
             <h3>MCP over stdio</h3>
-            <p><code>sage-gui mcp</code> speaks MCP on stdin and stdout and advertises <strong>34 tools</strong>: remember, recall, task, backlog, inbox, messages, governance and more. Drop it into any MCP client config and the agent gets memory with no network hop.</p>
-          </div>
-          <div class="value-card">
-            <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-clients"></use></svg></div>
-            <h3>Signed REST</h3>
-            <p>Everything the dashboard does is an HTTP call against <code>127.0.0.1:8080/v1</code>, authorised by an Ed25519 signature over the request body. Memories, agents, envelopes, governance, federation, tasks, private media and the workflow journal are all reachable; TLS listens on 8443.</p>
+            <p>Connect a compatible AI client to memory, recall and coordination tools. CEREBRUM helps prepare its connection. Start with <code>sage_inception</code> and follow the returned memory mode.</p><a class="brand-source" href="connect.html">Connect your AI client &rarr;</a>
           </div>
           <div class="value-card">
             <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-package"></use></svg></div>
             <h3>Python SDK</h3>
-            <p><code>sage-agent-sdk</code> wraps the same API in <strong>94 methods</strong>, sync and async, including durable task idempotency and the agent-access helpers. <code>pip install "sage-agent-sdk&gt;=<span data-sage-version-bare>11.23.14</span>"</code></p>
+            <p>Use sync or async clients in your own agent workflow. The SDK signs authenticated requests for you and provides typed responses for memories, tasks and agent operations.</p><a class="brand-source" href="#python-quickstart">Try the Python quickstart &darr;</a>
           </div>
           <div class="value-card">
-            <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-graph"></use></svg></div>
-            <h3>OpenAPI spec</h3>
-            <p>The whole REST surface ships as <code>api/openapi.yaml</code> in the repo, so you can generate a typed client in any language instead of hand-writing the nonce, signature and retry plumbing yourself.</p>
+            <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-clients"></use></svg></div>
+            <h3>Signed REST API</h3>
+            <p>Integrate from another language using HTTP. Agent API calls require Ed25519 request signatures, timestamps and nonces. The REST reference covers authentication, endpoints and examples.</p><a class="brand-source" href="https://github.com/l33tdawg/sage/blob/main/docs/reference/rest-api.md">Read the REST API reference &rarr;</a>
           </div>
         </div>
-      </div>
+      </section>
+
+      <section class="python-quickstart" id="python-quickstart" aria-labelledby="python-heading">
+        <div class="section-tag">Python quickstart</div><h2 id="python-heading">Read memories from your application.</h2>
+        <p class="section-desc">Requires Python 3.10+, a running SAGE node and an enrolled agent. Set <code>SAGE_IDENTITY_PATH</code> to its existing key file and <code>SAGE_DOMAIN</code> to a domain it can read. The example loads that identity and lists committed memories.</p>
+        <pre class="quickstart-code" tabindex="0" aria-label="Install the SAGE Python SDK"><code>python -m pip install sage-agent-sdk</code></pre>
+        <div class="quickstart-code-header"><span>quickstart.py</span><button class="quickstart-copy" type="button" data-copy-code="python-example" aria-label="Copy the Python quickstart" aria-live="polite">Copy code</button></div>
+        <pre class="quickstart-code quickstart-python" tabindex="0" aria-label="Python memory read example"><code id="python-example">import os
+from sage_sdk import AgentIdentity, SageClient
+
+identity = AgentIdentity.from_file(os.environ["SAGE_IDENTITY_PATH"])
+domain = os.environ["SAGE_DOMAIN"]
+
+with SageClient(
+    base_url="http://127.0.0.1:8080",
+    identity=identity,
+    trust_env=False,
+) as client:
+    page = client.list_memories(
+        domain=domain, status="committed", limit=3,
+    )
+    for memory in page.memories:
+        print(memory.memory_id, memory.content)</code></pre>
+        <p class="quickstart-note">Run with <code>python quickstart.py</code>. An empty list means there are no committed memories visible to this agent in that domain. Review enrollment and domain permissions in CEREBRUM if access is denied.</p>
+        <div class="quickstart-next"><h3>Next: record and recall experience.</h3><p>Use <code>propose()</code> in a domain your agent can write to and set the memory's classification explicitly. A submitted memory starts as <code>proposed</code>; it becomes available to normal recall after SAGE's admission process commits it. Use <code>hybrid()</code> for keyword and vector retrieval with a matching embedding.</p><div class="developer-reference-links"><a href="https://github.com/l33tdawg/sage/blob/main/docs/reference/python-sdk.md">Read the SDK examples &rarr;</a><a href="https://github.com/l33tdawg/sage/blob/main/docs/reference/concepts/voter-operations.md">Understand memory admission &rarr;</a></div></div>
+      </section>
+
+      <details class="developer-source"><summary>Prefer to build from source?</summary><p>The source setup guide covers Go requirements, building the binary and running a node. The architecture guide explains the consensus state and memory API.</p><div class="developer-reference-links"><a href="https://github.com/l33tdawg/sage/blob/main/docs/GETTING_STARTED.md">Read the source setup guide &rarr;</a><a href="https://github.com/l33tdawg/sage/blob/main/docs/ARCHITECTURE.md">Read the architecture guide &rarr;</a></div></details>
 
       <!-- Operations -->
       <div style="margin-top:60px;">
@@ -1566,10 +1531,10 @@ footer a:hover { text-decoration: underline; }
             </div>
           </div>
           <div class="privacy-points">
-            <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-local"></use></svg></div><div><h3>Local by Default</h3><p>No required cloud account or telemetry. Memories stay in <code>~/.sage/</code> unless you explicitly choose to share them.</p></div></div>
+            <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-local"></use></svg></div><div><h3>Local by Default</h3><p>No required SAGE cloud account or app usage analytics. Memories are stored in <code>~/.sage/</code>. Optional connections can send data to configured destinations.</p></div></div>
             <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-terminal"></use></svg></div><div><h3>Fully Inspectable</h3><p>Local data stores under <code>~/.sage/</code>. Inspect them, query them, back them up, move them.</p></div></div>
             <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-signed"></use></svg></div><div><h3>Tamper-Evident</h3><p>Every memory is digitally signed with your local key. Full audit trail.</p></div></div>
-            <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg></div><div><h3>AES-256 Encrypted at Rest</h3><p>Optional encryption for the memory vault. If your machine is stolen, the on-disk memories remain unreadable.</p></div></div>
+            <div class="privacy-point"><div class="privacy-icon"><svg class="ico" aria-hidden="true"><use href="#i-key"></use></svg></div><div><h3>AES-256 Encrypted at Rest</h3><p>When enabled, the vault encrypts memory contents at rest with AES-256-GCM. Protect the passphrase and recovery key.</p></div></div>
           </div>
         </div>
       </div>
@@ -1580,6 +1545,8 @@ footer a:hover { text-decoration: underline; }
     </div>
   </div>
 </div>
+
+</main>
 
 <!-- Lightbox -->
 <div class="lightbox-overlay" id="lightbox" onclick="closeLightbox(event)">
@@ -1593,6 +1560,7 @@ footer a:hover { text-decoration: underline; }
 <!-- Footer (always visible) -->
 <footer>
   <div class="container">
+    <div class="brand-footer-links"><a href="privacy.html">Privacy details</a><a href="https://github.com/l33tdawg/sage/blob/main/docs/GETTING_STARTED.md">Setup guide</a><a href="https://github.com/l33tdawg/sage/tree/main/docs/reference">Technical reference</a><a href="https://sage-foundation.net/">SAGE Foundation</a></div>
     <p>
       <strong>SAGE</strong> &middot; Persistent Memory for AI<br>
       Created by <a href="https://github.com/l33tdawg">Dhillon Andrew Kannabhiran</a><br>
@@ -1653,7 +1621,7 @@ function switchTab(name, scrollTarget) {
     }
   }
   const btn = scrollTarget
-    ? document.querySelector(`.nav-tab[data-scroll="${scrollTarget}"]`)
+    ? document.querySelector(`.nav-tab[data-scroll="${scrollTarget}"]`) || document.querySelector(`.nav-tab[data-tab="${name}"]:not([data-scroll])`)
     : document.querySelector(`.nav-tab[data-tab="${name}"]:not([data-scroll])`);
   if (btn) btn.classList.add('active');
   // Update URL hash
@@ -1691,17 +1659,28 @@ document.addEventListener('click', (e) => {
   if (tabs && tabs.classList.contains('open') && nav && !nav.contains(e.target)) closeMobileNav();
 });
 
-// Handle hash on load
-const initHash = window.location.hash.slice(1);
-if (initHash && document.getElementById('tab-' + initHash)) {
-  switchTab(initHash);
-} else if (initHash === 'faq') {
-  switchTab('features', 'faq');
+// Resolve shared links both on load and when an anchor changes in this document.
+function routeHash() {
+  const hash = window.location.hash.slice(1);
+  if (hash && document.getElementById('tab-' + hash)) {
+    switchTab(hash);
+  } else if (['integration-paths','python-quickstart'].includes(hash)) {
+    switchTab('developers', hash);
+  } else if (hash === 'how-it-works') {
+    switchTab('home', 'get-started');
+  } else if (['why-sage','get-started','trust','comparison-sources'].includes(hash)) {
+    switchTab('home', hash);
+  } else if (hash === 'faq') {
+    switchTab('features', 'faq');
+  }
 }
+routeHash();
+window.addEventListener('hashchange', routeHash);
 
 // ─── Neural Network Canvas ───
 (function() {
   const canvas = document.getElementById('neural');
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const ctx = canvas.getContext('2d');
   let w, h, particles = [];
 
@@ -1744,6 +1723,20 @@ if (initHash && document.getElementById('tab-' + initHash)) {
 //  so a #hash deep-link reload doesn't call switchTab() before `observer` exists — see TDZ fix)
 
 // ─── Copy Prompt ───
+document.querySelectorAll('[data-copy-code]').forEach(button => {
+  button.addEventListener('click', async () => {
+    const code = document.getElementById(button.dataset.copyCode);
+    if (!code) return;
+    try {
+      await navigator.clipboard.writeText(code.textContent);
+      button.textContent = 'Copied';
+      setTimeout(() => { button.textContent = 'Copy code'; }, 2000);
+    } catch {
+      button.textContent = 'Select code to copy';
+    }
+  });
+});
+
 function copyPrompt(box) {
   const text = 'Connect to SAGE persistent memory: fetch http://localhost:8080/v1/mcp-config and save the response as .mcp.json in this project root. Then restart your session and initialize SAGE memory.';
   navigator.clipboard.writeText(text).then(() => {
