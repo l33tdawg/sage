@@ -47,8 +47,9 @@ nav { background: rgba(6,2,14,.95); border-bottom-color: rgba(167,139,250,.15); 
 #tab-features .features-grid { margin-top: 28px; }
 
 .brand-hero { position: relative; isolation: isolate; padding: 88px 0 0; overflow: hidden; background: #06020e; }
-.brand-hero-art { position: absolute; inset: 0; width: 100%; height: 720px; object-fit: cover; object-position: center; z-index: -2; }
-.brand-hero::before { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg,rgba(6,2,14,.88),rgba(6,2,14,.35) 45%,transparent 65%),linear-gradient(0deg,#06020e,transparent 35%); }
+.brand-hero-art { position: absolute; inset: 0; width: 100%; height: 720px; object-fit: cover; object-position: center; z-index: -3; }
+.brand-hero::before { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(90deg,rgba(6,2,14,.38),rgba(6,2,14,.58) 30%,rgba(6,2,14,.3) 48%,transparent 65%),linear-gradient(0deg,#06020e,transparent 35%); pointer-events: none; }
+.brand-hero::after { content: ''; position: absolute; top: 0; left: 0; width: min(70%,1400px); height: 720px; z-index: -2; background: url('assets/sage-hero-trails.svg') left center / 100% 100% no-repeat; pointer-events: none; }
 .brand-hero-copy { max-width: 620px; padding-bottom: 74px; }
 .brand-eyebrow { color: #b4a0d9; letter-spacing: .15em; text-transform: uppercase; font-size: .68rem; margin-bottom: 23px; }
 .brand-wordmark { display: block; width: 420px; max-width: 87%; height: auto; margin-bottom: 32px; filter: drop-shadow(0 0 22px rgba(167,139,250,.12)); }
@@ -170,6 +171,7 @@ footer p { color: #af9dc7; }
 footer .brand-footer-links { display: flex; justify-content: center; flex-wrap: wrap; gap: 22px; margin-bottom: 22px; font-size: .78rem; }
 
 @media (max-width: 1050px) {
+  .brand-hero::after { display: none; }
   .nav-tab { padding: 0 8px; }
   .nav-download { display: none; }
   .brand-hero-art { height: 670px; object-position: 55% center; }
