@@ -53,6 +53,13 @@ type SubmitMemoryRequest struct {
 	// by the caller's signed request and consensus-bound to the exact task and
 	// assignee.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// EvidenceID claims evidence uploaded beforehand with POST
+	// /v1/memory/evidence: source material the memory is based on, kept
+	// NODE-LOCAL on this node so its memory gate can ask whether the memory is
+	// supported by it (docs/reference/write-gate.md). Only this random id is
+	// part of the signed body; the evidence itself never enters a transaction.
+	// Not accepted for tasks.
+	EvidenceID string `json:"evidence_id,omitempty"`
 }
 
 // SubmitMemoryResponse is the JSON body for a successful submission.
@@ -1235,6 +1242,10 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 			"confidence_score must be between 0 and 1.")
 		return
 	}
+	if req.EvidenceID != "" && req.MemoryType == string(memory.TypeTask) {
+		writeProblem(w, http.StatusBadRequest, "Invalid evidence", "evidence is not accepted for task memories.")
+		return
+	}
 	if req.IdempotencyKey != "" && req.MemoryType != string(memory.TypeTask) {
 		writeProblem(w, http.StatusBadRequest, "Invalid idempotency key", "idempotency_key is supported only for task memories.")
 		return
@@ -1507,11 +1518,18 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	// Keep nonce-lease ownership on that same detached lifecycle; using
 	// r.Context() here would turn an already-authorized durable write into a 503
 	// before it reaches the historical background commit path.
+	// Evidence is attached before the transaction is signed, so this node's
+	// gate can never judge the memory without it, and released again only if
+	// nothing was signed or sent (releaseUnsentEvidence).
+	if !s.claimSubmittedEvidence(w, r, req.EvidenceID, agentID, memoryID) {
+		return
+	}
 	stage, err := s.submitConsensusTx(context.Background(), submitTx, func(encoded []byte) error {
 		var submitErr error
 		txHash, committedHeight, submitErr = s.broadcastTxCommitWithHeight(encoded)
 		return submitErr
 	})
+	s.releaseUnsentEvidence(req.EvidenceID, memoryID, stage, err)
 	if err != nil {
 		if stage != consensusTxSubmit {
 			s.writeConsensusTxError(w, stage, "submit", err)

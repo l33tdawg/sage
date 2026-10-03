@@ -1,0 +1,80 @@
+{"id":"l001","category":"lasting_fact","text":"The staging database listens on port 6432.","label":true}
+{"id":"l002","category":"lasting_fact","text":"The vault master key rotates every 90 days.","label":true}
+{"id":"l003","category":"lasting_fact","text":"The nightly backup job runs at 02:15 UTC.","label":true}
+{"id":"l004","category":"lasting_fact","text":"Sara Osei owns the billing service.","label":true}
+{"id":"l005","category":"lasting_fact","text":"The office is in Kuala Lumpur.","label":true}
+{"id":"l006","category":"lasting_fact","text":"The vendor contract renews on 2027-03-01.","label":true}
+{"id":"l007","category":"lasting_fact","text":"The API gateway rate-limits unauthenticated requests at 60 per minute.","label":true}
+{"id":"l008","category":"lasting_fact","text":"The build image is pinned to Go 1.22.5.","label":true}
+{"id":"l009","category":"lasting_fact","text":"The p95 latency for search is 240 ms.","label":true}
+{"id":"l010","category":"lasting_fact","text":"The user's timezone is Asia/Kuala_Lumpur.","label":true}
+{"id":"l011","category":"lasting_fact","text":"The primary on-call rotation changes weekly.","label":true}
+{"id":"l012","category":"lasting_fact","text":"The queue-depth alert threshold is 5000 messages.","label":true}
+{"id":"l013","category":"lasting_fact","text":"The web frontend is served from the edge CDN.","label":true}
+{"id":"l014","category":"lasting_fact","text":"The billing exporter runs on the analytics cluster.","label":true}
+{"id":"l015","category":"lasting_fact","text":"The lab router runs firmware 7.4.2.","label":true}
+{"id":"l016","category":"lasting_fact","text":"The demo account password rotates on the first of each month.","label":true}
+{"id":"l017","category":"lasting_fact","text":"The database failover runbook lives at runbooks/db-failover.md.","label":true}
+{"id":"l018","category":"lasting_fact","text":"Marcus Chen starts on 2026-10-05.","label":true}
+{"id":"l019","category":"lasting_fact","text":"The incident channel is #ops-incidents.","label":true}
+{"id":"l020","category":"lasting_fact","text":"The dataset refresh completes by 04:00 UTC.","label":true}
+{"id":"l021","category":"lasting_fact","text":"The user prefers concise answers.","label":true}
+{"id":"l022","category":"lasting_fact","text":"The team standup is at 09:30 on weekdays.","label":true}
+{"id":"l023","category":"lasting_fact","text":"The vendor ships replacements within five days.","label":true}
+{"id":"l024","category":"lasting_fact","text":"The fire extinguishers were last serviced in September 2026.","label":true}
+{"id":"l025","category":"lasting_fact","text":"The production database listens on port 5432.","label":true}
+{"id":"l026","category":"lasting_fact","text":"The cost alert fires above 400 dollars per day.","label":true}
+{"id":"l027","category":"lasting_rule","text":"Deploys to production must run through the staging cluster first.","label":true}
+{"id":"l028","category":"lasting_rule","text":"Production deploys require two approvals.","label":true}
+{"id":"l029","category":"lasting_rule","text":"Rotate the vault master key every 90 days.","label":true}
+{"id":"l030","category":"lasting_rule","text":"Never store customer PII in staging.","label":true}
+{"id":"l031","category":"lasting_rule","text":"Use trunk-based development and keep branches short-lived.","label":true}
+{"id":"l032","category":"lasting_rule","text":"Run the database failover drill every quarter.","label":true}
+{"id":"l033","category":"lasting_rule","text":"Prefer metric units in all documentation.","label":true}
+{"id":"l034","category":"lasting_rule","text":"File incident write-ups within 48 hours.","label":true}
+{"id":"l035","category":"lasting_rule","text":"Pin build tool versions; do not use floating tags.","label":true}
+{"id":"l036","category":"lasting_rule","text":"When a judge is unavailable, fall back to the built-in checks and record nothing.","label":true}
+{"id":"l037","category":"lasting_rule","text":"Ask before sending any customer content to an external service.","label":true}
+{"id":"l038","category":"lasting_rule","text":"Keep API responses backward compatible for one minor version.","label":true}
+{"id":"l039","category":"lasting_rule","text":"Follow the runbook before making manual changes to production.","label":true}
+{"id":"l040","category":"lasting_rule","text":"Tag releases as vMAJOR.MINOR.PATCH.","label":true}
+{"id":"l041","category":"lasting_rule","text":"Review dependency updates weekly.","label":true}
+{"id":"l042","category":"lasting_rule","text":"Escalate any data-loss incident to the on-call lead immediately.","label":true}
+{"id":"l043","category":"lasting_rule","text":"Write a regression test for every fixed bug.","label":true}
+{"id":"l044","category":"lasting_rule","text":"Prefer small, reviewable pull requests.","label":true}
+{"id":"l045","category":"lasting_rule","text":"Back up the ledger before every migration.","label":true}
+{"id":"l046","category":"lasting_rule","text":"Do not paste secrets into chat or logs.","label":true}
+{"id":"l047","category":"session_remark","text":"The attachment was lost; ask the user to re-send the numbers.","label":false}
+{"id":"l048","category":"session_remark","text":"The user asked me to use a shorter format in this reply.","label":false}
+{"id":"l049","category":"session_remark","text":"The context was truncated, so the task list is incomplete.","label":false}
+{"id":"l050","category":"session_remark","text":"I could not reach the host from this session.","label":false}
+{"id":"l051","category":"session_remark","text":"The tool call timed out just now.","label":false}
+{"id":"l052","category":"session_remark","text":"The user said thanks at the end of the last message.","label":false}
+{"id":"l053","category":"session_remark","text":"In this conversation, the user is testing the write gate.","label":false}
+{"id":"l054","category":"session_remark","text":"I already summarized this thread in my previous reply.","label":false}
+{"id":"l055","category":"session_remark","text":"The paste failed because it was too large for this chat.","label":false}
+{"id":"l056","category":"session_remark","text":"The user wants the next answer to start with a one-line summary.","label":false}
+{"id":"l057","category":"session_remark","text":"This session has the dashboard open in another tab.","label":false}
+{"id":"l058","category":"session_remark","text":"I did not have network access during this turn.","label":false}
+{"id":"l059","category":"session_remark","text":"The user attached a screenshot in the message above.","label":false}
+{"id":"l060","category":"session_remark","text":"I asked a clarifying question and am waiting for the answer.","label":false}
+{"id":"l061","category":"session_remark","text":"The last command failed with exit code 1 in this session.","label":false}
+{"id":"l062","category":"session_remark","text":"The reply was cut off mid-sentence.","label":false}
+{"id":"l063","category":"session_remark","text":"The user asked me to stop at three bullets.","label":false}
+{"id":"l064","category":"session_remark","text":"This conversation started with a question about rerankers.","label":false}
+{"id":"l065","category":"session_remark","text":"I ran the tests twice during this session.","label":false}
+{"id":"l066","category":"session_remark","text":"The user corrected my earlier misunderstanding.","label":false}
+{"id":"l067","category":"session_remark","text":"The message arrived with broken formatting.","label":false}
+{"id":"l068","category":"session_remark","text":"I could not read the file the user linked.","label":false}
+{"id":"l069","category":"session_remark","text":"There are five messages in this thread so far.","label":false}
+{"id":"l070","category":"session_remark","text":"The current turn is about the memory gate.","label":false}
+{"id":"l071","category":"session_remark","text":"I promised to send the numbers in the next reply.","label":false}
+{"id":"l072","category":"session_remark","text":"The user is typing from a phone right now.","label":false}
+{"id":"l073","category":"session_remark","text":"I had to retry the download twice in this session.","label":false}
+{"id":"l074","category":"session_remark","text":"The user asked whether hubanov replied yet.","label":false}
+{"id":"l075","category":"durability_edge","text":"The user prefers metric units.","label":true}
+{"id":"l076","category":"durability_edge","text":"The user asked for metric units in the answer above.","label":false}
+{"id":"l077","category":"durability_edge","text":"Deploy the fix now.","label":false}
+{"id":"l078","category":"durability_edge","text":"When deploying, always go through staging.","label":true}
+{"id":"l079","category":"durability_edge","text":"The team decided yesterday to use staging for every deploy.","label":true}
+{"id":"l080","category":"durability_edge","text":"I decided to skip staging for this test run.","label":false}

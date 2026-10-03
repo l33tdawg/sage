@@ -5,7 +5,7 @@ agent that stores a remark about its own session — "the attachment was lost;
 the user must re-send the numbers" — as a 0.9-confidence fact gets it
 committed, and later sessions recall it as if it were true of the world.
 
-The memory gate lets a node ask an operator-configured judge one calibrated
+The memory gate lets a node ask a local judge a calibrated
 question before it votes on a proposed memory: *is this lasting knowledge, or a
 statement about the conversation it came from?* The judge returns a
 probability, so the decision is a number with a threshold, not a guess. The
@@ -45,7 +45,7 @@ fresh**, and the gate can only narrow their outcome:
 | accept | pass (≥ 0.9) | accept |
 | accept | reject (< 0.5) | **reject**, with the probability in the rationale |
 | accept | held (in between) | nothing, until the operator decides in the review queue |
-| accept | judge failed | accept (built-in checks only; retried after 10 minutes) |
+| accept | judge failed | nothing; held for operator review |
 
 Verdicts are cached **per judge version**: check wording, policy, configured
 models, the judge **service** (a credential-free hash of its scheme, host and
@@ -80,8 +80,14 @@ client cannot decide a memory it could not have reviewed.
 
 ## What leaves the node
 
-Only the **text** of proposed memories in scope is sent to the configured judge
-service — no ids, domains, authors or other metadata. Scope is controlled by
+Only the **text** of proposed memories in scope, plus their caller-supplied
+evidence when the support check is enabled, is sent to the configured local
+judge — no ids, domains, authors or other metadata. Judge transports accept
+only loopback URLs, bypass environment proxies, and refuse redirects. A
+configured judge that is unavailable or returns an unreadable verdict holds
+the memory for review; it cannot fall back to automatic acceptance.
+
+Scope is controlled by
 `SAGE_HUNCH_INCLUDE_DOMAINS` (only these domains) and
 `SAGE_HUNCH_EXEMPT_DOMAINS` (never these); the node logs the scope and the
 judge URL at startup, and the review screen repeats it. Content that cannot be
@@ -110,11 +116,37 @@ Catalog entries and other records written by programs, not distilled from a
 conversation, should not be asked this question. List their domain prefixes in
 `SAGE_HUNCH_EXEMPT_DOMAINS`; the built-in checks apply to them as before.
 
+## Managed local judge
+
+Set `SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v15` to use the pinned judge
+through SAGE's managed Ollama. Its GGUF download is verified by SHA-256 before
+registration. Before sending content, the reader binds the managed tag to the
+pinned registered GGUF blob reported by `/api/show` and refuses mismatched weights,
+cloud aliases or models without local GGUF metadata. SAGE starts its managed
+Ollama with `OLLAMA_NO_CLOUD=1`, overriding an inherited false setting.
+
+The reader requests thinking off and requires an actual first-token label and
+valid token logprobs. Missing probabilities, thinking output, an unavailable
+model or unreadable evidence hold the memory for review. An operator's review
+decision remains final, and the built-in rejection checks still apply.
+`SAGE_LOCAL_JUDGE_DEBIAS=1` asks both answer orders; changing this setting
+invalidates cached verdicts. `SAGE_LOCAL_JUDGE_TIMEOUT` bounds the per-memory
+judge budget (default `60s`), and `SAGE_LOCAL_JUDGE_REVISION` invalidates the
+cache after changing model weights behind the same name.
+
+The public seed set has been independently qualified with the real Go reader
+and SAGE's pinned Ollama v0.31.1 on darwin/arm64, with external networking
+blocked. Support precision was 0.9697 (one accepted trap), and lasting precision
+was 1.0. This is experimental: private fresh holdouts, other platforms and
+multilingual behavior have not been independently remeasured. See the
+[qualification report](../../bench/judge-qualify/reports/sage-judge-v15-sage-runtime.md)
+for per-item results and limits.
+
 ## Configuration (personal node)
 
 | Variable | Meaning |
 |---|---|
-| `SAGE_HUNCH_URL` | Hunch service base URL. **Unset = gate off.** |
+| `SAGE_HUNCH_URL` | Loopback Hunch service URL; takes precedence over the managed local judge. Both judge settings unset = gate off. A refused URL holds memories without sending content. |
 | `SAGE_HUNCH_API_KEY` | bearer key, if the service needs one |
 | `SAGE_HUNCH_MODELS` | comma-separated judge models, first one leads (empty = service default, one judge) |
 | `SAGE_HUNCH_POLICY` | `lead` (default) or `all` |

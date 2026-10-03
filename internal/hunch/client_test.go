@@ -65,3 +65,20 @@ func TestYesNo_FailsClosed(t *testing.T) {
 		require.Error(t, err)
 	})
 }
+
+func TestSupportJudge_SendsOnlyMemoryAndEvidence(t *testing.T) {
+	c := server(t, 200, map[string]any{"results": map[string]any{
+		"supported": map[string]any{"kind": "yesno", "p_yes": 0.97}}},
+		func(_ *http.Request, req map[string]any) {
+			require.Equal(t, map[string]any{"memory": "The pump is rated 40 kW.", "evidence": "Datasheet: rated power 40 kW."},
+				req["context"], "only the memory and its evidence leave the node")
+			checks := req["checks"].(map[string]any)
+			require.Len(t, checks, 1)
+			require.Contains(t, checks["supported"].(map[string]any)["no_if"], "earlier time",
+				"the check names the past-time look-alike")
+		})
+	p, err := SupportJudge{Client: c}.SupportedProbability(context.Background(),
+		"The pump is rated 40 kW.", "Datasheet: rated power 40 kW.")
+	require.NoError(t, err)
+	require.InDelta(t, 0.97, p, 1e-9)
+}

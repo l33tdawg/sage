@@ -34,7 +34,7 @@ Agents frequently get this wrong. There are **two distinct paths** that determin
 
 ### Path A: REST submit
 
-`POST /v1/memory/submit` → `handleSubmitMemory` (`api/rest/memory_handler.go:1209`, classification read at `:1232`):
+`POST /v1/memory/submit` → `handleSubmitMemory` (`api/rest/memory_handler.go:1216`, classification read at `:1232`):
 
 ```go
 // REST passes the caller's classification through verbatim.
@@ -141,7 +141,7 @@ Both stores are updated in the same block's Commit call. The BadgerDB entry is t
 
 ## handleGetMemory Classification
 
-`GET /v1/memory/{memory_id}` (`handleGetMemory`, `memory_handler.go:3374+`) also reads classification from BadgerDB and returns it in the response body. The same `if memClass > 0` gate logic applies to single-record fetches.
+`GET /v1/memory/{memory_id}` (`handleGetMemory`, `memory_handler.go:3392+`) also reads classification from BadgerDB and returns it in the response body. The same `if memClass > 0` gate logic applies to single-record fetches.
 
 ---
 

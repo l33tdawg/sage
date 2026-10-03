@@ -744,6 +744,7 @@ func (s *Server) setupRouter() chi.Router {
 
 		// Memory endpoints
 		r.Post("/v1/memory/submit", s.handleSubmitMemory)
+		r.Post("/v1/memory/evidence", s.handleUploadEvidence)
 		r.Post("/v1/memory/query", s.handleQueryMemory)
 		r.Post("/v1/memory/search", s.handleSearchMemory)
 		r.Post("/v1/memory/hybrid", s.handleHybridSearchMemory)

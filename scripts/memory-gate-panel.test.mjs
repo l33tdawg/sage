@@ -33,6 +33,32 @@ test('unreadable content is never decidable and never shown', () => {
     assert.equal(reviewItemState({ memory_id: 'm2', content: 'The depot opens at 07:00.' }).decidable, true);
 });
 
+test('the evidence check says the evidence text leaves the node too', () => {
+    const off = describeMemoryGate({ enabled: true, judges: 1 });
+    assert.doesNotMatch(off.scope, /evidence/);
+    const on = describeMemoryGate({ enabled: true, judges: 2, evidence_judges: 2 });
+    assert.match(on.scope, /evidence text is sent as well/);
+    assert.match(on.scope, /every judge agrees/);
+});
+
+test('a held memory shows the evidence it was submitted with', () => {
+    const s = reviewItemState({ memory_id: 'm1', content: 'The alarm is disabled.', evidence: 'Work order 118: alarm disabled.' });
+    assert.equal(s.evidence, 'Work order 118: alarm disabled.');
+    assert.equal(reviewItemState({ memory_id: 'm2', content: 'x' }).evidence, '');
+    assert.equal(reviewItemState({ memory_id: 'm3', content_unavailable: true, evidence: 'secret' }).evidence, undefined,
+        'nothing of an unreviewable item is shown');
+    assert.match(appSource, /memory-gate-evidence/);
+});
+
+test('expired evidence is said plainly, never shown as absent', () => {
+    const s = reviewItemState({ memory_id: 'm1', content: 'The alarm is disabled.', evidence_expired: true });
+    assert.equal(s.decidable, true);
+    assert.equal(s.evidence, '');
+    assert.match(s.evidenceNote, /evidence expired/);
+    assert.equal(reviewItemState({ memory_id: 'm2', content: 'x' }).evidenceNote, '');
+    assert.match(appSource, /memory-gate-evidence-expired/);
+});
+
 test('the panel is reachable from Settings', () => {
     assert.match(appSource, /id: 'memory-gate', label: 'Memory gate'/);
     assert.match(appSource, /settingsTab === 'memory-gate'/);

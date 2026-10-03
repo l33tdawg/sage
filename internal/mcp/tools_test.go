@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -6551,4 +6552,45 @@ func TestSageTaskRejectsAmbiguousAndShortIDPrefixes(t *testing.T) {
 	_, err = s.toolTask(ctx, map[string]any{"memory_id": "ab12", "status": "done"})
 	require.ErrorContains(t, err, "at least 8 characters")
 	require.Empty(t, *updated, "no mutation may be attempted for an unresolved prefix")
+}
+
+func TestSageRememberEvidenceTravelsSeparatelyFromTheSignedSubmission(t *testing.T) {
+	const evidence = "Work order 118: north gate alarm disabled today."
+	var ordered []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1, 0.2}})
+	})
+	mux.HandleFunc("/v1/memory/evidence", func(w http.ResponseWriter, r *http.Request) {
+		ordered = append(ordered, "evidence")
+		var body map[string]any
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, evidence, body["evidence"])
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"evidence_id": "ev-42", "expires_in_seconds": 3600})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, r *http.Request) {
+		ordered = append(ordered, "submit")
+		raw, _ := io.ReadAll(r.Body)
+		assert.NotContains(t, string(raw), "Work order 118", "the evidence text is never in the signed submission")
+		var body map[string]any
+		assert.NoError(t, json.Unmarshal(raw, &body))
+		assert.Equal(t, "ev-42", body["evidence_id"])
+		_ = json.NewEncoder(w).Encode(map[string]any{"memory_id": "m-1", "status": "committed", "tx_hash": "tx-1"})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+	_, err := s.toolRemember(context.Background(), map[string]any{
+		"content":  "The north gate alarm was disabled under work order 118.",
+		"type":     "fact",
+		"evidence": evidence,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"evidence", "submit"}, ordered)
 }

@@ -47,6 +47,7 @@ func (s *Server) registerTools() map[string]Tool {
 					"tags":               map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "User-defined labels for this memory (e.g. 'important', 'project-x')"},
 					"replaces_memory_id": map[string]any{"type": "string", "description": "Optional committed memory ID this content corrects. The replacement is committed first; only then is the old memory challenged."},
 					"replacement_reason": map[string]any{"type": "string", "description": "Optional audit reason recorded when the replaced memory is challenged."},
+					"evidence":           map[string]any{"type": "string", "description": "Optional source text this memory is based on (a quote, log line or document excerpt, up to 32 KiB). It stays on this node and never enters the chain; a node running the memory gate checks that it supports the memory as stated. Not for tasks."},
 				},
 				"required": []string{"content"},
 			},
@@ -953,6 +954,24 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		// broadly readable than its source.
 		submitBody["parent_hash"] = correctionSource.ContentHash
 		submitBody["classification"] = correctionSource.Classification
+	}
+	if evidence := stringParam(params, "evidence", ""); evidence != "" {
+		if memType == "task" {
+			return nil, fmt.Errorf("evidence is not accepted for task memories")
+		}
+		// Evidence is uploaded on its own: the signed submission body is part
+		// of the transaction, so only the returned id may travel in it.
+		uploadReq, _ := json.Marshal(map[string]string{"evidence": evidence})
+		var upload struct {
+			EvidenceID string `json:"evidence_id"`
+		}
+		if err := s.doSignedJSON(ctx, "POST", "/v1/memory/evidence", uploadReq, &upload); err != nil {
+			return nil, fmt.Errorf("upload evidence: %w", err)
+		}
+		if upload.EvidenceID == "" {
+			return nil, fmt.Errorf("upload evidence: the node returned no evidence_id")
+		}
+		submitBody["evidence_id"] = upload.EvidenceID
 	}
 	submitReq, _ := json.Marshal(submitBody)
 	var submitResp struct {
