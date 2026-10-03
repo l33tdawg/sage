@@ -30,7 +30,7 @@ func stdioRequestKey(id any) string {
 	return string(value)
 }
 
-func (calls *stdioRequests) Start(req jsonRPCRequest, dispatch func(context.Context, *jsonRPCRequest) *jsonRPCResponse) *jsonRPCResponse {
+func (calls *stdioRequests) Start(req jsonRPCRequest, server *Server) *jsonRPCResponse {
 	key := stdioRequestKey(req.ID)
 	calls.mu.Lock()
 	refusal := ""
@@ -50,7 +50,7 @@ func (calls *stdioRequests) Start(req jsonRPCRequest, dispatch func(context.Cont
 	go func() {
 		defer calls.wg.Done()
 		defer func() { cancel(); calls.mu.Lock(); delete(calls.active, key); calls.mu.Unlock() }()
-		response := dispatch(ctx, &req)
+		response := server.DispatchJSONRPC(ctx, &req)
 		// Cancellation abandons this reply, but never retries the operation. A
 		// signed write may already have reached consensus and keeps its normal
 		// indeterminate-outcome/fence handling in the HTTP submission path.

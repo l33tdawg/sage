@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,11 @@ func TestStdioRequestsProcessHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(1)
 	}
-	server := NewServer(os.Getenv("SAGE_STDIO_REQUESTS_BASE"), key)
+	port, err := strconv.Atoi(os.Getenv("SAGE_STDIO_REQUESTS_PORT"))
+	if err != nil || port <= 0 || port > 65535 {
+		os.Exit(1)
+	}
+	server := NewServer("http://127.0.0.1:"+strconv.Itoa(port), key)
 	server.conversations["stdio"] = &conversationState{inceptionChecked: true}
 	if err := server.Run(context.Background()); err != nil {
 		os.Exit(2)
@@ -41,7 +46,7 @@ func runStdioRequestProcess(t *testing.T, baseURL string) (io.WriteCloser, <-cha
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestStdioRequestsProcessHelper$")
-	cmd.Env = append(os.Environ(), "SAGE_STDIO_REQUESTS_HELPER=1", "SAGE_STDIO_REQUESTS_BASE="+baseURL, mcpRuntimeHandoffEnv+"=0")
+	cmd.Env = append(os.Environ(), "SAGE_STDIO_REQUESTS_HELPER=1", "SAGE_STDIO_REQUESTS_PORT="+strings.TrimPrefix(baseURL, "http://127.0.0.1:"), mcpRuntimeHandoffEnv+"=0")
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)
 	stdout, err := cmd.StdoutPipe()
