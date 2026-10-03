@@ -1,14 +1,24 @@
 # (S)AGE — Sovereign Agent Governed Experience
 
-**Persistent, consensus-validated memory infrastructure for AI agents.**
+![SAGE: persistent memory for AI agents, with a lavender neural brain](docs/brand/sage-twitter-cover.png)
 
-SAGE gives AI agents institutional memory that persists across conversations, goes through consensus validation, carries confidence scores, and decays naturally over time. On a multi-validator network that validation is a BFT quorum; on a personal install it is the node's own signed vote. Not a flat file. Not a vector DB bolted onto a chat app. Infrastructure — built on the same consensus primitives as distributed ledgers.
+**Stop re-explaining your project.**
 
-The architecture is described in [Paper 1: Agent Memory Infrastructure](papers/Paper1%20-%20Agent%20Memory%20Infrastructure%20-%20Byzantine-Resilient%20Institutional%20Memory%20for%20Multi-Agent%20Systems.pdf).
+SAGE gives AI agents a persistent memory of project decisions, failed approaches
+and useful lessons. Connect your tools to the same local node so authorized
+agents can record experience and recall relevant context in later sessions.
+Inspect what they keep in CEREBRUM, SAGE's local dashboard.
 
-> **Just want to install it?** [Download here](https://l33tdawg.github.io/sage/) — double-click, done. Works with any AI.
+Works with Claude Code, Codex, Cursor and other MCP-capable clients. Developers
+can integrate through the Python SDK or signed REST API. Recall depends on what
+is recorded, your configuration and the agent's use of its tools.
 
-[Quick Start](#quick-start) · [Architecture](#architecture) ·
+[Download SAGE](https://github.com/l33tdawg/sage/releases/latest) ·
+[Get started](https://l33tdawg.github.io/sage/#get-started) ·
+[Connect your AI](https://l33tdawg.github.io/sage/connect.html) ·
+[Developer quickstart](https://l33tdawg.github.io/sage/#developers)
+
+[Why SAGE](#why-sage) · [Quick Start](#quick-start) · [For Developers](#for-developers) · [Architecture](#architecture) ·
 [Capabilities](#current-capabilities) · [Dashboard](#cerebrum-dashboard) ·
 [Release history](#release-history) · [Documentation](#documentation)
 
@@ -18,11 +28,48 @@ The architecture is described in [Paper 1: Agent Memory Infrastructure](papers/P
 
 ---
 
+## Why SAGE
+
+Use SAGE when your agents return to ongoing work: a design decision worth
+keeping, an approach that failed, or a lesson the next session should use.
+RAG retrieves source material; SAGE uses retrieval too, with a governed record
+of agent experience around it.
+
+- **Trace the origin.** Agent-signed writes attribute memories to their recorded author.
+- **Review admission.** Memories pass through a validation lifecycle before they enter normal recall.
+- **Control access.** Enrollment, domain permissions and classification determine which agents can use a memory.
+- **Keep memory useful.** Inspect confidence and status, apply decay, or deprecate a memory while retaining its audit history.
+
+A personal install runs one validator and casts its own signed admission vote.
+A multi-validator network requires a BFT quorum. These checks govern what is
+committed; they do not prove every remembered claim is true or change your
+model's weights. See the [memory lifecycle](docs/reference/concepts/memory-lifecycle.md)
+and [consensus reference](docs/reference/concepts/consensus-confidence-decay.md).
+
+Memory is local by default. Optional federation, connectors and remote model
+providers can send data to configured destinations. Enable the vault for
+memory-content encryption at rest; see the [privacy details](https://l33tdawg.github.io/sage/privacy.html)
+and [Security FAQ](SECURITY_FAQ.md).
+
 ## Quick Start
 
 **Desktop:** [Download the latest release](https://github.com/l33tdawg/sage/releases/latest),
-open SAGE, then use CEREBRUM to connect your AI. For a full walkthrough, see
-[Getting Started](docs/GETTING_STARTED.md).
+open SAGE and complete setup in CEREBRUM. Choose your memory engine, connect an
+AI client and review agent access. Follow the
+[connection guide](https://l33tdawg.github.io/sage/connect.html) for your tool or
+the full [Getting Started](docs/GETTING_STARTED.md) walkthrough.
+
+If SAGE is already running, check it before starting another server:
+
+```bash
+curl http://127.0.0.1:8080/health
+```
+
+A healthy node returns `{"status":"healthy"}`. After connecting an MCP client,
+call `sage_inception` and follow its returned memory mode.
+
+<details>
+<summary>Build from source</summary>
 
 **From source (Go 1.26.8+):**
 
@@ -33,7 +80,9 @@ go build -o sage-gui ./cmd/sage-gui/
 ./sage-gui serve    # SAGE + Dashboard on :8080
 ```
 
-Or grab a binary: [macOS DMG](https://github.com/l33tdawg/sage/releases/latest) (signed & notarized) | [Windows EXE](https://github.com/l33tdawg/sage/releases/latest) | [Linux tar.gz](https://github.com/l33tdawg/sage/releases/latest)
+</details>
+
+Desktop packages: [macOS DMG](https://github.com/l33tdawg/sage/releases/latest) (signed & notarized) | [Windows EXE](https://github.com/l33tdawg/sage/releases/latest) | [Linux tar.gz](https://github.com/l33tdawg/sage/releases/latest)
 
 <details>
 <summary>Docker and containerized MCP setup</summary>
@@ -110,6 +159,62 @@ sage-gui mcp install
 This installs Claude Code hooks that prompt the memory lifecycle (boot, turn, reflect) — even if your `.mcp.json` is already configured. Restart your Claude Code session after running this.
 
 </details>
+
+---
+
+## For Developers
+
+Choose an integration for your workflow:
+
+| Integration | Use it for | Start here |
+| --- | --- | --- |
+| MCP | Giving an existing AI client memory and coordination tools | [Connection guide](https://l33tdawg.github.io/sage/connect.html) · [MCP reference](docs/reference/mcp-tools.md) |
+| Python SDK | Building a memory-aware agent or application with sync/async clients | [Developer quickstart](https://l33tdawg.github.io/sage/#developers) · [SDK reference](docs/reference/python-sdk.md) |
+| Signed REST API | Integrating from another language over HTTP | [REST reference](docs/reference/rest-api.md) |
+
+The [authoritative reference index](docs/reference/INDEX.md) covers exact API
+behavior, authentication, access controls and lifecycle rules. Start there
+when implementing an integration.
+
+### Python: read existing memories
+
+Requires Python 3.10+, a running node and an enrolled agent. Set
+`SAGE_IDENTITY_PATH` to that agent's existing key file and `SAGE_DOMAIN` to a
+domain it can read.
+
+```bash
+python -m pip install sage-agent-sdk
+```
+
+```python
+import os
+from sage_sdk import AgentIdentity, SageClient
+
+identity = AgentIdentity.from_file(os.environ["SAGE_IDENTITY_PATH"])
+domain = os.environ["SAGE_DOMAIN"]
+
+with SageClient(
+    base_url="http://127.0.0.1:8080",
+    identity=identity,
+    trust_env=False,
+) as client:
+    page = client.list_memories(
+        domain=domain, status="committed", limit=3,
+    )
+    for memory in page.memories:
+        print(memory.memory_id, memory.content)
+```
+
+Save as `quickstart.py` and run `python quickstart.py`. An empty list means no
+committed memories are visible to this agent in that domain. Review enrollment
+and domain permissions in CEREBRUM if access is denied.
+
+To record experience, use `propose()` in a domain the agent can write to and set
+classification explicitly. A submitted memory starts as `proposed`; normal
+recall includes it after admission commits it. For semantic retrieval, use
+`hybrid()` with query text and a matching embedding. See the
+[SDK examples](docs/reference/python-sdk.md) and
+[memory admission guide](docs/reference/concepts/voter-operations.md).
 
 ---
 
@@ -194,7 +299,7 @@ for exact fields, recovery, and authorization rules.
 
 ![CEREBRUM MRI brain — memories mapped inside a 3D brain with focused related notes](docs/screen-brain.png)
 
-`http://localhost:8080/ui/` — a dashboard-native operator console centered on the 3D MRI memory brain, with chain health, agents, federation, semantic memory, recall tuning, vault recovery, tasks, imports, and updates around it. Every major workflow is available from the browser; the CLI stays there for automation and recovery.
+`http://127.0.0.1:8080/ui/` — a dashboard-native operator console centered on the 3D MRI memory brain, with chain health, agents, federation, semantic memory, recall tuning, vault recovery, tasks, imports, and updates around it. Every major workflow is available from the browser; the CLI stays there for automation and recovery.
 
 | Control Board | Federation | Recall Engine |
 |:---:|:---:|:---:|
@@ -207,6 +312,9 @@ software updates, and encryption controls. Ordinary agent identity replacement
 uses re-enrollment; historical memory authorship is preserved.
 
 ---
+
+<details>
+<summary>Recent release notes (v11.23.14 and earlier)</summary>
 
 ## What's New in v11.23.14
 
@@ -645,6 +753,8 @@ This patch changes no consensus rule, AppHash input, key encoding, fork target,
 or application version. Existing app-v27 chains replay byte-identically.
 
 Container: `ghcr.io/l33tdawg/sage:11.19.13`. SDK 11.19.13.
+
+</details>
 
 ## Release History
 
@@ -2986,7 +3096,8 @@ The v10.x line (MRI 3D brain, the app-v12/v13/v14 idle-block + AppHash fork ladd
 | [Getting Started](docs/GETTING_STARTED.md) | Setup walkthrough, embedding providers, multi-agent network guide |
 | [Upgrading](docs/UPGRADING.md) | Moving an existing node to a new release, including v10.x → v11: backup, preflight, the app-version ladder, and what app-v23 does to your admins |
 | [Security FAQ](SECURITY_FAQ.md) | Threat model, encryption, auth, signature scheme |
-| [Connect Your AI](https://l33tdawg.github.io/sage/connect.html) | Interactive setup wizard for any provider |
+| [Connect Your AI](https://l33tdawg.github.io/sage/connect.html) | Setup instructions for supported AI clients |
+| [Developer Quickstart](https://l33tdawg.github.io/sage/#developers) | MCP, Python and REST integration paths with a first-read example |
 
 ---
 
@@ -3004,6 +3115,8 @@ Unless otherwise stated, SAGE source code is licensed under [Apache 2.0](LICENSE
 ## Author
 
 Dhillon Andrew Kannabhiran ([@l33tdawg](https://github.com/l33tdawg))
+
+[SAGE Foundation](https://sage-foundation.net/)
 
 ---
 
