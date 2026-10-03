@@ -8,6 +8,13 @@
     1200,
     630
   ],
+  "web_exports": {
+    "format": "JPEG",
+    "quality": 85,
+    "source_format": "PNG",
+    "max_bytes": 1048576,
+    "reason": "Signal Desktop limits preview image downloads to 1 MiB. Keep the PNG masters and use compact JPEGs in OG and Twitter metadata."
+  },
   "prompts": [
     {
       "name": "home",
