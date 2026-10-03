@@ -139,6 +139,20 @@ Prefer to bring your own? You can still point SAGE at any external TEI-compatibl
 
 ---
 
+## Optional memory-quality judge
+
+v11.23.14 adds a managed local judge to the experimental memory gate. It is
+**off by default**. On a personal SQLite node, set
+`SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v15` in the node's environment before
+starting it. SAGE downloads and verifies the pinned model in the background;
+memories wait for review while the judge is unavailable. The current managed
+adapter judges every domain; Hunch's include/exempt settings apply only to the
+Hunch service adapter.
+
+Review held memories in **Settings → Memory gate**. An operator decision still
+has to pass the built-in voter checks. Read the [memory-gate guide](reference/write-gate.md)
+for setup, evidence uploads, and the qualification limits before enabling it.
+
 ## Connect an AI tool
 
 The dashboard's **Connect an AI tool** flow (in the onboarding wizard, and on the Settings > Connection tab) writes the config for you. It first asks the one question that matters - is the tool on **this** computer, or **another** one - and then branches into three flows:

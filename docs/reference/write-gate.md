@@ -78,6 +78,33 @@ server immediately before it is stored — the content must still be readable
 and the record must pass the same integrity check — so a stale page or an API
 client cannot decide a memory it could not have reviewed.
 
+## Attach source evidence (v11.23.14)
+
+For non-task memories, MCP `sage_remember` accepts an optional `evidence` string
+(a quote, log line or document excerpt, at most 32 KiB). The bridge uploads it
+separately before submitting the memory. REST clients first sign
+`POST /v1/memory/evidence` with `{"evidence":"source text"}`, then include the
+returned `evidence_id` in the same agent's signed `POST /v1/memory/submit`.
+Only that random ID enters the submission proof; the source text stays in the
+node's SQLite store. The Python SDK v11.23.14 does not yet expose this upload
+or the `evidence_id` argument. See the [REST contract](rest-api.md#post-v1memoryevidence)
+and [MCP parameter reference](mcp-tools.md#sage_remember)
+(`api/rest/memory_evidence.go`; `internal/mcp/tools.go`, `toolRemember`).
+
+With support judging enabled, every support judge must reach 0.9 to pass.
+If all return below 0.5, support is rejected; other combinations are held for
+review. This support check runs alongside lasting-memory judging and can only
+narrow its outcome. It checks the claim's time frame and attribution as well as
+its wording. A memory without evidence gets only the lasting check; missing or
+unreadable claimed evidence holds the memory (`internal/voter/gate.go`,
+`evaluate`, `combineSupport`).
+
+Evidence uploaded but not claimed expires after one hour, with a cap of 64
+unclaimed uploads per agent. Claimed text is retained while the memory is
+proposed and pruned after its final decision. An unresolved claim with no memory
+after 24 hours loses its text but keeps an expired marker, so a late submission
+is held for review (`internal/store/sqlite_gate.go`, `PruneMemoryEvidence`).
+
 ## What leaves the node
 
 Only the **text** of proposed memories in scope, plus their caller-supplied
@@ -87,7 +114,7 @@ only loopback URLs, bypass environment proxies, and refuse redirects. A
 configured judge that is unavailable or returns an unreadable verdict holds
 the memory for review; it cannot fall back to automatic acceptance.
 
-Scope is controlled by
+For the Hunch service adapter, scope is controlled by
 `SAGE_HUNCH_INCLUDE_DOMAINS` (only these domains) and
 `SAGE_HUNCH_EXEMPT_DOMAINS` (never these); the node logs the scope and the
 judge URL at startup, and the review screen repeats it. Content that cannot be
@@ -125,6 +152,12 @@ pinned registered GGUF blob reported by `/api/show` and refuses mismatched weigh
 cloud aliases or models without local GGUF metadata. SAGE starts its managed
 Ollama with `OLLAMA_NO_CLOUD=1`, overriding an inherited false setting.
 
+The current managed adapter judges every domain. `SAGE_HUNCH_INCLUDE_DOMAINS`,
+`SAGE_HUNCH_EXEMPT_DOMAINS` and `SAGE_HUNCH_EVIDENCE` configure only the Hunch
+service adapter; they do not restrict managed local judging. The managed
+adapter always checks supplied evidence (`cmd/sage-gui/local_judge.go`,
+`localJudgeFromEnv`).
+
 The reader requests thinking off and requires an actual first-token label and
 valid token logprobs. Missing probabilities, thinking output, an unavailable
 model or unreadable evidence hold the memory for review. An operator's review
@@ -146,6 +179,11 @@ for per-item results and limits.
 
 | Variable | Meaning |
 |---|---|
+| `SAGE_LOCAL_JUDGE_MODEL` | Managed Ollama model; `sage-memory-judge:v15` selects the pinned build. Installation runs in the background. |
+| `SAGE_LOCAL_JUDGE_DEBIAS` | Exactly `1` asks both answer orders and averages probabilities (twice the calls). |
+| `SAGE_LOCAL_JUDGE_TIMEOUT` | Managed judge budget per memory (default `60s`). |
+| `SAGE_LOCAL_JUDGE_REVISION` | Operator tag that invalidates managed-judge cached verdicts. |
+| `SAGE_HUNCH_EVIDENCE` | `off` disables Hunch support checks; otherwise evidence is checked when supplied. Does not affect the managed adapter. |
 | `SAGE_HUNCH_URL` | Loopback Hunch service URL; takes precedence over the managed local judge. Both judge settings unset = gate off. A refused URL holds memories without sending content. |
 | `SAGE_HUNCH_API_KEY` | bearer key, if the service needs one |
 | `SAGE_HUNCH_MODELS` | comma-separated judge models, first one leads (empty = service default, one judge) |

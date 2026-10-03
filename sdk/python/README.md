@@ -100,9 +100,9 @@ Request signing is handled automatically by the client. Each request includes fo
 
 ## Complete API Reference
 
-`SageClient` exposes 84 public operations. `AsyncSageClient` exposes those
-same 84 operations as coroutines plus the async-only `close()` lifecycle
-method, for 85 public methods total.
+`SageClient` exposes 92 public operations. `AsyncSageClient` exposes those
+same 92 operations as coroutines plus the async-only `close()` lifecycle
+method, for 93 public methods total.
 
 ### Health & Status
 
@@ -255,6 +255,39 @@ result = client.pre_validate(
 )
 # Returns: PreValidateResponse(accepted, votes=[{validator, decision, reason}], quorum)
 ```
+
+### Optional memory gate and source evidence
+
+The node's experimental memory gate is off by default. When enabled, a
+successful `propose()` can still leave a memory at `status="proposed"` while
+judging runs or the operator reviews it. A transaction receipt is not the
+memory's final approval; inspect `get_memory(result.memory_id)` for its lifecycle
+status. Built-in rejection checks still apply after an operator decision.
+
+In SDK v11.23.14, `propose()` has no `evidence_id` parameter or evidence-upload
+helper. To supply source text, use MCP `sage_remember(evidence=...)` or the
+signed REST upload/submission flow. Do not put private source text in the memory
+content to work around this: memory content enters the transaction. See the
+[memory-gate guide](https://github.com/l33tdawg/sage/blob/main/docs/reference/write-gate.md)
+and [REST evidence reference](https://github.com/l33tdawg/sage/blob/main/docs/reference/rest-api.md#post-v1memoryevidence).
+
+### Private media and workflow journal
+
+These node-local helpers use the signed agent's private storage boundary and
+require the node's vault to be unlocked. Both clients expose the same methods:
+
+| Method | Route |
+|---|---|
+| `private_media_put(object_id, jpeg)` | `PUT /v1/private-media/{object_id}` |
+| `private_media_get(object_id)` | `GET /v1/private-media/{object_id}` |
+| `workflow_get(record_id)` | `GET /v1/workflows/{record_id}` |
+| `workflow_put(record_id, kind, expected_revision, payload, *, guard=...)` | `PUT /v1/workflows/{record_id}` |
+| `workflow_list(*, after=None, limit=20)` | `GET /v1/workflows` |
+
+The journal uses compare-and-swap revisions. Session writes can include a guard
+on a separate conversation-control record; see the
+[workflow and private-media reference](https://github.com/l33tdawg/sage/blob/main/docs/reference/python-sdk.md)
+for guard conditions, JPEG validation, size limits, and retry behavior.
 
 ### Task Management
 

@@ -18,6 +18,10 @@ on:
   # moment the version stamps on the site are allowed to move.
   release:
     types: [published]
+  # GITHUB_TOKEN publication does not emit a downstream release event.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
 
 concurrency:
@@ -26,10 +30,14 @@ concurrency:
 
 permissions:
   contents: write
+  pages: write
 
 jobs:
   snapshot:
     name: Refresh downloads.json
+    # Run only after successful publication from this repository. Always check out main below;
+    # never execute code or consume artifacts from the triggering run.
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -50,6 +58,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/pages-download-snapshot.mjs --pages pages
       - name: Commit the refresh
+        id: commit
         working-directory: pages
         run: |
           if [ -z "$(git status --porcelain)" ]; then
@@ -61,3 +70,10 @@ jobs:
           git add -- downloads.json index.html
           git commit -m 'chore(pages): refresh the download snapshot'
           git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      # Bot pushes are not guaranteed to trigger the legacy branch build. Request it explicitly.
+      - name: Build GitHub Pages
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds"
