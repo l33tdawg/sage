@@ -318,6 +318,7 @@ replacement first, old-memory challenge second.
 | `type` | string | no | `fact`, `observation`, `inference`, or `task`. Default: `observation`; a correction inherits the original type when omitted. |
 | `confidence` | number | no | Score 0–1. Default: 0.80. |
 | `tags` | string[] | no | User-defined labels (e.g. `important`, `project-x`). Git branch is auto-appended. |
+| `evidence` | string | no | Optional source text, up to 32 KiB, for non-task memories. Uploaded separately and kept on this node; an enabled memory gate checks whether it supports the claim. |
 | `replaces_memory_id` | string | no | Live committed/challenged memory this content corrects. The replacement is pre-validated like any other write, so a body byte-identical to its source is refused as a duplicate — the voter would have deprecated it — and the correction must actually change the content. |
 | `replacement_reason` | string | no | Audit reason used when challenging the old memory after the replacement commits. |
 
@@ -359,6 +360,7 @@ until its first explicit policy review; this does not authorize MCP challenge,
 deprecate, reinstate, or any other level-3 Modify operation.
 
 **REST:** `POST /v1/memory/pre-validate` (optional), `POST /v1/embed`,
+`POST /v1/memory/evidence` when evidence is supplied,
 `POST /v1/memory/submit`, and for a correction
 `GET /v1/memory/{memory_id}` plus
 `POST /v1/memory/{replaces_memory_id}/challenge`.

@@ -83,16 +83,22 @@ disarming the flag. `sage-gui` also reads these from a `voter:` block in `config
 | `VALIDATOR_KEY_FILE` | `amid` socket mode: concrete `priv_validator_key.json` for both the auto-voter and REST governance gateway (in-process mode injects the key under `--home`). Without a usable live key, REST governance fails closed with 503; the random compatibility key is never accepted for governance. | (none) | amid, REST | `cmd/amid/main.go`, `api/rest/server.go` |
 | `SAGE_GOVERNANCE_OPERATOR_ID` | `amid` governance gateway allowlist: one hex Ed25519 identity permitted to authorize this validator's REST propose/vote/cancel calls. Equivalent flag: `--governance-operator-id`. Empty disables governance mutations. `sage-gui` wires its local operator identity without this env variable. | (none) | amid | `cmd/amid/main.go`, `api/rest/server.go` |
 
-### Optional memory-quality gate (v11.23.11)
+### Optional memory-quality gate (v11.23.14)
 
-The gate is off unless `SAGE_HUNCH_URL` is set. It runs in `sage-gui` with a
-SQLite store and sends proposed memory text from the configured domains to the
-judge service. See [`write-gate.md`](write-gate.md) for the review workflow,
-plaintext requirements, and cache behavior.
+The gate is off when both `SAGE_HUNCH_URL` and `SAGE_LOCAL_JUDGE_MODEL` are
+unset. It runs in `sage-gui` with a SQLite store. A loopback Hunch service takes
+precedence over the managed local judge. Judge failure holds memories for
+operator review; it never falls back to automatic acceptance. See
+[`write-gate.md`](write-gate.md) for the evidence flow, review workflow,
+plaintext requirements, and qualification limits.
+
+The Hunch include/exempt settings below apply only to the Hunch adapter. The
+current managed local adapter judges every domain (`cmd/sage-gui/node.go`,
+`localJudgeFromEnv` in `cmd/sage-gui/local_judge.go`).
 
 | Variable | What it does | Default | Read by | Source |
 |----------|--------------|---------|---------|--------|
-| `SAGE_HUNCH_URL` | Hunch judge service base URL; enables the gate when set. | unset (gate off) | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:35` |
+| `SAGE_HUNCH_URL` | Loopback Hunch service base URL; enables the gate and takes precedence over `SAGE_LOCAL_JUDGE_MODEL`. Proxies and redirects are refused. | unset (gate off) | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:35` |
 | `SAGE_HUNCH_API_KEY` | Bearer key for a service that requires authentication. | unset | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:39` |
 | `SAGE_HUNCH_MODELS` | Comma-separated judge models; the first leads under the `lead` policy. | one judge using the service's default model | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:49` |
 | `SAGE_HUNCH_POLICY` | `lead` or `all`; unrecognized values use `lead`. | `lead` | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:61` |
@@ -100,6 +106,11 @@ plaintext requirements, and cache behavior.
 | `SAGE_HUNCH_EXEMPT_DOMAINS` | Comma-separated domain prefixes never sent to the judge. | none | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:62` |
 | `SAGE_HUNCH_TIMEOUT` | Per-memory judge budget as a positive Go duration; invalid values use the default. | `60s` | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:41` |
 | `SAGE_HUNCH_JUDGE_REVISION` | Operator tag in the cache version; change it when the service's default model changes behind the same URL. | unset | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:68` |
+| `SAGE_HUNCH_EVIDENCE` | `off` disables support judging in the Hunch adapter. Otherwise supplied evidence is checked by every judge. | enabled when evidence is supplied | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go` |
+| `SAGE_LOCAL_JUDGE_MODEL` | Managed Ollama model name; `sage-memory-judge:v15` selects the pinned experimental judge. Used only when `SAGE_HUNCH_URL` is unset. Installation runs in the background; unavailable or unverified inference holds memories. | unset (gate off) | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go`; gate wiring in `cmd/sage-gui/node.go` |
+| `SAGE_LOCAL_JUDGE_DEBIAS` | Exactly `1` asks both answer orders and averages their probabilities; changes the cache version. | disabled | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go` |
+| `SAGE_LOCAL_JUDGE_TIMEOUT` | Per-memory judge budget as a positive Go duration; invalid values use the default. | `60s` | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go` |
+| `SAGE_LOCAL_JUDGE_REVISION` | Operator tag in the cache version; change it when weights change behind the configured model name. | unset | sage-gui | `localJudgeVersion` — `cmd/sage-gui/local_judge.go` |
 
 ### External Comet settings for app-v20
 

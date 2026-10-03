@@ -98,9 +98,9 @@ governance actions require nonce-bound proof and reject legacy signing.
 
 ## Clients
 
-`SageClient` exposes 84 public operations and is synchronous (backed by
-`httpx.Client`). `AsyncSageClient` exposes the same 84 operations as
-coroutines, plus its async-only `close()` method, for 85 public methods total
+`SageClient` exposes 92 public operations and is synchronous (backed by
+`httpx.Client`). `AsyncSageClient` exposes the same 92 operations as
+coroutines, plus its async-only `close()` method, for 93 public methods total
 (backed by `httpx.AsyncClient`). Apart from that lifecycle method, async
 signatures match their sync counterparts — just `await` them.
 
@@ -199,6 +199,15 @@ response is already on-chain even though the governed memory lifecycle remains
   an intentional recurring occurrence.
 - App-v23 task creation rejects `knowledge_triples` and `linked_memories`;
   create links after the task receipt is confirmed.
+
+**Optional memory gate:** a transaction receipt may still have
+`status="proposed"` while node-local judging or operator review is pending.
+Inspect `get_memory(memory_id)` for the final lifecycle status. SDK v11.23.14
+has no evidence-upload helper or `propose(evidence_id=...)` argument; use
+MCP `sage_remember(evidence=...)` or the signed
+[REST evidence flow](rest-api.md#post-v1memoryevidence) when supplying source
+text (`sdk/python/src/sage_sdk/client.py`, `SageClient.propose`;
+`sdk/python/src/sage_sdk/async_client.py`, `AsyncSageClient.propose`).
 
 **Classification levels:**
 
@@ -1057,7 +1066,7 @@ Both clients expose the following methods; await their async counterparts:
 
 ```python
 workflow_get(record_id: str) -> WorkflowJournalRecord
-workflow_put(record_id: str, kind: str, expected_revision: int, payload: Any) -> WorkflowJournalRecord
+workflow_put(record_id: str, kind: str, expected_revision: int, payload: Any, *, guard: dict[str, Any] | WorkflowJournalGuard = ...) -> WorkflowJournalRecord
 workflow_list(*, after: str | None = None, limit: int = 20) -> WorkflowJournalPage
 ```
 
@@ -1066,8 +1075,18 @@ GET/PUT use `/v1/workflows/{record_id}`. List uses signed
 starts the UUID-ordered scan). No actor or kind filter is accepted. The SDK
 validates canonical nonzero UUIDs, exact integer revisions, and strict JSON
 payloads bounded to 16384 encoded bytes. PUT kinds are `mesh_outbound`,
-`mesh_inbound`, and `public_proposal`; `expected_revision` is 0 for create or
+`mesh_inbound`, `public_proposal`, `conversation_control`, and
+`conversation_session`; `expected_revision` is 0 for create or
 the exact current revision for update, and must be below `9007199254740991`.
+
+For `conversation_session`, an optional `guard` is a `WorkflowJournalGuard`
+or a dict with `record_id` and `expected_revision`. It names a different
+same-agent `conversation_control` record at the exact positive revision.
+The store checks the control and target revision in the same transaction;
+an unavailable or conflicting control refuses the write. Omit `guard` for an
+unguarded write; `None` is not a supported guard value
+(`sdk/python/src/sage_sdk/client.py`, `_workflow_put_body`;
+`internal/store/workflow_journal.go`, `PutWorkflowJournalGuarded`).
 
 Records have exactly `schema="sage.workflow-journal.v1"`, `agent_id`,
 `record_id`, `revision`, `kind`, `payload`, `trust="untrusted_auxiliary"`.
@@ -2015,10 +2034,13 @@ except SageAPIError as e:
 
 ## Method Count Summary
 
-**`SageClient`**: 84 public methods
-**`AsyncSageClient`**: 85 public methods (`close` is async-only)
+**`SageClient`**: 92 public methods
+**`AsyncSageClient`**: 93 public methods (`close` is async-only)
 
-Groups: Health (2), Memory (8), Embeddings (1), Tasks (2), Voting/Validation
-(5), Agents (8), Validator (2), Pipeline (10), canonical Messages (5), Access Control (4), Domains (4), Organizations (7), Departments (6),
-Federation (5), Governance and scope visibility (8), and async lifecycle (1) =
-85 distinct methods across both clients (counting the 84 shared methods once).
+There are 92 shared public methods, including retained pipeline/receipt
+compatibility helpers, private media and workflow journal operations. The
+async-only `close()` makes 93 distinct public methods across the two clients.
+Constructors, context-manager hooks and private helpers are excluded. Counts
+were checked against the class definitions in
+`sdk/python/src/sage_sdk/client.py` and
+`sdk/python/src/sage_sdk/async_client.py`.

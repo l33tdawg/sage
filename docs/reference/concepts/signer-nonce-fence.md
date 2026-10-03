@@ -1,10 +1,10 @@
 # The signer fence — same-key nonce ordering, and what it cannot prove
 
-**Status: v11.23.14. With the `sage-gui` entrypoint, the fence survives the process
-that raised it: a restart no longer loses the record, a restored fence re-reads
-its own proofs from the chain, and the one shape no proof can settle has an
-explicit operator exit that says so. Read "What the fence still cannot do" for
-the limits that remain.**
+**Status: v11.23.14. Persisted signer-fence records survive restarts in
+`sage-gui` and both AMID modes. Restored fences wait for chain-proven fate;
+`sage-gui` also provides an explicit operator exit for the shape no proof can
+settle. Signed transaction bytes are not stored. Read "What the fence still
+cannot do" for the limits that remain.**
 
 Source of truth: `internal/tx/nonce.go` (the lease),
 `internal/tx/nonce_fence.go` (the fence), `cmd/sage-gui/signer_fence_restart.go`
@@ -12,11 +12,12 @@ Source of truth: `internal/tx/nonce.go` (the lease),
 
 The typed committed-memory vote refusal described below ships in v11.23.11.
 
-The durable-intent startup wiring and coordinated-restart guard described here
-apply to `sage-gui`. The current `cmd/amid` entrypoint does not install those
-hooks. AMID operators must preserve unresolved transaction identity and signed
-bytes separately and prove their fate before allowing signing after maintenance;
-restarting AMID alone does not restore or resolve its in-process fence.
+Durable-intent startup wiring applies to both entrypoints. AMID stores its
+records in a separate `signer-fence-intents.sqlite` ledger under `--badger-path`
+and restores them before serving requests; see [AMID persistence](#amid-persistence).
+The coordinated desktop updater and `sage-gui fence` operator commands apply
+only to `sage-gui`. AMID has no automatic abandonment or signed-transaction
+import command, and restarting it does not prove an unresolved transaction's fate.
 
 ---
 

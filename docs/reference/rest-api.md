@@ -46,6 +46,32 @@ The optional tail is emitted only after the app-v17 activation block commits. Be
 
 ## 1. Memory
 
+### `POST /v1/memory/evidence`
+
+Upload source text for the optional memory gate before submitting a non-task
+memory. Requires Ed25519 authentication and, after app-v23, an active ordinary
+agent. SQLite implements this node-local route; an unsupported store returns
+`501` (`api/rest/memory_evidence.go`, `handleUploadEvidence`).
+
+```json
+{"evidence": "Datasheet: rated power 40 kW."}
+```
+
+The text must be nonempty and at most 32 KiB (UTF-8 bytes). A `201` response
+contains `{"evidence_id":"<random id>","expires_in_seconds":3600}`. Include
+that ID as `evidence_id` in the same agent's signed memory submission. Unknown,
+expired, already-claimed or another agent's IDs return `400`; evidence is never
+silently dropped. At most 64 unclaimed uploads per agent are retained; excess
+uploads return `429` (`internal/store/sqlite_gate.go`, `CreateMemoryEvidence`,
+`ClaimMemoryEvidence`).
+
+Unclaimed uploads expire after one hour. Claimed text stays while its memory
+is proposed and is pruned after a final memory decision. If no memory appears
+within 24 hours of claiming it, the text expires but an expired marker remains:
+a late memory is held for review rather than judged without its evidence.
+Uploading evidence broadcasts nothing; only its random ID, never its source
+text, enters the signed submission. See [the memory-gate guide](write-gate.md).
+
 ### `POST /v1/memory/submit`
 
 Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (FinalizeBlock completes). Default timeout 60 s; override via `SAGE_TX_COMMIT_TIMEOUT_MS`.
@@ -66,6 +92,7 @@ Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (F
 | `linked_memories` | []string | no | Related memory IDs for legacy/non-idempotent submission paths. App-v23 task creation rejects this field because links are not part of the canonical task transaction; create links separately after the task is confirmed. |
 | `tags` | []string | no | Up to 32 labels of 128 UTF-8 bytes each. Above app-v20 they are sorted/deduplicated into the signed tx; scoped-domain tags are also AppHash-covered and projection-recoverable. Ordinary-domain tags remain node-local. OR-filter on query/search. |
 | `provider` | string | no | Stored off-chain only; not on-chain |
+| `evidence_id` | string | no | Random ID from `POST /v1/memory/evidence`, claimed once by the same signed agent. Not accepted for tasks. Only the ID enters the signed submission; source text stays node-local. |
 | `idempotency_key` | string | no | App-v23 tasks only; 1–128 visible ASCII bytes without spaces. If omitted, REST derives the same permanent semantic key as MCP from the exact signed agent ID, resolved domain, and task content. Repeating that semantic task returns the original receipt at its current status. Supply a fresh explicit key only to intentionally create another occurrence with identical content/domain. |
 
 **Classification values** (`internal/tx/types.go:84-90`):

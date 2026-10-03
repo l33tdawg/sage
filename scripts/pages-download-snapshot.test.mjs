@@ -46,11 +46,18 @@ function fixture(pages = index) {
   return dir;
 }
 
-test('the workflow runs on a schedule, on release, and writes only to gh-pages', () => {
+test('the workflow refreshes after successful releases and explicitly builds gh-pages', () => {
   for (const marker of [
     "cron: '17 */6 * * *'",
     'types: [published]',
+    'workflow_run:',
+    'workflows: [Release]',
+    'types: [completed]',
+    "if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)",
     'workflow_dispatch:',
+    'pages: write',
+    "if: steps.commit.outputs.changed == 'true'",
+    'gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds"',
     'contents: write',
     'ref: main',
     'ref: gh-pages',
