@@ -2,11 +2,11 @@ package hunch
 
 import "context"
 
-// The check SAGE's memory gate asks. It names its look-alikes in yes_if /
+// The checks SAGE's memory gate asks. Each names its look-alikes in yes_if /
 // no_if; the wording is part of the contract (changing it changes the judge's
 // accuracy), so ChecksVersion is recorded with every judgement and must be
-// bumped whenever the wording changes.
-const ChecksVersion = "sage-lasting/1"
+// bumped whenever any wording changes.
+const ChecksVersion = "sage-lasting/1+supported/1"
 
 // Lasting asks whether a memory belongs in long-term memory at all. The
 // failure it targets: an agent stores a remark about its own session ("the
@@ -24,12 +24,20 @@ var Lasting = Check{
 		"or attachment, truncated context, something that could not be done just now, a request to re-send",
 }
 
-// LastingJudge adapts a Hunch service to the memory gate's provider-neutral
+// JudgeBackend is one question put to one model. Both backends satisfy it: the
+// Hunch service client (remote, vLLM-shaped) and the local client (a model
+// served on this machine, e.g. SAGE's own Ollama). The gate depends only on the
+// adapters below, so a node can be pointed at either without other changes.
+type JudgeBackend interface {
+	YesNo(ctx context.Context, judgeContext any, checks map[string]Check) (map[string]float64, error)
+}
+
+// LastingJudge adapts a judge backend to the memory gate's provider-neutral
 // judge interface (internal/voter.LastingJudge): it asks the Lasting check and
 // returns p_yes. Only the memory's content is sent — no id, domain, author or
 // other metadata.
 type LastingJudge struct {
-	Client *Client
+	Client JudgeBackend
 }
 
 // LastingProbability returns the probability that content is lasting memory.
@@ -39,4 +47,41 @@ func (j LastingJudge) LastingProbability(ctx context.Context, content string) (f
 		return 0, err
 	}
 	return ps["lasting"], nil
+}
+
+// Supported asks whether a memory is backed by the evidence submitted with it.
+// It is only ever asked WITH the evidence: without it the question degrades
+// into "does this sound plausible", which is not a confidence.
+//
+// It names the two look-alikes that most often pass a plain "is it supported"
+// question: evidence about an EARLIER time for a claim stated as current ("at
+// the last inspection the alarm was disabled" -> "the alarm is disabled"), and
+// evidence that only REPORTS what someone says for a claim stated as fact. A
+// memory that keeps the evidence's time frame or attribution is supported.
+var Supported = Check{
+	Kind:     "yesno",
+	Question: "Is the assertion in `memory` supported by `evidence`, as stated — including its time frame and certainty?",
+	YesIf: "`evidence` states or directly shows what `memory` asserts; if `memory` keeps the evidence's time frame " +
+		"(\"at the last inspection\", \"in 2024\") or its attribution (\"according to the operator\"), that still counts",
+	NoIf: "`evidence` is about something else, only makes it plausible, contradicts it, or supports a weaker or different " +
+		"claim than `memory` makes; or `evidence` describes an earlier time (a past inspection, report, date or \"at the time\") " +
+		"while `memory` states it as true now; or `evidence` only reports what someone says, claims or believes " +
+		"(\"reportedly\", \"according to\", \"X said\") while `memory` states it as fact",
+}
+
+// SupportJudge adapts a judge backend to the memory gate's evidence judge
+// interface (internal/voter.SupportJudge): it asks the Supported check with the
+// memory and its evidence and returns p_yes. Only those two texts are sent.
+type SupportJudge struct {
+	Client JudgeBackend
+}
+
+// SupportedProbability returns the probability that evidence supports content.
+func (j SupportJudge) SupportedProbability(ctx context.Context, content, evidence string) (float64, error) {
+	ps, err := j.Client.YesNo(ctx, map[string]string{"memory": content, "evidence": evidence},
+		map[string]Check{"supported": Supported})
+	if err != nil {
+		return 0, err
+	}
+	return ps["supported"], nil
 }

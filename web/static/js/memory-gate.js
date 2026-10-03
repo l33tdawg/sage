@@ -23,6 +23,9 @@ export function describeMemoryGate(gate) {
         : 'Memories in every domain';
     if (exempt.length) scope += `, except domains starting with ${exempt.join(', ')},`;
     scope += ' are judged: their text is sent to the configured judge service. No ids, authors or other metadata are sent.';
+    if ((Number(gate.evidence_judges) || 0) > 0) {
+        scope += ' For a memory submitted with evidence, the evidence text is sent as well, and it passes only when every judge agrees the evidence supports it.';
+    }
     const judges = Number(gate.judges) || 0;
     return {
         enabled: true,
@@ -42,5 +45,12 @@ export function reviewItemState(item) {
             text: 'Content cannot be read on this node right now (locked or undecryptable), so it cannot be reviewed here.',
         };
     }
-    return { decidable: true, text: item.content || '' };
+    return {
+        decidable: true,
+        text: item.content || '',
+        evidence: item.evidence || '',
+        evidenceNote: item.evidence_expired
+            ? 'This memory was submitted with evidence, but the evidence expired on this node before the memory arrived, so whether it supports the memory could not be checked. Decide from the memory alone.'
+            : '',
+    };
 }

@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.23.13.
+Reconciled against internal/mcp for SAGE v11.23.14.
 
 # SAGE MCP Tools Reference
 
@@ -1986,6 +1986,18 @@ payload-free inbound count and directs the caller to the unified `sage_inbox`
 claim/read operation. `sage_messages_receive` remains the token-replay-safe
 exact-local batch primitive, and `sage_message_replies(before=...)` remains the
 explicit backward pager.
+
+**Stdio request scheduling:** up to 16 tool requests run concurrently, with
+responses serialized through one stdout writer. A slow HTTP-backed tool does
+not hold later `tools/list` frames or independent tool calls. A full pool returns
+a retryable JSON-RPC server error for excess tool requests while continuing to
+read control frames. `notifications/cancelled` cancels the matching in-flight
+tool context; unknown, malformed or late cancellation emits no response.
+Cancellation never retries a mutation or proves that consensus did not commit
+it. Use the normal reconciliation contract for an indeterminate write. EOF and
+installed-runtime handoff drain already-dispatched requests before closing or
+transferring stdout (`Wait`, `internal/mcp/stdio_requests.go:87`;
+`Run`, `internal/mcp/server.go:439`).
 
 **Installed-runtime handoff (v11.18.5):** a stdio MCP process snapshots the
 exact executable that started it. If an in-place app/binary update replaces

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 11.23.13
+  version: 11.23.14
   description: |-
     (Sovereign) Agent Governed Experience — network REST API for memory
     submission, validation, and query.
@@ -381,6 +381,32 @@ components:
             domain, and content. Reusing a key with a different canonical
             payload returns 409. Use a fresh explicit key only to intentionally
             create another occurrence with identical content and domain.
+        evidence_id:
+          type: string
+          description: >-
+            Claims evidence this agent uploaded with POST /v1/memory/evidence,
+            once and before it expires, for the optional memory gate. Only this
+            random id is in the signed body; the evidence text is kept on the
+            receiving node and never enters a transaction. Not accepted for
+            tasks.
+
+    UploadEvidenceRequest:
+      type: object
+      required:
+        - evidence
+      properties:
+        evidence:
+          type: string
+          maxLength: 32768
+          description: Source text the memory is based on (at most 32 KiB).
+
+    UploadEvidenceResponse:
+      type: object
+      properties:
+        evidence_id:
+          type: string
+        expires_in_seconds:
+          type: integer
 
     MemoryQueryRequest:
       type: object
@@ -3124,6 +3150,54 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /v1/memory/evidence:
+    post:
+      operationId: uploadMemoryEvidence
+      summary: Upload node-local evidence for a memory this agent will submit.
+      description: >-
+        Stores the evidence on this node only (encrypted like memory content
+        when the vault is on) for the optional memory gate's evidence check,
+        and returns an id to pass as evidence_id on /v1/memory/submit. Nothing
+        is broadcast. An agent may hold at most 64 unclaimed uploads; each
+        expires after an hour.
+      tags:
+        - Memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadEvidenceRequest"
+      responses:
+        "201":
+          description: Evidence stored; claim it with evidence_id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadEvidenceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Above app-v23, the caller is not an active ordinary agent (Root is not an agent).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "429":
+          description: Too much unclaimed evidence for this agent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "501":
+          description: This node's store does not keep evidence.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
 
   /v1/memory/pre-validate:
     post:

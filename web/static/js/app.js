@@ -82,7 +82,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.23.13';
+const SAGE_VERSION = 'v11.23.14';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -5622,6 +5622,8 @@ function MemoryGatePanel() {
                     <div class="memory-gate-item" style="border:1px solid var(--border);border-radius:6px;padding:10px;margin:8px 0;">
                         <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">${it.domain_tag || ''} ${it.memory_type ? '· ' + it.memory_type : ''} · held ${it.held_at ? new Date(it.held_at).toLocaleString() : ''}</div>
                         <div style="white-space:pre-wrap;font-size:13px;margin-bottom:6px;">${st.text}</div>
+                        ${st.evidenceNote && html`<div class="memory-gate-evidence-expired" style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">${st.evidenceNote}</div>`}
+                        ${st.evidence && html`<div class="memory-gate-evidence" style="white-space:pre-wrap;font-size:12px;color:var(--text-dim);border-left:2px solid var(--border);padding-left:8px;margin-bottom:6px;"><strong>Evidence:</strong> ${st.evidence}</div>`}
                         <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">${it.reason}</div>
                         ${st.decidable && html`
                             <div style="display:flex;gap:8px;">

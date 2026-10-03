@@ -11,7 +11,7 @@ import (
 func gateVersionFromEnv(t *testing.T, env map[string]string) string {
 	t.Helper()
 	for _, k := range []string{"SAGE_HUNCH_URL", "SAGE_HUNCH_API_KEY", "SAGE_HUNCH_MODELS", "SAGE_HUNCH_POLICY",
-		"SAGE_HUNCH_JUDGE_REVISION", "SAGE_HUNCH_INCLUDE_DOMAINS", "SAGE_HUNCH_EXEMPT_DOMAINS"} {
+		"SAGE_HUNCH_JUDGE_REVISION", "SAGE_HUNCH_INCLUDE_DOMAINS", "SAGE_HUNCH_EXEMPT_DOMAINS", "SAGE_HUNCH_EVIDENCE"} {
 		t.Setenv(k, env[k])
 	}
 	g := writeGateFromEnv(zerolog.Nop())
@@ -54,4 +54,17 @@ func TestGateVersion_OperatorRevisionAndSettingsInvalidate(t *testing.T) {
 
 func TestDisplayJudgeURL_StripsCredentials(t *testing.T) {
 	require.Equal(t, "https://judge.local/v", displayJudgeURL("https://user:hunter2@judge.local/v?token=abc#x"))
+}
+
+func TestWriteGateFromEnv_EvidenceCheckIsOnByDefaultAndCanBeTurnedOff(t *testing.T) {
+	t.Setenv("SAGE_HUNCH_URL", "http://judge.local:8791")
+	t.Setenv("SAGE_HUNCH_MODELS", "m1,m2")
+	t.Setenv("SAGE_HUNCH_EVIDENCE", "")
+	on := writeGateFromEnv(zerolog.Nop())
+	require.Len(t, on.SupportJudges, 2, "every configured model also judges evidence")
+	t.Setenv("SAGE_HUNCH_EVIDENCE", "off")
+	off := writeGateFromEnv(zerolog.Nop())
+	require.Empty(t, off.SupportJudges)
+	require.Len(t, off.Judges, 2)
+	require.NotEqual(t, on.Version, off.Version, "turning the evidence check off re-judges pending memories")
 }

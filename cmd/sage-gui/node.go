@@ -1410,7 +1410,23 @@ func runServe(startupProof string) (rerr error) {
 	// lifecycle so every listener/store/consensus component drains before exec.
 	restartRequested = make(chan preparedRestartRequest, 1)
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
+	// Two ways to judge memories, in this order: a judge SERVICE when SAGE_HUNCH_URL is set, else
+	// the model this node serves through its own managed Ollama (SAGE_LOCAL_JUDGE_MODEL). A node
+	// with neither runs with the built-in checks alone.
 	memoryGate := writeGateFromEnv(logger)
+	if memoryGate == nil && ollamaMgr != nil {
+		memoryGate = localJudgeFromEnv(logger, ollamaMgr.URL())
+		// If the configured local judge is the pinned, verified build, make sure it is installed in the
+		// managed Ollama — downloaded from its pinned URL and sha256-checked, refusing a mismatch. Done in
+		// the background so a first-run weights download never blocks node startup.
+		if memoryGate != nil && strings.TrimSpace(os.Getenv("SAGE_LOCAL_JUDGE_MODEL")) == ollamad.JudgeModelTag {
+			startWorker(func() {
+				if err := ollamaMgr.EnsureJudgeModel(ctx, func(s string) { logger.Info().Str("step", s).Msg("local judge model") }); err != nil {
+					logger.Warn().Err(err).Msg("could not install the pinned local judge model — the gate will hold memories for review until it is present")
+				}
+			})
+		}
+	}
 	dashboard.SetMemoryGate(memoryGate)
 	dashboard.NodeOperatorAgentID = operatorAgentID
 	dashboard.RunBackground = func(fn func(context.Context)) {

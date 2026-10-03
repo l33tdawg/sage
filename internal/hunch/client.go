@@ -35,10 +35,10 @@ type Client struct {
 	BaseURL string
 	APIKey  string
 	Model   string // empty = the service's default model
-	HTTP    *http.Client
+	http    *http.Client
 }
 
-// New returns a client with a bounded per-request timeout.
+// New returns a loopback-only client with a bounded per-request timeout.
 func New(baseURL, apiKey, model string, timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -47,7 +47,7 @@ func New(baseURL, apiKey, model string, timeout time.Duration) *Client {
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		APIKey:  apiKey,
 		Model:   model,
-		HTTP:    &http.Client{Timeout: timeout},
+		http:    localClient(timeout),
 	}
 }
 
@@ -81,6 +81,12 @@ func (c *Client) YesNo(ctx context.Context, judgeContext any, checks map[string]
 	if c == nil || c.BaseURL == "" {
 		return nil, errors.New("hunch: client not configured")
 	}
+	if err := ValidateLocalURL(c.BaseURL); err != nil {
+		return nil, err
+	}
+	if c.http == nil {
+		return nil, errors.New("hunch: client must be created with New")
+	}
 	if len(checks) == 0 {
 		return nil, errors.New("hunch: no checks")
 	}
@@ -102,7 +108,7 @@ func (c *Client) YesNo(ctx context.Context, judgeContext any, checks map[string]
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("hunch: request: %w", err)
 	}

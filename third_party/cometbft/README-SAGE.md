@@ -19,12 +19,12 @@ Provenance:
   intentional deviations from that v0.38.23 baseline
 - license: Apache-2.0; the upstream `LICENSE` and `NOTICE` are retained here
 
-SAGE carries six coordinated state-sync production overlays:
+SAGE carries six production overlay files:
 
 | File | Narrow deviation and reason |
 | --- | --- |
 | `statesync/reactor.go` | An oversized `SnapshotsResponse` checks `Reactor.syncer` under `Reactor.mtx` before rejecting through it. Upstream can dereference a nil syncer when the advertisement arrives while state sync is inactive. |
-| `blocksync/reactor.go` | A SAGE boot-runtime seal-abort sentinel stops block sync gracefully while the node is already shutting down. Every unrelated application error retains upstream's panic behavior. |
+| `blocksync/reactor.go` | A SAGE boot-runtime seal-abort sentinel stops block sync gracefully while the node is already shutting down. Every unrelated application error retains upstream's panic behavior. The local quorum-blocking threshold rounds one third of total voting power up, so one validator of power 1 in a four-validator set keeps block syncing until caught up. `MaxTotalVotingPower` bounds the ceiling arithmetic safely. |
 | `node/node.go` | Reactor construction reads the effective state-sync-height bridge while the block store is empty and deliberately retains it across consecutive empty-blockstore restarts. Once a block is materialized the bridge is ignored, so stale evidence cannot override the real block-store height. |
 | `node/setup.go` | The successful state-sync path persists the verified bootstrap commit before publishing positive-height `StateStore` state, switches successfully to block sync, and only then persists the completion marker consumed by SAGE's live seal. A startup helper recognizes and removes only the sole byte-exact configured `genesisDoc` record cached before asynchronous state sync; changed, malformed, or additional state data is preserved for rejection. |
 | `state/store.go` | `StateStore.Bootstrap` writes the effective state-sync height in the same synchronous batch as the bootstrapped state. A crash can therefore never expose positive state without the height bridge needed while the block store is still empty. |
@@ -32,7 +32,7 @@ SAGE carries six coordinated state-sync production overlays:
 
 The standalone validator image in `deploy/Dockerfile.node` copies all six
 files over a fresh exact-v0.38.23 checkout, so split Docker topology tests and
-the root module execute the same six Comet state-sync hardenings. Test-only
+the root module execute the same Comet hardenings. Test-only
 files are additive and do not replace upstream production sources.
 
 Regression coverage is split accordingly:
@@ -42,6 +42,9 @@ Regression coverage is split accordingly:
 - `blocksync/reactor_sage_test.go` proves only the direct or wrapped SAGE
   seal-abort sentinel selects the graceful reactor exit and that an empty block
   store starts catch-up from the effective synchronized height;
+- `blocksync/quorum_rounding_sage_test.go` covers quorum-blocking thresholds
+  for unit-power and weighted sets, exact thirds, absent validators and maximum
+  permitted total power;
 - `node/node_sage_test.go` proves the height bridge survives two consecutive
   empty-blockstore restarts and is ignored, but not destroyed, once a block is
   materialized;

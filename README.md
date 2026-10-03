@@ -48,7 +48,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.13`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.14`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -207,6 +207,20 @@ software updates, and encryption controls. Ordinary agent identity replacement
 uses re-enrollment; historical memory authorship is preserved.
 
 ---
+
+## What's New in v11.23.14
+
+**MCP tool calls stay responsive while another tool waits on HTTP.** Stdio now runs up to 16 tool requests concurrently and reads cancellation notifications immediately. A slow history read can no longer hold later independent tools or the tool registry behind it. Cancellation stops the matching request context; an indeterminate write still requires its normal reconciliation.
+
+**AMID restores unresolved signer fences before it starts serving.** A private, node-local SQLite ledger preserves identity-only submission intents across process exits. Startup refuses an unreadable or malformed ledger, and a restored fence settles only on chain-proven fate. Disabling the REST validator key also removes the inherited key from ordinary signing paths. A proven fence finishes its durable cleanup before reopening the signer, so a fast next submission cannot lose its new recovery record to the prior cleanup.
+
+**Block sync rounds quorum-blocking power up correctly.** A validator with power 1 out of 4 no longer leaves block sync early. Actual quorum-blocking power keeps its existing behavior.
+
+**An optional local judge checks lasting knowledge and its submitted evidence.** Set `SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v15` to use SAGE's verified local model through its managed Ollama runtime. It remains experimental and off by default. Judge traffic is restricted to loopback, cloud aliases and mismatched model blobs are refused, and an unavailable judge holds proposals for operator review. Public seed-set qualification on SAGE's pinned runtime passed with external networking blocked; support precision was 97% with one accepted trap, and lasting precision was 100%. See the [memory-gate guide](docs/reference/write-gate.md) and [runtime qualification report](bench/judge-qualify/reports/sage-judge-v15-sage-runtime.md) for configuration and limits. Thanks to [@ihubanov](https://github.com/ihubanov) for the contribution.
+
+No consensus execution change, app-version change or chain migration.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.14`. SDK 11.23.14.
 
 ## What's New in v11.23.13
 

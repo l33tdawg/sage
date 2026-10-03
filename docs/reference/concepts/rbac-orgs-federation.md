@@ -1,8 +1,8 @@
-<!-- Core document reconciled through SAGE v11.23.13/app-v27, including consensus-backed Access Group authority, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
+<!-- Core document reconciled through SAGE v11.23.14/app-v27, including consensus-backed Access Group authority, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
 
 # RBAC, Organizations, and Federation
 
-Verified against SAGE v11.23.13. Legacy organization/federation sections retain
+Verified against SAGE v11.23.14. Legacy organization/federation sections retain
 their historical context; app-v23 roles, Root, Access Groups, and app-v25
 historical writer continuity are the current local-control model.
 
@@ -385,7 +385,7 @@ A `POST /v1/memory/query` request passes through these gates in order (`memory_h
 
 ### Gate 1: checkDomainAccess (DomainAccess policy)
 
-`checkDomainAccess` (`memory_handler.go:362-365`) reads the agent's `DomainAccess` JSON field (on-chain BadgerDB first, SQLite fallback):
+`checkDomainAccess` (`memory_handler.go:369-372`) reads the agent's `DomainAccess` JSON field (on-chain BadgerDB first, SQLite fallback):
 
 - `role == "admin"` → bypass all checks, full access
 - `role == "observer"` → write operations blocked
@@ -407,7 +407,7 @@ Applied when `domainAccessApproved == false` and the domain has a registered own
 - `agentID == nodeOperatorID` → `seeAll = true` (node operator bypass)
 - `role == "admin"` → `seeAll = true`
 - `visible_agents == "*"` → `seeAll = true`
-- **Any org member with clearance=4 (TOP SECRET)** → `seeAll = true` (`agentHasTopSecretClearance` check, `memory_handler.go:1173`)
+- **Any org member with clearance=4 (TOP SECRET)** → `seeAll = true` (`agentHasTopSecretClearance` check, `memory_handler.go:1180`)
 - Otherwise: agent sees memories from `[agentID] + parsed(visible_agents)` list
 
 If `seeAll == false`, `opts.SubmittingAgents` is set to the allowed list, which `QuerySimilar` uses to filter at the PostgreSQL level.

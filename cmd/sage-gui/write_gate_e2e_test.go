@@ -56,6 +56,10 @@ func fakeHunchServer(t *testing.T) *httptest.Server {
 				default:
 					p = 0.98
 				}
+			case "supported":
+				if strings.Contains(req.Context["evidence"], "today") {
+					p = 0.97
+				}
 			}
 			results[id] = map[string]any{"kind": "yesno", "p_yes": p}
 		}
@@ -151,11 +155,18 @@ func TestMemoryGateEndToEndOnARealNode(t *testing.T) {
 	go voter.Run(ctx, app, projection, voter.Config{
 		Key: selfKey, CometRPC: fmt.Sprintf("http://127.0.0.1:%d", port), PollInterval: 200 * time.Millisecond,
 		Gate: &voter.Gate{Judges: []voter.LastingJudge{hunch.LastingJudge{Client: hunch.New(judge.URL, "", "", 10*time.Second)}},
-			Version: gateVersion},
+			SupportJudges: []voter.SupportJudge{hunch.SupportJudge{Client: hunch.New(judge.URL, "", "", 10*time.Second)}},
+			Version:       gateVersion},
 	}, zerolog.Nop())
 
 	agentKey := agentKeyFromBootstrap(t, bootstrap)
 	nonce := uint64(0)
+	attachEvidence := func(memoryID, evidence string) {
+		t.Helper()
+		evID, err := projection.CreateMemoryEvidence(ctx, "gate-agent", evidence)
+		require.NoError(t, err)
+		require.NoError(t, projection.ClaimMemoryEvidence(ctx, evID, "gate-agent", memoryID))
+	}
 	submit := func(id, content string) {
 		t.Helper()
 		nonce++
@@ -202,6 +213,25 @@ func TestMemoryGateEndToEndOnARealNode(t *testing.T) {
 	require.Equal(t, memory.StatusProposed, statusOf(unsureID), "an abstained memory stays proposed (no vote)")
 	require.NoError(t, projection.SetReviewDecision(ctx, unsureID, gateVersion, memory.VerdictAccept, "operator", "checked"))
 	waitStatus(unsureID, committed, "the reviewed memory is voted and committed")
+
+	// 4. A memory submitted with evidence is also asked whether the evidence
+	// supports it: evidence about an earlier time does not support a claim
+	// stated as current, and the memory is voted down although it is lasting.
+	staleID := "00000000-0000-4000-8000-000000000004"
+	attachEvidence(staleID, "At the 2023 inspection the north gate alarm was disabled.")
+	submit(staleID, "The north gate alarm is disabled.")
+	waitStatus(staleID, func(s memory.MemoryStatus) bool { return s != "" && s != memory.StatusProposed },
+		"an unsupported memory is voted on")
+	require.NotEqual(t, memory.StatusCommitted, statusOf(staleID), "a memory its evidence does not support is not committed")
+	sv, ok, err := projection.SemanticVerdict(ctx, staleID, gateVersion)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Contains(t, sv.Reason, "not supported by the evidence")
+
+	supportedID := "00000000-0000-4000-8000-000000000005"
+	attachEvidence(supportedID, "Work order 118: north gate alarm disabled today.")
+	submit(supportedID, "The north gate alarm was disabled under work order 118.")
+	waitStatus(supportedID, committed, "a memory its evidence supports is accepted")
 
 	v, ok, err := projection.SemanticVerdict(ctx, remarkID, gateVersion)
 	require.NoError(t, err)
