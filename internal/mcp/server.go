@@ -456,6 +456,8 @@ func (s *Server) Run(ctx context.Context) error {
 		out.Close()
 	}
 	defer shutdown()
+	calls := newStdioRequests(ctx, out)
+	defer calls.Close()
 	startChannel := func() {
 		if channelCancel != nil {
 			return
@@ -484,7 +486,7 @@ func (s *Server) Run(ctx context.Context) error {
 	for {
 		line, readErr := readMCPFrame(reader, maxMCPFrameBytes)
 		if errors.Is(readErr, io.EOF) {
-			return nil
+			return calls.Wait()
 		}
 		if errors.Is(readErr, errMCPFrameTooLarge) {
 			if err := writeMCPError(ctx, out, nil, -32600, "Request too large"); err != nil {
@@ -513,6 +515,9 @@ func (s *Server) Run(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "SAGE MCP: installed executable changed; handing the pending request to the upgraded runtime\n")
 			// No old-runtime goroutine may retain stdout after the replacement owns
 			// it. Stop the optional channel first, then drain/stop the sole writer.
+			if err := calls.Wait(); err != nil {
+				return err
+			}
 			shutdown()
 			// Pass the buffered reader, not raw os.Stdin: ReadSlice may already
 			// have pulled bytes from following frames into reader's buffer.
@@ -542,7 +547,16 @@ func (s *Server) Run(ctx context.Context) error {
 			continue
 		}
 
-		resp := s.DispatchJSONRPC(ctx, &req)
+		if req.Method == "notifications/cancelled" {
+			calls.Cancel(req.Params)
+			continue
+		}
+		var resp *jsonRPCResponse
+		if req.Method == "tools/call" && req.ID != nil {
+			resp = calls.Start(req, s.DispatchJSONRPC)
+		} else {
+			resp = s.DispatchJSONRPC(ctx, &req)
+		}
 		if resp != nil {
 			if err := out.WriteJSON(ctx, resp); err != nil {
 				return fmt.Errorf("SAGE MCP: write response: %w", err)
