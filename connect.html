@@ -11,20 +11,20 @@
   gtag('js', new Date());
   gtag('config', 'G-Y9LD21QVEQ');
 </script>
-<title>Connect Your AI to SAGE</title>
+<title>SAGE | Connect your AI</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta property="og:title" content="Connect Your AI to SAGE">
-<meta property="og:description" content="Under two minutes, start to memory. One JSON snippet for Claude Desktop, Claude Code, Cursor, Windsurf and anything MCP-capable.">
+<meta property="og:title" content="SAGE | Connect your AI">
+<meta property="og:description" content="Connect your MCP-capable AI client to SAGE. Choose your tool, add its configuration and start recording useful project context.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://l33tdawg.github.io/sage/connect.html">
-<meta property="og:image" content="https://l33tdawg.github.io/sage/og-connect.png">
+<meta property="og:image" content="https://l33tdawg.github.io/sage/assets/og-sage-connect-20261003.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Connect Your AI to SAGE">
-<meta name="twitter:description" content="Under two minutes, start to memory. One JSON snippet for Claude Desktop, Claude Code, Cursor, Windsurf and anything MCP-capable.">
-<meta name="twitter:image" content="https://l33tdawg.github.io/sage/og-connect.png">
-<meta name="description" content="Give your AI a memory in under 2 minutes. Works with Claude, ChatGPT, Claude Code, and any MCP-compatible assistant.">
+<meta name="twitter:title" content="SAGE | Connect your AI">
+<meta name="twitter:description" content="Connect your MCP-capable AI client to SAGE. Choose your tool, add its configuration and start recording useful project context.">
+<meta name="twitter:image" content="https://l33tdawg.github.io/sage/assets/og-sage-connect-20261003.jpg">
+<meta name="description" content="Connect your MCP-capable AI client to SAGE. Choose your tool, add its configuration and start recording useful project context.">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
 
@@ -363,26 +363,27 @@ p code, li code {
   .check-badge { flex-direction: column; text-align: center; }
 }
 </style>
+<link rel="stylesheet" href="brand.css">
+<link rel="stylesheet" href="document.css">
+<link rel="canonical" href="https://l33tdawg.github.io/sage/connect.html">
+<meta property="og:site_name" content="SAGE">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:alt" content="SAGE wordmark and lavender neural brain. Connect your AI. One memory. The tools you already use.">
+<meta name="twitter:image:alt" content="SAGE wordmark and lavender neural brain. Connect your AI. One memory. The tools you already use.">
 </head>
-<body>
+<body class="brand-document brand-connect">
 
-<div class="header">
-  <div class="container">
-    <span class="logo">SAGE</span>
-    <div>
-      <a href="./">Home</a>
-      &nbsp;&middot;&nbsp;
-      <a href="https://github.com/l33tdawg/sage">GitHub</a>
-    </div>
-  </div>
-</div>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="brand-site-header"><div class="container brand-header-inner"><a href="./" class="brand-site-logo" aria-label="SAGE home"><img src="assets/sage-wordmark.svg" width="531" height="110" alt="SAGE"></a><nav class="brand-site-nav" aria-label="Site"><a href="./" class="document-home">Home</a><a href="./#get-started">Get started</a><a href="./#developers">Developers</a><a href="privacy.html">Privacy</a><a class="document-download" href="https://github.com/l33tdawg/sage/releases/latest">Download</a></nav></div></header>
 
-<div class="container">
-  <div class="hero">
-    <h1>Connect Your AI to SAGE</h1>
-    <p>Give your AI a permanent memory in under 2 minutes. Works with any AI that supports MCP: Claude, ChatGPT, DeepSeek, Gemini, Mistral, Cursor, local models, and more.</p>
-    <span class="hero-note"><strong>MCP</strong> = Model Context Protocol, the standard way AI apps connect to local tools.</span>
-  </div>
+<main class="container" id="main" tabindex="-1">
+  <section class="hero document-hero" aria-labelledby="page-heading">
+    <p class="brand-eyebrow">Connection guide</p>
+    <h1 id="page-heading">One memory.<br>The tools you already use.</h1>
+    <p>Connect your MCP-capable AI client to SAGE. Choose your tool, add its configuration, and let your agent record useful project context for later sessions.</p>
+    <span class="hero-note"><strong>MCP</strong> is the protocol your AI client uses to call SAGE memory tools.</span>
+    <div class="document-actions"><a class="btn-primary" href="https://github.com/l33tdawg/sage/releases/latest">Download SAGE</a><a href="#client-guides">Choose your client &darr;</a></div>
+  </section>
 
   <!-- Quick visual overview -->
   <div class="overview">
@@ -405,18 +406,18 @@ p code, li code {
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2"><path d="M12 2a7 7 0 0 0-7 7c0 2.38 1.19 4.47 3 5.74V17a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-2.26c1.81-1.27 3-3.36 3-5.74a7 7 0 0 0-7-7z"/><line x1="10" y1="22" x2="14" y2="22"/></svg>
       </div>
       <div class="overview-label">Activate</div>
-      <div class="overview-desc">Your AI remembers everything</div>
+      <div class="overview-desc">Record and recall useful context</div>
     </div>
   </div>
 
   <!-- Prerequisite check -->
   <div class="check-badge">
     <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--gold)" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4m0 4h.01"/></svg>
-    <p><strong>Before you start:</strong> Make sure SAGE is running. If you installed the app, just open it. If you built from source, run <code>sage-gui serve</code>. You should see the CEREBRUM at <code>http://localhost:8080/ui/</code></p>
+    <p><strong>Before you start:</strong> Open SAGE and complete setup. Check that CEREBRUM loads at <code>http://localhost:8080/ui/</code>, and keep the node running while you connect your client.</p>
   </div>
 
   <!-- Provider Tabs -->
-  <div class="tabs">
+  <div class="tabs" id="client-guides" aria-label="Client guides">
     <button class="tab active" onclick="showTab('claude-desktop', this)">Claude Desktop <span class="tab-badge popular">Popular</span></button>
     <button class="tab" onclick="showTab('claude-code', this)">Claude Code</button>
     <button class="tab" onclick="showTab('other', this)">Other MCP Clients <span class="tab-badge new">MCP</span></button>
@@ -466,7 +467,7 @@ p code, li code {
       <p>Start a new conversation and type:</p>
       <pre><code>Initialize your SAGE memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
       <div class="info-box success" style="margin-top:12px;">
-        <strong>Done.</strong> Claude will initialise its memory and begin learning from every conversation. Projects, preferences, and insights persist across sessions.
+        <strong>Connected.</strong> Your agent can record useful project context and recall it in later sessions. Follow the memory instructions returned by SAGE and review what it keeps in CEREBRUM.
       </div>
     </div>
   </div>
@@ -503,7 +504,7 @@ sage-gui mcp install</code><button class="copy-btn" onclick="copyCode(this)">Cop
         <strong>Done.</strong> Claude Code will now build persistent memory across coding sessions: debugging insights, project context, preferences.
       </div>
       <div class="info-box" style="margin-top:12px;">
-        <strong>Tip:</strong> Add a <code>CLAUDE.md</code> file to your project containing: <em>&ldquo;Call sage_turn every turn to maintain persistent memory.&rdquo;</em> This ensures the memory lifecycle runs reliably across sessions.
+        <strong>Tip:</strong> Add a <code>CLAUDE.md</code> instruction to call <code>sage_inception</code> when a new session begins and follow the memory mode it returns. Keep those instructions with your project so later sessions can find them.
       </div>
     </div>
   </div>
@@ -607,7 +608,7 @@ Environment:
       <span class="step-num">3</span>
       <h3>Open ChatGPT and initialize</h3>
       <p>Open <a href="https://chat.openai.com" style="color:var(--accent);">chat.openai.com</a> in Chrome. The extension wires SAGE in transparently. In your first message, tell ChatGPT:</p>
-      <pre><code>You have SAGE memory tools. Use sage_turn every reply to build persistent memory.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <pre><code>Call sage_inception to initialize your memory, then follow the memory instructions it returns.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
       <div class="info-box" style="margin-top:12px;">
         <strong>Tip:</strong> Add the same instruction under <strong>Settings &rarr; Personalisation &rarr; Custom Instructions</strong> so ChatGPT carries it across new conversations.
       </div>
@@ -629,7 +630,7 @@ Environment:
     <div class="step">
       <span class="step-num">2</span>
       <h3>Add SAGE</h3>
-      <p>The config is the same everywhere. Just change the <code>SAGE_PROVIDER</code> to match your tool:</p>
+      <p>Use the SAGE MCP command below as a starting point. Your client's configuration format and the binary path depend on your tool and operating system:</p>
       <pre><code>{
   "mcpServers": {
     "sage": {
@@ -643,7 +644,7 @@ Environment:
   }
 }</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
       <div class="info-box">
-        <strong>SAGE_PROVIDER</strong> keeps memories scoped per tool. Set it to something descriptive like <code>cursor</code>, <code>windsurf</code>, etc. Facts (verified truths) are shared across all providers automatically.
+        <strong>SAGE_PROVIDER</strong> identifies the client, such as <code>cursor</code> or <code>windsurf</code>. Use the agent identity and domain permissions configured in CEREBRUM to control which project memories it can access.
       </div>
     </div>
 
@@ -651,7 +652,7 @@ Environment:
       <span class="step-num">3</span>
       <h3>Restart and initialize</h3>
       <p>Restart your AI tool, then tell it:</p>
-      <pre><code>Call sage_inception to initialize your memory. Then call sage_turn every reply.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
+      <pre><code>Call sage_inception to initialize your memory, then follow the memory instructions it returns.</code><button class="copy-btn" onclick="copyCode(this)">Copy</button></pre>
     </div>
   </div>
 
@@ -676,26 +677,23 @@ Environment:
 
     <div class="faq-item">
       <h4>Can I use SAGE with multiple AI tools at the same time?</h4>
-      <p>Yes! That's what <code>SAGE_PROVIDER</code> is for. Each tool gets its own memory space. Set different provider names in each config. Facts are shared; personal observations and reflections stay scoped to each tool.</p>
+      <p>Yes. Connect each tool with its own agent identity. Grant the agents access to the project domains you want them to share. Their current permissions determine which memories they can read and write.</p>
     </div>
 
     <div class="faq-item">
       <h4>Where is my data stored?</h4>
-      <p>Everything stays on your machine in <code>~/.sage/</code> by default. SAGE uses local BadgerDB/SQLite stores. Optional connector flows, such as your Cloudflare tunnel, use only the network path you configure. If you enabled encryption during setup, memories are AES-256-GCM encrypted at rest.</p>
+      <p>Memories are stored locally under <code>~/.sage/</code>. Optional connectors, federation and remote model providers can send data to configured destinations. Vault encryption for memory contents is optional. Read the <a href="privacy.html">privacy details</a>.</p>
     </div>
 
     <div class="faq-item">
       <h4>Can I switch from ChatGPT to Claude (or vice versa)?</h4>
-      <p>Absolutely. SAGE is model-agnostic. Your memories belong to you, not to any provider. Just add the config to your new tool and your AI picks up where the last one left off. Facts are shared across providers automatically.</p>
+      <p>Yes. Connect the new client to the same SAGE node and give its agent access to the relevant project memories. It can then recall the context you recorded, subject to its permissions and use of the memory tools.</p>
     </div>
   </div>
 
-  <div class="footer">
-    <a href="./">SAGE</a> &middot;
-    <a href="https://github.com/l33tdawg/sage">GitHub</a> &middot;
-    Apache 2.0 License
-  </div>
-</div>
+</main>
+
+<footer class="brand-site-footer"><div class="container"><div class="brand-footer-links"><a href="./">Home</a><a href="connect.html">Connection guide</a><a href="privacy.html">Privacy details</a><a href="https://github.com/l33tdawg/sage">GitHub</a><a href="https://sage-foundation.net/">SAGE Foundation</a></div><p>SAGE &middot; Persistent memory for AI agents &middot; Apache 2.0</p></div></footer>
 
 <script>
 function showTab(id, btn) {

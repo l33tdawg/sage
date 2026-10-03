@@ -3,19 +3,19 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>(S)AGE | Privacy Policy</title>
+<title>SAGE | Privacy &amp; data choices</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta property="og:title" content="(S)AGE Privacy Policy">
-<meta property="og:description" content="Your data stays on your machine. Local BadgerDB and SQLite under ~/.sage, AES-256-GCM at rest, and no telemetry.">
+<meta property="og:title" content="SAGE | Privacy &amp; data choices">
+<meta property="og:description" content="Local memory storage, optional vault encryption and configurable external connections. App and website privacy details.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://l33tdawg.github.io/sage/privacy.html">
-<meta property="og:image" content="https://l33tdawg.github.io/sage/og-privacy.png">
+<meta property="og:image" content="https://l33tdawg.github.io/sage/assets/og-sage-privacy-20261003.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="(S)AGE Privacy Policy">
-<meta name="twitter:description" content="Your data stays on your machine. Local BadgerDB and SQLite under ~/.sage, AES-256-GCM at rest, and no telemetry.">
-<meta name="twitter:image" content="https://l33tdawg.github.io/sage/og-privacy.png">
+<meta name="twitter:title" content="SAGE | Privacy &amp; data choices">
+<meta name="twitter:description" content="Local memory storage, optional vault encryption and configurable external connections. App and website privacy details.">
+<meta name="twitter:image" content="https://l33tdawg.github.io/sage/assets/og-sage-privacy-20261003.jpg">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
@@ -23,7 +23,7 @@
   --void: #06020e;
   --surface: #110b22;
   --border: #2a1d4a;
-  --muted: #6b5a8e;
+  --muted: #afa4c1;
   --text: #c8bfe0;
   --bright: #ede8f7;
   --accent: #a78bfa;
@@ -48,36 +48,44 @@ a:hover { text-decoration: underline; }
 code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85rem; color: var(--accent); }
 .footer { margin-top: 60px; padding-top: 24px; border-top: 1px solid var(--border); text-align: center; color: var(--muted); font-size: 0.85rem; }
 </style>
+<link rel="stylesheet" href="brand.css">
+<link rel="stylesheet" href="document.css">
+<meta name="description" content="Local memory storage, optional vault encryption and configurable external connections. App and website privacy details.">
+<link rel="canonical" href="https://l33tdawg.github.io/sage/privacy.html">
+<meta property="og:site_name" content="SAGE">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:alt" content="SAGE wordmark and lavender neural brain. Your memory. Your control. Privacy and data choices.">
+<meta name="twitter:image:alt" content="SAGE wordmark and lavender neural brain. Your memory. Your control. Privacy and data choices.">
 </head>
-<body>
-<div class="container">
-  <h1>Privacy Policy</h1>
-  <p class="updated">Last updated: September 19, 2026</p>
+<body class="brand-document brand-privacy">
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="brand-site-header"><div class="container brand-header-inner"><a href="./" class="brand-site-logo" aria-label="SAGE home"><img src="assets/sage-wordmark.svg" width="531" height="110" alt="SAGE"></a><nav class="brand-site-nav" aria-label="Site"><a href="./" class="document-home">Home</a><a href="./#get-started">Get started</a><a href="./#developers">Developers</a><a href="privacy.html" aria-current="page">Privacy</a><a class="document-download" href="https://github.com/l33tdawg/sage/releases/latest">Download</a></nav></div></header>
+<main class="container" id="main" tabindex="-1">
+  <section class="document-hero" aria-labelledby="page-heading"><p class="brand-eyebrow">Privacy &amp; data choices</p><h1 id="page-heading">Your memory.<br>Your control.</h1><p>Understand what SAGE stores, where data can go and which protections you choose to enable.</p></section>
+  <p class="updated">Last updated: October 3, 2026</p>
 
-  <p><strong>(S)AGE ((S)overeign Agent Governed Experience)</strong> is an open-source, local-first AI memory system. This policy covers both the (S)AGE desktop application and the (S)AGE Memory browser extension.</p>
+  <div class="privacy-body">
+  <p><strong>(S)AGE ((S)overeign Agent Governed Experience)</strong> is an open-source, local-first AI memory system. This policy covers the (S)AGE desktop application and the (S)AGE Memory browser extension. The project website is described separately below.</p>
 
   <h2>The short version</h2>
-  <p><strong>Your data stays local by default.</strong> (S)AGE runs on your computer with no required SAGE cloud account or product telemetry. Data leaves the node only when you explicitly configure federation, synchronization, an AI connector, an external embedding or reranking provider, or another network integration.</p>
+  <p><strong>Your memories are stored locally by default.</strong> (S)AGE runs on your computer with no required SAGE cloud account or product telemetry. Optional federation, synchronization, AI connectors and remote model providers can send data to the destinations you configure. Update checks and model setup also contact release and model hosts.</p>
 
   <h2>What data is stored</h2>
   <ul>
     <li><strong>AI memories</strong>: stored in local BadgerDB/SQLite stores at <code>~/.sage/</code> on your computer</li>
     <li><strong>Agent working state</strong>: private media and workflow journal entries your agents store on the node, held in the same local stores</li>
-    <li><strong>Snapshots</strong>: scheduled backups under <code>~/.sage/data/snapshots/</code>, encrypted with your vault passphrase</li>
-    <li><strong>Encryption keys</strong>: Ed25519 signing keys and your vault passphrase, generated locally and never transmitted</li>
+    <li><strong>Snapshots</strong>: scheduled backups stored locally under <code>~/.sage/data/snapshots/</code></li>
+    <li><strong>Encryption keys</strong>: signing keys and vault key material held on your node. Protect the passphrase and recovery key you use to unlock the vault</li>
     <li><strong>Extension settings</strong>: your (S)AGE server URL (default: localhost:8080), stored in browser local storage</li>
   </ul>
-  <p>If you enabled encryption during setup, memories and agent working state are AES-256-GCM encrypted at rest.</p>
+  <p>Vault encryption for memory contents is optional. Private media and workflow journals require the vault and are encrypted at rest with AES-256-GCM.</p>
 
-  <h2>What data is NOT collected</h2>
-  <ul>
-    <li>No personal information</li>
-    <li>No browsing history</li>
-    <li>No conversation content sent to external servers</li>
-    <li>No analytics or telemetry</li>
-    <li>No cookies (except a local session cookie for the dashboard)</li>
-    <li>No required third-party service; optional integrations contact only the services you configure</li>
-  </ul>
+  <h2>Product telemetry and optional connections</h2>
+  <p>The SAGE app does not send product usage analytics to the project. It needs no SAGE cloud account. The local dashboard uses a session cookie for authentication.</p>
+  <p>The memories you and your agents store may contain personal or project information. If you configure a connector, federation or a remote provider, the data required by that feature can be sent to its configured destination.</p>
+
+  <h2>The project website</h2>
+  <p>The public project website loads Google Analytics and Google Fonts. Those services receive web requests from your browser. The application's no-telemetry statement refers to the SAGE app, not this website.</p>
 
   <h2>Browser extension permissions</h2>
   <ul>
@@ -89,7 +97,7 @@ code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-si
   </ul>
 
   <h2>Network requests</h2>
-  <p>By default, (S)AGE talks to <strong>your own local server</strong> at <code>localhost:8080</code> (or the URL you configure). Optional federation, synchronization, Cloudflare tunnel, ChatGPT connector, embedding, and reranking flows make the network requests required by those features. Federation relays carry encrypted traffic but can observe connection metadata. The SAGE project does not receive your memory contents merely because you run a node.</p>
+  <p>By default, (S)AGE talks to <strong>your own local server</strong> at <code>localhost:8080</code> (or the URL you configure). Optional federation, synchronization, Cloudflare tunnel, ChatGPT connector, embedding, and reranking flows make the network requests required by those features. Federation relays carry encrypted traffic but can observe connection metadata. Update checks and model setup can contact release and model hosts. The SAGE project does not receive your memory contents merely because you run a node.</p>
 
   <h2>Open source</h2>
   <p>All source code is publicly available at <a href="https://github.com/l33tdawg/sage">github.com/l33tdawg/sage</a> under the Apache 2.0 license. You can audit every line of code.</p>
@@ -97,9 +105,8 @@ code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-si
   <h2>Contact</h2>
   <p>For questions about this privacy policy, open an issue at <a href="https://github.com/l33tdawg/sage/issues">github.com/l33tdawg/sage/issues</a> or email <a href="mailto:l33tdawg@hackinthebox.org">l33tdawg@hackinthebox.org</a>.</p>
 
-  <div class="footer">
-    <a href="./">(S)AGE</a> &middot; <a href="https://github.com/l33tdawg/sage">GitHub</a> &middot; Apache 2.0 License
   </div>
-</div>
+</main>
+<footer class="brand-site-footer"><div class="container"><div class="brand-footer-links"><a href="./">Home</a><a href="connect.html">Connection guide</a><a href="privacy.html">Privacy details</a><a href="https://github.com/l33tdawg/sage">GitHub</a><a href="https://sage-foundation.net/">SAGE Foundation</a></div><p>SAGE &middot; Persistent memory for AI agents &middot; Apache 2.0</p></div></footer>
 </body>
 </html>

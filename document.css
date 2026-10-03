@@ -1,0 +1,74 @@
+.brand-document { color: var(--text); background: var(--void); }
+.brand-document .container { max-width: 960px; padding-inline: 24px; }
+.brand-site-header { position: sticky; top: 0; z-index: 10; background: rgba(6,2,14,.96); border-bottom: 1px solid rgba(167,139,250,.15); }
+.brand-site-header .brand-header-inner { max-width: 1220px; min-height: 72px; padding-block: 0; display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.brand-site-logo { display: flex; flex-shrink: 0; }
+.brand-site-logo img { display: block; width: 100px; height: auto; }
+.brand-site-nav { display: flex; gap: 26px; align-items: center; background: none; border: 0; }
+.brand-site-nav a { color: #bdb0d0; font-size: .84rem; text-decoration: none; padding-block: 12px; }
+.brand-site-nav a:hover, .brand-site-nav a[aria-current="page"] { color: #ede5fc; }
+.brand-site-nav a[aria-current="page"] { box-shadow: inset 0 -2px #c4b5fd; }
+.brand-site-nav .document-download { background: #c4b5fd; color: #180d2a; padding: 9px 16px; border-radius: 8px; font-weight: 700; }
+.brand-document main.container { padding-block: 62px 20px; }
+.brand-document .document-hero { position: relative; isolation: isolate; text-align: left; padding: 16px 0 48px; }
+.document-hero::before { content: ''; position: absolute; z-index: -1; width: 820px; max-width: 100%; height: 380px; right: -24px; top: -36px; opacity: .48; background: linear-gradient(90deg,#06020e,rgba(6,2,14,.82) 35%,transparent 70%),linear-gradient(0deg,#06020e,transparent 80%),url('assets/sage-neural-hero.jpg') 70% center / cover; mask-image: radial-gradient(ellipse at 65% 50%,#000 15%,transparent 72%); pointer-events: none; }
+.brand-document .document-hero .brand-eyebrow { margin: 0 0 22px; color: #b4a0d9; font-size: .68rem; letter-spacing: .15em; text-transform: uppercase; }
+.brand-document .document-hero h1 { max-width: 650px; font-size: clamp(2.4rem,5vw,3.5rem); font-weight: 600; color: var(--bright); line-height: 1.1; letter-spacing: -.04em; margin: 0 0 20px; }
+.brand-document .document-hero > p:not(.brand-eyebrow) { max-width: 640px; margin: 0; font-size: 1.04rem; color: #d2c8e3; line-height: 1.75; }
+.brand-document .hero-note { color: #b6a5ce; font-size: .8rem; max-width: 650px; }
+.document-actions { display: flex; gap: 20px; flex-wrap: wrap; align-items: center; margin-top: 26px; }
+.document-actions .btn-primary { padding: 13px 20px; text-decoration: none; display: inline-flex; align-items: center; }
+.document-actions > a:not(.btn-primary) { font-size: .86rem; color: #c4b5fd; text-underline-offset: 4px; }
+.brand-connect .overview { gap: 18px; display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); margin-bottom: 32px; }
+.brand-connect .overview-step { padding: 22px 16px; border: 1px solid rgba(167,139,250,.18); border-radius: 12px; background: rgba(17,11,34,.55); }
+.brand-connect .overview-desc { color: #b9accd; line-height: 1.6; }
+.brand-connect .overview-icon { width: 44px; height: 44px; border-width: 1px; }
+.brand-connect .check-badge { border-color: rgba(167,139,250,.2); background: rgba(17,11,34,.6); }
+.brand-connect .tabs { scroll-margin-top: 92px; }
+.brand-connect .tab { padding-inline: 18px; }
+.brand-connect .tab-content { padding: 32px 0; }
+.brand-connect .step { padding-bottom: 28px; border-bottom: 1px solid rgba(167,139,250,.12); }
+.brand-connect .step:last-child { border-bottom: 0; }
+.brand-connect pre { font-size: .8rem; border-color: rgba(167,139,250,.2); }
+.brand-connect .copy-btn { color: #d6c9eb; background: #201335; }
+.brand-connect .faq-item h4 { color: #c4b5fd; }
+.brand-connect .faq-item p { font-size: .94rem; line-height: 1.8; }
+.brand-connect .troubleshoot { border-top-color: rgba(167,139,250,.2); }
+.brand-connect .troubleshoot h2 { font-weight: 600; letter-spacing: -.03em; font-size: 2rem; }
+.brand-privacy main.container { max-width: 880px; }
+.brand-privacy .document-hero { padding-bottom: 28px; }
+.brand-privacy .updated { font-family: var(--font-mono); color: #b6a5ce; font-size: .75rem; margin: 0 0 38px; }
+.privacy-body h2 { font-size: 1.3rem; font-weight: 600; letter-spacing: -.02em; margin-top: 36px; padding-top: 26px; border-top: 1px solid rgba(167,139,250,.18); }
+.privacy-body h2:first-child { margin-top: 26px; }
+.privacy-body p, .privacy-body li { font-size: .96rem; line-height: 1.85; }
+.privacy-body ul { margin-left: 24px; }
+.privacy-body a { text-decoration: underline; text-underline-offset: 4px; }
+.brand-document code { overflow-wrap: anywhere; }
+.brand-document .brand-site-footer { margin-top: 70px; padding: 34px 0; border-top: 1px solid rgba(167,139,250,.15); text-align: center; font-size: .8rem; color: #b6a5ce; }
+.brand-site-footer a { color: #c4b5fd; text-decoration: none; }
+.brand-site-footer .container { padding-block: 0; }
+.brand-site-footer a:hover { text-decoration: underline; }
+.brand-site-footer .brand-footer-links { display: flex; justify-content: center; gap: 24px; flex-wrap: wrap; margin-bottom: 16px; }
+@media (max-width: 640px) {
+  .brand-site-header .brand-header-inner { min-height: 64px; gap: 20px; }
+  .brand-site-nav { gap: 18px; }
+  .brand-site-nav .document-home { display: none; }
+  .brand-document main.container { padding-top: 36px; }
+  .brand-document .document-hero { padding-bottom: 34px; }
+  .brand-document .document-hero h1 { font-size: clamp(2rem,8vw,2.7rem); }
+  .document-hero::before { right: 0; opacity: .3; }
+  .brand-connect .overview { gap: 10px; }
+  .brand-connect .overview-step { padding: 18px 8px; }
+  .brand-connect .overview-label { font-size: .8rem; }
+  .brand-connect .overview-desc { font-size: .72rem; }
+  .brand-connect .tab { font-size: .8rem; padding-inline: 12px; }
+  .brand-connect .tab-badge { display: none; }
+  .brand-document .container { padding-inline: 20px; }
+  .brand-document .brand-site-footer { margin-top: 40px; }
+}
+@media (max-width: 480px) {
+  .brand-site-nav .document-download { display: none; }
+  .brand-site-header .brand-header-inner { flex-wrap: wrap; gap: 10px; padding-block: 14px 6px; }
+  .brand-site-nav { width: 100%; justify-content: space-between; gap: 14px; }
+  .brand-connect .tabs { scroll-margin-top: 130px; }
+}

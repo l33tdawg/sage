@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 720" fill="none">
+  <defs>
+    <linearGradient id="trail" x1="0" y1="0" x2="1400" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a78bfa" stop-opacity=".45"/>
+      <stop offset=".2" stop-color="#d1bffa" stop-opacity=".8"/>
+      <stop offset=".55" stop-color="#a78bfa" stop-opacity=".36"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="haze">
+      <stop stop-color="#9572db" stop-opacity=".13"/>
+      <stop offset="1" stop-color="#9572db" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="glow" x="-25%" y="-50%" width="150%" height="200%">
+      <feGaussianBlur stdDeviation="5"/>
+    </filter>
+    <g id="paths" stroke="url(#trail)" stroke-linecap="round">
+      <path d="M-80 105C100 30 244 70 382 160S650 290 876 203 1150 124 1430 250"/>
+      <path d="M-80 141C117 47 246 89 386 175S654 271 864 214 1178 159 1430 264" opacity=".55"/>
+      <path d="M-90 385C99 337 163 192 333 169S600 269 821 239 1100 122 1440 185" opacity=".6"/>
+      <path d="M-100 315C100 290 214 393 399 450S729 403 916 325 1200 289 1440 355" opacity=".65"/>
+      <path d="M-90 521C102 478 183 371 352 379S672 503 886 429 1160 383 1430 407"/>
+      <path d="M-90 544C113 476 196 393 354 394S676 507 889 440 1170 412 1430 426" opacity=".45"/>
+      <path d="M-90 638C94 532 249 547 404 579S649 603 864 513 1160 426 1440 510" opacity=".65"/>
+      <path d="M-80 218C126 156 215 266 367 301S648 353 860 308 1160 280 1430 326" opacity=".38"/>
+    </g>
+    <g id="nodes" fill="#c4b5fd">
+      <circle cx="130" cy="73" r="2.7"/>
+      <circle cx="302" cy="114" r="3.2"/>
+      <circle cx="333" cy="169" r="2.4"/>
+      <circle cx="194" cy="342" r="2.2"/>
+      <circle cx="110" cy="450" r="3"/>
+      <circle cx="352" cy="379" r="2.8"/>
+      <circle cx="256" cy="552" r="2.6"/>
+      <circle cx="404" cy="579" r="2"/>
+    </g>
+  </defs>
+  <ellipse cx="180" cy="300" rx="380" ry="315" fill="url(#haze)"/>
+  <use href="#paths" stroke-width="5" filter="url(#glow)" opacity=".65"/>
+  <use href="#paths" stroke-width="1.15"/>
+  <use href="#nodes" filter="url(#glow)" opacity=".85"/>
+  <use href="#nodes" opacity=".75"/>
+</svg>
