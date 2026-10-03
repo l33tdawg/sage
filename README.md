@@ -212,7 +212,7 @@ uses re-enrollment; historical memory authorship is preserved.
 
 **MCP tool calls stay responsive while another tool waits on HTTP.** Stdio now runs up to 16 tool requests concurrently and reads cancellation notifications immediately. A slow history read can no longer hold later independent tools or the tool registry behind it. Cancellation stops the matching request context; an indeterminate write still requires its normal reconciliation.
 
-**AMID restores unresolved signer fences before it starts serving.** A private, node-local SQLite ledger preserves identity-only submission intents across process exits. Startup refuses an unreadable or malformed ledger, and a restored fence settles only on chain-proven fate. Disabling the REST validator key also removes the inherited key from ordinary signing paths.
+**AMID restores unresolved signer fences before it starts serving.** A private, node-local SQLite ledger preserves identity-only submission intents across process exits. Startup refuses an unreadable or malformed ledger, and a restored fence settles only on chain-proven fate. Disabling the REST validator key also removes the inherited key from ordinary signing paths. A proven fence finishes its durable cleanup before reopening the signer, so a fast next submission cannot lose its new recovery record to the prior cleanup.
 
 **Block sync rounds quorum-blocking power up correctly.** A validator with power 1 out of 4 no longer leaves block sync early. Actual quorum-blocking power keeps its existing behavior.
 

@@ -1101,9 +1101,10 @@ func publishFenceGauges() {
 // fence nobody can see is a mystery hang, and the whole argument for holding
 // rather than conceding is that the failure is loud and attributable.
 type keyFence struct {
-	ch      chan struct{}
-	pending int
-	lifted  bool
+	ch       chan struct{}
+	pending  int
+	retiring bool
+	lifted   bool
 
 	txHash   string
 	nonce    uint64
@@ -1342,36 +1343,44 @@ func fenceSetNote(ind *indeterminateSubmit) string {
 // which is what an earlier revision did — makes the fence lift as a side effect
 // of the goroutine merely ending, including when it ends by panicking.
 //
-// Closing ch (rather than sending) is what makes every queued waiter wake, and
-// lifted guards against a double close if the counter is ever driven to zero
-// twice.
+// Closing ch (rather than sending) is what makes every queued waiter wake.
+// retiring selects exactly one durable cleanup before the key opens; lifted
+// prevents a later proof from retiring the same fence again.
 func liftFence(key string, fence *keyFence, verdict TxVerdict, detail string) {
 	fenceMu.Lock()
+	if fence.retiring || fence.lifted {
+		fenceMu.Unlock()
+		return
+	}
 	fence.pending--
+	if fence.pending > 0 {
+		fenceMu.Unlock()
+		return
+	}
+	fence.retiring = true
 	held := time.Since(fence.since)
 	attempts := fence.attempts
 	txHash := fence.txHash
 	nonce, hasNonce := fence.nonce, fence.hasNonce
-	opened := false
-	if fence.pending <= 0 && !fence.lifted {
-		fence.lifted = true
-		// Only delete OUR entry: a later fence for the same key is a different
-		// object, and deleting it here would open a key that is still closed.
-		if fences[key] == fence {
-			delete(fences, key)
-		}
-		close(fence.ch)
-		opened = true
-	}
 	fenceMu.Unlock()
 
-	if !opened {
-		return
-	}
-	// The fence is over, so its durable shadow must go with it: leaving the
-	// intent behind would re-raise this fence at the next startup and refuse a
-	// key whose fate has just been proven.
+	// Retire the durable shadow BEFORE opening the key. The store deletes by
+	// signer: opening first would let a new submission save its intent, then
+	// this prior retirement could delete that new record. Keep the fence in
+	// the map and leave its waiter channel open until cleanup returns, without
+	// holding the process-wide mutex over storage I/O. A deletion failure keeps
+	// its existing logged, degraded-persistence policy.
 	discardFenceIntent(key)
+
+	fenceMu.Lock()
+	fence.lifted = true
+	// Only delete OUR entry: a later fence for the same key is a different
+	// object, and deleting it here would open a key that is still closed.
+	if fences[key] == fence {
+		delete(fences, key)
+	}
+	close(fence.ch)
+	fenceMu.Unlock()
 	metrics.NonceFenceResolvedTotal.WithLabelValues(verdict.metricFate()).Inc()
 	publishFenceGauges()
 	// Keep the outcome visible after the fence (and the status row that shows

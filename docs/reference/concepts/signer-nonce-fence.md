@@ -152,6 +152,14 @@ only on a proven fate — a committed submit, a hash-bound definitive rejection
 fence for every record whose fate was never proven, so the node comes back
 REFUSING to sign those keys instead of re-seeding past them.
 
+A proven fence retires its durable record before reopening the signer
+(`liftFence`, `internal/tx/nonce_fence.go:1349`). The store deletes by signer, so
+opening first could let the next submission save its recovery record just before
+the prior cleanup deletes it. Storage I/O keeps that signer held without holding
+the global fence mutex; other signers can proceed. A deletion error retains the
+existing logged, degraded-persistence behavior (`discardFenceIntent`,
+`internal/tx/nonce_fence_intent.go:124`).
+
 Two limits remain, and both are deliberate:
 
 - **The durable record carries identity, not payload.** It holds the signer, the
