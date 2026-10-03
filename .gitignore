@@ -120,6 +120,7 @@ AGENTS.md
 docs/*
 !docs/diagrams/
 !docs/README.md
+!docs/brand/
 !docs/ARCHITECTURE.md
 !docs/GETTING_STARTED.md
 !docs/ADMIN_BOOTSTRAP.md
