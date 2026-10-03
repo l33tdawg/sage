@@ -13,7 +13,7 @@
 </script>
 <title>SAGE v11 | CEREBRUM Memory Brain for AI Agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Install SAGE v11.23.13: governed local-first memory for AI agents, with consensus-validated recall, encrypted agent working state, controlled federation, and in-place upgrades.">
+<meta name="description" content="Install SAGE v11.23.14: governed local-first memory for AI agents, with consensus-validated recall, encrypted agent working state, controlled federation, and in-place upgrades.">
 <meta name="theme-color" content="#0a0614">
   <meta property="og:title" content="SAGE | Durable memory for AI agents">
   <meta property="og:description" content="Your agent shouldn't start from zero every session. Durable memory outside the model: what you decided, what broke, what you already ruled out.">
@@ -963,7 +963,7 @@ footer a:hover { text-decoration: underline; }
     <div class="container">
       <div class="v11-hero-grid">
         <div class="hero-copy">
-          <div class="hero-kicker"><span>SAGE <span data-sage-version>v11.23.13</span> · durable memory for AI agents</span></div>
+          <div class="hero-kicker"><span>SAGE <span data-sage-version>v11.23.14</span> · durable memory for AI agents</span></div>
           <h1>Your agent shouldn't start from <em>zero</em> every session</h1>
           <p class="hero-sub">SAGE keeps durable memory outside the model: what you decided, what broke, what you already ruled out. Your agent opens a session with that context instead of a blank slate, so you spend turns on the work instead of re-explaining it. Works with Claude Code, Codex, Cursor and anything MCP-capable.</p>
         </div>
@@ -993,14 +993,14 @@ footer a:hover { text-decoration: underline; }
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
         <div class="cta-meta">
-          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.23.13</strong> &middot; signed assets</span>
+          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.23.14</strong> &middot; signed assets</span>
           <span class="cta-count" id="minds-freed">
-            <strong id="download-count" data-count="8933" data-updated-at="2026-10-03T01:02:17.913Z">8,933</strong>
+            <strong id="download-count" data-count="8939" data-updated-at="2026-10-03T04:59:09.420Z">8,939</strong>
             <span>package downloads</span>
           </span>
         </div>
         <p class="cta-fineprint">
-          <span id="download-status" aria-live="polite">Last known count &middot; Oct 3, 2026, 01:02 UTC</span>
+          <span id="download-status" aria-live="polite">Last known count &middot; Oct 3, 2026, 04:59 UTC</span>
           <span class="cta-fineprint-sep" aria-hidden="true">&middot;</span>
           <span>Prereleases, repeats and automated downloads included; not unique installs.</span>
         </p>
@@ -1071,7 +1071,7 @@ footer a:hover { text-decoration: underline; }
           <img src="screen-network.png" alt="Federation dashboard showing LAN and internet SAGE-to-SAGE links">
         </div>
         <div class="reveal">
-          <div class="section-tag"><span>Built through <span data-sage-version>v11.23.13</span></span></div>
+          <div class="section-tag"><span>Built through <span data-sage-version>v11.23.14</span></span></div>
           <h2>Keep agents connected, governed, and safely up to date.</h2>
           <p class="section-desc">CEREBRUM is the local control plane for memory, agent access, recovery, and sharing. Existing nodes upgrade in place; memory history stays attributable while current access remains explicit and reviewable.</p>
           <ul class="fed-list">
@@ -1146,13 +1146,13 @@ footer a:hover { text-decoration: underline; }
 
       <!-- What's New -->
       <div class="whats-new reveal">
-        <h3>What's new in <span id="whats-new-version">v11.23.2</span></h3>
-        <p style="opacity:0.85;margin:0 0 24px 0;">The 11.23 line activates app-v28. Two things turn on: a sparse public-memory Merkle commitment, and a co-commit rule that consensus enforces instead of the node's REST boundary. 11.23.2 finishes the job for chains whose older public records predate the fork. Upgrades stay in place. No chain reset, no transaction-type change. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.23.2" style="color:var(--accent);">Read the release notes &rarr;</a></p>
+        <h3>What's new in <span id="whats-new-version">v11.23.14</span></h3>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.23.14 improves MCP responsiveness, protects AMID restarts, and adds optional local memory judging with source evidence. The judge is experimental and off by default. This release keeps the existing consensus version and chain data in place. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.23.14" style="color:var(--accent);">Read the release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>App-v28 activates</h4><p>The public-memory commitment becomes AppHash-covered and the co-commit rule moves into consensus, so a memory the quorum already rejected can't have its exact bytes re-admitted by any submission path. Personal nodes walk the rung automatically, in place.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>An activation that could finish</h4><p>v11.23.2 fixes the case where an older chain could not open the fork at all: legacy public records whose content hash had been erased by a historical lifecycle transition now stay out of the committed public set instead of aborting the activation block on every replay.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Encrypted agent working state</h4><p>Private media and a compare-and-swap workflow journal live encrypted on your node, reachable only from inside the agent boundary. The node also reports its storage posture, so a plaintext downgrade shows up instead of staying quiet.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Upgrades are deliberate</h4><p>An App version panel and an explicit upgrade vote make a consensus fork something you choose, and a node killed mid-submission remembers the abandoned transaction instead of re-seeding nonces past it.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Responsive MCP calls</h4><p>A slow tool call can run alongside independent requests. Clients can cancel pending calls, and bounded concurrency keeps the bridge responsive. Cancellation does not undo a committed write.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Optional local memory judge</h4><p>An experimental model can check whether proposed memories are lasting knowledge. It is off by default; uncertain or unavailable verdicts wait for operator review. <a href="https://github.com/l33tdawg/sage/blob/v11.23.14/docs/reference/write-gate.md">Read the memory-gate guide</a>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Source evidence stays local</h4><p>Attach a quote, log line or document excerpt through MCP or signed REST. An enabled memory gate checks whether it supports the claim. The source text stays on your node and never enters the chain.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Safer fleet restarts</h4><p>AMID restores pending transaction fences before serving requests. A restart keeps signing blocked until the pending transaction is resolved. A malformed or unreadable fence ledger refuses startup until the problem is resolved.</p></div></div>
         </div>
       </div>
 
@@ -1184,7 +1184,7 @@ footer a:hover { text-decoration: underline; }
         <div class="feature-card"><div><h3>Threaded answers and wake hints</h3><p><code>sage_message_reply</code> returns results to the original sender; <code>sage_message_replies</code> pages through those answers. The signed local wake stream lets supervisors wait for inbox changes, but a wake is never a delivery receipt, read receipt, or claim.</p></div></div>
         <div class="feature-card"><div><h3>Governed collaboration</h3><p>Agent identity, live permissions, and explicit task assignment remain authoritative. Message payloads and replies are untrusted data, not permission to execute instructions. Federated collaboration never grants local write or administrative authority by itself.</p></div></div>
       </div>
-      <p style="text-align:center;margin-top:24px;">Read the <a href="https://github.com/l33tdawg/sage/blob/v11.23.2/docs/reference/mcp-tools.md">MCP task and messaging reference</a>, <a href="https://github.com/l33tdawg/sage/blob/v11.23.2/docs/reference/concepts/message-reply-lifecycle.md">reply lifecycle</a>, and <a href="https://github.com/l33tdawg/sage/blob/v11.23.2/docs/reference/concepts/message-wake-bus.md">wake-stream contract</a>.</p>
+      <p style="text-align:center;margin-top:24px;">Read the <a href="https://github.com/l33tdawg/sage/blob/v11.23.14/docs/reference/mcp-tools.md">MCP task and messaging reference</a>, <a href="https://github.com/l33tdawg/sage/blob/v11.23.14/docs/reference/concepts/message-reply-lifecycle.md">reply lifecycle</a>, and <a href="https://github.com/l33tdawg/sage/blob/v11.23.14/docs/reference/concepts/message-wake-bus.md">wake-stream contract</a>.</p>
 
       <!-- Screenshots -->
       <div style="margin-top:80px;">
@@ -1226,7 +1226,7 @@ footer a:hover { text-decoration: underline; }
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-tag"></use></svg><span>What changed in v11?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p>v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.23.2 makes that activation work on chains whose older public records predate it.</p></div>
+          <div class="faq-a"><p>v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.23.14 improves MCP responsiveness and AMID restart safety, and adds an optional local memory judge with source-evidence checks. The judge is experimental and off by default.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-federation"></use></svg><span>What does federation mean?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
@@ -1480,7 +1480,7 @@ footer a:hover { text-decoration: underline; }
           <div><span class="output">MCP stdio  ./sage-gui mcp</span></div>
           <div>&nbsp;</div>
           <div><span class="comment"># Python SDK</span></div>
-          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=<span data-sage-version-bare>11.23.13</span>"</span></div>
+          <div><span class="prompt">$</span> <span class="cmd">pip install "sage-agent-sdk&gt;=<span data-sage-version-bare>11.23.14</span>"</span></div>
         </div>
       </div>
 
@@ -1488,9 +1488,9 @@ footer a:hover { text-decoration: underline; }
         <div class="dev-badge"><strong>Go 1.26.8+</strong></div>
         <div class="dev-badge"><strong>CometBFT</strong> v0.38</div>
         <div class="dev-badge"><strong>BadgerDB</strong> + SQLite</div>
-        <div class="dev-badge"><strong>MCP</strong> stdio &middot; 34 tools</div>
+        <div class="dev-badge"><strong>MCP</strong> stdio &middot; 35 tools</div>
         <div class="dev-badge"><strong>Signed REST</strong> /v1</div>
-        <div class="dev-badge"><strong>Python SDK</strong> <span data-sage-version-bare>11.23.13</span></div>
+        <div class="dev-badge"><strong>Python SDK</strong> <span data-sage-version-bare>11.23.14</span></div>
         <div class="dev-badge"><strong>Apache 2.0</strong></div>
       </div>
 
@@ -1504,7 +1504,7 @@ footer a:hover { text-decoration: underline; }
           <div class="value-card">
             <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-terminal"></use></svg></div>
             <h3>MCP over stdio</h3>
-            <p><code>sage-gui mcp</code> speaks MCP on stdin and stdout and advertises <strong>34 tools</strong>: remember, recall, task, backlog, inbox, messages, governance and more. Drop it into any MCP client config and the agent gets memory with no network hop.</p>
+            <p><code>sage-gui mcp</code> speaks MCP on stdin and stdout and advertises <strong>35 tools</strong>: remember, recall, task, backlog, inbox, messages, governance and more. Add it to an MCP client config to connect your agent to the local SAGE node.</p>
           </div>
           <div class="value-card">
             <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-clients"></use></svg></div>
@@ -1514,12 +1514,12 @@ footer a:hover { text-decoration: underline; }
           <div class="value-card">
             <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-package"></use></svg></div>
             <h3>Python SDK</h3>
-            <p><code>sage-agent-sdk</code> wraps the same API in <strong>94 methods</strong>, sync and async, including durable task idempotency and the agent-access helpers. <code>pip install "sage-agent-sdk&gt;=<span data-sage-version-bare>11.23.13</span>"</code></p>
+            <p><code>sage-agent-sdk</code> exposes <strong>92 public operations</strong> through synchronous and asynchronous clients, including durable task idempotency and the agent-access helpers. <code>pip install "sage-agent-sdk&gt;=<span data-sage-version-bare>11.23.14</span>"</code></p>
           </div>
           <div class="value-card">
             <div class="value-card-icon"><svg class="ico" aria-hidden="true"><use href="#i-graph"></use></svg></div>
-            <h3>OpenAPI spec</h3>
-            <p>The whole REST surface ships as <code>api/openapi.yaml</code> in the repo, so you can generate a typed client in any language instead of hand-writing the nonce, signature and retry plumbing yourself.</p>
+            <h3>API reference</h3>
+            <p>The <a href="https://github.com/l33tdawg/sage/blob/v11.23.14/docs/reference/INDEX.md">code-verified reference</a> covers REST routes, SDK methods, MCP tools and request signing. Check it before generating a client: the OpenAPI spec has known drift.</p>
           </div>
         </div>
       </div>
