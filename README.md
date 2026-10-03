@@ -216,6 +216,8 @@ uses re-enrollment; historical memory authorship is preserved.
 
 **Block sync rounds quorum-blocking power up correctly.** A validator with power 1 out of 4 no longer leaves block sync early. Actual quorum-blocking power keeps its existing behavior.
 
+**An optional local judge checks lasting knowledge and its submitted evidence.** Set `SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v15` to use SAGE's verified local model through its managed Ollama runtime. It remains experimental and off by default. Judge traffic is restricted to loopback, cloud aliases and mismatched model blobs are refused, and an unavailable judge holds proposals for operator review. Public seed-set qualification on SAGE's pinned runtime passed with external networking blocked; support precision was 97% with one accepted trap, and lasting precision was 100%. See the [memory-gate guide](docs/reference/write-gate.md) and [runtime qualification report](bench/judge-qualify/reports/sage-judge-v15-sage-runtime.md) for configuration and limits. Thanks to [@ihubanov](https://github.com/ihubanov) for the contribution.
+
 No consensus execution change, app-version change or chain migration.
 
 Container: `ghcr.io/l33tdawg/sage:11.23.14`. SDK 11.23.14.
