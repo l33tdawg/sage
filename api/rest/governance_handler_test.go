@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -424,6 +425,28 @@ func TestDisableValidatorSigningKeyNeutralizesLegacyEnvironmentKey(t *testing.T)
 	require.True(t, srv.validatorSigningKeyConfigured)
 	srv.DisableValidatorSigningKey()
 	assert.False(t, srv.validatorSigningKeyConfigured)
+	parsed := nonceSubmissionTestTx("disabled-validator-key")
+	called := false
+	_, submitErr := srv.submitConsensusTx(context.Background(), parsed, func([]byte) error { called = true; return nil })
+	require.Error(t, submitErr, "disabling an inherited validator key must also refuse ordinary REST consensus writes")
+	require.False(t, called)
+	require.Empty(t, parsed.PublicKey)
+	require.Empty(t, parsed.Signature)
+	require.Equal(t, uint64(1), parsed.Nonce, "refusal must precede nonce allocation")
+
+	require.NoError(t, srv.SetValidatorSigningKey(key))
+	_, submitErr = srv.submitConsensusTx(context.Background(), parsed, func(encoded []byte) error {
+		wire, err := tx.DecodeTx(encoded)
+		require.NoError(t, err)
+		valid, err := tx.VerifyTx(wire)
+		require.NoError(t, err)
+		require.True(t, valid)
+		require.Equal(t, []byte(key.Public().(ed25519.PublicKey)), wire.PublicKey)
+		called = true
+		return nil
+	})
+	require.NoError(t, submitErr, "explicit key reinjection must restore normal signing")
+	require.True(t, called)
 }
 
 func TestCORSAllowsSignedRequestNonceHeader(t *testing.T) {

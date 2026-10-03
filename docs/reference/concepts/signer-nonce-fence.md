@@ -460,6 +460,30 @@ residual in full — that is what
 `internal/tx/nonce_fence_safety_test.go` walks and asserts, so this document
 cannot quietly stop being true about the unprotected deployment.
 
+### AMID persistence
+
+Both AMID modes restore signer fences before starting listeners or signing
+producers. Their node-local ledger is
+`<--badger-path>/signer-fence-intents.sqlite`, separate from canonical Badger
+state and from PostgreSQL. Keep that file with the node's data across restarts.
+It contains only signer, transaction hash, nonce and timestamp; signed payloads
+and private keys are never copied into it. SQLite uses verified WAL mode with
+`synchronous=FULL`. See `cmd/amid/signer_fence.go:prepareAMIDSignerFences` and
+`internal/store/signer_fence_db.go:OpenSignerFenceIntentDB`.
+
+An unreadable or corrupt ledger refuses AMID startup rather than leaving the
+old signer unprotected. Once running, the shared fence hook retains its existing
+policy: a failed intent write emits `fence_intent_write_failed` and the broadcast
+continues, so persistence is degraded until that storage fault is resolved.
+Restored AMID fences wait for chain-proven fate; they do not use the desktop's
+automatic abandonment rules.
+
+This protects submissions recorded by the updated process. It cannot recover
+an older process's unrecorded fence or lost signed bytes, and AMID has no legacy
+signed-transaction import command. The `sage-gui fence` CLI operates on the
+desktop SQLite projection, not this AMID ledger. A restart or a missing
+transaction-index result is still not a recovery proof.
+
 ### The honest scope claim
 
 > Same-key nonce inversion is eliminated **within a running process, for every

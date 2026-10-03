@@ -2,6 +2,7 @@ package rest
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"net/http"
@@ -107,6 +108,9 @@ func (s *Server) submitConsensusTx(
 	}
 	if submit == nil {
 		return consensusTxSubmit, fmt.Errorf("missing transaction submitter")
+	}
+	if len(s.signingKey) != ed25519.PrivateKeySize {
+		return consensusTxSign, fmt.Errorf("validator signing key is unavailable")
 	}
 	// REFUSE IMMEDIATELY when this key is already fenced. The lease below would
 	// otherwise park here until the request's deadline (see tx.FenceForSigner),

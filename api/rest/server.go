@@ -488,6 +488,9 @@ func (s *Server) SetAppV23RootKeyResolver(
 // Root and non-Admin principals retain their normal envelopes. Consensus is
 // still authoritative; this broker is only the usable local proof producer.
 func (s *Server) signTx(parsed *tx.ParsedTx) error {
+	if len(s.signingKey) != ed25519.PrivateKeySize {
+		return fmt.Errorf("validator signing key is unavailable")
+	}
 	if err := s.embedAppV23LocalElevation(parsed); err != nil {
 		return err
 	}
@@ -636,12 +639,13 @@ func (s *Server) SetValidatorSigningKey(key ed25519.PrivateKey) error {
 	return nil
 }
 
-// DisableValidatorSigningKey explicitly closes the governance gateway. The
+// DisableValidatorSigningKey removes this server's validator signing key. The
 // embedding runtimes call this before attempting authoritative key injection,
 // preventing NewServer's legacy VALIDATOR_KEY_FILE fallback from remaining
 // enabled when an explicit --home/--validator-key-file load fails.
 func (s *Server) DisableValidatorSigningKey() {
 	s.validatorSigningKeyConfigured = false
+	s.signingKey = nil
 }
 
 // SetFederation wires the v11 federation transport. Must be called before the
