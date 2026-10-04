@@ -366,6 +366,7 @@ func TestRun_HungJudgeDoesNotBlockOtherVotesOrUpgradeVoting(t *testing.T) {
 	app := &fakeApp{pid: "prop-1", target: 12, supported: true, ok: true, hasVote: map[string]bool{}}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	done := make(chan struct{})
 	go func() {
 		Run(ctx, app, gs, Config{Key: priv, CometRPC: srv.URL, PollInterval: 5 * time.Millisecond,
@@ -401,6 +402,10 @@ func TestRun_HungJudgeDoesNotBlockOtherVotesOrUpgradeVoting(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not return promptly after cancellation while a judge call was hanging")
 	}
+	require.Eventually(t, func() bool {
+		_, fenced := tx.FenceForSigner(priv)
+		return !fenced
+	}, 5*time.Second, 10*time.Millisecond, "any canceled broadcast must reconcile before the mock RPC closes")
 }
 
 // combineForTest runs the policy on a single judge's probability.
