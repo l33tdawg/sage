@@ -211,8 +211,10 @@ func TestGate_JudgeFailureHoldsForReview(t *testing.T) {
 		out, d := g.Apply(ctx, gs, m, accept, zerolog.Nop())
 		return out == gateHold && !d.Accept && g.recentlyFailed("m1")
 	}, 5*time.Second, 10*time.Millisecond, "a failed configured judge cannot bypass the gate")
-	_, ok, _ := gs.SemanticVerdict(ctx, "m1", "v1")
-	require.True(t, ok, "the unavailable hold is visible in the review queue")
+	require.Eventually(t, func() bool {
+		v, ok, err := gs.SemanticVerdict(ctx, "m1", "v1")
+		return err == nil && ok && v.Verdict == memory.VerdictAbstain
+	}, 5*time.Second, 10*time.Millisecond, "the unavailable hold is visible in the review queue")
 }
 
 func TestGate_UnreadableContentIsNeverSent(t *testing.T) {
