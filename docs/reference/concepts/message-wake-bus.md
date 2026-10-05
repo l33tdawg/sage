@@ -21,7 +21,7 @@ for exact local recipients. A request carrying `idempotency_key` uses the keyed
 `SendLocalMessage` (`internal/store/messages.go:324-402`) path. An unkeyed request uses
 `AdmitLocalMessage` (`internal/store/messages.go:403-439`), which inserts the row and allocates the
 sequence in one transaction without creating a replay mapping. After either
-fresh path commits, `handlePipeSend` (`api/rest/pipe_handler.go:648-1062`) publishes only the
+fresh path commits, `handlePipeSend` (`api/rest/pipe_handler.go:652-1066`) publishes only the
 returned process-local non-zero generation. A keyed replay loads
 the original row without `WakeSeq`, so it neither advances nor republishes the
 generation. Provider-only and outbound federated rows do not allocate a local

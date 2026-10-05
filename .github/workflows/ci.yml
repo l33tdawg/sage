@@ -178,13 +178,31 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
+          cache: npm
+      - run: npm ci
       - run: npm test
+      - name: Install Chromium for serverless fixtures
+        run: npx playwright install --with-deps chromium
+      - name: Federation browser fixtures (9 tests; no running node)
+        run: npm run test:e2e:fixtures
+
+  benchmark-protocol:
+    name: Benchmark Protocol (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: pip install -r bench/requirements-test.txt
+      - run: python -m unittest discover -s bench -p 'test_*.py' -v
 
   build:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [lint, vulncheck, test, frontend-static, v119-fault-gates]
+    needs: [lint, vulncheck, test, frontend-static, benchmark-protocol, v119-fault-gates]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

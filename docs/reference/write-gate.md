@@ -15,6 +15,15 @@ one constrained token's logprobs from a model you run.
 It is **off by default** and changes nothing in consensus, the transaction
 format or recall.
 
+On a personal node, the single validator supplies the quorum itself. With this
+gate off, admission still relies on the built-in duplicate, quality and
+confidence-consistency checks; the quorum adds no independent assessment.
+Enabling the gate adds the background review described below before this
+node's voter accepts a proposal. It is local voting policy, not a new
+consensus rule or a stronger advisory pre-validation endpoint. Co-commits do
+not use the voter and therefore do not pass through this gate
+(`internal/voter/decision.go`; `internal/abci/app.go`, `processCoCommitSubmit`).
+
 ## The check
 
 > Should this be stored as lasting memory: does it state something about the

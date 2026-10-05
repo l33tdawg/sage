@@ -270,17 +270,18 @@ type RouteSnapshot struct {
 // SecurityBlocked means every connected candidate failed pinned TLS/identity
 // validation before any HTTP request was sent.
 type RouteDiagnostics struct {
-	State             string `json:"state"`
-	ActiveKind        string `json:"active_kind,omitempty"`
-	Target            string `json:"target,omitempty"`
-	LastSuccessAt     int64  `json:"last_success_at,omitempty"`
-	LastFailureAt     int64  `json:"last_failure_at,omitempty"`
-	LastError         string `json:"last_error,omitempty"`
-	LatencyMS         int64  `json:"latency_ms,omitempty"`
-	SnapshotRevision  uint64 `json:"snapshot_revision,omitempty"`
-	SnapshotIssuedAt  int64  `json:"snapshot_issued_at,omitempty"`
-	SnapshotExpiresAt int64  `json:"snapshot_expires_at,omitempty"`
-	SnapshotAgeSecond int64  `json:"snapshot_age_seconds,omitempty"`
+	State             string                 `json:"state"`
+	ActiveKind        string                 `json:"active_kind,omitempty"`
+	Target            string                 `json:"target,omitempty"`
+	LastSuccessAt     int64                  `json:"last_success_at,omitempty"`
+	LastFailureAt     int64                  `json:"last_failure_at,omitempty"`
+	LastError         string                 `json:"last_error,omitempty"`
+	RequestFailure    *PeerRequestDiagnostic `json:"request_failure,omitempty"`
+	LatencyMS         int64                  `json:"latency_ms,omitempty"`
+	SnapshotRevision  uint64                 `json:"snapshot_revision,omitempty"`
+	SnapshotIssuedAt  int64                  `json:"snapshot_issued_at,omitempty"`
+	SnapshotExpiresAt int64                  `json:"snapshot_expires_at,omitempty"`
+	SnapshotAgeSecond int64                  `json:"snapshot_age_seconds,omitempty"`
 }
 
 type PeerRouteDialResult struct {
@@ -457,6 +458,7 @@ func (m *Manager) recordRouteSuccess(chain string, selected PeerRouteDialResult)
 	status.Target = selected.Target
 	status.LastSuccessAt = now
 	status.LastError = ""
+	status.RequestFailure = nil
 	status.LatencyMS = selected.Latency.Milliseconds()
 	m.routeStatus[chain] = status
 	m.routeMu.Unlock()
@@ -479,6 +481,7 @@ func (m *Manager) recordRouteFailure(chain string, err error, security bool) {
 	}
 	status.LastFailureAt = time.Now().Unix()
 	status.LastError = err.Error()
+	status.RequestFailure = clonePeerRequestDiagnostic(err)
 	m.routeStatus[chain] = status
 	m.routeMu.Unlock()
 }
@@ -499,6 +502,11 @@ func (m *Manager) recordRouteSnapshot(chain string, snapshot RouteSnapshot) {
 func (m *Manager) RouteDiagnostics(chain string) RouteDiagnostics {
 	m.routeMu.RLock()
 	status, ok := m.routeStatus[chain]
+	if status.RequestFailure != nil {
+		failure := *status.RequestFailure
+		failure.Candidates = append([]PeerRouteAttempt(nil), failure.Candidates...)
+		status.RequestFailure = &failure
+	}
 	m.routeMu.RUnlock()
 	if !m.transportIsEnabled() {
 		status.State = RouteStateDisabled
@@ -512,6 +520,21 @@ func (m *Manager) RouteDiagnostics(chain string) RouteDiagnostics {
 		}
 	}
 	return status
+}
+
+// A status response can fail after the transport itself connected successfully.
+// Record request evidence without relabeling that connected route as offline.
+func (m *Manager) recordPeerRequestFailure(chain string, err error) {
+	m.routeMu.Lock()
+	if m.routeStatus == nil {
+		m.routeStatus = make(map[string]RouteDiagnostics)
+	}
+	status := m.routeStatus[chain]
+	status.LastFailureAt = time.Now().Unix()
+	status.LastError = err.Error()
+	status.RequestFailure = clonePeerRequestDiagnostic(err)
+	m.routeStatus[chain] = status
+	m.routeMu.Unlock()
 }
 
 // LocalRouteStatus is the dashboard preflight projection used before a peer

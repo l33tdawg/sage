@@ -644,6 +644,10 @@ const (
 	pipelineCompleteActivitySummary = "[Pipeline] Local agent pipeline completed. Details omitted from the activity stream."
 )
 
+func unknownLocalPipeTargetDetail(target string) string {
+	return fmt.Sprintf("No active local provider or agent name matches %q. POST /v1/pipe/resolve with an exact local agent ID or saved name/provider field, or a federated handle/address; then sign the returned to_agent and, for federation, source_chain_id and destination_chain_id. MCP clients can use sage_find_agent or sage_directory for an exact address. Direct to_provider sends use a shared provider inbox claimable by any matching active agent; arbitrary provider aliases are not inferred.", target)
+}
+
 // handlePipeSend creates a pipeline message addressed to another agent/provider.
 func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -827,7 +831,7 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 						}
 						if isRoot {
 							writeProblem(w, http.StatusNotFound, "Unknown target",
-								fmt.Sprintf("no registered local agent named %q; resolve federated targets before sending", req.ToProvider))
+								unknownLocalPipeTargetDetail(req.ToProvider))
 							return
 						}
 						active, activeErr := s.appV23ActiveOrdinaryAgent(agent.AgentID)
@@ -838,7 +842,7 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 						}
 						if !active {
 							writeProblem(w, http.StatusNotFound, "Unknown target",
-								fmt.Sprintf("no registered local agent named %q; resolve federated targets before sending", req.ToProvider))
+								unknownLocalPipeTargetDetail(req.ToProvider))
 							return
 						}
 						// Resolve name → agent_id for direct delivery.
@@ -846,7 +850,7 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 						req.ToProvider = ""
 					} else {
 						writeProblem(w, http.StatusNotFound, "Unknown target",
-							fmt.Sprintf("no registered local agent named %q; resolve federated targets before sending", req.ToProvider))
+							unknownLocalPipeTargetDetail(req.ToProvider))
 						return
 					}
 				}
@@ -1079,6 +1083,8 @@ func (s *Server) writeRemotePipeTargetError(w http.ResponseWriter, err error) {
 		writeProblem(w, http.StatusConflict, "Federated agent unavailable", "That agent or connection is currently paused or unavailable.")
 	case errors.Is(err, federation.ErrRemotePipeTargetNotAccepting):
 		writeProblem(w, http.StatusForbidden, "Federated agent is not accepting work", "The receiving SAGE has not enabled work requests for that agent.")
+	case errors.Is(err, federation.ErrRemotePipeLocalStoreUnavailable):
+		writeProblem(w, http.StatusServiceUnavailable, "Local federated pipeline unavailable", "This SAGE's local federated pipeline storage is unavailable.")
 	case errors.Is(err, federation.ErrRemotePipePeerUnsupported):
 		writeProblem(w, http.StatusNotImplemented, "Peer update required", "The receiving SAGE does not support federated pipeline delivery.")
 	case errors.Is(err, federation.ErrRemotePipeResolutionIncomplete):

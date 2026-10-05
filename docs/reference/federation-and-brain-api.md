@@ -296,6 +296,15 @@ table, but it runs before revocation-sensitive leases and is deadline-limited.
 Callers must provide at least two characters from a known agent name,
 registered name, or provider name.
 
+Discovery returns authorized routing metadata, not online presence or delivery
+evidence. Friendly send resolution uses exact display/registered names or a
+returned qualified handle/address; substring discovery matches do not become
+send aliases. Local provider labels must exactly match saved agent metadata,
+and arbitrary provider aliases are not inferred. Use `sage_find_agent` or
+`sage_directory` and pass the returned exact `to` value to
+`sage_message_send` (`internal/mcp/tools.go`, `toolFindAgent`, `toolDirectory`;
+`api/rest/pipe_handler.go`, `handlePipeResolve`).
+
 Target capabilities are cached only for that bounded live projection:
 `ReadAllDomains` substitutes for the ordinary level-1 domain grant, while
 `DenyFederatedPipe` wins over ReadAll and domain ownership.
@@ -318,7 +327,7 @@ The whole inner proof plus intent/payload/result use the local vault-backed
 storage path. Foreign completion creates no memory journal, and the result is
 atomically paired with its durable return outbox event before the peer is
 acknowledged (`internal/store/pipeline_transport.go:126-189`, `:256-326`;
-`handlePipeResult`, `api/rest/pipe_handler.go:1609-1911`).
+`handlePipeResult`, `api/rest/pipe_handler.go:1615-1924`).
 
 ### `POST /fed/v1/query/available`
 
@@ -506,6 +515,30 @@ same strict validation as automatic enrollment and are persisted atomically
 with the runtime allowlist. Older peers return 404 and remain Direct-only; the
 agreement itself stays valid. Revocation removes the stored route and inbound
 admission.
+
+Route repair already runs at startup, every five minutes, and after local
+address changes. A non-security request failure, or a Direct winner when a P2P
+selector is available, also admits an asynchronous refresh, deduplicated for the
+exact agreement/control generation and limited to once per minute. Refresh
+exchanges the current bundle under pinned peer authentication; it cannot fix an
+unreachable listener or replace JOIN trust (`internal/federation/routes.go`,
+`runScheduledRouteRefresh`, `StartRouteRefresher`; `internal/federation/client.go`,
+`doPeerRequestWithHeaders`; `cmd/sage-gui/federation_routes.go`,
+`watchFederationRouteChanges`).
+
+For a known peer, use the connection's **Retry** action to share one bounded
+route exchange and one authenticated `/fed/v1/status` re-probe of the frozen
+agreement/control generation. A retained old-generation address may bootstrap
+only `/fed/v1/p2p/routes` under the current pinned credentials; protected data
+requests still refuse its stale route binding. Authentication failures stop
+recovery. Pair again only when the recovery verdict reports an unprovable legacy
+binding or the operator has verified that JOIN trust needs replacement; a
+timeout alone does not establish that. These checks use recorded candidates,
+without inferring a route from an old IP address (`internal/federation/client.go`,
+`RetryPeerStatus`, `runPeerStatusRetry`, `doPeerRequestWithHeaders`;
+`internal/federation/routes.go`, `routeRefreshAgreementBinding`;
+`internal/federation/concrete_endpoint_generation_recovery_test.go`;
+`internal/federation/p2p_only_generation_recovery_test.go`).
 
 ### `POST /fed/v1/connection/revoke-notice` (established peers)
 
@@ -756,6 +789,32 @@ must render `failure_state` first; a previous Direct/Relay success cannot
 override a current trust or reachability failure
 (`web/federation_route_status.go`; `web/static/js/federation-route-state.js`).
 
+Failed authenticated status probes retain `route.request_failure` operational
+metadata: the sanitized status `endpoint`, `transport_verdict`, optional
+`http_status`, bounded `candidates`, and an operator `remedy`. Each candidate
+contains `kind`, `target`, and `verdict` and is recorded only when its dial
+actually starts, after any race delay; at most eight are retained. A
+`p2p_selector_started` flag reports entry into a selector even when a custom
+selector does not provide candidate hooks. An absent relay attempt therefore
+does not prove relay unavailability. Connected transport can coexist with an
+HTTP, response-decoding, or peer-identity failure. Candidate snapshots cannot
+be rewritten by a late losing worker (`internal/federation/request_diagnostics.go`;
+`internal/federation/client.go`, `fetchPeerStatusWithHeaders`;
+`internal/federation/routes.go`, `RouteDiagnostics`;
+`cmd/sage-gui/federation_routes.go`, `dialFederationP2PRouteTargets`).
+
+Reply delivery preflight checks the exact originating chain and its current
+policy epoch before probing that recorded peer's `/fed/v1/status`. A failed
+probe keeps the completed reply and return event for the existing retry path;
+its persisted outbox `last_error` now names the failing endpoint, verdict,
+actual candidate attempts, and the same remedy. URL credentials, queries,
+fragments, raw transport messages, and peer response bodies are excluded.
+Recipient-resolution HTTP problems keep their generic responses, so this
+operational evidence does not become a directory or authorization proof
+(`internal/federation/pipe_outbox.go`, `preflightPipelineResultPeer`,
+`recordPipelineDeliveryError`; `internal/federation/request_diagnostics.go`;
+`api/rest/pipe_handler.go`, `writeRemotePipeTargetError`).
+
 CEREBRUM treats this as an admin-management surface: active connection rows
 open their Read/Copy details and expose the everyday Pause/Resume action;
 permanent Revoke lives inside the expanded danger section. Revoked/expired rows
@@ -833,13 +892,31 @@ binding application listeners and refuses startup if cleanup cannot be confirmed
 
 ## 4. The brain as a tool - `GET /v1/dashboard/memory/{id}/related`
 
-Powers the MRI click-to-explore "train of thought" board. Cookie-authed dashboard route (`web/handler.go:328`), handler `handleMemoryRelated` (`web/memory_related.go:97-262`).
+Powers the MRI click-to-explore "train of thought" board. Cookie-authed dashboard route (`web/handler.go:328`), handler `handleMemoryRelated` (`web/memory_related.go:98-325`).
 
-**Query params:** `k` (default 50, capped at 120; `memory_related.go:31-32`, `103-109`).
+**Query params:** `k` (default 50, capped at 120; `memory_related.go:31-32`, `105-111`).
 
-**Auth / RBAC:** an MCP-agent request (carrying `X-Agent-ID`) is restricted to its visible agents; the operator dashboard (cookie session, no `X-Agent-ID`) sees all (`resolveAgentRBAC`, `memory_related.go:118-123`). `404` if the memory is not found.
+**Auth / RBAC:** an MCP-agent request (carrying `X-Agent-ID`) is restricted to its visible agents; the operator dashboard (cookie session, no `X-Agent-ID`) sees all (`resolveAgentRBAC`, `memory_related.go:120-125`). `404` if the memory is not found.
 
 **How related memories are ranked** (no embeddings required, `memory_related.go:17-28`): chain lineage via `parent_hash` (weight 6.0, `chain`), shared tags (2.0, `same-topic`), full-text content overlap (FTS when available, else in-process word overlap on an encrypted vault; `similar`), and same-domain high-confidence filler (0.25, `same-lobe`) so the panel is never empty. Ties break on memory id for stability.
+
+**Parent resolution:** a correction's `parent_hash` is the original record's
+SHA-256 content hash, not its UUID (`internal/mcp/tools.go`, `toolRemember`).
+SQLite and PostgreSQL first accept an exact legacy memory-ID pointer, then
+resolve the indexed hash with at most two matching metadata rows, without
+loading parent content. Zero or multiple hash
+matches yield no chain relation; visibility filtering does not turn an
+ambiguous hash into a unique parent. The selected record must still pass the
+handler's visibility check before content loading and canonical-projection
+check before disclosure. Ordinary lookup/load failures omit the chain signal;
+a visible parent's canonical mismatch still fails the response closed
+(`internal/store/memory_lineage.go`, `FindMemoryParent`;
+`web/memory_related.go`, `handleMemoryRelated`). The MRI graph follows the same
+resolution and only draws a parent edge to a validated node already rendered
+in that response (`web/handler.go`, `computeGraphJSON`). Persisted pointers
+and consensus semantics remain unchanged. Third-party stores without the
+optional `MemoryLineageStore` retain exact-ID lookup only
+(`web/memory_lineage.go`, `findMemoryParent`).
 
 **Response** (`memory_related.go:256-261`):
 

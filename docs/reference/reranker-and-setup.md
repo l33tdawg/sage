@@ -13,6 +13,13 @@ onboarding is a per-node UI flag, recall tuning is a per-node preference, and th
 touches chain state. Normal memory submission (which does reach consensus) is
 documented in [`rest-api.md`](rest-api.md) and [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md).
 
+The reranker ships off by default (`internal/embedding/reranker_test.go`,
+`TestResolveRerankerConfig_DefaultsOff`). Its relevance and latency depend on
+the model, query and candidate set. The committed historical benchmark changed
+query expansion and reranking together and does not establish the reranker's
+isolated effect. See [benchmark evidence and the comparison plan](../../bench/REPRODUCIBILITY.md)
+before drawing quality or performance conclusions.
+
 All endpoints below live on the **dashboard listener** and normally use the
 dashboard's cookie/session auth (`authMiddleware`), not the Ed25519 signed-request
 scheme the `/v1/*` public API uses. The forgotten-passphrase recovery exception is
@@ -131,17 +138,23 @@ tools read: `recall_top_k` and `recall_min_confidence`. Routes at
 
 ### `GET /v1/dashboard/settings/recall`
 
-Returns the current values (`handleGetRecallSettings`, `web/handler.go:5298-5330`).
+Returns the current values (`handleGetRecallSettings`, `web/handler.go:5315-5361`).
 
 **Response** (HTTP 200): `{"top_k": 5, "min_confidence": 70}`
 
-Defaults when unset: `top_k` = 5 (`web/handler.go:2451`), `min_confidence` = 70
-(percent; `web/handler.go:2458`). The 70% default catches observations (0.80+)
-and inferences (0.60+), not just facts.
+Defaults when unset: `top_k` = 5, `min_confidence` = 70 percent
+(`web/handler.go`, `handleGetRecallSettings`). The 70% floor admits facts and
+observations whose effective confidence remains at least 0.70; it excludes
+the base 0.60 inference tier and observations that have decayed below 0.70.
+The query floor applies before the top-K trim. `sage_recall` discloses the
+applied `confidence_floor`; a caller may explicitly lower `min_confidence`
+to inspect lower-confidence results within the same authorization scope
+(`api/rest/memory_handler.go`, `setFilterInfo`; `internal/mcp/tools.go`,
+`confidenceFloorDisclosure`; `internal/store/sqlite.go`, `QuerySimilar`).
 
 ### `POST /v1/dashboard/settings/recall`
 
-Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:5366-5419`).
+Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:5383-5436`).
 
 **Request:** `{"top_k": 10, "min_confidence": 75}`
 **Response** (HTTP 200): `{"ok": true, "top_k": 10, "min_confidence": 75}`

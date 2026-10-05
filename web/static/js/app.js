@@ -5374,8 +5374,8 @@ function RecallSettings() {
                 <div style="font-size:11px;color:var(--text-dim);margin-top:2px;line-height:1.5;">
                     How many memories each recall hands your agent. More = richer context, but every extra
                     memory spends tokens in the agent's window.
-                    ${rrOn === true && html`<span style="color:var(--accent);"> Reranker is on: higher k is the sweet spot - SAGE over-samples and the cross-encoder re-scores, so the extra slots stay relevant instead of adding noise.</span>`}
-                    ${rrOn === false && html`<span> Above ~10 the tail gets noisy without the reranker - turn it on in Memory engine above to make high k worthwhile.</span>`}
+                    ${rrOn === true && html`<span style="color:var(--accent);"> Reranker is on: SAGE over-samples candidates and re-scores them with a second model. Compare relevance and latency on your own queries when changing k.</span>`}
+                    ${rrOn === false && html`<span> An optional reranker can change the ordering. Compare relevance and latency on your own queries before enabling it in Memory engine.</span>`}
                 </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px;min-width:180px">
@@ -6330,7 +6330,7 @@ function RerankerControl() {
                 ${detected && !cfg.enabled ? html`
                     <div style="font-size:12px;color:var(--accent);">Found a reranker running at ${detected} - the URL was filled in for you. Click Save & enable to start using it (the connection is verified on save).</div>
                 ` : ''}
-                <div style="font-size:11px;color:var(--text-muted);">Optional. Re-scores recall results for sharper relevance. Off by default; recall works fine without it.</div>
+                <div style="font-size:11px;color:var(--text-muted);">Optional. Reorders recall results using a second model. Off by default; compare relevance and latency before enabling it.</div>
             </div>
             `}
             ${showSetup && html`<${RerankerSetupModal} onClose=${() => { setShowSetup(false); reload(); }} onDone=${reload} />`}
@@ -6529,7 +6529,7 @@ function RerankerSetupModal({ onClose, onDone }) {
                     `}
                     ${phase === 'unavailable' && html`<p style="color:var(--text-dim);">The managed reranker isn't available on this node build. You can still point SAGE at your own TEI-compatible server from Settings.</p>`}
                     ${phase === 'consent' && html`
-                        <p style="margin-top:0;">The reranker re-scores recall results with a cross-encoder for sharper relevance. SAGE sets it up by itself - nothing to install, nothing leaves this machine:</p>
+                        <p style="margin-top:0;">The optional reranker re-scores recall results with a cross-encoder. Compare relevance and latency on your own queries. SAGE manages the local setup:</p>
                         <ul style="padding-left:20px;color:var(--text-dim);font-size:13px;">
                             <li>${needEngine ? html`Download the engine (llama.cpp, ${mb(st.engine_bytes)} MB, checksum-verified)` : html`Engine: already in place \u2713`}</li>
                             <li>${needModel ? html`Download the model (${st.model_name}, ${mb(st.model_bytes)} MB, checksum-verified, one-time)` : html`Model: already downloaded \u2713`}</li>
@@ -6563,7 +6563,7 @@ function RerankerSetupModal({ onClose, onDone }) {
                         <div style="text-align:center;padding:8px 0;">
                             <div style="font-size:34px;margin-bottom:8px;">\uD83C\uDFAF</div>
                             <h3 style="margin:0 0 8px;color:var(--accent-green);">Reranker is on</h3>
-                            <p style="color:var(--text-dim);">Recall results are now re-scored by a cross-encoder for sharper relevance. SAGE manages the process - it starts with the node and you can turn it off any time in Settings.</p>
+                            <p style="color:var(--text-dim);">Recall results are now re-scored by a cross-encoder. Compare relevance and latency on your own queries. SAGE manages the process - it starts with the node and you can turn it off any time in Settings.</p>
                         </div>
                     `}
                     ${err && phase !== 'consent' && phase !== 'done' && html`<div class="import-error" style="margin-top:14px;">${err}</div>`}
@@ -7072,7 +7072,7 @@ function SettingsPage({ onRunSetup, requestedTab }) {
             ${settingsTab === 'recall' && html`
                 <div class="settings-tab-content">
                     <div class="settings-section">
-                        <h3>Memory engine <${HelpTip} text="The two models that power recall: the embedding model that turns memories into vectors for semantic search (managed by SAGE), and the optional reranker that re-scores recall results for sharper relevance (one-click managed setup)." /></h3>
+                        <h3>Memory engine <${HelpTip} text="The embedding model turns memories into vectors for semantic search. The optional reranker uses a second model to re-score recall results; compare relevance and latency before enabling it. SAGE can manage both models locally." /></h3>
                         <div class="settings-row" style="align-items:center;">
                             <span class="label">${statusDot(embedderStatus.online)} Smart memory embeddings</span>
                             <span class="value" role="group" aria-label="Embedding provider" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
@@ -12487,6 +12487,7 @@ function NetworkPage({ sse, accessMode = false }) {
                                                         onChange=${e => { setEditCapabilities(e.target.checked ? (editCapabilities | 16) : (editCapabilities & ~16)); setAccessDirty(true); }} />
                                                     <span>Block federated agent inbox messages (local notes remain available)</span>
                                                 </label>
+                                                <div class="muted">Blocking messages does not hide this agent from connected SAGEs. To hide it, turn off Visible in a connection’s Agent discovery settings.</div>
                                             </div>
 
                                             <div class="access-section-title">Domain Access <${HelpTip} text="Control which knowledge domains this agent can read, write, or modify. Modify is level 3 and includes permission to challenge/deprecate or reinstate memories. The domain owner normally authorizes the change. For an agent installed on this computer, the genesis admin can explicitly override access without changing the original owner or memory authorship." /></div>
@@ -14641,11 +14642,11 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                             ${rerankOn ? html`
                                 <div style="display:flex;align-items:center;gap:10px;margin-top:10px;background:var(--success-tint);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
                                     <span style="color:var(--accent);font-size:18px;">✓</span>
-                                    <div style="font-size:13px;">The <strong>reranker</strong> is on too - recall results get re-scored for sharper relevance.</div>
+                                    <div style="font-size:13px;">The <strong>reranker</strong> is on too - recall results get re-scored by a second model. Compare relevance and latency on your own queries.</div>
                                 </div>
                             ` : html`
                                 <div style="margin-top:12px;">
-                                    <div style="font-size:13px;color:var(--text-dim);">Recommended extra: the <strong>reranker</strong> re-scores recall results for sharper relevance. Fully automatic - SAGE downloads the engine and model itself (one-time ~650 MB) and manages the process.</div>
+                                    <div style="font-size:13px;color:var(--text-dim);">Optional: the <strong>reranker</strong> re-scores recall results using a second model. Compare relevance and latency before enabling it. SAGE downloads the engine and model (one-time ~650 MB) and manages the process.</div>
                                     <button class="btn btn-primary" style="margin-top:8px;" onClick=${() => setShowRerankSetup(true)}>Set up the reranker - one click</button>
                                 </div>
                             `}
@@ -15313,7 +15314,7 @@ function OverviewPage({ sse }) {
                         <span style="font-size:12px;color:var(--text-muted);">Recall is keyword-only right now - the biggest upgrade you can make.</span>
                     ` : html`
                         <button class="btn btn-primary" onClick=${() => setShowRerankSetup(true)}>Set up the reranker →</button>
-                        <span style="font-size:12px;color:var(--text-muted);">One click, fully managed - re-scores recall results for sharper relevance.</span>
+                        <span style="font-size:12px;color:var(--text-muted);">Optional local model. Compare relevance and latency before enabling it.</span>
                     `}
                 </div>
             ` : ''}`)}
@@ -17792,7 +17793,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy, loc
 			<div class="fed-perm-section-head">
 				<div>
 					<h4 id=${`fed-discovery-heading-${chain}`}>Agent discovery on ${peerName}</h4>
-					<p>Who ${peerName} can find when it lists or searches for an agent on this SAGE. Flip the Visible switch on any agent in the directory above, or use these two buttons to move all of them at once. This is listing and search only: it never grants memory access, and a discovered agent still has to accept before anything is delivered.</p>
+					<p>Who ${peerName} can find when it lists or searches for an agent on this SAGE. Flip the Visible switch on any agent in the directory above, or use these two buttons to move all of them at once. This is listing and search only: it never grants memory access, and a discovered agent still has to accept before anything is delivered. Agents with messaging blocked can remain visible as Not accepting.</p>
 				</div>
 				<span class="fed-discovery-summary" role="status" aria-live="polite">${agentExposure === null
 					? 'Loading…'

@@ -5558,6 +5558,8 @@ func (s *Server) toolPipeReceiptStatus(ctx context.Context, params map[string]an
 	return response, nil
 }
 
+const pipeTargetResolutionGuidance = "Use an exact local agent ID or registered/display name, a federated #node/agent-prefix handle, or agent_id@chain. Use sage_find_agent to discover matching names and sage_directory for local agent IDs. A provider label resolves only when it exactly matches registered agent metadata; arbitrary provider aliases are not inferred."
+
 func (s *Server) toolPipe(ctx context.Context, params map[string]any) (any, error) {
 	if err := s.requireBoundFederatedCaller(ctx); err != nil {
 		return nil, err
@@ -5587,10 +5589,10 @@ func (s *Server) toolPipe(ctx context.Context, params map[string]any) (any, erro
 		DestinationChainID string `json:"destination_chain_id"`
 	}
 	if err := s.doSignedJSON(ctx, "POST", "/v1/pipe/resolve", resolveBody, &resolved); err != nil {
-		return nil, fmt.Errorf("pipeline target resolution: %w", err)
+		return nil, fmt.Errorf("pipeline target resolution: %w. %s", err, pipeTargetResolutionGuidance)
 	}
 	if resolved.ToAgent == "" && resolved.ToProvider == "" {
-		return nil, fmt.Errorf("pipeline target resolution returned no exact target")
+		return nil, fmt.Errorf("pipeline target resolution returned no exact target. %s", pipeTargetResolutionGuidance)
 	}
 	// Local compatibility sends delegate to the canonical Messages service so
 	// there is one queue and one insertion path. The legacy tool has no caller

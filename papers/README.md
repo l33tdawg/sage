@@ -26,16 +26,39 @@ Presents a longitudinal study measuring whether consensus-validated institutiona
 
 ## Priority & Provenance
 
-All papers are timestamped via:
-- **Git commit history** — root commit of the published history, [`f2097605`](https://github.com/l33tdawg/sage/commit/f2097605e48f212512337c016c2cbcf0acdeeff9) dated 2026-03-02
-- **Zenodo DOI** — permanent, citable digital object identifiers (see below)
-- **GitHub Release** — tagged releases with SHA-256 checksums
+Source and paper provenance:
+- **Source Git history** — root commit of the current published history, [`f2097605`](https://github.com/l33tdawg/sage/commit/f2097605e48f212512337c016c2cbcf0acdeeff9) dated 2026-03-02; this source date does not establish a paper's publication date
+- **Zenodo DOI** — archived paper versions and their individual publication dates (see below)
+- **GitHub Release** — tagged source releases with SHA-256 checksums
 
-Reproducibility note: Papers 2 and 4 draw on the Level Up CTF experiment pipeline. The
-published tree carries `integrations/levelup/experiment_protocol.py` and `sage_bridge.py`;
-the pipeline's scripts and run records are excluded for IP reasons (see the Level Up
-Integration section of `.gitignore`), so the paper statistics cannot be re-derived from a
-fresh clone. The PDFs and the Zenodo records above are the citable artifacts.
+### Public experiment materials (2026-10-05)
+
+Papers 2, 3 and 4 draw on the Level Up CTF experiment pipeline. The published
+current `main` tree carries `integrations/levelup/experiment_protocol.py` and `sage_bridge.py`.
+The pipeline scripts, organizational wiring, agent mesh, generated challenge
+artifacts and run records are excluded from that tree for IP reasons (see the Level Up
+Integration section of `.gitignore`). A fresh clone therefore cannot rerun
+those experiments or independently re-derive their reported statistics.
+
+Paper 3, page 18, describes the experiment harness and associated materials as
+"fully open-source." That description is broader than the materials available
+in the current `main` tree. Its two published integration files provide a
+protocol/statistics component and a bridge; they do not constitute the complete
+experiment pipeline. This repository-side note corrects the availability claim.
+
+Earlier repository provenance text named `23b45930b0dc097f56978a99f45a11c93571b60b`
+as the initial commit. That historical commit remains accessible on GitHub,
+but it is not an ancestor of the current published `main` history. The current
+history begins at `f2097605e48f212512337c016c2cbcf0acdeeff9`. Cite an exact source
+revision and the individual Zenodo records for archived paper versions and
+publication dates. A historical source identifier alone does not establish
+that the complete experiment materials are publicly available.
+
+The PDF files are unchanged by this disclosure. Their sizes and MD5 digests
+match the files listed in the four Zenodo records as checked on 2026-10-05.
+The SHA-256 values below identify the PDFs in this repository; Paper 4's earlier
+README checksum was stale and has been corrected. Read the archived PDFs'
+reproducibility statements together with this disclosure.
 
 ## Zenodo DOIs
 
@@ -53,7 +76,7 @@ fresh clone. The PDFs and the Zenodo records above are the citable artifacts.
 c10859717df7cde0d986f43526931df0ac6667964d0347195d9388b8e9fcbc72  Paper1 - Agent Memory Infrastructure - Byzantine-Resilient Institutional Memory for Multi-Agent Systems.pdf
 277c4a3ad290c4d645da5e00a9596bf9bc3ec34f67ffa747580dadfa8b592796  Paper2 - Consensus-Validated Memory Improves Agent Performance on Complex Tasks.pdf
 e8f16b4dcf9868467de17b9ea9f983e2a3128fed55d33d32bfa24133f9de2e6d  Paper3 - Institutional Memory as Organizational Knowledge - AI Agents That Learn Their Jobs from Experience Not Instructions.pdf
-b2c1e0e87f00da74832480130f432230f2cde42e55869b15c20cf8909c8bb767  Paper4 - Longitudinal Learning in Governed Multi-Agent Systems - How Institutional Memory Improves Agent Performance Over Time.pdf
+10653d6e19b9a83ec3533ec16b69211f44b25c195dd982d88d810bcc1be35539  Paper4 - Longitudinal Learning in Governed Multi-Agent Systems - How Institutional Memory Improves Agent Performance Over Time.pdf
 ```
 
 ## License

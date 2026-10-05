@@ -12,22 +12,23 @@ Thanks for your interest in contributing to (S)AGE. This document covers the pro
 
 ## Development Setup
 
+Read [test surfaces and CI evidence](test/README.md) before selecting a suite. Default tests and serverless fixtures can run without a SAGE node:
+
 ```bash
-# Start the network
-make init
-make up
-
-# Run all tests
-make test          # 48 Go unit tests
-make integration   # 13 integration tests (needs running network)
-make sdk-test      # 21 Python SDK tests
-make lint          # golangci-lint
-
-# Python SDK development
-cd sdk/python
-pip install -e ".[dev]"
-pytest -v
+make test
+make sdk-test
+make lint
+npm ci
+npm test
+npx playwright install chromium
+npm run test:e2e:fixtures
+pip install -r bench/requirements-test.txt
+python3 -m unittest discover -s bench -p 'test_*.py' -v
 ```
+
+Ordinary tagged integration and 191 legacy browser tests are manual surfaces with disposable deployment prerequisites and known modernization gaps. They are not verified by the default unit tests or the nine CI browser fixtures. Follow the linked guide; do not start/recreate a shared personal node to run tests.
+
+Python SDK development uses `cd sdk/python`, `pip install -e ".[dev]"`, and `pytest -v`.
 
 ## Pull Requests
 

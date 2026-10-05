@@ -15,12 +15,13 @@ import (
 )
 
 var (
-	ErrRemotePipeTargetNotFound       = errors.New("remote pipe target not found")
-	ErrRemotePipeTargetAmbiguous      = errors.New("remote pipe target is ambiguous")
-	ErrRemotePipeTargetUnavailable    = errors.New("remote pipe target is unavailable")
-	ErrRemotePipeTargetNotAccepting   = errors.New("remote pipe target is not accepting work requests")
-	ErrRemotePipePeerUnsupported      = errors.New("remote SAGE does not support federated pipeline delivery")
-	ErrRemotePipeResolutionIncomplete = errors.New("remote pipe target resolution is incomplete")
+	ErrRemotePipeTargetNotFound        = errors.New("remote pipe target not found")
+	ErrRemotePipeTargetAmbiguous       = errors.New("remote pipe target is ambiguous")
+	ErrRemotePipeTargetUnavailable     = errors.New("remote pipe target is unavailable")
+	ErrRemotePipeTargetNotAccepting    = errors.New("remote pipe target is not accepting work requests")
+	ErrRemotePipePeerUnsupported       = errors.New("remote SAGE does not support federated pipeline delivery")
+	ErrRemotePipeLocalStoreUnavailable = errors.New("local federated pipeline storage is unavailable")
+	ErrRemotePipeResolutionIncomplete  = errors.New("remote pipe target resolution is incomplete")
 )
 
 type remotePipeCandidate struct {
@@ -619,7 +620,7 @@ func (m *Manager) resolveRemotePipeTarget(ctx context.Context, target string, al
 	unsupportedPeers := 0
 	ss := m.syncStore()
 	if ss == nil {
-		return nil, ErrRemotePipePeerUnsupported
+		return nil, ErrRemotePipeLocalStoreUnavailable
 	}
 	for i := range agreements {
 		agreement := agreements[i]
