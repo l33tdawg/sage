@@ -146,14 +146,20 @@ a correction submitted via `sage_remember(replaces_memory_id=...)` therefore car
 new content hash.
 
 That check lives in the voter, so it only covers paths that vote. A co-commit
-(`POST /v1/cocommit/submit`) commits on block inclusion and never consults the voter at
-all, so the same tombstone question is asked once more at the REST submission boundary
-(`api/rest/cocommit_handler.go`): a content hash another row already carried past
-`proposed` returns `409 Tombstoned content`, with the envelope's own `SharedID` excluded
-so an idempotent re-send is not refused by the row it wrote, and a projection error fails
-open rather than blocking the surface. Two limits are worth stating plainly. It is a
-submission-boundary check, not a consensus rule — a node broadcasting a co-commit
-transaction directly, without this node's REST surface, is not covered by it. And it
-sits here *because* the consensus path deliberately reads no off-chain state: the
-content-hash index lives in the serving projection, so a deterministic in-consensus
-version of this check would mean folding that index into the app hash.
+(`POST /v1/cocommit/submit`) commits on block inclusion and never consults the
+voter. The REST submission guard checks the serving projection for another row
+with the same content hash that has left `proposed`, returning
+`409 Tombstoned content`. It excludes the envelope's own `SharedID`, and a
+projection lookup error still allows broadcast (`api/rest/cocommit_handler.go`,
+`handleCoCommitSubmit`).
+
+Before app-v28 activation, that REST guard is not a consensus rule: a directly
+broadcast co-commit bypasses it. After activation, from H+1, consensus also
+checks the canonical AppHash-covered reverse index and rejects matching content
+under another ID. The `SharedID` exclusion remains; a prior co-commit core has
+its own resubmission guard. A canonical lookup error refuses the transaction
+rather than treating the SQL guard's fail-open behavior as permission to commit
+(`internal/abci/app.go`, `processCoCommitSubmit`;
+`internal/store/cocommit_tombstone.go`, `CoCommitTombstoned`). Consensus reads no
+serving-projection state. See [app-v28 lifecycle](app-v28-lifecycle.md) for the
+activation, index promotion and replay boundary.

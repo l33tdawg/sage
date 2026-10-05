@@ -1,8 +1,10 @@
-<!-- Reconciled through SAGE v11.13.5. -->
+<!-- Status model and compatibility notes reconciled with SAGE v11.23.14, source baseline 8a9c75bfbe7365bef031a2ca127885be9b9d9734. -->
 
 # Memory Lifecycle
 
-Verified against code at SAGE v11.13.5.
+Status model and compatibility notes verified against SAGE v11.23.14, source
+baseline `8a9c75bfbe7365bef031a2ca127885be9b9d9734`. Historical sections below
+identify their fork boundaries.
 
 ## Overview
 
@@ -12,49 +14,56 @@ A SAGE memory begins as an agent-signed REST request and ends as a consensus-com
 
 ## Status Model
 
-Defined in `internal/memory/model.go:22-31`.
+The status values remain defined in `internal/memory/model.go`, `MemoryStatus`.
+Current ordinary submissions follow the consensus handlers below; there is no
+separate callable transition map.
 
-```
-proposed
-   ├── validated   (declared, no writer — see the note below)
-   │      ├── committed
-   │      └── deprecated
-   ├── committed   (quorum reached)
-   │      ├── challenged
-   │      │      ├── committed   (challenge rejected)
-   │      │      └── deprecated
-   │      └── deprecated
-   └── deprecated  (quorum failed, or challenge upheld)
-```
+| From | Result | Current execution path |
+|------|--------|------------------------|
+| No record | `proposed` | Ordinary submit (`internal/abci/app.go`, `processMemorySubmit`). |
+| `proposed` | `committed` or `deprecated` | Weighted content-vote quorum (`internal/abci/app.go`, `processMemoryVote`, `checkAndApplyQuorum`). Commit is direct; it does not pass through `validated`. |
+| `committed` | `challenged` or `deprecated` | Authorized challenge: park an open round or resolve immediately when its threshold is met (`internal/abci/app.go`, `processMemoryChallenge`). |
+| `challenged` | `committed` or `deprecated` | Authorized reinstatement, or enough distinct challengers to resolve the open round (`internal/abci/app.go`, `processMemoryReinstate`, `processMemoryChallenge`). |
 
-Documentation transition map (`internal/memory/lifecycle.go`, `validTransitions`):
+After app-v21 activation, a fresh challenge can open only over a committed
+record. A proposed record is rejected by that challenge path; it does not move
+to `challenged` or bypass content-vote quorum. Earlier challenge rules retain
+their historical behavior for replay, including one-strike deprecation of a
+proposed record (`internal/abci/app.go`, `processMemoryChallenge`). Reinstatement
+requires a currently challenged record and its open challenge state; it does
+not revive a deprecated record (`internal/abci/app.go`, `processMemoryReinstate`).
 
-| From        | Allowed targets              |
-|-------------|------------------------------|
-| proposed    | validated, challenged, deprecated |
-| validated   | committed, deprecated        |
-| committed   | challenged, deprecated       |
-| challenged  | committed, deprecated        |
+`validated` has no production writer. It remains a recognized stored status:
+`IsValidStatus` (`internal/memory/model.go`) accepts it, and hash re-anchor
+validation recognizes the enum while allowing repair only for `committed` or
+`deprecated` records (`internal/store/memory_hash_reanchor.go`,
+`validateMemoryHashReanchorEntries`, `validateMemoryHashReanchorState`). Keeping
+the enum preserves historical status decoding and replay. Recall filters
+hard-code `status IN ('committed','challenged')`, so a row in that state is
+invisible to agents rather than ranked low. Treat it as reserved wire surface
+rather than a lifecycle step; adding a writer means moving the read filters in
+the same change.
 
-`deprecated` is terminal — no forward transition exists.
+Deprecated ordinary records are not reopened by current submission or voting:
+app-v25 exact-envelope replays are no-ops, conflicting submissions are rejected,
+and the voter requires `proposed` (`internal/abci/app.go`, `processMemorySubmit`,
+`processMemoryVote`, `checkAndApplyQuorum`). That is not a universal guarantee
+that no code can ever overwrite a deprecated status. A valid co-commit writes
+`committed` directly and can reclaim its predictable SharedID from a normal
+memory that occupied that slot, unless the slot already carries a co-commit
+core. This collision defense is distinct from reinstatement, and app-v28 still
+checks the co-commit's content hash against other records' tombstones
+(`internal/abci/app.go`, `processCoCommitSubmit`). The narrowly guarded legacy
+`RepairSelfDupRejectedMemories` helper can reset matching self-dedup rejections
+to `proposed` only for an explicitly asserted single-node deployment with
+exactly its own validator. It has no production caller and is not the ordinary
+transaction lifecycle (`internal/abci/app.go`, `RepairSelfDupRejectedMemories`).
 
-`validated` is the one status nothing writes. It stays in the enum because
-`IsValidStatus` and the on-chain hash re-anchor accept it, so a chain that
-already carries the value still decodes and replays byte-identically — but no
-path produces it: not the submit transaction, not the voter, not the dashboard,
-not the SDK. Recall filters hard-code `status IN ('committed','challenged')`, so
-a row in that state is invisible to agents rather than ranked low. Treat it as
-reserved wire surface rather than a lifecycle step; adding a writer means moving
-the read filters in the same change.
-
-The transition map above has no production callers, as its own comment says
-(`internal/memory/lifecycle.go`, `validTransitions`, `Transition`). Consensus
-writes statuses imperatively and does not consult it; for example, quorum can
-commit a proposed record directly. Keep this map as a reference model, not an
-authority for admitting transactions or rewriting historical statuses. The old
-unused `ValidateMemoryRecord` helper has been removed; submission validation
-remains in `api/rest/memory_handler.go`, `handleSubmitMemory`, and consensus
-independently validates its transaction payload.
+The unused transition helpers and `ValidateMemoryRecord` have been removed.
+Submission validation remains in `api/rest/memory_handler.go`,
+`handleSubmitMemory`, and consensus independently validates its transaction
+payload. Removing the unused helpers changes no statuses, wire formats,
+consensus checks or historical replay rules.
 
 ---
 
@@ -128,7 +137,7 @@ In a one-strike path there is no separate voting round: the challenged memory tr
 - **Two or more holders → park as `challenged`.** A live `committed` memory is parked `challenged` with an AppHash-folded challenge record carrying the challenger, execution height, the measured quorum, and the prior hash/status snapshot (`SetChallengeRecord`, `app.go:3968-3980`; `status_update` stamps `DisputedHeight`/`DisputedQuorum`, `app.go:3993-3999`). The measured count is persisted and **never re-measured** at resolution. A `priorStatus == committed` guard is load-bearing: it confines the two-phase machine to committed memories, so a `deprecated` memory can never be resurrected through the park path and a `proposed` one can never skip the content-validation quorum.
 - **Confirm → `deprecated`.** A *distinct* modify-verb holder re-issues the challenge to finalize the deprecation; the original challenger **cannot** self-confirm (Code 93, `app.go:3915-3917`), which would collapse two-phase back into one-strike.
 
-**`TxTypeMemoryReinstate` (`processMemoryReinstate`)** drives the `challenged → committed` transition now represented in the `validTransitions` map. It is a new dual-gated tx (CheckTx + handler, returning Code 10 "unknown tx type" pre-fork so a non-activated chain replays byte-identically) taking a `challenged` memory back to `committed` and restoring the original content hash captured in the challenge record (the commit and deprecate paths nil that hash, so a reinstate without the record would leave a hash-less husk). Current modify-verb holders may reinstate. The original challenger may **always withdraw** using the AppHash-folded `ChallengerID`, even if their level-3 grant expires or is revoked while the dispute is open. Rejections: Code 94 not-challenged/double-resolve, Code 92 unauthorized. The operation is reachable through REST (`POST /v1/memory/{id}/reinstate`), MCP (`sage_reinstate`), and both Python SDK clients (`reinstate()`).
+**`TxTypeMemoryReinstate` (`processMemoryReinstate`)** drives the `challenged → committed` transition in consensus (`internal/abci/app.go`, `processMemoryReinstate`). It is a new dual-gated tx (CheckTx + handler, returning Code 10 "unknown tx type" pre-fork so a non-activated chain replays byte-identically) taking a `challenged` memory back to `committed` and restoring the original content hash captured in the challenge record. Current modify-verb holders may reinstate. The original challenger may **always withdraw** using the AppHash-folded `ChallengerID`, even if their level-3 grant expires or is revoked while the dispute is open. Rejections: Code 94 not-challenged/double-resolve, Code 92 unauthorized. The operation is reachable through REST (`POST /v1/memory/{id}/reinstate`), MCP (`sage_reinstate`), and both Python SDK clients (`reinstate()`).
 
 **app-v21 - corroboration-weighted challenge rounds.** App-v21 is a governed, strict-`>` switch: chains that do not activate it retain the exact `legacy_v17` policy above, and the activation block itself still executes under that legacy policy. A fresh post-v21 challenge over a committed memory snapshots the sorted union of current modify holders (owner/ancestor owners plus live level-3 grantees) and current read-authorized AppHash-covered `corrob:<memory>:<agent>` supporters. New post-v21 corroborations themselves require that same read access, preventing arbitrary signed identities from manufacturing immunity. Only a live modify holder may open the dispute; a snapshotted corroborator may then reverse their support by endorsing that open round. The opener's own corroboration is excluded because their challenge already supersedes that support. If the resulting eligible canonical corroborator count is `k`, deprecation requires `k+1` distinct challengers from the frozen union. Thus `k=0` still deprecates on the first challenge, while an eight-corroborator memory requires nine distinct challengers—even when those supporters do not hold the modify verb.
 
@@ -306,6 +315,7 @@ A memory reaches `deprecated` via these paths:
 2. **Challenge (one-strike)**: a `TxTypeMemoryChallenge` is included in a block → immediately deprecated (`app.go:4011`). No secondary vote. This is the behavior before app-v17 activates; between app-v17 and app-v21 it also applies to a domain with a single modify-verb holder. Post-app-v21, immediate resolution instead means `k=0` eligible corroborators.
 3. **Challenge confirmed (app-v17 two-phase)**: on a domain with two or more modify-verb holders the first authorized challenge parks the memory `challenged`; a second, *distinct* modify-verb holder's confirming challenge finalizes the deprecation (`app.go:3918-3943`). The original challenger cannot self-confirm.
 4. **Corroboration-weighted challenge (app-v21)**: a governed post-v21 chain snapshots current modify holders plus current read-authorized canonical corroborators and requires `k+1` distinct challengers, where `k` is the eligible supporter count excluding the opener. Zero corroborators still resolve immediately; oversized modifier rosters use the bounded app-v17 two-party fallback and oversized supporter rosters use a deterministic bounded committee.
-5. **Explicit transition**: `ValidTransition(proposed → deprecated)` and `ValidTransition(validated → deprecated)` are also allowed for administrative paths, though no current public tx type drives them directly.
+
+After app-v21 activation, fresh challenges require a committed target; pending proposed records instead reach deprecation through failed content-vote quorum. These are handler-enforced rules, not edges from a separate transition utility (`internal/abci/app.go`, `processMemoryChallenge`, `checkAndApplyQuorum`).
 
 Deprecated memories remain in PostgreSQL for audit purposes and are queryable by ID but are excluded from default similarity search results (callers can override with `status_filter`).
