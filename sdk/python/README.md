@@ -2,7 +2,7 @@
 
 Python client for the SAGE (Sovereign Agent Governed Experience) protocol -- a governed, verifiable institutional memory layer for multi-agent systems.
 
-**Requires Python 3.10+** | **SAGE v11.23.14 SDK** | **TLS, app-v27 record-author lifecycle authority, app-v26 explicit Access Group authority, app-v24 memory integrity, app-v25 immutable envelopes and historical continuity recovery, canonical local and federated Messages with read receipts, read-only federation, scoped governance, and per-record `classification` supported**
+**Requires Python 3.10+** | **SAGE v11.23.15 SDK** | **TLS, app-v27 record-author lifecycle authority, app-v26 explicit Access Group authority, app-v24 memory integrity, app-v25 immutable envelopes and historical continuity recovery, canonical local and federated Messages with read receipts, read-only federation, scoped governance, and per-record `classification` supported**
 
 ## Installation
 
@@ -264,7 +264,7 @@ judging runs or the operator reviews it. A transaction receipt is not the
 memory's final approval; inspect `get_memory(result.memory_id)` for its lifecycle
 status. Built-in rejection checks still apply after an operator decision.
 
-In SDK v11.23.14, `propose()` has no `evidence_id` parameter or evidence-upload
+In SDK v11.23.15, `propose()` has no `evidence_id` parameter or evidence-upload
 helper. To supply source text, use MCP `sage_remember(evidence=...)` or the
 signed REST upload/submission flow. Do not put private source text in the memory
 content to work around this: memory content enters the transaction. See the

@@ -97,7 +97,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.14`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.15`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -314,7 +314,21 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.23.14 and earlier)</summary>
+<summary>Recent release notes (v11.23.15 and earlier)</summary>
+
+## What's New in v11.23.15
+
+**MCP stdio bridges exit when their client process dies.** Inherited pipes can keep a bridge's input open after its client has gone. SAGE now watches the original parent process, cancels its tools and subscriptions on confirmed parent exit, and bounds cleanup even when input or output is blocked. An idle client keeps its bridge.
+
+**Correction lineage resolves by content hash in CEREBRUM.** The graph and related-memory view find the parent of a correction through bounded metadata lookups on SQLite and PostgreSQL. Legacy exact-ID pointers still work; ambiguous hashes and hidden parents do not expose a lineage edge or memory body.
+
+**A malformed reranker response preserves the original recall results.** Missing, duplicate or invalid candidate indices and non-finite scores now discard the reranking response as a whole, keeping the existing reciprocal-rank-fusion ordering. The optional reranker remains off by default; its guidance now asks users to compare relevance and latency on their own queries.
+
+**Federation and message failures explain the next step.** Local storage and target-resolution failures, plus failed requests to known peers, include bounded diagnostics and remedies. Route diagnostics report only attempted candidates and omit credentials, payloads and peer response bodies. Messaging controls also explain that blocking delivery does not hide an agent from discovery.
+
+The release removes unused memory-transition helpers, expands bounded CI coverage, and documents reproducible retrieval benchmarks and the limits of the public research artifacts. No consensus execution change, app-version change or chain migration; app-v28 remains active. The local judge model stays pinned to the qualified v15 artifact.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.15`. SDK 11.23.15.
 
 ## What's New in v11.23.14
 
