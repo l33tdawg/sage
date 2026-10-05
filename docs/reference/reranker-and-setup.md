@@ -135,9 +135,15 @@ Returns the current values (`handleGetRecallSettings`, `web/handler.go:5298-5330
 
 **Response** (HTTP 200): `{"top_k": 5, "min_confidence": 70}`
 
-Defaults when unset: `top_k` = 5 (`web/handler.go:2451`), `min_confidence` = 70
-(percent; `web/handler.go:2458`). The 70% default catches observations (0.80+)
-and inferences (0.60+), not just facts.
+Defaults when unset: `top_k` = 5, `min_confidence` = 70 percent
+(`web/handler.go`, `handleGetRecallSettings`). The 70% floor admits facts and
+observations whose effective confidence remains at least 0.70; it excludes
+the base 0.60 inference tier and observations that have decayed below 0.70.
+The query floor applies before the top-K trim. `sage_recall` discloses the
+applied `confidence_floor`; a caller may explicitly lower `min_confidence`
+to inspect lower-confidence results within the same authorization scope
+(`api/rest/memory_handler.go`, `setFilterInfo`; `internal/mcp/tools.go`,
+`confidenceFloorDisclosure`; `internal/store/sqlite.go`, `QuerySimilar`).
 
 ### `POST /v1/dashboard/settings/recall`
 

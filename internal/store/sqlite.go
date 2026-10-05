@@ -2614,9 +2614,23 @@ func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidate
 	}
 
 	scored, err := reranker.Rerank(ctx, query, texts)
-	if err != nil || len(scored) == 0 {
-		// Best-effort: if the reranker is unreachable or returns nothing
-		// useful, surface the RRF ordering rather than fail the whole recall.
+	validScores := err == nil && len(scored) == len(candidates)
+	seen := make([]bool, len(candidates))
+	for _, r := range scored {
+		if !validScores {
+			break
+		}
+		if r.Index < 0 || r.Index >= len(candidates) || seen[r.Index] ||
+			math.IsNaN(r.Score) || math.IsInf(r.Score, 0) {
+			validScores = false
+			break
+		}
+		seen[r.Index] = true
+	}
+	if !validScores {
+		// A reranker must score every candidate exactly once with a finite
+		// score. Reject the whole malformed response before changing the
+		// healthy RRF ordering, rather than dropping unscored candidates.
 		if len(candidates) > topK {
 			candidates = candidates[:topK]
 		}
@@ -2629,19 +2643,8 @@ func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidate
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 
 	out := make([]*memory.MemoryRecord, 0, topK)
-	seen := make(map[int]struct{}, len(scored))
-	for _, r := range scored {
-		if r.Index < 0 || r.Index >= len(candidates) {
-			continue
-		}
-		if _, dup := seen[r.Index]; dup {
-			continue
-		}
-		seen[r.Index] = struct{}{}
+	for _, r := range scored[:topK] {
 		out = append(out, candidates[r.Index])
-		if len(out) >= topK {
-			break
-		}
 	}
 	return out, nil
 }
