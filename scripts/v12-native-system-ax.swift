@@ -131,6 +131,7 @@ private func wasVisited(
 
 private func findElement(
     in application: AXUIElement,
+    skipTableRows: Bool = false,
     predicate: (AXUIElement) -> Bool
 ) -> AXUIElement? {
     var queue: [(element: AXUIElement, depth: Int)] = [(application, 0)]
@@ -141,6 +142,12 @@ private func findElement(
         cursor += 1
         guard !wasVisited(entry.element, buckets: &visited) else { continue }
         if predicate(entry.element) { return entry.element }
+        // Locating chrome must not scan hundreds of table rows first. Row text
+        // is traversed separately, under the exact selected AXRow.
+        if skipTableRows,
+           [kAXTableRole as String, kAXOutlineRole as String].contains(
+               stringAttribute(entry.element, kAXRoleAttribute as CFString) ?? ""
+           ) { continue }
         guard entry.depth < traversalLimits["maximum_depth"]! else { continue }
         queue.append(contentsOf: pagedChildren(entry.element).map { ($0, entry.depth + 1) })
     }
@@ -148,7 +155,7 @@ private func findElement(
 }
 
 private func findElement(identifier: String, in application: AXUIElement) -> AXUIElement? {
-    findElement(in: application) {
+    findElement(in: application, skipTableRows: true) {
         stringAttribute($0, kAXIdentifierAttribute as CFString) == identifier
     }
 }
@@ -293,27 +300,62 @@ private func waitForMatch(
     throw ProbeFailure.timeout("timed out waiting for \(description)")
 }
 
-private func pressMenuPath(
-    _ path: [String], application: AXUIElement, deadline: ContinuousClock.Instant
-) throws -> [String: Any] {
-    guard let first = path.first, path.count >= 2,
-          let menuBar = elementAttribute(application, kAXMenuBarAttribute as CFString)
-    else { throw ProbeFailure.assertion("application has no AX menu bar") }
-    FileHandle.standardError.write(Data("AX menu: \(path.joined(separator: " > "))\n".utf8))
-    var parent = try waitForMatch(in: menuBar, deadline: deadline, description: "menu \(first)") {
-        stringAttribute($0, kAXRoleAttribute as CFString) == (kAXMenuBarItemRole as String) &&
-            stringAttribute($0, kAXTitleAttribute as CFString) == first
-    }
-    var results: [Int32] = []
-    results.append(try press(parent, operation: "AXPress menu \(first)").rawValue)
+private func currentMenuItem(path: [String], application: AXUIElement) -> AXUIElement? {
+    guard let first = path.first,
+          let menuBar = elementAttribute(application, kAXMenuBarAttribute as CFString),
+          var item = findElement(in: menuBar, predicate: {
+              stringAttribute($0, kAXRoleAttribute as CFString) == (kAXMenuBarItemRole as String) &&
+                  stringAttribute($0, kAXTitleAttribute as CFString) == first
+          }) else { return nil }
     for title in path.dropFirst() {
-        let item = try waitForMatch(in: parent, deadline: deadline, description: "menu item \(title)") {
+        guard let child = findElement(in: item, predicate: {
             stringAttribute($0, kAXRoleAttribute as CFString) == (kAXMenuItemRole as String) &&
                 stringAttribute($0, kAXTitleAttribute as CFString) == title &&
                 boolAttribute($0, kAXEnabledAttribute as CFString) == true
+        }) else { return nil }
+        item = child
+    }
+    // AX menu elements can be reused for another item while SwiftUI rebuilds.
+    // Recheck the resolved leaf and never carry a parent across an AXPress.
+    guard stringAttribute(item, kAXTitleAttribute as CFString) == path.last else { return nil }
+    return item
+}
+
+private func pressMenuPath(
+    _ path: [String], application: AXUIElement, deadline: ContinuousClock.Instant
+) throws -> [String: Any] {
+    guard path.count >= 2 else { throw ProbeFailure.assertion("menu path requires a command") }
+    FileHandle.standardError.write(Data("AX menu: \(path.joined(separator: " > "))\n".utf8))
+    var results: [Int32] = []
+    for length in 1...path.count {
+        let prefix = Array(path.prefix(length))
+        var item: AXUIElement?
+        while clock.now < deadline {
+            if let current = currentMenuItem(path: prefix, application: application) {
+                item = current
+                break
+            }
+            usleep(20_000)
         }
-        results.append(try press(item, operation: "AXPress \(title)").rawValue)
-        parent = item
+        guard let item else {
+            var entries: [[String: Any]] = []
+            if let menuBar = elementAttribute(application, kAXMenuBarAttribute as CFString) {
+                _ = findElement(in: menuBar) { element in
+                    if entries.count < 32 {
+                        entries.append([
+                            "role": stringAttribute(element, kAXRoleAttribute as CFString) ?? "",
+                            "title": stringAttribute(element, kAXTitleAttribute as CFString) ?? "",
+                            "enabled": boolAttribute(element, kAXEnabledAttribute as CFString) ?? false,
+                        ])
+                    }
+                    return entries.count >= 32
+                }
+            }
+            let diagnostic = try JSONSerialization.data(withJSONObject: ["menu_diagnostic": entries], options: [.sortedKeys])
+            FileHandle.standardError.write(diagnostic + Data("\n".utf8))
+            throw ProbeFailure.timeout("timed out waiting for current menu path \(prefix.joined(separator: " > "))")
+        }
+        results.append(try press(item, operation: "AXPress \(prefix.joined(separator: " > "))").rawValue)
     }
     return ["path": path, "ax_press_results": results]
 }
@@ -332,12 +374,22 @@ private func waitForTable(
 ) throws -> AXUIElement {
     let table: AXUIElement
     do {
-        table = try waitForMatch(in: application, deadline: deadline, description: "row-bearing AX table \(identifier)") {
-            stringAttribute($0, kAXIdentifierAttribute as CFString) == identifier &&
-                [kAXTableRole as String, kAXOutlineRole as String].contains(stringAttribute($0, kAXRoleAttribute as CFString) ?? "") &&
-                attributeCount($0, kAXRowsAttribute as CFString) > 0 &&
-                ownsExactFocus($0, application: application, pid: pid)
+        var focusedTable: AXUIElement?
+        while clock.now < deadline {
+            if let focused = focusedElement(application),
+               stringAttribute(focused, kAXIdentifierAttribute as CFString) == identifier,
+               [kAXTableRole as String, kAXOutlineRole as String].contains(stringAttribute(focused, kAXRoleAttribute as CFString) ?? ""),
+               attributeCount(focused, kAXRowsAttribute as CFString) > 0,
+               ownsExactFocus(focused, application: application, pid: pid) {
+                focusedTable = focused
+                break
+            }
+            usleep(20_000)
         }
+        guard let focusedTable else {
+            throw ProbeFailure.timeout("timed out waiting for row-bearing AX table \(identifier)")
+        }
+        table = focusedTable
     } catch {
         var matches: [[String: Any]] = []
         _ = findElement(in: application) { element in
@@ -371,7 +423,7 @@ private func waitForSelectedRow(
     deadline: ContinuousClock.Instant
 ) throws -> AXUIElement {
     while clock.now < deadline {
-        if let table = findElement(in: application, predicate: {
+        if let table = findElement(in: application, skipTableRows: true, predicate: {
             stringAttribute($0, kAXIdentifierAttribute as CFString) == tableIdentifier &&
                 [kAXTableRole as String, kAXOutlineRole as String].contains(stringAttribute($0, kAXRoleAttribute as CFString) ?? "")
         }), selectedRowContains(table, text: text) { return table }
@@ -444,14 +496,14 @@ private func runBrainMenuFocus(
         throw ProbeFailure.assertion("agent table is not the three-row synthetic fixture")
     }
     try postSyntheticKey(125, flags: [], pid: pid)
-    _ = try waitForSelectedRow("Codex", tableIdentifier: "brain-connectome-table", application: application, deadline: deadline)
+    _ = try waitForSelectedRow("Claude", tableIdentifier: "brain-connectome-table", application: application, deadline: deadline)
     actions.append(try pressMenuPath(["View", "Show Inspector"], application: application, deadline: deadline))
     let agentClose = try waitForElement(identifier: "brain-inspector-close", in: application, deadline: deadline)
     try waitForFocus(element: agentClose, application: application, pid: pid, deadline: deadline)
     _ = try press(agentClose, operation: "AXPress agent inspector close")
     try waitForAbsence(identifier: "brain-inspector-close", application: application, deadline: deadline)
     let finalTable = try waitForTable("brain-connectome-table", application: application, pid: pid, deadline: deadline)
-    guard selectedRowContains(finalTable, text: "Codex") else {
+    guard selectedRowContains(finalTable, text: "Claude") else {
         throw ProbeFailure.assertion("closing the agent inspector lost selection")
     }
     var finalSnapshot = snapshot(finalTable)
@@ -463,6 +515,8 @@ private func runBrainMenuFocus(
         "final": finalSnapshot,
         "memory_selection_preserved": true,
         "agent_selection_preserved": true,
+        "selected_memory_name": "Native CEREBRUM architecture",
+        "selected_agent_name": "Claude", // First row after canonical agent-ID sorting.
         "exact_application_and_system_focus": true,
         "synthetic_windowserver_keyboard_events": true,
         "physical_keyboard_event_routing": false,
@@ -479,8 +533,13 @@ private func runScenario(arguments: Arguments) throws -> [String: Any] {
           ["retry-fail", "retry-restore", "brain-menu-focus"].contains(scenario)
     else { throw ProbeFailure.usage(usage) }
 
+    // An application-element timeout does not apply to menu/child elements.
+    // Bound every RPC for this probe process, including AXPress menu tracking.
+    let timeoutResult = AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 1.0)
+    guard timeoutResult == .success else {
+        throw ProbeFailure.ax("set process-wide AX messaging timeout", timeoutResult)
+    }
     let application = AXUIElementCreateApplication(pid)
-    AXUIElementSetMessagingTimeout(application, 1.0)
     var reportedPID: pid_t = 0
     guard AXUIElementGetPid(application, &reportedPID) == .success, reportedPID == pid else {
         throw ProbeFailure.assertion("AX application PID does not match the requested process")

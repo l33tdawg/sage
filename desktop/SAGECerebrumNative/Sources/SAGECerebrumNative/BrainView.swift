@@ -190,7 +190,7 @@ struct BrainView: View {
         .onChange(of: model.selectedEngramID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedConnectionID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.hasVisibleInspector) { wasVisible, isVisible in
-            guard wasVisible, !isVisible, keyboardFocus == .inspectorClose else { return }
+            guard wasVisible, !isVisible, resolvedKeyboardFocus == .inspectorClose else { return }
             model.inspectorIsPresented = false
             requestFocus(returnFocusTarget)
         }
@@ -1075,7 +1075,7 @@ struct BrainView: View {
         applyMetalEvent(.rendererReported(
             attemptID: attemptID,
             capability: capability,
-            keyboardSurfaceOwned: keyboardFocus == .surface,
+            keyboardSurfaceOwned: resolvedKeyboardFocus == .surface,
             accessibilitySurfaceOwned: accessibilityFocus == .surface
         ))
         if capability == .available, attemptID == pendingMetalRestorationAttemptID {
@@ -1246,7 +1246,7 @@ struct BrainView: View {
                     isReady: model.graph?.nodes.contains(where: { $0.id == "g1" }) == true,
                     selectedMemoryID: model.selectedNodeID,
                     inspectorIsPresented: inspectorIsPresented,
-                    focusTarget: keyboardFocus.map(focusTargetName)
+                    focusTarget: resolvedKeyboardFocus.map(focusTargetName)
                 )
             },
             prepareFirstMemorySelection: {
@@ -1278,6 +1278,21 @@ struct BrainView: View {
         guard let session else { return true }
         return session.acceptsRouteCommands(for: .brain) &&
             session.brainCommandOwner == commandRegistrationID && !session.showsKeyboardShortcuts
+    }
+
+    private var resolvedKeyboardFocus: BrainFocusTarget? {
+        // A represented AppKit control can own firstResponder while SwiftUI's
+        // FocusState is nil. Use the concrete mounted control for ownership;
+        // querying it never changes the responder or requests focus.
+        if let keyWindow = NSApplication.shared.keyWindow {
+            for target in [BrainFocusTarget.surface, .table, .inspectorClose, .metalRetry] {
+                guard let identifier = nativeFocusIdentifier(target),
+                      let view = nativeFocusView(identifier: identifier, target: target),
+                      view.window === keyWindow else { continue }
+                if keyWindow.firstResponder === view { return target }
+            }
+        }
+        return keyboardFocus
     }
 
     private func requestKeyboardFocus(_ target: BrainFocusTarget) {

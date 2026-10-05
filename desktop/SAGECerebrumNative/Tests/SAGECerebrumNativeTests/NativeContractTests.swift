@@ -202,7 +202,6 @@ import Testing
     #expect(commands.contains("CommandGroup(before: .help)"))
     #expect(commands.contains("selected: session.route == route"))
     #expect(commands.contains("select: { session.navigate(to: route) }"))
-    #expect(commands.contains("NSMenu.didBeginTrackingNotification"))
     #expect(!commands.contains("menu.delegate = self"))
     #expect(commands.contains("keyboardShortcut(KeyEquivalent(key), modifiers: command.specification.modifiers)"))
     #expect(commands.contains("Self.shortcutRow(.keyboardShortcuts)"))
@@ -2567,4 +2566,122 @@ private func nativeBrainMenuItems(_ menu: NSMenu) -> [CerebrumCommandID: NSMenuI
     navigation.update()
     view.update()
     #expect(items.allSatisfy { !$0.isEnabled })
+}
+
+@MainActor
+private final class RebuildingNativeMenuDelegate: NSObject, NSMenuDelegate {
+    var rebuilds = 0
+    var closes = 0
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        rebuilds += 1
+        menu.removeAllItems()
+        let focus = NSMenuItem(title: "Focus Search", action: nil, keyEquivalent: "f")
+        focus.keyEquivalentModifierMask = [.command]
+        menu.addItem(focus)
+    }
+
+    func menuDidClose(_ menu: NSMenu) { closes += 1 }
+}
+
+@MainActor
+@Test func nativeMenuRestoresCommandsAfterUpstreamRebuildAndRevalidatesTheirMount() throws {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    session.route = .brain
+    let owner = UUID()
+    session.registerBrainCommands(owner: owner, state: .init(hasInspector: true, hasSelection: true))
+    let coordinator = CerebrumNativeMenuCoordinator(session: session)
+    let upstream = RebuildingNativeMenuDelegate()
+    let menu = NSMenu(title: "View")
+    let delegate = CerebrumMenuUpdateDelegate(upstream: upstream) { menu in
+        coordinator.refreshFocusSearchMenuItem(in: menu)
+        coordinator.refreshBrainMenu(in: menu)
+    }
+    menu.delegate = delegate
+    coordinator.refreshBrainMenu(in: menu)
+    let stale = try #require(nativeBrainMenuItems(menu)[.brainPresentationList])
+    menu.delegate?.menuNeedsUpdate?(menu)
+    #expect(upstream.rebuilds == 1)
+    #expect(menu.items.filter { $0.title == "Focus Search" }.count == 1)
+    let restored = nativeBrainMenuItems(menu)
+    #expect(restored.count == 8)
+    #expect(restored[.brainPresentationList] !== stale)
+    let list = try #require(restored[.brainPresentationList])
+    #expect(NSApplication.shared.sendAction(try #require(list.action), to: list.target, from: list))
+    #expect(session.brainCommandRequest?.command == .brainPresentationList)
+    #expect(session.takeBrainCommand(owner: owner, state: .init()) == .brainPresentationList)
+    session.showsKeyboardShortcuts = true
+    menu.delegate?.menuNeedsUpdate?(menu)
+    #expect(upstream.rebuilds == 2)
+    #expect(nativeBrainMenuItems(menu).count == 8)
+    #expect(nativeBrainMenuItems(menu).values.allSatisfy { !$0.isEnabled })
+    session.showsKeyboardShortcuts = false
+    session.route = .search
+    menu.delegate?.menuNeedsUpdate?(menu)
+    #expect(upstream.rebuilds == 3)
+    #expect(nativeBrainMenuItems(menu).isEmpty)
+    #expect(NSApplication.shared.sendAction(try #require(list.action), to: list.target, from: list))
+    #expect(session.brainCommandRequest == nil)
+}
+
+@MainActor
+@Test func nativeMenuUpdateProxyPreservesOptionalCallbacksAndWeakDelegateLifetime() throws {
+    weak var weakUpstream: RebuildingNativeMenuDelegate?
+    let close = #selector(NSMenuDelegate.menuDidClose(_:))
+    let count = #selector(NSMenuDelegate.numberOfItems(in:))
+    let delegate = autoreleasepool {
+        let upstream = RebuildingNativeMenuDelegate()
+        weakUpstream = upstream
+        let delegate = CerebrumMenuUpdateDelegate(upstream: upstream) { _ in }
+        let menu = NSMenu(title: "View")
+        menu.delegate = delegate
+        #expect(delegate.responds(to: close))
+        #expect(!delegate.responds(to: count))
+        #expect((delegate.forwardingTarget(for: close) as AnyObject?) === upstream)
+        menu.delegate?.menuDidClose?(menu)
+        #expect(upstream.closes == 1)
+        return delegate
+    }
+    #expect(weakUpstream == nil)
+    #expect(!delegate.responds(to: close))
+    #expect(delegate.forwardingTarget(for: close) == nil)
+}
+
+@MainActor
+@Test func nativeMenuCoordinatorFollowsMainMenuReplacementAndKeepsUpstreamUpdates() throws {
+    let previousMenu = NSApplication.shared.mainMenu
+    defer { NSApplication.shared.mainMenu = previousMenu }
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    session.route = .brain
+    session.registerBrainCommands(owner: UUID(), state: .init(hasInspector: true))
+    let first = NSMenu(title: "Main")
+    let firstViewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+    let firstView = NSMenu(title: "View")
+    let firstUpstream = RebuildingNativeMenuDelegate()
+    firstView.delegate = firstUpstream
+    firstViewItem.submenu = firstView
+    first.addItem(firstViewItem)
+    NSApplication.shared.mainMenu = first
+    let coordinator = CerebrumNativeMenuCoordinator()
+    coordinator.install(session: session)
+    #expect(coordinator.refresh())
+    #expect(firstView.delegate is CerebrumMenuUpdateDelegate)
+    #expect(nativeBrainMenuItems(firstView).count == 8)
+
+    let second = NSMenu(title: "Main")
+    let secondViewItem = NSMenuItem(title: "View", action: nil, keyEquivalent: "")
+    let secondView = NSMenu(title: "View")
+    let secondUpstream = RebuildingNativeMenuDelegate()
+    secondView.delegate = secondUpstream
+    secondViewItem.submenu = secondView
+    second.addItem(secondViewItem)
+    NSApplication.shared.mainMenu = second
+    // No explicit coordinator refresh: replacing NSApp.mainMenu must install
+    // the current delegate and commands before this menu is opened.
+    #expect(secondView.delegate is CerebrumMenuUpdateDelegate)
+    #expect(firstView.delegate === firstUpstream)
+    #expect(nativeBrainMenuItems(secondView).count == 8)
+    secondView.delegate?.menuNeedsUpdate?(secondView)
+    #expect(secondUpstream.rebuilds == 1)
+    #expect(nativeBrainMenuItems(secondView).count == 8)
 }

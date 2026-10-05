@@ -7,6 +7,10 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
     private static let inspectorIdentifier = NSUserInterfaceItemIdentifier(CerebrumCommandID.searchToggleInspector.rawValue)
     private weak var session: AppSession?
     private weak var navigationMenu: NSMenu?
+    private weak var viewMenu: NSMenu?
+    private var navigationUpdateDelegate: CerebrumMenuUpdateDelegate?
+    private var viewUpdateDelegate: CerebrumMenuUpdateDelegate?
+    private var mainMenuObservation: NSKeyValueObservation?
     private var observingMenuChanges = false
     private var refreshing = false
     private var refreshScheduled = false
@@ -18,12 +22,16 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
 
     func install(session: AppSession) {
         self.session = session
+        if mainMenuObservation == nil {
+            mainMenuObservation = NSApp.observe(\.mainMenu, options: [.new]) { [weak self] _, _ in
+                MainActor.assumeIsolated { _ = self?.refresh() }
+            }
+        }
         if !observingMenuChanges {
             observingMenuChanges = true
             for name in [NSMenu.didAddItemNotification, NSMenu.didRemoveItemNotification] {
                 NotificationCenter.default.addObserver(self, selector: #selector(menuContentsChanged(_:)), name: name, object: nil)
             }
-            NotificationCenter.default.addObserver(self, selector: #selector(viewMenuWillTrack(_:)), name: NSMenu.didBeginTrackingNotification, object: nil)
         }
         Task { @MainActor [weak self] in
             for _ in 0..<100 {
@@ -60,10 +68,17 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
         guard let session else { return false }
         guard let mainMenu = NSApp.mainMenu else { return false }
         if let menu = mainMenu.items.first(where: { $0.title == "Navigate" })?.submenu {
-            installNavigationTracking(for: menu)
+            navigationUpdateDelegate = installUpdateDelegate(
+                for: menu, replacing: navigationMenu, delegate: navigationUpdateDelegate
+            )
+            navigationMenu = menu
             refreshNavigationMenu(in: menu)
         }
         guard let viewMenu = mainMenu.items.first(where: { $0.title == "View" })?.submenu else { return false }
+        viewUpdateDelegate = installUpdateDelegate(
+            for: viewMenu, replacing: self.viewMenu, delegate: viewUpdateDelegate
+        )
+        self.viewMenu = viewMenu
         refreshFocusSearchMenuItem(in: viewMenu)
         refreshBrainMenu(in: viewMenu)
         let existing = viewMenu.items.first { $0.identifier == Self.inspectorIdentifier }
@@ -197,33 +212,18 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
         }
     }
 
-    @objc private func viewMenuWillTrack(_ notification: Notification) {
-        guard let menu = notification.object as? NSMenu,
-              menu === NSApp.mainMenu?.items.first(where: { $0.title == "View" })?.submenu else { return }
-        refresh()
-    }
-
-    private func installNavigationTracking(for menu: NSMenu) {
-        guard navigationMenu !== menu else { return }
-        if let navigationMenu {
-            NotificationCenter.default.removeObserver(
-                self,
-                name: NSMenu.didBeginTrackingNotification,
-                object: navigationMenu
-            )
+    private func installUpdateDelegate(
+        for menu: NSMenu, replacing oldMenu: NSMenu?, delegate oldDelegate: CerebrumMenuUpdateDelegate?
+    ) -> CerebrumMenuUpdateDelegate {
+        if oldMenu === menu, let oldDelegate, menu.delegate === oldDelegate { return oldDelegate }
+        if let oldMenu, let oldDelegate, oldMenu.delegate === oldDelegate {
+            oldMenu.delegate = oldDelegate.upstream
         }
-        navigationMenu = menu
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(navigationMenuDidBeginTracking(_:)),
-            name: NSMenu.didBeginTrackingNotification,
-            object: menu
-        )
-    }
-
-    @objc private func navigationMenuDidBeginTracking(_ notification: Notification) {
-        guard let menu = notification.object as? NSMenu, menu === navigationMenu else { return }
-        refreshNavigationMenu(in: menu)
+        let delegate = CerebrumMenuUpdateDelegate(upstream: menu.delegate) { [weak self] _ in
+            _ = self?.refresh()
+        }
+        menu.delegate = delegate
+        return delegate
     }
 
     private enum GlobalMenuTarget {
@@ -276,6 +276,38 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
         case let .navigate(route): session?.navigate(to: route)
         case .focusSearch: session?.focusSearch()
         }
+    }
+}
+
+// SwiftUI rebuilds its NSMenu in menuNeedsUpdate, after tracking notifications.
+// Restore route-owned items after that rebuild, before AppKit validates or
+// searches for a key equivalent. Every other optional delegate callback stays
+// with SwiftUI; the proxy preserves its weak delegate ownership.
+@MainActor
+final class CerebrumMenuUpdateDelegate: NSObject, NSMenuDelegate {
+    // Objective-C introspection/forwarding is nonisolated. These methods only
+    // inspect the weak delegate reference; menu work remains on the main actor.
+    nonisolated(unsafe) weak var upstream: (any NSMenuDelegate)?
+    private let update: (NSMenu) -> Void
+
+    init(upstream: (any NSMenuDelegate)?, update: @escaping (NSMenu) -> Void) {
+        self.upstream = upstream
+        self.update = update
+        super.init()
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        upstream?.menuNeedsUpdate?(menu)
+        update(menu)
+    }
+
+    override func responds(to selector: Selector!) -> Bool {
+        super.responds(to: selector) || upstream?.responds(to: selector) == true
+    }
+
+    override func forwardingTarget(for selector: Selector!) -> Any? {
+        if let upstream, upstream.responds(to: selector) { return upstream }
+        return super.forwardingTarget(for: selector)
     }
 }
 

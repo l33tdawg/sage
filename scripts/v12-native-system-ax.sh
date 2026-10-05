@@ -69,6 +69,8 @@ assert.equal(result.traversal_limits.maximum_nodes, 8192);
 if (scenario === 'brain-menu-focus') {
   assert.equal(result.schema, 'sage.v12.native-system-ax.brain.v1');
   for (const field of ['memory_selection_preserved', 'agent_selection_preserved', 'exact_application_and_system_focus', 'synthetic_windowserver_keyboard_events']) assert.equal(result[field], true);
+  assert.equal(result.selected_memory_name, 'Native CEREBRUM architecture');
+  assert.equal(result.selected_agent_name, 'Claude');
   assert.equal(result.physical_keyboard_event_routing, false);
   assert.equal(result.fixture_focus_injection, false);
   assert.deepEqual(result.keyboard_sequence, ['Down', 'Control-Command-I', 'Down']);

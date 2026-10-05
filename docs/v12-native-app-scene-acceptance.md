@@ -1,6 +1,6 @@
 # v12 native app-scene acceptance
 
-**Status, 2026-10-05:** the packaged v5 gate passed on the GitHub-hosted
+**Prior CI evidence, 2026-10-05:** the packaged v5 gate passed on the GitHub-hosted
 macOS runner in [run 37300998981](https://github.com/l33tdawg/sage/actions/runs/37300998981)
 for PR head `8c6f5ef0e7a470ea865282972e01d155105360a0`. The tested PR merge
 checkout was `11d9c92ae218aef2825d2f82e427a75c9fc55c4d`; both commits have tree
@@ -9,11 +9,30 @@ checkout was `11d9c92ae218aef2825d2f82e427a75c9fc55c4d`; both commits have tree
 on arm64 macOS 15.7.9. The same CI run passed the Swift suite, required hardware
 Metal checks, release build, and release-binary fixture/linkage scan.
 
+**Menu lifecycle candidate qualification, 2026-10-05:** local result
+`20261005T130452Z-app-scene-19252` passed all 21 v5 assertions on arm64 macOS
+27.0.1 build 26A434 after the menu replacement/update fix. Its base commit is
+`984427cc46209a35db708b2fd062e322980735b5`; the packaged harness records
+`dirty:746571c9e0102059c2af102d0be9b8acac0cd2a9f5f1f9cf96dd163dad63a0fa`
+as its source fingerprint. Result SHA-256:
+`4bce0e51b5cc82accc4c831c487c81ca41ddabd20edb3997761722fed5ceee6e`.
+The fixture now lets production menu delegates update the menu and performs no
+manual coordinator refresh. Logical focus observations resolve the actual
+mounted AppKit first responder when SwiftUI's binding has cleared; exact
+responder, active/key-window, selection and single-consumption assertions
+remain required. Immutable clean-head and current CI evidence belongs in
+[PR #417](https://github.com/l33tdawg/sage/pull/417).
+
 This is packaged app-scene and synthetic in-process keyboard evidence.
 The result explicitly records `physical_keyboard_event_routing=false`,
-`system_ax_server=false`, and `voiceover_spoken_evidence=false`. Final external
-system-AX qualification still awaits an unlocked session on the named Mac;
-physical keyboard, VoiceOver, and installed-release acceptance remain open.
+`system_ax_server=false`, and `voiceover_spoken_evidence=false`. The separate
+[external Brain scenario](v12-native-system-ax-acceptance.md) now has a completed
+candidate system-AX/WindowServer pass. Physical keyboard, VoiceOver, and
+installed-release acceptance remain open. Three focused menu regression tests,
+253 Node validator/workflow tests, and the AX harness contract tests passed
+locally. The local full Swift process exited without a completion summary on
+Swift 6.4/macOS 27; that run is incomplete and does not replace full-suite CI
+qualification on the pinned Xcode toolchain.
 
 This gate launches the packaged SwiftUI/AppKit executable rather than hosting a
 view in the test runner. It therefore exercises the application's actual scene,

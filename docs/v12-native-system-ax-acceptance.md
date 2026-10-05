@@ -1,19 +1,37 @@
 # v12 native macOS system accessibility acceptance
 
-**Status, 2026-10-05:** the external probe reports Accessibility trust on the
-current named Mac, and the compiler/preflight and result-validator mutation
-checks pass. The **final AppKit implementation has no completed system-AX
-runtime pass yet**: the Mac was locked during qualification, preventing native
-window activation. A source-bound runtime result after manual unlock is
-required. Spoken VoiceOver and physical keyboard acceptance remain separate
-operator gates.
+**Status, 2026-10-05:** the bounded `brain-menu-focus` scenario has a
+completed external system-AX runtime pass on the unlocked Apple M5 Max Mac
+(arm64, macOS 27.0.1 build 26A434). Result
+`20261005T125830Z-brain-menu-focus-15034` completed in seven seconds with
+Accessibility trust, all seven rendered menu paths, Memory and Agent Network
+selection preservation, and exact application/system focus on the actual
+row-bearing tables and inspector-close button. Down-arrow and
+Control-Command-I delivery used synthetic WindowServer events. Physical
+keyboard and spoken VoiceOver acceptance remain separate operator gates.
 
-An earlier intermediate implementation reached external Navigate and List View
-menu actions, exact application/system focus on the row-bearing Memory
-`AXOutline`, and selection of the known preview row through an injected Down
-arrow. That partial observation is neither a complete scenario pass nor
-qualification of the final implementation. No focus, active-window, or
-accessibility gate is waived because the desktop is locked.
+This candidate run is bound to base commit
+`984427cc46209a35db708b2fd062e322980735b5`, tree
+`1cef3a055624475c71db791dc06f1f5b8f95daf0`, and dirty-source snapshot
+`6be562b3fc450d87dce083e6b814a45dcf6531e35d8459ac0878d024f460de08`.
+The result SHA-256 is
+`23124811b7c9c8016fae6520457505f387a9aac6abe0ffd24e12435916000e33`.
+It qualifies that candidate, not another branch head. Review the immutable
+clean-head qualification and CI evidence recorded in
+[PR #417](https://github.com/l33tdawg/sage/pull/417) before accepting a later
+revision. Checksummed result, probe/app logs, and host manifest remain local;
+operator evidence is not uploaded to the public repository.
+
+The pass exposed and fixed two production menu lifecycle gaps: SwiftUI can
+replace the main menu, and it can rebuild View/Navigate items during
+`menuNeedsUpdate`. The coordinator observes replacement and restores current
+route-owned commands after the upstream delegate updates, preserving its
+optional callbacks and weak lifetime. It does not repair the menu through the
+DEBUG acceptance fixture. Focus observations use the concrete mounted AppKit
+first responder when SwiftUI's focus binding is nil; they never request or
+manufacture focus. Compiler/preflight and strict result-validator mutation
+checks also pass. Retry/Metal restoration, other command paths, installed
+release, physical keyboard, and VoiceOver retain their own acceptance scope.
 
 This gate targets the SwiftUI/AppKit/Metal application with bundle identifier
 `com.sage.cerebrum.beta`. It does not target the historical Tauri shell and it
@@ -105,7 +123,8 @@ the actual inspector-close `AXButton`, and that pressing that button returns
 focus to the currently mounted row-bearing table. It also injects
 Control-Command-I and requires the same inspector focus effect. Finally it
 switches to Agent Network through the rendered menu, selects the known preview
-agent, and repeats inspector focus/return checks against the Connectome table.
+agent **Claude** (the first row after production agent-ID sorting), and repeats
+inspector focus/return checks against the Connectome table.
 
 A logged-in, unlocked graphical session is required; Accessibility trust alone
 does not establish that the desktop can activate a window. Unlocking is a manual
@@ -114,7 +133,12 @@ operator action. The harness does not attempt to unlock the Mac.
 Keyboard injection requires the target PID to own both foreground application
 and system focus immediately before each event. The probe never sets AX focus,
 changes the application's first responder, or calls an in-process acceptance
-bridge. Menu actions are issued once; bounded observation waits establish their
+bridge. Menu lookup reacquires the full path from the current application menu bar
+at every observation; it does not retain parent handles across an `AXPress`.
+Control discovery skips table rows, while selected-row text is checked only
+under the exact selected `AXRow`. Every AX RPC has the same bounded timeout
+within this probe process, and the scenario retains its 45-second deadline.
+Menu actions are issued once; bounded observation waits establish their
 effects before the next assertion. An `AXError.cannotComplete` response is not
 retried because a menu may already have entered tracking.
 
@@ -130,7 +154,7 @@ must still be serialized because they share foreground system focus.
 
 Run `bash scripts/v12-native-system-ax.test.sh` for compiler/preflight and
 contract checks. The result validator rejects mutated evidence claiming wrapper
-focus, missing rows, the wrong menu path, unproven physical keyboard or VoiceOver
+focus, missing rows, the wrong selected memory/agent or menu path, unproven physical keyboard or VoiceOver
 results, or fixture-injected focus. It can also validate an existing result
 without launching an app. Supply the captured `launched_pid` and
 `requested_bundle_version` from that run's manifest:

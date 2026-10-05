@@ -1236,7 +1236,6 @@ private final class NativeAppSceneAcceptanceRunner {
         for item in menu.items {
             if let submenu = item.submenu { update(menu: submenu) }
         }
-        if menu === NSApp.mainMenu { CerebrumNativeMenuCoordinator.shared.refresh() }
     }
 
     private func uniqueMenuItem(
