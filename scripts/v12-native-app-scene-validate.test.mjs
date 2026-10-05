@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { validateNativeAppScene } from './v12-native-app-scene-validate.mjs';
 
 const commit = 'a'.repeat(40);
@@ -339,4 +343,100 @@ for (const field of ['window_is_key', 'control_window_matches', 'control_is_exac
 for (const field of ['window_is_key', 'field_is_editable', 'field_is_ns_search_field', 'field_window_matches',
     'field_editor_matches_first_responder', 'field_owns_first_responder']) {
     reject(`false Search field ${field}`, v => { v.responder_snapshot[3][field] = false; });
+}
+
+
+const appSceneHarness = readFileSync(new URL('./v12-native-app-scene-acceptance.sh', import.meta.url), 'utf8');
+const sourceFingerprintFunction = appSceneHarness.slice(
+    appSceneHarness.indexOf('compute_source_state() {'),
+    appSceneHarness.indexOf('\nmkdir -p "${EVIDENCE_DIR}"'),
+);
+
+function temporarySourceRepository(run) {
+    const root = mkdtempSync(join(tmpdir(), 'sage-app-scene-source-'));
+    const git = (...args) => execFileSync('git', ['-C', root, ...args], {encoding: 'utf8', stdio: 'pipe'}).trim();
+    try {
+        git('init', '--quiet');
+        git('config', 'user.name', 'Acceptance provenance fixture');
+        git('config', 'user.email', 'acceptance@example.invalid');
+        git('config', 'commit.gpgsign', 'false');
+        git('config', 'core.hooksPath', join(root, 'disabled-hooks'));
+        writeFileSync(join(root, '.gitignore'), 'dist/\n');
+        writeFileSync(join(root, 'source.txt'), 'initial source\n');
+        git('add', '.');
+        git('commit', '--quiet', '-m', 'initial');
+        run(root, git);
+    } finally { rmSync(root, {recursive: true, force: true}); }
+}
+
+function fingerprint(root) {
+    return execFileSync('/bin/bash', ['-euo', 'pipefail', '-c', `${sourceFingerprintFunction}\ncompute_source_state`], {
+        env: {...process.env, ROOT: root}, encoding: 'utf8', stdio: 'pipe',
+    }).trim();
+}
+
+test('source fingerprint binds clean HEAD and tree, including an empty commit', () => {
+    temporarySourceRepository((root, git) => {
+        const initial = fingerprint(root);
+        assert.match(initial, /^clean:[a-f0-9]{64}$/);
+        const tree = git('rev-parse', 'HEAD^{tree}');
+        git('commit', '--quiet', '--allow-empty', '-m', 'different commit, same tree');
+        assert.equal(git('rev-parse', 'HEAD^{tree}'), tree);
+        const sameTree = fingerprint(root);
+        assert.match(sameTree, /^clean:[a-f0-9]{64}$/);
+        assert.notEqual(sameTree, initial, 'a clean HEAD change must change the source fingerprint');
+        writeFileSync(join(root, 'source.txt'), 'different committed source\n');
+        git('add', 'source.txt');
+        git('commit', '--quiet', '-m', 'different tree');
+        assert.notEqual(git('rev-parse', 'HEAD^{tree}'), tree);
+        const differentTree = fingerprint(root);
+        assert.match(differentTree, /^clean:[a-f0-9]{64}$/);
+        assert.notEqual(differentTree, sameTree, 'a clean source-tree change must change the fingerprint');
+    });
+});
+
+for (const phase of ['build', 'runtime']) {
+    test(`app-scene harness rejects clean commit drift during ${phase} before accepting evidence`, {skip: process.platform !== 'darwin'}, () => {
+        temporarySourceRepository((root, git) => {
+            mkdirSync(join(root, 'scripts'));
+            writeFileSync(join(root, 'scripts/v12-native-app-scene-acceptance.sh'), appSceneHarness);
+            writeFileSync(join(root, 'scripts/build-native-cerebrum-macos.sh'), `#!/bin/bash
+set -euo pipefail
+if [ "$SAGE_PROVENANCE_TEST_PHASE" = build ]; then
+  git -C "$SAGE_PROVENANCE_TEST_ROOT" commit --quiet --allow-empty -m drift-during-build
+fi
+mkdir -p "$SAGE_NATIVE_OUTPUT_DIR/SAGE CEREBRUM Native.app/Contents/MacOS"
+cp "$SAGE_PROVENANCE_TEST_ROOT/runtime-fixture.sh" "$SAGE_NATIVE_OUTPUT_DIR/SAGE CEREBRUM Native.app/Contents/MacOS/SAGECerebrumNative"
+chmod +x "$SAGE_NATIVE_OUTPUT_DIR/SAGE CEREBRUM Native.app/Contents/MacOS/SAGECerebrumNative"
+`);
+            writeFileSync(join(root, 'runtime-fixture.sh'), `#!/bin/bash
+set -euo pipefail
+if [ "$SAGE_PROVENANCE_TEST_PHASE" = runtime ]; then
+  git -C "$SAGE_PROVENANCE_TEST_ROOT" commit --quiet --allow-empty -m drift-during-runtime
+fi
+printf '%s\n' '{"unit_fixture_only":true}'
+`);
+            writeFileSync(join(root, 'scripts/v12-native-app-scene-validate.mjs'),
+                `import {writeFileSync} from 'node:fs'; writeFileSync(process.env.SAGE_PROVENANCE_VALIDATOR_MARKER, 'reached'); process.exit(99);`);
+            git('add', '.');
+            git('commit', '--quiet', '-m', 'install non-GUI control fixtures');
+            const before = git('rev-parse', 'HEAD');
+            const tree = git('rev-parse', 'HEAD^{tree}');
+            const marker = join(root, 'dist/validator-reached');
+            const result = spawnSync('/bin/bash', [join(root, 'scripts/v12-native-app-scene-acceptance.sh')], {
+                env: {...process.env, SAGE_NATIVE_VERSION: '12.0.0-beta.1',
+                    SAGE_NATIVE_APP_SCENE_EVIDENCE_DIR: join(root, 'dist/v12-native/12.0.0-beta.1/app-scene-validation'),
+                    SAGE_PROVENANCE_TEST_ROOT: root, SAGE_PROVENANCE_TEST_PHASE: phase,
+                    SAGE_PROVENANCE_VALIDATOR_MARKER: marker}, encoding: 'utf8', timeout: 10_000,
+            });
+            assert.equal(result.status, 1, result.stderr);
+            assert.match(result.stderr, new RegExp(`source state changed during native app-scene ${phase}`));
+            assert.notEqual(git('rev-parse', 'HEAD'), before);
+            assert.equal(git('rev-parse', 'HEAD^{tree}'), tree, 'regression must exercise a clean same-tree commit');
+            assert.equal(git('status', '--porcelain'), '');
+            assert.equal(existsSync(marker), false, 'drifted evidence must never reach the result validator');
+            assert.equal(readFileSync(join(root, 'dist/v12-native/12.0.0-beta.1/app-scene-validation/STATUS.txt'), 'utf8'),
+                'app-scene acceptance pending\n');
+        });
+    });
 }

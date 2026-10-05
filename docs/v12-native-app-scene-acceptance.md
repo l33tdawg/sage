@@ -86,7 +86,10 @@ could not establish rendered Brain menu routing.
 
 The app writes one bounded JSON result to standard output and exits nonzero on
 any assertion or timeout. The shell applies a separate 60-second deadline,
-binds the result to the exact commit and a clean/dirty source-snapshot hash,
+binds the result to the exact commit and a clean/dirty source fingerprint that
+includes HEAD, its tree, tracked changes and untracked files. It checks that
+fingerprint after the build and again after the runtime, before accepting any
+result, so even a clean same-tree commit change rejects the run. It then
 validates the result and evidence boundary, cleans up only the captured PID after
 checking its executable path, and records the result, app log, manifest, and
 SHA-256 hashes. CI uploads these diagnostics even when a later validation step

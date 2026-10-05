@@ -17,6 +17,8 @@ for required in \
   'compute_source_state()' \
   'SOURCE_STATE_BEFORE_BUILD=$(compute_source_state)' \
   'SOURCE_STATE_AFTER_BUILD=$(compute_source_state)' \
+  'SOURCE_STATE_AFTER_RUNTIME=$(compute_source_state)' \
+  'source state changed during native app-scene runtime' \
   'source state changed during native app-scene build' \
   'SOURCE_STATE="${SOURCE_STATE_BEFORE_BUILD}"' \
   'refusing to signal pid' \
@@ -38,6 +40,11 @@ test "${pending_line}" -lt "${build_line}"
 test "${before_build_line}" -lt "${build_line}"
 test "${after_build_line}" -gt "${build_line}"
 test "${after_build_line}" -lt "${launch_line}"
+after_runtime_line=$(grep -nF 'SOURCE_STATE_AFTER_RUNTIME=$(compute_source_state)' "${HARNESS}" | head -1 | cut -d: -f1)
+wait_line=$(grep -nF 'wait "${APP_PID}"' "${HARNESS}" | tail -1 | cut -d: -f1)
+validate_line=$(grep -nF 'node "${ROOT}/scripts/v12-native-app-scene-validate.mjs"' "${HARNESS}" | head -1 | cut -d: -f1)
+test "${after_runtime_line}" -gt "${wait_line}"
+test "${after_runtime_line}" -lt "${validate_line}"
 for required in \
   'sage.v12.native-app-scene.v5' \
   'rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle' \

@@ -13,18 +13,28 @@ BUILD_DIR="${ROOT}/dist/v12-native/app-scene-debug/${VERSION}-$$"
 EVIDENCE_DIR="${SAGE_NATIVE_APP_SCENE_EVIDENCE_DIR:-${ROOT}/dist/v12-native/${VERSION}/app-scene-validation}"
 
 compute_source_state() {
-  local snapshot_sha cleanliness
+  local snapshot_sha cleanliness source_head source_tree final_head worktree_status
+  source_head=$(git -C "${ROOT}" rev-parse --verify HEAD) || return 1
+  source_tree=$(git -C "${ROOT}" rev-parse --verify "${source_head}^{tree}") || return 1
   snapshot_sha=$(
+    set -euo pipefail
     {
-      git -C "${ROOT}" diff --binary HEAD
+      printf 'head=%s\ntree=%s\n' "${source_head}" "${source_tree}"
+      git -C "${ROOT}" diff --binary "${source_head}" || exit 1
       git -C "${ROOT}" ls-files --others --exclude-standard | while IFS= read -r candidate; do
         printf 'untracked=%s\n' "${candidate}"
-        /usr/bin/shasum -a 256 "${ROOT}/${candidate}"
+        /usr/bin/shasum -a 256 "${ROOT}/${candidate}" || exit 1
       done
     } | /usr/bin/shasum -a 256 | awk '{print $1}'
-  )
+  ) || return 1
+  worktree_status=$(git -C "${ROOT}" status --porcelain=v1 --untracked-files=all) || return 1
+  final_head=$(git -C "${ROOT}" rev-parse --verify HEAD) || return 1
+  if [ "${final_head}" != "${source_head}" ]; then
+    echo "source HEAD changed while fingerprinting native app-scene source" >&2
+    return 1
+  fi
   cleanliness=clean
-  if [ -n "$(git -C "${ROOT}" status --porcelain=v1 --untracked-files=all)" ]; then
+  if [ -n "${worktree_status}" ]; then
     cleanliness=dirty
   fi
   printf '%s:%s\n' "${cleanliness}" "${snapshot_sha}"
@@ -34,6 +44,10 @@ mkdir -p "${EVIDENCE_DIR}"
 EVIDENCE_DIR=$(cd "${EVIDENCE_DIR}" && pwd -P)
 printf '%s\n' 'app-scene acceptance pending' >"${EVIDENCE_DIR}/STATUS.txt"
 SOURCE_STATE_BEFORE_BUILD=$(compute_source_state)
+if [ "$(git -C "${ROOT}" rev-parse --verify HEAD)" != "${COMMIT}" ]; then
+  echo "source commit changed before native app-scene build" >&2
+  exit 1
+fi
 
 SAGE_NATIVE_VERSION="${VERSION}" \
 SAGE_NATIVE_CONFIGURATION=debug \
@@ -114,6 +128,12 @@ APP_PID=""
   echo "native app-scene fixture failed with status ${status}; see ${APP_LOG}" >&2
   exit "${status}"
 }
+
+SOURCE_STATE_AFTER_RUNTIME=$(compute_source_state)
+if [ "${SOURCE_STATE_AFTER_RUNTIME}" != "${SOURCE_STATE}" ]; then
+  echo "source state changed during native app-scene runtime" >&2
+  exit 1
+fi
 
 node "${ROOT}/scripts/v12-native-app-scene-validate.mjs" "${RESULT}" "${COMMIT}" "${SOURCE_STATE}" "${RUN_ID}" "${LAUNCHED_PID}"
 
