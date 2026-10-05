@@ -813,21 +813,25 @@ private final class NativeAppSceneAcceptanceRunner {
         if let failure { value["failure"] = failure }
         if !passed {
             value["view_debug_snapshot"] = viewDebugSnapshot()
-            value["failure_brain_state"] = [
-                "route": session.route.rawValue,
-                "application_active": NSApp.isActive,
-                "window_is_key": window.isKeyWindow,
-                "owner": session.brainCommandOwner?.uuidString ?? "",
-                "mode": session.brainCommandState?.mode.rawValue ?? "unregistered",
-                "presentation": session.brainCommandState?.presentation.rawValue ?? "unregistered",
-                "refreshing": session.brainCommandState?.isRefreshing ?? false,
-                "blocks_global_commands": session.brainCommandState?.blocksGlobalCommands ?? false,
-                "inspector_is_presented": session.brainCommandState?.inspectorIsPresented ?? false,
-                "request_id": session.brainCommandRequest.map { Int($0.id) } ?? -1,
-                "request_owner": session.brainCommandRequest?.owner.uuidString ?? "",
-                "request_command": session.brainCommandRequest?.command.rawValue ?? "",
-                "focus_target": NativeAppSceneBrainBridge.shared.snapshot()?.focusTarget ?? "",
-            ]
+            let brainState = session.brainCommandState
+            let brainRequest = session.brainCommandRequest
+            let brainSnapshot = NativeAppSceneBrainBridge.shared.snapshot()
+            let requestID: Int = brainRequest.map { Int($0.id) } ?? -1
+            var failureBrainState: [String: Any] = [:]
+            failureBrainState["route"] = session.route.rawValue
+            failureBrainState["application_active"] = NSApp.isActive
+            failureBrainState["window_is_key"] = window.isKeyWindow
+            failureBrainState["owner"] = session.brainCommandOwner?.uuidString ?? ""
+            failureBrainState["mode"] = brainState?.mode.rawValue ?? "unregistered"
+            failureBrainState["presentation"] = brainState?.presentation.rawValue ?? "unregistered"
+            failureBrainState["refreshing"] = brainState?.isRefreshing ?? false
+            failureBrainState["blocks_global_commands"] = brainState?.blocksGlobalCommands ?? false
+            failureBrainState["inspector_is_presented"] = brainState?.inspectorIsPresented ?? false
+            failureBrainState["request_id"] = requestID
+            failureBrainState["request_owner"] = brainRequest?.owner.uuidString ?? ""
+            failureBrainState["request_command"] = brainRequest?.command.rawValue ?? ""
+            failureBrainState["focus_target"] = brainSnapshot?.focusTarget ?? ""
+            value["failure_brain_state"] = failureBrainState
             if let mainMenu = NSApp.mainMenu {
                 value["failure_brain_menu_snapshot"] = menuEntries(in: mainMenu).filter { $0.path.first == "View" }.map {
                     ["path": $0.path.joined(separator: " > "), "key": $0.item.keyEquivalent,
