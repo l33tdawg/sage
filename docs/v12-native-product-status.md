@@ -13,6 +13,22 @@ native macOS CEREBRUM builds and must not alter stable publication.
 [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md) — the
 macOS product surface is SwiftUI/AppKit/Metal with no WebView renderer.
 
+## Stable parity audit — 2026-10-05
+
+The [stable-to-beta audit](v12-stable-parity-audit.md) compares stable
+`019327c0` with beta `25b03045` and records the messaging, lifecycle, storage,
+consensus, and reliability changes still to carry across. The native code
+baseline remains **v11.19.0 / app-v27**; this audit does not advance it.
+Stable release preparation is tracked separately in
+[PR #416](https://github.com/l33tdawg/sage/pull/416), pending at the time of this
+entry. The August status and evidence below describe their original baseline.
+
+The first focused Brain menu, keyboard, and focus slice can use deterministic
+preview data independently of backend convergence. Attaching to current stable
+requires a separate native app/daemon compatibility qualification before the
+version guard changes. Rendered app-scene, system accessibility, physical
+keyboard, and VoiceOver evidence remain distinct acceptance gates.
+
 ## Direction reset: fully native
 
 The earlier bounded-WebView decision is superseded. The Tauri build remains
