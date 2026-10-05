@@ -1,5 +1,7 @@
+import { FederationConnectome } from './federation-connectome.js';
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
+import { FederationDirectory, stageFederationDomains } from './federation-directory.js';
 import { fetchStats, fetchMemoryAdoptionProgress, fetchMemoryAdoptionInventory, retryMemoryAdoption, assignMemoryAdoption, deprecateMemoryAdoption, fetchGraph, fetchMemories, deleteMemory, updateMemory, fetchHealth, fetchValidators, fetchScopes, fetchMcpConfig, checkAuth, login, recoverVault, lockSession, importMemories, importPreview, importConfirm, fetchCleanupSettings, saveCleanupSettings, runCleanup, fetchAgents, fetchAppV23Access, updateAppV23AgentPolicy, updateAppV26AgentDisplayName, putAppV23AccessGroup, deleteAppV23AccessGroup, fetchAppV23LinkedReaders, fetchAppV23LinkedReaderIdentities, checkAppV23LinkedReaderEligibility, mutateAppV23LinkedReader, fetchAppV23LinkedMessageConsent, fetchAppV23RemoteHostedMessageCandidates, putAppV23LinkedMessageConsent, fetchAgent, createAgent, updateAgent, removeAgent, downloadBundle, fetchTemplates, fetchRedeployStatus, startRedeploy, createPairingCode, rotateAgentKey, handoverRootCredential, fetchBootInstructions, saveBootInstructions, fetchLedgerStatus, enableLedger, changeLedgerPassphrase, disableLedger, fetchTags, fetchMemoryTags, setMemoryTags, fetchAutostart, setAutostart, checkForUpdate, applyUpdate, restartServer, fetchReranker, saveReranker, testReranker, detectReranker, fetchOnboarding, saveOnboarding,
 rerankerSetupStatus, rerankerSetupDownload, rerankerSetupStart, rerankerSetupStop, rerankerSetupInstallEngine, fetchTasks, updateTaskStatus, reorderTasks, createTask, assignTask, fetchUnregisteredAgents, mergeAgent, fetchRecallSettings, saveRecallSettings, fetchAgentDomains, reassignDomainOwnership, bulkUpdateMemories, fetchMemoryMode, saveMemoryMode, fetchPipeline, fetchPipelineStats, sendPipelineNote, fetchGovProposals, fetchGovProposalDetail, submitGovProposal, submitGovVote, fetchMemoryReanchorPlan, wizardCheckCloudflared, wizardInstallCloudflared, wizardStartLogin, wizardLoginStatus, wizardCreateTunnel, wizardMintToken, connectProvider, connectRemoteUrl, fetchUpdateStatus, selectEmbeddingProvider,
 embeddingsStatus, checkOllamaEmbed, installOllamaRuntime, startOllamaRuntime, pullEmbedModel, reembedMemories, reembedProgress, enableSemanticEmbeddings,
@@ -7,17 +9,21 @@ deprecateUnreadable, getRecoveryKey, confirmRecoveryKeyBackup, recoverOrphansPre
 joinHostInterfaces, enableNetworkMode, joinHostStart, joinHostStatus, joinHostApprove, joinHostAbort,
 joinGuestStart, joinGuestStatus, joinGuestCancel, joinGuestRestart,
 chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
-fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedAgentExportsGet, fedAgentExportSet, fedReaderRestrictionsGet, fedReaderRestrictionSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedGroups, fedGroupsRefresh, fedGroupCreate, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedGroupDissolve, fedJoinRoutes, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
+fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedAgentExportsGet, fedAgentExportSet, fedAgentExposureGet, fedAgentExposureSet, fedReaderRestrictionsGet, fedReaderRestrictionSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedGroups, fedGroupsRefresh, fedGroupCreate, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedGroupDissolve, fedJoinRoutes, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
 import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
 import { buildUpdateBanner } from './update-banner.js';
+import { describeSignerFences, describeLastFenceResolution, fenceSummary } from './signer-fences.js';
+import { describeMemoryGate, reviewItemState } from './memory-gate.js';
+import { fetchMemoryGateReviewQueue, decideMemoryGateReview } from './api.js';
 import { computeReorderedColumn, applyColumnOrder } from './task-reorder.js';
 import { runSequential, summarizeClearedTasks, summarizeDroppedTasks, summarizeForgottenMemories } from './bulk-sequence.js';
 import { refreshTaskSnapshot } from './task-refresh.js';
 import { createFederationJoinScanLifecycle, normalizeFederationJoinState } from './federation-flow.js';
 import { buildBrainDomainInventory } from './domain-inventory.js';
 import { enqueueGovernedTransfer, runWithGovernanceCooldown } from './governance-retry.js';
+import { fetchAppUpgradeStatus, submitAppUpgradePropose } from './api.js';
 import {
     appV23PolicyDraft,
     appV23NormalizeAccessState,
@@ -76,7 +82,7 @@ const html = window.html;
 // `go build` dev binary where main.version is "dev"). Keep in sync with the
 // release being built; stamped release builds override this via the live
 // /health read below.
-const SAGE_VERSION = 'v11.19.0';
+const SAGE_VERSION = 'v11.23.15';
 
 // Promise-based, themed replacement for the browser's blocking confirmation API.
 // Requests are immutable and serialized so independent actions cannot replace
@@ -5368,8 +5374,8 @@ function RecallSettings() {
                 <div style="font-size:11px;color:var(--text-dim);margin-top:2px;line-height:1.5;">
                     How many memories each recall hands your agent. More = richer context, but every extra
                     memory spends tokens in the agent's window.
-                    ${rrOn === true && html`<span style="color:var(--accent);"> Reranker is on: higher k is the sweet spot - SAGE over-samples and the cross-encoder re-scores, so the extra slots stay relevant instead of adding noise.</span>`}
-                    ${rrOn === false && html`<span> Above ~10 the tail gets noisy without the reranker - turn it on in Memory engine above to make high k worthwhile.</span>`}
+                    ${rrOn === true && html`<span style="color:var(--accent);"> Reranker is on: SAGE over-samples candidates and re-scores them with a second model. Compare relevance and latency on your own queries when changing k.</span>`}
+                    ${rrOn === false && html`<span> An optional reranker can change the ordering. Compare relevance and latency on your own queries before enabling it in Memory engine.</span>`}
                 </div>
             </div>
             <div style="display:flex;align-items:center;gap:10px;min-width:180px">
@@ -5407,285 +5413,155 @@ function RecallSettings() {
 function CleanupSettings() {
     const [config, setConfig] = useState(null);
     const [saving, setSaving] = useState(false);
-    const [lastRun, setLastRun] = useState(null);
+    const [busy, setBusy] = useState(false);
     const [lastResult, setLastResult] = useState(null);
-    const [cleanupRunning, setCleanupRunning] = useState(false);
-    const [cleanupResult, setCleanupResult] = useState(null);
+    const [preview, setPreview] = useState(null);
+    const [error, setError] = useState('');
+    const [available, setAvailable] = useState(false);
+    const [authorized, setAuthorized] = useState(false);
     const [expanded, setExpanded] = useState(false);
+    const active = lastResult && ['queued', 'scanning', 'running', 'confirmation_pending'].includes(lastResult.state);
 
     useEffect(() => {
-        fetchCleanupSettings().then(data => {
-            if (data.config) setConfig(data.config);
-            if (data.last_run) setLastRun(data.last_run);
-            if (data.last_result) {
-                try { setLastResult(JSON.parse(data.last_result)); } catch(e) {}
+        let cancelled = false;
+        let timer;
+        const refresh = async () => {
+            try {
+                const data = await fetchCleanupSettings();
+                if (cancelled) return;
+                setConfig(prev => prev || data.config);
+                setLastResult(data.last_result);
+                setAvailable(data.worker_available);
+                setAuthorized(data.authorized);
+            } catch (e) {
+                if (!cancelled) setError(e.message);
+            } finally {
+                if (!cancelled) timer = setTimeout(refresh, 3000);
             }
-        }).catch(() => {});
+        };
+        refresh();
+        return () => { cancelled = true; clearTimeout(timer); };
     }, []);
 
     const updateField = (field, value) => {
+        setPreview(null);
         setConfig(prev => ({ ...prev, [field]: value }));
     };
-
+    const save = async (next) => {
+        const data = await saveCleanupSettings(next);
+        setConfig(data.config);
+        setAuthorized(true);
+        setPreview(null);
+    };
     const handleSave = async () => {
-        if (!config || saving) return;
-        setSaving(true);
-        try {
-            const res = await saveCleanupSettings(config);
-            if (res.config) setConfig(res.config);
-        } catch(e) {}
-        setSaving(false);
-    };
-
-    const handleDryRun = async () => {
-        setCleanupRunning(true);
-        setCleanupResult(null);
-        try {
-            const res = await runCleanup(true);
-            setCleanupResult(res);
-        } catch(e) {
-            setCleanupResult({ error: 'Failed to run preview' });
-        }
-        setCleanupRunning(false);
-    };
-
-    const handleCleanup = async () => {
-        const previewCount = cleanupResult && cleanupResult.dry_run ? Number(cleanupResult.deprecated || 0) : null;
-        const previewNote = previewCount === null
-            ? 'Use Preview first if you want to see the exact count before continuing. '
-            : `Your latest preview found ${previewCount} ${previewCount === 1 ? 'memory' : 'memories'} to clean. `;
-        if (!await showConfirmation(
-            `${previewNote}Run cleanup using the current rules? Matching memories stop appearing in normal recall but remain in the audit history. Memories outside the current rules stay active.`,
-            { title: 'Clean Synaptic Ledger?', confirmLabel: 'Run cleanup', tone: 'danger' }
+        if (config.enabled && !await showConfirmation(
+            'Authorize automatic consensus cleanup using these updated rules? A run may begin immediately.',
+            { title: 'Authorize cleanup rules?', confirmLabel: 'Save and authorize', tone: 'danger' }
         )) return;
-        setCleanupRunning(true);
-        setCleanupResult(null);
+        setSaving(true);
+        setError('');
+        try { await save(config); } catch (e) { setError(e.message); }
+        finally { setSaving(false); }
+    };
+    const handleToggle = async (event) => {
+        const enabled = event.target.checked;
+        event.target.checked = config.enabled;
+        if (enabled && !await showConfirmation(
+            'Authorize periodic consensus cleanup using these rules? It can begin immediately. Eligible memories may be retired or enter a challenge round; audit history is retained. Open tasks and internal records are protected. Preview first to inspect the full eligible count.',
+            { title: 'Enable automatic cleanup?', confirmLabel: 'Authorize cleanup', tone: 'danger' }
+        )) return;
+        setSaving(true);
+        setError('');
+        try { await save({ ...config, enabled }); } catch (e) { setError(e.message); }
+        finally { setSaving(false); }
+    };
+    const handleDryRun = async () => {
+        setBusy(true);
+        setError('');
         try {
-            const res = await runCleanup(false);
-            setCleanupResult(res);
-            setLastRun(new Date().toISOString());
-            setLastResult(res);
-        } catch(e) {
-            setCleanupResult({ error: 'Failed to run cleanup' });
-        }
-        setCleanupRunning(false);
+            setPreview(await runCleanup(true, config));
+        } catch (e) { setError(e.message); }
+        finally { setBusy(false); }
+    };
+    const handleCleanup = async () => {
+        const count = preview && preview.complete ? preview.eligible : null;
+        if (!await showConfirmation(
+            (count === null ? 'Preview first to inspect the full eligible count. ' : `The latest full scan found ${count} eligible memories. `) +
+            'Run consensus cleanup with these rules? Eligibility is checked again before each submission. Confirmed retirements stop normal recall but retain audit history; some memories require further challenge votes.',
+            { title: 'Clean Synaptic Ledger?', confirmLabel: 'Queue cleanup', tone: 'danger' }
+        )) return;
+        setBusy(true);
+        setError('');
+        try {
+            setPreview(null);
+            setLastResult(await runCleanup(false, config));
+        } catch (e) { setError(e.message); }
+        finally { setBusy(false); }
     };
 
-    if (!config) return null;
-
+    if (!config) return html`<div class="settings-section">${error || 'Loading memory cleanup…'}</div>`;
+    const controls = [
+        ['observation_ttl_days', 'Observation lifetime (days)', 1, 90, 1],
+        ['session_ttl_days', 'Session-context lifetime (days)', 1, 30, 1],
+        ['stale_threshold', 'Computed confidence threshold', 0.01, 0.5, 0.01],
+        ['cleanup_interval_hours', 'Automatic interval (hours)', 1, 168, 1],
+    ];
     return html`
         <div class="settings-section cleanup-section">
-            <h3 style="display:flex;align-items:center;justify-content:space-between;cursor:pointer" onClick=${() => setExpanded(!expanded)}>
-                <span>
-                    <svg width="16" height="16" viewBox="0 0 16 16" style="vertical-align:-2px;margin-right:6px">
-                        <path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM8 5v3.5l2.5 1.5" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/>
-                    </svg>
-                    Memory Auto-Cleanup <${HelpTip} text="Automatically removes stale observations and low-confidence memories over time. Keeps your brain focused on high-value knowledge." align="right" />
-                </span>
-                <span style="font-size:12px;color:var(--text-muted)">${expanded ? '▲' : '▼'}</span>
-            </h3>
-
-            <div class="cleanup-description">
-                <p style="color:var(--text-dim);font-size:13px;line-height:1.5;margin:8px 0">
-                    Automatically deprecate stale memories whose confidence has decayed below a threshold,
-                    or observations that have outlived their usefulness.
-                </p>
-            </div>
-
-            <!-- Master toggle — always visible -->
-            <div class="settings-row" style="padding:12px 0;border-bottom:1px solid var(--border)">
-                <div style="flex:1">
-                    <span class="label" style="font-weight:600">Enable Auto-Cleanup</span>
-                    <div class="setting-help">
-                        <span style="color:var(--accent);font-size:11px;font-weight:500">ON:</span>
-                        <span style="color:var(--text-dim);font-size:11px"> SAGE periodically removes stale session observations and low-confidence memories. Good for long-running agents that accumulate thousands of memories.</span>
-                    </div>
-                    <div class="setting-help" style="margin-top:2px">
-                        <span style="color:var(--danger);font-size:11px;font-weight:500">OFF:</span>
-                        <span style="color:var(--text-dim);font-size:11px"> Nothing is ever auto-removed. You control what stays. Best if you want complete history or have a small memory set.</span>
-                    </div>
-                </div>
+            <h3>Memory Auto-Cleanup</h3>
+            <p class="setting-help">Retire expired observations and low-confidence memories through consensus. Open tasks and internal records are protected. Audit history is retained.</p>
+            ${error && html`<p role="alert" style="color:var(--danger)">${error}</p>`}
+            ${!available && html`<p role="status">Cleanup worker is unavailable. No new cleanup can run.</p>`}
+            ${config.enabled && !authorized && html`<p role="status">Automatic cleanup authorization is no longer valid. Disable, review the rules, then enable again to authorize the current Root.</p>`}
+            <div class="settings-row">
+                <span>Enable automatic cleanup</span>
                 <label class="toggle-switch">
                     <input type="checkbox" aria-label="Enable automatic memory cleanup" checked=${config.enabled}
-                        onChange=${(e) => {
-                            const newVal = e.target.checked;
-                            updateField('enabled', newVal);
-                            saveCleanupSettings({ ...config, enabled: newVal }).catch(() => {});
-                        }} />
+                        disabled=${saving || busy || (!available && !config.enabled)} onChange=${handleToggle} />
                     <span class="toggle-slider"></span>
                 </label>
             </div>
-
-            <!-- Quick actions — always visible -->
-            <div style="display:flex;gap:8px;padding:12px 0;flex-wrap:wrap;align-items:center">
-                <button class="btn btn-danger" onClick=${handleCleanup} disabled=${cleanupRunning} style="font-size:12px;">
-                    ${cleanupRunning ? 'Cleaning...' : 'Clean Synaptic Ledger…'}
-                </button>
-                <button class="btn" onClick=${handleDryRun} disabled=${cleanupRunning} style="font-size:12px">
-                    ${cleanupRunning ? 'Running...' : 'Preview'}
-                </button>
-                ${lastRun && html`<span style="font-size:11px;color:var(--text-muted)">Last run: ${new Date(lastRun).toLocaleString()}</span>`}
+            <p class="setting-help">OFF prevents new automatic submissions; an already-submitted transaction may still complete. Legacy settings require fresh authorization after upgrading.</p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0">
+                <button class="btn btn-danger" onClick=${handleCleanup} disabled=${busy || saving || active || !available}>Clean Synaptic Ledger…</button>
+                <button class="btn" onClick=${handleDryRun} disabled=${busy || saving || active}>${busy ? 'Working…' : 'Preview'}</button>
+                <button class="btn" onClick=${() => setExpanded(!expanded)} aria-expanded=${expanded}>Cleanup rules</button>
             </div>
-
-            <!-- Cleanup result — always visible -->
-            ${cleanupResult && html`
-                <div class="cleanup-result" style="margin-bottom:12px;padding:12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius)">
-                    ${cleanupResult.error ? html`
-                        <span style="color:var(--danger)">${cleanupResult.error}</span>
-                    ` : html`
-                        <div style="font-size:13px;color:var(--text-dim)">
-                            <strong>${cleanupResult.dry_run ? 'Preview' : 'Done'}:</strong>
-                            ${cleanupResult.deprecated || 0} memories ${cleanupResult.dry_run ? 'would be' : ''} deprecated
-                            (${cleanupResult.checked || 0} checked)
-                        </div>
-                    `}
+            ${preview && html`
+                <div class="cleanup-result">
+                    <strong>${preview.complete ? 'Full preview' : 'Incomplete preview'}</strong>:
+                    ${preview.eligible} eligible · ${preview.checked} scanned · ${preview.skipped} unverifiable rows skipped.
+                    <p class="setting-help">All pages scanned; no 500-memory total limit. Counts reflect this scan, not a frozen snapshot. Every target is rechecked before submission.</p>
                 </div>
             `}
-
+            ${lastResult && lastResult.state && html`
+                <div class="cleanup-result" role="status">
+                    <strong>Cleanup: ${lastResult.state.replaceAll('_', ' ')}</strong>
+                    ${['queued', 'scanning'].includes(lastResult.state) ? html`<p>Full inventory scan pending or in progress; totals are not yet available.</p>` : html`
+                        <p>${lastResult.checked} scanned · ${lastResult.eligible} verified eligible · ${lastResult.submitted} confirmed submissions ·
+                        ${lastResult.deprecated} observed retired · ${lastResult.challenged} observed challenged · ${lastResult.unchanged || 0} no longer retired/challenged · ${lastResult.skipped} skipped</p>
+                    `}
+                    ${lastResult.confirmation_pending && html`<p>Waiting for canonical confirmation. No duplicate submission will be sent.</p>`}
+                    ${lastResult.error && html`<p style="color:var(--danger)">${lastResult.error}</p>`}
+                    ${lastResult.finished_at && html`<p class="setting-help">Attempt ended: ${new Date(lastResult.finished_at).toLocaleString()}</p>`}
+                </div>
+            `}
             ${expanded && html`
-                <!-- Observation TTL -->
-                <div class="settings-row setting-detail" style="padding:12px 0;border-bottom:1px solid var(--border)">
-                    <div style="flex:1">
-                        <span class="label">Observation TTL</span>
-                        <div class="setting-help">
-                            <span style="color:var(--text-dim);font-size:11px">
-                                How many days before general observations are auto-deprecated.
-                                Observations are things like "user asked about X" or "noticed pattern Y" — useful short-term, less so after a week.
-                            </span>
-                        </div>
-                        <div class="setting-help" style="margin-top:2px">
-                            <span style="color:var(--text-muted);font-size:11px;font-style:italic">
-                                Example: Set to 7 days if your agent logs dozens of observations per session. Set to 30+ if observations are rare and valuable.
-                            </span>
-                        </div>
+                <p class="setting-help">Observations qualify when their lifetime expires, or when computed confidence falls below the threshold. Other memory types qualify by confidence. Session-context observations use their own lifetime.</p>
+                ${controls.map(([field, label, min, max, step]) => html`
+                    <div class="settings-row">
+                        <label>${label}
+                            <input type="range" aria-label=${label} min=${min} max=${max} step=${step} value=${config[field]}
+                                disabled=${saving || busy} onInput=${e => updateField(field, Number(e.target.value))} />
+                        </label>
+                        <span>${config[field]}</span>
                     </div>
-                    <div style="display:flex;align-items:center;gap:8px">
-                        <input type="range" aria-label="Observation lifetime in days" min="1" max="90" value=${config.observation_ttl_days}
-                            onInput=${(e) => updateField('observation_ttl_days', parseInt(e.target.value))}
-                            style="width:120px" />
-                        <span class="value" style="min-width:50px;text-align:right">${config.observation_ttl_days}d</span>
-                    </div>
-                </div>
-
-                <!-- Session TTL -->
-                <div class="settings-row setting-detail" style="padding:12px 0;border-bottom:1px solid var(--border)">
-                    <div style="flex:1">
-                        <span class="label">Session Context TTL</span>
-                        <div class="setting-help">
-                            <span style="color:var(--text-dim);font-size:11px">
-                                How many days before session-context observations expire. These are ephemeral notes like
-                                "user said good morning" or "started new session" — they clutter your memory fast.
-                            </span>
-                        </div>
-                        <div class="setting-help" style="margin-top:2px">
-                            <span style="color:var(--text-muted);font-size:11px;font-style:italic">
-                                Example: Set to 1-2 days for aggressive cleanup. Set to 7 if you want a week of session history.
-                            </span>
-                        </div>
-                    </div>
-                    <div style="display:flex;align-items:center;gap:8px">
-                        <input type="range" aria-label="Session context lifetime in days" min="1" max="30" value=${config.session_ttl_days}
-                            onInput=${(e) => updateField('session_ttl_days', parseInt(e.target.value))}
-                            style="width:120px" />
-                        <span class="value" style="min-width:50px;text-align:right">${config.session_ttl_days}d</span>
-                    </div>
-                </div>
-
-                <!-- Stale Threshold -->
-                <div class="settings-row setting-detail" style="padding:12px 0;border-bottom:1px solid var(--border)">
-                    <div style="flex:1">
-                        <span class="label">Stale Confidence Threshold</span>
-                        <div class="setting-help">
-                            <span style="color:var(--text-dim);font-size:11px">
-                                Memories whose computed confidence drops below this value get auto-deprecated.
-                                Confidence decays naturally over time — facts decay slowly (~139 day half-life),
-                                while observations decay faster.
-                            </span>
-                        </div>
-                        <div class="setting-help" style="margin-top:2px">
-                            <span style="color:var(--text-muted);font-size:11px;font-style:italic">
-                                Example: 0.10 is conservative (only removes very stale memories). 0.25 is aggressive (removes anything that's lost 75% confidence).
-                            </span>
-                        </div>
-                    </div>
-                    <div style="display:flex;align-items:center;gap:8px">
-                        <input type="range" aria-label="Stale confidence threshold" min="1" max="50" value=${Math.round(config.stale_threshold * 100)}
-                            onInput=${(e) => updateField('stale_threshold', parseInt(e.target.value) / 100)}
-                            style="width:120px" />
-                        <span class="value" style="min-width:50px;text-align:right">${(config.stale_threshold * 100).toFixed(0)}%</span>
-                    </div>
-                </div>
-
-                <!-- Cleanup Interval -->
-                <div class="settings-row setting-detail" style="padding:12px 0;border-bottom:1px solid var(--border)">
-                    <div style="flex:1">
-                        <span class="label">Cleanup Interval</span>
-                        <div class="setting-help">
-                            <span style="color:var(--text-dim);font-size:11px">
-                                How often the background cleanup runs (in hours). Lower = more frequent checks.
-                            </span>
-                        </div>
-                        <div class="setting-help" style="margin-top:2px">
-                            <span style="color:var(--text-muted);font-size:11px;font-style:italic">
-                                Example: 24h (once a day) is fine for most users. Set to 1h if you're generating memories rapidly.
-                            </span>
-                        </div>
-                    </div>
-                    <div style="display:flex;align-items:center;gap:8px">
-                        <input type="range" aria-label="Cleanup interval in hours" min="1" max="168" value=${config.cleanup_interval_hours}
-                            onInput=${(e) => updateField('cleanup_interval_hours', parseInt(e.target.value))}
-                            style="width:120px" />
-                        <span class="value" style="min-width:50px;text-align:right">${config.cleanup_interval_hours}h</span>
-                    </div>
-                </div>
-
-                <!-- Save button -->
-                <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
-                    <button class="btn btn-primary" onClick=${handleSave} disabled=${saving}>
-                        ${saving ? 'Saving...' : 'Save Settings'}
-                    </button>
-                    <button class="btn" onClick=${handleDryRun} disabled=${cleanupRunning}>
-                        ${cleanupRunning ? 'Running...' : 'Preview Cleanup'}
-                    </button>
-                    <button class="btn btn-danger" onClick=${handleCleanup} disabled=${cleanupRunning}>
-                        Run Cleanup Now
-                    </button>
-                </div>
-
-                <!-- Cleanup result -->
-                ${cleanupResult && html`
-                    <div class="cleanup-result" style="margin-top:12px;padding:12px;background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--radius)">
-                        ${cleanupResult.error ? html`
-                            <span style="color:var(--danger)">${cleanupResult.error}</span>
-                        ` : html`
-                            <div style="font-size:13px;color:var(--text-dim)">
-                                <strong style="color:var(--text)">${cleanupResult.dry_run ? 'Preview' : 'Cleanup Complete'}</strong>
-                                <span style="margin-left:8px">
-                                    Checked: ${cleanupResult.checked} ·
-                                    ${cleanupResult.dry_run ? 'Would deprecate' : 'Deprecated'}: <strong style="color:${cleanupResult.deprecated > 0 ? 'var(--warning)' : 'var(--accent)'}">${cleanupResult.deprecated}</strong>
-                                </span>
-                            </div>
-                            ${cleanupResult.deprecated_ids && cleanupResult.deprecated_ids.length > 0 && html`
-                                <div style="margin-top:8px;font-size:11px;color:var(--text-muted);max-height:100px;overflow-y:auto">
-                                    ${cleanupResult.deprecated_ids.map(id => html`<div style="font-family:monospace">${id.substring(0, 8)}...</div>`)}
-                                </div>
-                            `}
-                        `}
-                    </div>
-                `}
-
-                <!-- Last run info -->
-                ${lastRun && html`
-                    <div style="margin-top:8px;font-size:11px;color:var(--text-muted)">
-                        Last cleanup: ${new Date(lastRun).toLocaleString()}
-                        ${lastResult && lastResult.deprecated != null ? html` · Deprecated: ${lastResult.deprecated}` : ''}
-                    </div>
-                `}
+                `)}
+                <button class="btn btn-primary" onClick=${handleSave} disabled=${saving || busy}>${saving ? 'Saving…' : 'Save rules'}</button>
             `}
         </div>
     `;
 }
-
 // ============================================================================
 // Settings Page
 // ============================================================================
@@ -5695,6 +5571,73 @@ function CleanupSettings() {
 // key — keeps everything, best when you have the key) or DEPRECATE (hide them).
 // One key per recover pass; re-run with another key for whatever remains. Renders
 // nothing when there's nothing unreadable and no action was taken.
+// MemoryGatePanel — the operator's review queue for the optional memory gate.
+// Memories the judges were unsure about are not voted on until decided here.
+function MemoryGatePanel() {
+    const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [err, setErr] = useState(null);
+    const [busyId, setBusyId] = useState('');
+    const [done, setDone] = useState({}); // memory_id -> decision
+
+    const load = async () => {
+        setLoading(true); setErr(null);
+        try { setData(await fetchMemoryGateReviewQueue({ limit: 50 })); }
+        catch (e) { setErr(e.message || String(e)); }
+        setLoading(false);
+    };
+    // The server pages past rows it may not show; follow its cursor to append.
+    const loadMore = async () => {
+        if (!data?.next_cursor) return;
+        setLoading(true); setErr(null);
+        try {
+            const next = await fetchMemoryGateReviewQueue({ limit: 50, cursor: data.next_cursor });
+            setData({ ...next, items: [...(data.items || []), ...(next.items || [])] });
+        } catch (e) { setErr(e.message || String(e)); }
+        setLoading(false);
+    };
+    useEffect(() => { load(); }, []);
+
+    const decide = async (id, decision) => {
+        setBusyId(id); setErr(null);
+        try { await decideMemoryGateReview(id, decision); setDone(d => ({ ...d, [id]: decision })); }
+        catch (e) { setErr(e.message || String(e)); }
+        setBusyId('');
+    };
+
+    const gate = describeMemoryGate(data?.gate);
+    const items = (data?.items || []).filter(it => !done[it.memory_id]);
+    const decided = Object.keys(done).length;
+    return html`
+        <div class="settings-section memory-gate-panel">
+            <h3 style="margin:0 0 6px;">${gate.headline}</h3>
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">${gate.detail}</div>
+            ${gate.enabled && html`<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px;">${gate.scope}</div>`}
+            ${loading && html`<div class="empty-state">Loading…</div>`}
+            ${err && html`<div class="import-error" style="margin:8px 0;">${err}</div>`}
+            ${!loading && gate.enabled && items.length === 0 && html`<div class="empty-state">Nothing is waiting for review.${decided ? ` ${decided} decided this session — the node applies each on its next vote.` : ''}</div>`}
+            ${!loading && items.map(it => {
+                const st = reviewItemState(it);
+                return html`
+                    <div class="memory-gate-item" style="border:1px solid var(--border);border-radius:6px;padding:10px;margin:8px 0;">
+                        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">${it.domain_tag || ''} ${it.memory_type ? '· ' + it.memory_type : ''} · held ${it.held_at ? new Date(it.held_at).toLocaleString() : ''}</div>
+                        <div style="white-space:pre-wrap;font-size:13px;margin-bottom:6px;">${st.text}</div>
+                        ${st.evidenceNote && html`<div class="memory-gate-evidence-expired" style="font-size:12px;color:var(--text-dim);margin-bottom:6px;">${st.evidenceNote}</div>`}
+                        ${st.evidence && html`<div class="memory-gate-evidence" style="white-space:pre-wrap;font-size:12px;color:var(--text-dim);border-left:2px solid var(--border);padding-left:8px;margin-bottom:6px;"><strong>Evidence:</strong> ${st.evidence}</div>`}
+                        <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">${it.reason}</div>
+                        ${st.decidable && html`
+                            <div style="display:flex;gap:8px;">
+                                <button class="btn btn-primary" style="font-size:12px;padding:5px 12px;" disabled=${busyId === it.memory_id} onClick=${() => decide(it.memory_id, 'accept')}>Keep as memory</button>
+                                <button class="btn btn-danger" style="font-size:12px;padding:5px 12px;" disabled=${busyId === it.memory_id} onClick=${() => decide(it.memory_id, 'reject')}>Reject</button>
+                            </div>`}
+                    </div>`;
+            })}
+            ${!loading && data?.next_cursor && html`<button class="btn" style="font-size:11px;padding:4px 10px;margin:6px 6px 0 0;" onClick=${loadMore}>Load more</button>`}
+            ${!loading && html`<button class="btn" style="font-size:11px;padding:4px 10px;margin-top:6px;" onClick=${load}>Refresh</button>`}
+        </div>
+    `;
+}
+
 function UnreadableMemoriesPanel({ status, onChange, onBusy }) {
     const [mode, setMode] = useState('actions'); // actions | recover
     const [recoveryKey, setRecoveryKey] = useState('');
@@ -6387,7 +6330,7 @@ function RerankerControl() {
                 ${detected && !cfg.enabled ? html`
                     <div style="font-size:12px;color:var(--accent);">Found a reranker running at ${detected} - the URL was filled in for you. Click Save & enable to start using it (the connection is verified on save).</div>
                 ` : ''}
-                <div style="font-size:11px;color:var(--text-muted);">Optional. Re-scores recall results for sharper relevance. Off by default; recall works fine without it.</div>
+                <div style="font-size:11px;color:var(--text-muted);">Optional. Reorders recall results using a second model. Off by default; compare relevance and latency before enabling it.</div>
             </div>
             `}
             ${showSetup && html`<${RerankerSetupModal} onClose=${() => { setShowSetup(false); reload(); }} onDone=${reload} />`}
@@ -6586,7 +6529,7 @@ function RerankerSetupModal({ onClose, onDone }) {
                     `}
                     ${phase === 'unavailable' && html`<p style="color:var(--text-dim);">The managed reranker isn't available on this node build. You can still point SAGE at your own TEI-compatible server from Settings.</p>`}
                     ${phase === 'consent' && html`
-                        <p style="margin-top:0;">The reranker re-scores recall results with a cross-encoder for sharper relevance. SAGE sets it up by itself - nothing to install, nothing leaves this machine:</p>
+                        <p style="margin-top:0;">The optional reranker re-scores recall results with a cross-encoder. Compare relevance and latency on your own queries. SAGE manages the local setup:</p>
                         <ul style="padding-left:20px;color:var(--text-dim);font-size:13px;">
                             <li>${needEngine ? html`Download the engine (llama.cpp, ${mb(st.engine_bytes)} MB, checksum-verified)` : html`Engine: already in place \u2713`}</li>
                             <li>${needModel ? html`Download the model (${st.model_name}, ${mb(st.model_bytes)} MB, checksum-verified, one-time)` : html`Model: already downloaded \u2713`}</li>
@@ -6620,7 +6563,7 @@ function RerankerSetupModal({ onClose, onDone }) {
                         <div style="text-align:center;padding:8px 0;">
                             <div style="font-size:34px;margin-bottom:8px;">\uD83C\uDFAF</div>
                             <h3 style="margin:0 0 8px;color:var(--accent-green);">Reranker is on</h3>
-                            <p style="color:var(--text-dim);">Recall results are now re-scored by a cross-encoder for sharper relevance. SAGE manages the process - it starts with the node and you can turn it off any time in Settings.</p>
+                            <p style="color:var(--text-dim);">Recall results are now re-scored by a cross-encoder. Compare relevance and latency on your own queries. SAGE manages the process - it starts with the node and you can turn it off any time in Settings.</p>
                         </div>
                     `}
                     ${err && phase !== 'consent' && phase !== 'done' && html`<div class="import-error" style="margin-top:14px;">${err}</div>`}
@@ -6812,6 +6755,15 @@ function SettingsPage({ onRunSetup, requestedTab }) {
     // older servers only set the `ollama` string. Derive a normalized view
     // so the row below this can render any provider without branching twice.
     const embedderStatus = describeEmbedder(health);
+    // A held signer fence blocks every write from its key and every coordinated
+    // restart, and until this row existed the dashboard said nothing about it:
+    // the field report read as "reads fine, writes time out, no error". The
+    // health block is operator-gated, so rows appear for the local dashboard
+    // session and the summary alone for a non-operator payload.
+    const fenceStatus = describeSignerFences(health);
+    // The fence that ENDED, so a hold that resolved while the operator was
+    // reading is still visible once the held-fence row above disappears.
+    const lastFenceResolution = describeLastFenceResolution(health);
     const chooseEmbeddingProvider = async (provider) => {
         if (provider === embedderStatus.provider || embeddingSwitching) return;
         if (provider === 'ollama') {
@@ -6908,6 +6860,7 @@ function SettingsPage({ onRunSetup, requestedTab }) {
         { id: 'recall', label: 'Recall', help: 'Semantic embedding, reranking, recall depth, confidence floor, and agent boot instructions.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M11 11l3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>` },
         { id: 'security', label: 'Security', help: 'Encrypt the Synaptic Ledger and manage its passphrase and recovery key.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 1L2 4v4c0 4 3 6 6 7 3-1 6-3 6-7V4L8 1z" stroke="currentColor" fill="none" stroke-width="1.5"/></svg>` },
         { id: 'maintenance', label: 'Maintenance', help: 'Preview cleanup, export backups, restart the node, rerun setup, and change preferences.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M11 2a3 3 0 00-3 3.9L3 11v2h2l5.1-5A3 3 0 1011 2z" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linejoin="round"/></svg>` },
+        { id: 'memory-gate', label: 'Memory gate', help: 'Review memories the optional memory gate held, and see what it sends to its judge service.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M3 3h10v10H3z" stroke="currentColor" fill="none" stroke-width="1.5"/><path d="M5.5 8l2 2 3.5-4" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
         { id: 'updates', label: 'Updates', help: 'Check, install, and inspect SAGE software releases and build information.', icon: html`<svg width="14" height="14" viewBox="0 0 16 16"><path d="M8 2v8M5 7l3 3 3-3" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/><path d="M3 12h10" stroke="currentColor" fill="none" stroke-width="1.5" stroke-linecap="round"/></svg>` },
     ];
 
@@ -6963,6 +6916,40 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                         <div class="settings-section">
                             <h3>System Status</h3>
                             <div class="settings-row"><span class="label">${statusDot(true)} SAGE</span><span class="value" style="color:var(--accent)">Running</span></div>
+                            ${fenceStatus.active > 0 && html`
+                                <div class="settings-row" style="align-items:flex-start;">
+                                    <span class="label" style="color:var(--danger)">${statusDot(false)} Signing key on hold</span>
+                                    <span class="value" style="color:var(--danger);max-width:55%;text-align:right;">${fenceSummary(fenceStatus)}</span>
+                                </div>
+                                <div class="settings-row" style="align-items:flex-start;">
+                                    <span class="label" style="font-size:12px;">${fenceStatus.explanation}</span>
+                                    <span class="value"></span>
+                                </div>
+                                ${fenceStatus.rows.map(row => html`
+                                    <div class="settings-row" style="align-items:flex-start;" key=${'fence-' + (row.signerFull || row.signer)}>
+                                        <span class="label" style="font-size:12px;">
+                                            ${row.resolutionLabel}${row.signerShort ? ` · ${row.signerShort}` : ''}
+                                        </span>
+                                        <span class="value" style="font-size:12px;font-weight:400;color:var(--text-muted);max-width:60%;text-align:right;">
+                                            ${row.nonceText ? `nonce ${row.nonceText} · ` : ''}held ${row.heldLabel} · ${row.attemptsLabel}
+                                            <br/>${row.resolutionHint}
+                                            ${row.detail ? html`<br/><span style="color:var(--text-dim);">${row.detail}</span>` : ''}
+                                        </span>
+                                    </div>
+                                `)}
+                            `}
+                            ${lastFenceResolution && html`
+                                <div class="settings-row" style="align-items:flex-start;">
+                                    <span class="label" style="font-size:12px;color:${lastFenceResolution.abandoned ? 'var(--warning, var(--danger))' : 'var(--text-dim)'};">
+                                        ${lastFenceResolution.label}${lastFenceResolution.signerShort ? ` · ${lastFenceResolution.signerShort}` : ''}
+                                    </span>
+                                    <span class="value" style="font-size:12px;font-weight:400;color:var(--text-muted);max-width:60%;text-align:right;">
+                                        ${lastFenceResolution.atLabel}${lastFenceResolution.heldLabel ? ` · held ${lastFenceResolution.heldLabel}` : ''}${lastFenceResolution.nonceText ? ` · nonce ${lastFenceResolution.nonceText}` : ''}
+                                        <br/>${lastFenceResolution.hint}
+                                        ${lastFenceResolution.detail ? html`<br/><span style="color:var(--text-dim);">${lastFenceResolution.detail}</span>` : ''}
+                                    </span>
+                                </div>
+                            `}
                             <div class="settings-row"><span class="label">${statusDot(embedderStatus.online)} ${embedderStatus.displayName}</span><span class="value" style="color: ${embedderStatus.online ? 'var(--accent)' : 'var(--text-muted)'}" title="${embedderStatus.detail || ''}">${embedderStatus.online ? (embedderStatus.detail ? embedderStatus.detail : 'Connected') : 'Offline'}</span></div>
                             ${(embedderStatus.provider === 'hash' || (embStatus && (embStatus.need_reembed > 0 || embStatus.unreadable > 0 || embStatus.errored > 0))) && html`
                                 <div class="settings-row" style="align-items:center;">
@@ -7085,7 +7072,7 @@ function SettingsPage({ onRunSetup, requestedTab }) {
             ${settingsTab === 'recall' && html`
                 <div class="settings-tab-content">
                     <div class="settings-section">
-                        <h3>Memory engine <${HelpTip} text="The two models that power recall: the embedding model that turns memories into vectors for semantic search (managed by SAGE), and the optional reranker that re-scores recall results for sharper relevance (one-click managed setup)." /></h3>
+                        <h3>Memory engine <${HelpTip} text="The embedding model turns memories into vectors for semantic search. The optional reranker uses a second model to re-score recall results; compare relevance and latency before enabling it. SAGE can manage both models locally." /></h3>
                         <div class="settings-row" style="align-items:center;">
                             <span class="label">${statusDot(embedderStatus.online)} Smart memory embeddings</span>
                             <span class="value" role="group" aria-label="Embedding provider" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
@@ -7177,6 +7164,12 @@ function SettingsPage({ onRunSetup, requestedTab }) {
                         </div>
                         ${html`<${AutostartToggle} />`}
                     </div>
+                </div>
+            `}
+
+            ${settingsTab === 'memory-gate' && html`
+                <div class="settings-tab-content">
+                    <${MemoryGatePanel} />
                 </div>
             `}
 
@@ -11285,6 +11278,11 @@ function NetworkPage({ sse, accessMode = false }) {
     const [memoryRepairPlan, setMemoryRepairPlan] = useState(null);
     const [memoryRepairError, setMemoryRepairError] = useState('');
     const [memoryRepairSubmitting, setMemoryRepairSubmitting] = useState(false);
+    // App-version upgrade surface: the chain's rung, the pending plan, the
+    // active ballot, and the two ceilings (what this binary can execute vs how
+    // far its auto-voter goes on its own).
+    const [appUpgrade, setAppUpgrade] = useState(null);
+    const [appUpgradeBusy, setAppUpgradeBusy] = useState(false);
 
     const loadAgents = useCallback(async () => {
         try {
@@ -11329,6 +11327,15 @@ function NetworkPage({ sse, accessMode = false }) {
         } catch (e) { /* governance endpoint may not exist yet */ }
     }, []);
 
+    // Reads the authoritative upgrade status (same query the CLI uses), so
+    // CEREBRUM and `sage-gui upgrade status` can never disagree about the rung
+    // the chain is on or which fork is next.
+    const loadAppUpgrade = useCallback(async () => {
+        try {
+            setAppUpgrade(await fetchAppUpgradeStatus());
+        } catch (e) { /* older node or endpoint unavailable */ }
+    }, []);
+
     const loadMemoryRepairPlan = useCallback(async () => {
         try {
             const plan = await fetchMemoryReanchorPlan();
@@ -11355,6 +11362,7 @@ function NetworkPage({ sse, accessMode = false }) {
         loadUnregistered();
         loadGovProposals();
         loadMemoryRepairPlan();
+        loadAppUpgrade();
         fetchStats().then(data => {
             if (data?.by_domain) setAllDomains(Object.keys(data.by_domain).sort());
         }).catch(() => {});
@@ -11700,6 +11708,39 @@ function NetworkPage({ sse, accessMode = false }) {
     }, [loadAgents, loadUnregistered]);
 
     // Governance handlers
+    // Proposes the chain's next app-version rung through the dedicated
+    // UpgradePropose transaction. The generic governance-propose route refuses
+    // app-version upgrades by design, so this is the only way CEREBRUM can
+    // start one. When the target is dormant (above this binary's auto-vote
+    // ceiling) the confirmation says so, because the plan then cannot pass
+    // without explicit votes from validators.
+    const handleAppUpgradePropose = useCallback(async () => {
+        if (!appUpgrade) return;
+        const target = appUpgrade.next_target_app_version;
+        const dormant = target > (appUpgrade.auto_vote_ceiling || 0);
+        const proceed = await showConfirmation(
+            dormant
+                ? `Propose activation of app-v${target}? This gate is DORMANT in this binary: every node's upgrade auto-voter abstains, so the plan only activates if validators cast explicit votes.`
+                : `Propose activation of app-v${target}? Validators auto-vote accept when their binary supports the target.`,
+            { title: `Propose app-v${target}`, confirmLabel: 'Propose' },
+        );
+        if (!proceed) return;
+        setAppUpgradeBusy(true);
+        try {
+            const result = await submitAppUpgradePropose(target, `CEREBRUM: activate app-v${target}`);
+            showToast(
+                result.dormant
+                    ? `app-v${target} proposed — dormant, so every validator must vote explicitly before it activates.`
+                    : `app-v${target} proposed (activates at height ${result.activation_height}).`,
+                'success', 10000,
+            );
+            await Promise.all([loadAppUpgrade(), loadGovProposals()]);
+        } catch (e) {
+            showToast('Upgrade propose failed: ' + e.message, 'error', 10000);
+        }
+        setAppUpgradeBusy(false);
+    }, [appUpgrade, loadAppUpgrade, loadGovProposals]);
+
     const handleGovVote = useCallback(async (proposalId, decision) => {
         setGovVoting(true);
         try {
@@ -11985,7 +12026,41 @@ function NetworkPage({ sse, accessMode = false }) {
                     ${!activeProposal && html`<button class="gov-new-btn" onClick=${() => setShowGovModal(true)}>+ New Proposal</button>`}
 				</div>
 
-				${govScopes.length > 0 && html`
+                ${appUpgrade && html`
+                    <div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;background:var(--surface);margin:10px 0 14px;">
+                        <div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;">
+                            <div>
+                                <strong>App version app-v${appUpgrade.status?.current_app_version ?? '?'}</strong>
+                                <span style="color:var(--text-muted);font-size:11px;"> · binary executes up to app-v${appUpgrade.compiled_app_version} · auto-vote ceiling app-v${appUpgrade.auto_vote_ceiling}</span>
+                            </div>
+                            ${appUpgrade.proposable && html`
+                                <button class="gov-new-btn" disabled=${appUpgradeBusy} onClick=${handleAppUpgradePropose}>
+                                    ${appUpgradeBusy ? 'Proposing…' : `Propose app-v${appUpgrade.next_target_app_version}`}
+                                </button>
+                            `}
+                        </div>
+                        ${appUpgrade.status?.pending_plan && html`
+                            <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">
+                                Pending plan: ${appUpgrade.status.pending_plan.name} · target app-v${appUpgrade.status.pending_plan.target_app_version} · activation height ${appUpgrade.status.pending_plan.activation_height}
+                            </div>
+                        `}
+                        ${appUpgrade.status?.active_proposal && html`
+                            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">
+                                Active ballot: ${appUpgrade.status.active_proposal.proposal_id}${appUpgrade.status.active_proposal.target_app_version ? ` · target app-v${appUpgrade.status.active_proposal.target_app_version}` : ''}
+                            </div>
+                        `}
+                        ${appUpgrade.explicit_vote_required_now && html`
+                            <div style="font-size:11px;color:var(--warning);margin-top:6px;font-weight:600;">
+                                This target is above the auto-vote ceiling — every validator must vote explicitly on the ballot below before it can activate.
+                            </div>
+                        `}
+                        ${appUpgrade.dormant_below_ceiling_gap && !appUpgrade.explicit_vote_required_now && html`
+                            <div style="font-size:11px;color:var(--text-muted);margin-top:6px;">${appUpgrade.dormant_note}</div>
+                        `}
+                    </div>
+                `}
+
+                ${govScopes.length > 0 && html`
 					<div style="display:grid;gap:8px;margin:10px 0 14px;">
 						${govScopes.map(scope => html`
 							<div style="border:1px solid var(--border);border-radius:10px;padding:10px 12px;background:var(--surface);">
@@ -12412,6 +12487,7 @@ function NetworkPage({ sse, accessMode = false }) {
                                                         onChange=${e => { setEditCapabilities(e.target.checked ? (editCapabilities | 16) : (editCapabilities & ~16)); setAccessDirty(true); }} />
                                                     <span>Block federated agent inbox messages (local notes remain available)</span>
                                                 </label>
+                                                <div class="muted">Blocking messages does not hide this agent from connected SAGEs. To hide it, turn off Visible in a connection’s Agent discovery settings.</div>
                                             </div>
 
                                             <div class="access-section-title">Domain Access <${HelpTip} text="Control which knowledge domains this agent can read, write, or modify. Modify is level 3 and includes permission to challenge/deprecate or reinstate memories. The domain owner normally authorizes the change. For an agent installed on this computer, the genesis admin can explicitly override access without changing the original owner or memory authorship." /></div>
@@ -14566,11 +14642,11 @@ function OnboardingWizard({ onClose, onNavigate, onOpenGuide }) {
                             ${rerankOn ? html`
                                 <div style="display:flex;align-items:center;gap:10px;margin-top:10px;background:var(--success-tint);border:1px solid rgba(16,185,129,0.35);border-radius:8px;padding:12px 14px;">
                                     <span style="color:var(--accent);font-size:18px;">✓</span>
-                                    <div style="font-size:13px;">The <strong>reranker</strong> is on too - recall results get re-scored for sharper relevance.</div>
+                                    <div style="font-size:13px;">The <strong>reranker</strong> is on too - recall results get re-scored by a second model. Compare relevance and latency on your own queries.</div>
                                 </div>
                             ` : html`
                                 <div style="margin-top:12px;">
-                                    <div style="font-size:13px;color:var(--text-dim);">Recommended extra: the <strong>reranker</strong> re-scores recall results for sharper relevance. Fully automatic - SAGE downloads the engine and model itself (one-time ~650 MB) and manages the process.</div>
+                                    <div style="font-size:13px;color:var(--text-dim);">Optional: the <strong>reranker</strong> re-scores recall results using a second model. Compare relevance and latency before enabling it. SAGE downloads the engine and model (one-time ~650 MB) and manages the process.</div>
                                     <button class="btn btn-primary" style="margin-top:8px;" onClick=${() => setShowRerankSetup(true)}>Set up the reranker - one click</button>
                                 </div>
                             `}
@@ -15238,7 +15314,7 @@ function OverviewPage({ sse }) {
                         <span style="font-size:12px;color:var(--text-muted);">Recall is keyword-only right now - the biggest upgrade you can make.</span>
                     ` : html`
                         <button class="btn btn-primary" onClick=${() => setShowRerankSetup(true)}>Set up the reranker →</button>
-                        <span style="font-size:12px;color:var(--text-muted);">One click, fully managed - re-scores recall results for sharper relevance.</span>
+                        <span style="font-size:12px;color:var(--text-muted);">Optional local model. Compare relevance and latency before enabling it.</span>
                     `}
                 </div>
             ` : ''}`)}
@@ -15781,7 +15857,7 @@ function App() {
 function FedGreenRail() {
     return html`<div class="fed-green-rail">
         <span class="fed-green-dot">✓</span>
-        Nothing is deleted. This only adds a connection to another network. Your memories are never touched.
+        Connecting does not share or delete memories. You choose memory access after connecting.
     </div>`;
 }
 
@@ -15790,9 +15866,9 @@ function FedGreenRail() {
 // but the operator should not have to think in implementation steps.
 function FedCeremonyProgress({ stage }) {
     const stages = [
-        ['scan', 'Scan each other'],
-        ['check', 'Confirm colleague'],
-        ['done', 'Connected'],
+        ['scan', 'Exchange codes'],
+        ['check', 'Verify together'],
+        ['done', 'Explore agents'],
     ];
     const active = Math.max(0, stages.findIndex(([id]) => id === stage));
     return html`<div class="fed-ceremony-progress" aria-label="Connection progress">
@@ -16278,7 +16354,7 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
                 const state = classifyFederationFailure(e, 'offline');
                 setRouteFailure(state);
                 if (misses >= 4) setPollNote(`${federationRoutePresentation({ state, last_error: e && e.message }).label}: ${e && e.message ? e.message : 'no response'}. SAGE will keep trying prepared Direct and Secure relay routes.`);
-                if (misses >= 15) { setEndedReason('SAGE could not reach the other computer for about 30 seconds over either prepared route. Your connection has not been approved.'); setStep('interrupted'); }
+                if (misses >= 15) { setEndedReason('SAGE could not reach the other computer for about 30 seconds. Check the connection, then retry to recover the latest status.'); setStep('interrupted'); }
             }
         };
         const id = setInterval(tick, 2000); tick();
@@ -16293,7 +16369,7 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
     return html`<div class="fed-wizard" ref=${wizardRef}>
         <div class="fed-wizard-head">
             <button class="btn fed-back" disabled=${busy} onClick=${exitGuest}>← Back</button>
-            <span class="fed-wizard-title">${recoveryPeer ? `Pair again with ${recoveryPeer}` : 'Join someone’s network'}</span>
+            <span class="fed-wizard-title">${recoveryPeer ? `Pair again with ${recoveryPeer}` : 'Use a connection code'}</span>
         </div>
         ${!['aborted', 'ended', 'interrupted'].includes(step) && html`<${FedCeremonyProgress} stage=${progressStage} />`}
         ${err && html`<div class="fed-err" role="alert">${err}</div>`}
@@ -16301,10 +16377,10 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
 
         ${step === 'scan' && html`<div class="fed-step">
             <${FedGreenRail} />
-            <h2>${recoveryPeer ? `Pair again with ${recoveryPeer}` : 'Scan their SAGE'}</h2>
+            <h2>${recoveryPeer ? `Pair again with ${recoveryPeer}` : 'Use a connection code'}</h2>
             ${recoveryPeer
                 ? html`<p class="fed-recovery-lead">Ask <strong>${recoveryPeer}</strong> to create a new connection code on their SAGE. Then scan it here, or paste the code they send you. They will need to approve the reconnection before anything can be shared.</p>`
-                : html`<p class="muted">Point your camera at the connection code your colleague is showing you.</p>`}
+                : html`<p class="muted">Scan the code on the other SAGE, or paste the code they send you. Keep both screens open for the return code and number check.</p>`}
             ${tier4 && html`<div class="fed-tier4-note">Connecting remotely or using a pasted image? The short number check later protects against a code being swapped or relayed.</div>`}
             ${!endpointReady && html`<div class="muted">Finding this computer’s network address…</div>`}
             ${endpointMissing && html`<div class="fed-tier4-note" role="status">No Direct address was detected. You can still scan a code that contains a Secure relay route.</div>`}
@@ -16324,12 +16400,12 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
 
         ${step === 'return' && scan && html`<div class="fed-step">
             <${FedGreenRail} />
-            <h3>Now let them scan you</h3>
+            <h3>Send your return code</h3>
             <p class="muted">Connecting to <strong>${scan.host_name || 'the other SAGE'}</strong>. SAGE automatically chose the best prepared route. Hold this up to their camera, or send it for them to paste.</p>
             ${routePlan && html`<${FedRouteDiagnostic} plan=${routePlan} compact=${true} />`}
             <${FedQr} text=${scan.return_uri} caption="Their SAGE scans this to check it's really you." />
             <div class="fed-step-actions">
-                <button class="btn btn-primary" disabled=${busy} onClick=${doRequest}>${busy ? 'Working…' : "They've scanned me — continue"}</button>
+                <button class="btn btn-primary" disabled=${busy} onClick=${doRequest}>${busy ? 'Working…' : "They used my code — continue"}</button>
             </div>
         </div>`}
 
@@ -16349,6 +16425,8 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
             instruction=${tier4
                 ? "They'll read you one final code. Type exactly what you hear."
                 : "Compare with their screen, or type exactly what they read aloud."}
+            peerName=${scan && scan.host_name}
+            trustOnly=${true}
             expectedCode=${codes.code_h}
             tier4=${tier4}
             confirmLabel="Yes - connect"
@@ -16359,8 +16437,8 @@ function GuestJoinWizard({ onExit, recoveryPeer }) {
         ${step === 'done' && html`<div class="fed-step fed-done">
             <div class="fed-done-check">✓</div>
             <h2>You're connected to ${(scan && scan.host_name) || 'the other SAGE'}</h2>
-            <p class="muted">Trust is established. Each computer now manages what it shares. Open this connection to choose existing domains for live Read or optional Copy; disconnecting always stops future access. Connection-bound Write is reserved but not active yet.</p>
-            <button class="btn btn-primary" onClick=${onExit}>Done</button>
+            <p class="muted">Your agents can discover and message each other automatically when both SAGEs support automatic node messaging. No memory domains are shared by connecting. Open the agent directory to check both sides, then optionally configure Read or Copy.</p>
+            <button class="btn btn-primary" onClick=${onExit}>Explore federation</button>
         </div>`}
 
         ${step === 'aborted' && html`<div class="fed-step">
@@ -16571,7 +16649,7 @@ function HostJoinWizard({ onExit }) {
         ${step === 'prepare' && html`<div class="fed-step">
             <h2>Connect another SAGE</h2>
             <${FedGreenRail} />
-            <p class="muted">SAGE checks Direct and Secure relay routes and chooses the best one automatically. The encrypted trust ceremony is the same nearby or across the internet.</p>
+            <p class="muted">Create a code for the other SAGE to scan or paste. Keep both screens open; you will each verify a short number before connecting. SAGE chooses the best available route automatically.</p>
             ${!endpointReady || !routePlan
                 ? html`<div class="fed-route-loading"><span class="fed-spinner"></span> Preparing secure routes…</div>`
                 : html`<${FedRouteDiagnostic} plan=${routePlan} />`}
@@ -16643,8 +16721,8 @@ function HostJoinWizard({ onExit }) {
             <div class="fed-done-check">✓</div>
             <h2>Connected to ${(view && view.guest_name) || 'the other SAGE'}</h2>
             <h3>Trust is established</h3>
-            <p class="muted">Permissions are separate from trust. Open this connection from Federation to choose which existing domains they may Read or Copy. They manage what they share back from their own computer; connection-bound Write is reserved but not active yet.</p>
-            <button class="btn btn-primary" onClick=${onExit}>Done</button>
+            <p class="muted">Your agents can discover and message each other automatically when both SAGEs support automatic node messaging. No memory domains are shared by connecting. Open the agent directory to check both sides, then optionally configure Read or Copy.</p>
+            <button class="btn btn-primary" onClick=${onExit}>Explore federation</button>
         </div>`}
 
         ${step === 'aborted' && html`<div class="fed-step">
@@ -16752,8 +16830,26 @@ function normalizeFedPipeContactGrant(value) {
         version: Number(grant.version || 0),
         agreementId: String(grant.agreement_id || grant.agreementId || ''),
         revision: String(grant.revision || ''),
+        next_cursor: String(grant.next_cursor || ''),
         paused: grant.paused === true,
         contacts,
+    };
+}
+
+// Agent discovery (messaging) exposure for one connection. An unconfigured
+// connection reports mode "all", which is the shipped default, so the UI can
+// render the true posture instead of assuming the operator narrowed it.
+function normalizeFedAgentExposure(value) {
+    const exposure = value && typeof value === 'object' ? value : {};
+    const mode = ['all', 'selected', 'none'].includes(exposure.mode) ? exposure.mode : 'all';
+    const agentIDs = Array.isArray(exposure.agent_ids)
+        ? exposure.agent_ids.map(id => String(id || '').trim().toLowerCase()).filter(Boolean)
+        : [];
+    return {
+        mode,
+        agent_ids: agentIDs,
+        revision: Number(exposure.revision || 0),
+        configured: exposure.configured === true,
     };
 }
 
@@ -16794,9 +16890,10 @@ function fedFriendlyLocalAgentLabel(agent) {
 
 // FedPermissionsPanel keeps identity/trust separate from ongoing authorization.
 // Each node edits only its own grants and observes the peer's grants read-only.
-function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
+function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy, localName }) {
     const chain = conn.remote_chain_id;
     const peerName = conn.peer_name || 'Other SAGE';
+    const automaticNodeMessaging = connectionStatus ? (connectionStatus.capabilities || []).includes('federated-node-messaging-v1') : null;
     const localIsHost = conn.local_role === 'host';
     const roleKnown = conn.local_role === 'host' || conn.local_role === 'guest';
     const relationshipRole = localIsHost ? 'This SAGE created the original connection code' : (conn.local_role === 'guest' ? `${peerName} created the original connection code` : 'This older direct relationship needs its role restored');
@@ -16807,6 +16904,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
     const [remoteKnown, setRemoteKnown] = useState(false);
     const [remotePaused, setRemotePaused] = useState(false);
     const [alignmentPending, setAlignmentPending] = useState(false);
+	const [localNodeContacts, setLocalNodeContacts] = useState(null);
 	const [localPipeContacts, setLocalPipeContacts] = useState(null);
 	const [localPipeContactsKnown, setLocalPipeContactsKnown] = useState(false);
 	const [remotePipeContacts, setRemotePipeContacts] = useState(null);
@@ -16818,6 +16916,11 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 	const [localAgentDirectoryErr, setLocalAgentDirectoryErr] = useState('');
 	const [selectedLocalAgentID, setSelectedLocalAgentID] = useState('');
 	const [agentExports, setAgentExports] = useState({});
+	const [agentExposure, setAgentExposure] = useState(null);
+	const [exposureMode, setExposureMode] = useState('all');
+	const [exposureSelection, setExposureSelection] = useState(() => new Set());
+	const [exposureBusy, setExposureBusy] = useState(false);
+	const [exposureErr, setExposureErr] = useState('');
 	const [readerRestrictions, setReaderRestrictions] = useState({});
 	const [selectedReaderID, setSelectedReaderID] = useState('');
 	const [readerDenyAll, setReaderDenyAll] = useState(false);
@@ -16851,7 +16954,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
         setSyncErr('');
         setSyncSaveErr('');
         const load = async () => {
-			const [catalogResult, permissionsResult, syncResult, syncStatusResult, pipeContactsResult, agentsResult, exportsResult, restrictionsResult] = await Promise.allSettled([
+			const [catalogResult, permissionsResult, syncResult, syncStatusResult, pipeContactsResult, agentsResult, exportsResult, restrictionsResult, exposureResult] = await Promise.allSettled([
                 fedShareableDomains(),
                 fedPermissionsGet(chain, false),
                 fedSyncGet(chain),
@@ -16860,6 +16963,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 				fetchAgents(),
 				fedAgentExportsGet(chain),
 				fedReaderRestrictionsGet(chain),
+				fedAgentExposureGet(chain),
             ]);
             if (!live) return;
             const errors = [];
@@ -16896,6 +17000,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
             else setSyncStatus(null);
 			if (pipeContactsResult.status === 'fulfilled') {
 				const result = pipeContactsResult.value || {};
+				setLocalNodeContacts(result.local_node_contacts ? normalizeFedPipeContactGrant(result.local_node_contacts) : null);
 				setLocalPipeContacts(normalizeFedPipeContactGrant(result.local_contacts));
 				setLocalPipeContactsKnown(true);
 				if (result.remote_known === true) {
@@ -16930,6 +17035,12 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 				}
 				setReaderRestrictions(next);
 			} else errors.push('reader restrictions: unavailable');
+			if (exposureResult.status === 'fulfilled') {
+				const next = normalizeFedAgentExposure(exposureResult.value && exposureResult.value.exposure);
+				setAgentExposure(next);
+				setExposureMode(next.mode);
+				setExposureSelection(next.mode === 'selected' ? new Set(next.agent_ids) : new Set());
+			} else errors.push('agent discovery policy: unavailable');
             setErr(errors.length ? `Couldn't load ${errors.join('; ')}` : '');
         };
         load();
@@ -16999,6 +17110,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
             }
 			if (pipeContactsResult.status === 'fulfilled') {
 				const result = pipeContactsResult.value || {};
+				setLocalNodeContacts(result.local_node_contacts ? normalizeFedPipeContactGrant(result.local_node_contacts) : null);
 				const targeted = pinnedAgentIDs.flatMap((agentID, index) => {
 					const targetedResult = targetedResults[index];
 					return targetedResult && targetedResult.status === 'fulfilled'
@@ -17129,11 +17241,11 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
         const enabledWorkRequests = localPipeContacts && Array.isArray(localPipeContacts.contacts)
             ? localPipeContacts.contacts.filter(contact => contact && contact.accepting === true).length
             : 0;
-        if (dirty && !localPipeContactsKnown && !await showConfirmation(
+        if (dirty && !automaticNodeMessaging && !localPipeContactsKnown && !await showConfirmation(
             'Agent work-request switches could not be loaded. Updating the shared domain list will reset any enabled switches to Off. You can turn unchanged agents back on after refreshing.',
             { title: 'Update shared domains?', confirmLabel: 'Update and reset', tone: 'primary' }
         )) return;
-        if (dirty && enabledWorkRequests > 0 && !await showConfirmation(
+        if (dirty && !automaticNodeMessaging && enabledWorkRequests > 0 && !await showConfirmation(
             `Updating the shared domain list resets ${enabledWorkRequests} enabled agent work-request ${enabledWorkRequests === 1 ? 'switch' : 'switches'} to Off. This prevents a changed domain-access scope from inheriting permission. You can turn unchanged agents back on after saving.`,
             { title: 'Update shared domains?', confirmLabel: 'Update and reset', tone: 'primary' }
         )) return;
@@ -17255,13 +17367,67 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 		}
 	};
 
+	// Agent discovery is a live switch, not a draft: every change commits
+	// under the revision-bound connection policy the moment it is made, so
+	// there is no Save button to hunt for and no "Saved" state to decode.
+	// The complete eligible roster comes from the local agent directory —
+	// never from the bounded, exposure-filtered directory page — so narrowing
+	// "all" cannot silently drop agents that page did not show.
+	const applyAgentExposure = async (mode, agentIDs) => {
+		if (exposureBusy || agentExposure === null) return;
+		const canonicalMode = mode === 'selected' && agentIDs.length === 0 ? 'none' : mode;
+		const ids = canonicalMode === 'selected' ? Array.from(new Set(agentIDs)).slice().sort() : [];
+		setExposureBusy(true); setExposureErr('');
+		try {
+			const response = await fedAgentExposureSet(chain, {
+				mode: canonicalMode,
+				agent_ids: ids,
+				expected_revision: Number(agentExposure.revision || 0),
+			});
+			const next = normalizeFedAgentExposure(response && response.exposure);
+			setAgentExposure(next);
+			setExposureMode(next.mode);
+			setExposureSelection(next.mode === 'selected' ? new Set(next.agent_ids) : new Set());
+		} catch (e) {
+			setExposureErr(String(e.message || e));
+		} finally {
+			setExposureBusy(false);
+		}
+	};
+
+	const exposureVisibleIDs = () => {
+		if (exposureMode === 'all') return new Set(exposureCandidates.map(agent => agent.agent_id));
+		if (exposureMode === 'selected') return new Set(exposureSelection);
+		return new Set();
+	};
+
+	const setAgentVisibility = (agentID, visible) => {
+		const id = String(agentID || '').trim().toLowerCase();
+		if (!id || exposureBusy || agentExposure === null) return;
+		if (!visible && exposureMode === 'all' && exposureCandidates.length === 0) {
+			setExposureErr('The local agent list is still loading. Refresh this connection and try again.');
+			return;
+		}
+		const next = exposureVisibleIDs();
+		if (visible) next.add(id); else next.delete(id);
+		const mode = next.size === 0
+			? 'none'
+			: (next.size === exposureCandidates.length ? 'all' : 'selected');
+		applyAgentExposure(mode, Array.from(next));
+	};
+
+	const setAllAgentsVisible = visible => {
+		if (exposureBusy || agentExposure === null) return;
+		applyAgentExposure(visible ? 'all' : 'none', []);
+	};
+
 	const removeLocalAgentExport = async contact => {
 		const currentExport = contact && agentExports[contact.agent_id];
 		if (!currentExport || currentExport.state !== 'active' || busy || pipeContactMutationRef.current) return;
 		const label = contact.display_name || contact.handle || 'this agent';
 		if (!await showConfirmation(
-			`Remove ${label} from this federation? ${peerName} will immediately lose its directory entry, Read access derived from this agent's owned domains, and its message route. Manual domain-only shares are unchanged.`,
-			{ title: 'Remove federated agent?', confirmLabel: 'Remove agent', tone: 'danger' }
+			`Stop sharing ${label}’s owned memory with ${peerName}? This removes the Read access granted by this export.${automaticNodeMessaging ? ' Automatic discovery and messaging remain available.' : ' This older peer also relies on the export for this agent’s messaging route.'} Other explicit domain grants still apply.`,
+			{ title: 'Stop sharing owned memory?', confirmLabel: 'Stop sharing', tone: 'danger' }
 		)) return;
 		pipeContactMutationRef.current = true;
 		setPipeContactBusy(contact.agent_id); setPipeContactErr('');
@@ -17278,7 +17444,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 				...current,
 				contacts: current.contacts.filter(item => item.agent_id !== contact.agent_id),
 			} : current);
-			showToast(`${label} removed from the federation`, 'success');
+			showToast(`${label}’s memory export stopped`, 'success');
 		} catch (e) {
 			setPipeContactErr(String(e.message || e));
 		} finally {
@@ -17350,11 +17516,6 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 				setPipeContactErr(`${selectedName} is no longer an active local agent. Refresh the connection and choose another agent.`);
 				return;
 			}
-			if (!appV23FederatedInboxEnabled(currentAgent.capabilities)) {
-				setPipeContactLookupStatus('');
-				setPipeContactPolicyBlock({ agentID, selectedName });
-				return;
-			}
 			let result = await fedPipeContactsGet(chain, false, agentID);
 			if (lookupGeneration !== pinnedLocalAgentGenerationRef.current) {
 				setPipeContactLookupStatus('Agent access changed while SAGE was checking. Choose the agent again.');
@@ -17370,7 +17531,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 				}
 				if (!await showConfirmation(
 					`Sharing ${selectedName} will add ${ownedDomains.length} owned ${ownedDomains.length === 1 ? 'domain' : 'domains'} to this connection.${dirty ? ' Your pending domain changes will be saved too.' : ''}`,
-					{ title: 'Share agent and domains?', confirmLabel: 'Share agent', tone: 'primary' }
+					{ title: 'Share owned memory?', confirmLabel: 'Share memory', tone: 'primary' }
 				)) return;
 				setPipeContactLookupStatus(`Exporting ${selectedName}'s ${ownedDomains.length} owned ${ownedDomains.length === 1 ? 'domain' : 'domains'}…`);
 				if (dirty) {
@@ -17415,7 +17576,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 			pinnedLocalAgentGenerationRef.current += 1;
 			setLocalPipeContacts(current => mergeFedPipeContactGrant(current, [{ agentID, grant: targeted }]));
 			setLocalPipeContactsKnown(true);
-			setPipeContactLookupStatus(`${selectedName} added. Work requests are Off until you enable them.${evictedSelection ? ' The oldest unenabled selection was hidden to keep background checks bounded.' : ''}`);
+			setPipeContactLookupStatus(`${selectedName}’s owned memory is now shared for live Read.${evictedSelection ? ' The oldest unenabled selection was hidden to keep background checks bounded.' : ''}`);
 		} catch (e) {
 			if (lookupGeneration !== pinnedLocalAgentGenerationRef.current) return;
 			setPipeContactLookupStatus('');
@@ -17436,8 +17597,10 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 			await navigator.clipboard.writeText(value);
 			setCopiedContact(contact.agent_id);
 			setTimeout(() => setCopiedContact(current => current === contact.agent_id ? '' : current), 1500);
+			return true;
 		} catch (e) {
 			setPipeContactErr('Could not copy the agent address.');
+			return false;
 		}
 	};
 
@@ -17523,6 +17686,10 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 	const localAgentOptions = (Array.isArray(localAgentDirectory) ? localAgentDirectory : [])
 		.filter(agent => agent && agent.agent_id && agent.status === 'active' && !agent.removed_at && !shownLocalAgentIDs.has(agent.agent_id))
 		.sort((a, b) => fedFriendlyLocalAgentLabel(a).localeCompare(fedFriendlyLocalAgentLabel(b)));
+	const exposureCandidates = (Array.isArray(localAgentDirectory) ? localAgentDirectory : [])
+		.filter(agent => agent && agent.agent_id && agent.status === 'active' && !agent.removed_at)
+		.map(agent => ({ ...agent, agent_id: String(agent.agent_id).toLowerCase() }))
+		.sort((a, b) => fedFriendlyLocalAgentLabel(a).localeCompare(fedFriendlyLocalAgentLabel(b)));
 	const showOutgoing = roleKnown;
     const outboxCounts = syncStatus && syncStatus.outbox_counts && typeof syncStatus.outbox_counts === 'object'
         ? syncStatus.outbox_counts
@@ -17562,7 +17729,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 
     return html`<div class="fed-permissions-panel">
         <div class="fed-permissions-intro">
-			<strong>${relationshipRole}.</strong> This trusted connection is its own federation group; neither side creates a matching local group. ${roleKnown ? `Each SAGE independently chooses which local agents join it, which manual domains it shares, and which copies it keeps.` : 'This older pairing has no trustworthy role binding, so outbound sharing stays locked until it is paired again.'}
+			<strong>${relationshipRole}.</strong> This trusted connection is its own federation group; neither side creates a matching local group. ${roleKnown ? `Agents can discover and message across upgraded nodes automatically. Each SAGE independently chooses which memory domains it shares and which copies it keeps.` : 'This older pairing has no trustworthy role binding, so outbound sharing stays locked until it is paired again.'}
         </div>
         ${conn.sharing_paused && html`<div class="fed-perm-pause-note">
             <strong>Sharing from this SAGE is paused.</strong> The saved domain choices below are preserved and take effect again when you resume.
@@ -17572,6 +17739,18 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
             <span><strong>Connection actions</strong><span class="muted">Permanent revocation requires the JOIN ceremony to reconnect.</span></span>
             <button class="btn btn-danger" disabled=${revokeBusy} onClick=${onRevoke}>${revokeBusy ? 'Revoking…' : 'Revoke trust…'}</button>
 		</div>
+
+		${roleKnown && html`<${FederationDirectory} key=${chain}
+            peerName=${peerName} localName=${localName} local=${localNodeContacts} remote=${remotePipeContacts}
+            automatic=${automaticNodeMessaging}
+            copyAddress=${copyPipeContact} catalog=${catalog || {}} draft=${draft} disabled=${busy || !draft}
+            visibility=${{ agents: exposureCandidates, mode: exposureMode, selected: exposureSelection, busy: exposureBusy || agentExposure === null, setVisible: setAgentVisibility }}
+            stageDomains=${(domains, permission) => setDraft(current => stageFederationDomains(current, catalog || {}, domains, permission))}
+            loadMore=${async (side, cursor) => {
+                const page = await fedPipeContactsGet(chain, side === 'remote', '', { [side]: cursor });
+                if (side === 'remote' && !page.remote_known) throw new Error('Their agent directory is temporarily unavailable.');
+                return normalizeFedPipeContactGrant(side === 'local' ? page.local_node_contacts : page.remote_contacts);
+            }} />`}
 
 		${roleKnown && html`<section class="fed-perm-section">
 			<div class="fed-perm-section-head">
@@ -17610,11 +17789,36 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 			</div>`}
 		</section>`}
 
+		${roleKnown && automaticNodeMessaging !== false && html`<section class="fed-perm-section fed-agent-section" aria-labelledby=${`fed-discovery-heading-${chain}`}>
+			<div class="fed-perm-section-head">
+				<div>
+					<h4 id=${`fed-discovery-heading-${chain}`}>Agent discovery on ${peerName}</h4>
+					<p>Who ${peerName} can find when it lists or searches for an agent on this SAGE. Flip the Visible switch on any agent in the directory above, or use these two buttons to move all of them at once. This is listing and search only: it never grants memory access, and a discovered agent still has to accept before anything is delivered. Agents with messaging blocked can remain visible as Not accepting.</p>
+				</div>
+				<span class="fed-discovery-summary" role="status" aria-live="polite">${agentExposure === null
+					? 'Loading…'
+					: (exposureMode === 'all'
+						? `All ${exposureCandidates.length} agents visible`
+						: (exposureMode === 'none'
+							? 'No agents visible'
+							: `${exposureSelection.size} of ${exposureCandidates.length} agents visible`))}${exposureBusy ? ' · saving…' : ''}</span>
+			</div>
+			<div class="fed-exposure-actions">
+				<button class="btn" disabled=${exposureBusy || agentExposure === null || exposureMode === 'all'}
+					onClick=${() => setAllAgentsVisible(true)}>Show all agents</button>
+				<button class="btn" disabled=${exposureBusy || agentExposure === null || exposureMode === 'none'}
+					onClick=${() => setAllAgentsVisible(false)}>Hide all agents</button>
+				<span class="muted">Changes apply immediately. Being visible only lets ${peerName} find and ask; it grants nothing.</span>
+			</div>
+			${exposureCandidates.length === 0 && agentExposure !== null && html`<div class="fed-agent-empty muted">No active local agents to choose from.</div>`}
+			${exposureErr && html`<div class="fed-err fed-perm-error" role="alert">${exposureErr}</div>`}
+		</section>`}
+
 		${roleKnown && html`<section class="fed-perm-section fed-agent-section">
 			<div class="fed-perm-section-head">
 				<div>
-					<h4>Federated agents</h4>
-					<p>Adding a local agent explicitly joins it to this federation. ${peerName}'s ordinary agents can read its owned domains by default and message it; Write remains blocked unless you configure a separate receiving rule.</p>
+					<h4>Agent-owned memory sharing</h4>
+					<p>Exporting an agent here explicitly grants ${peerName} live Read access to its owned domains, including future children. Agent discovery and messaging are handled separately above.</p>
 				</div>
 			</div>
 			${peerAgentCompatibility.observed && !peerAgentCompatibility.fullySupported && html`
@@ -17627,9 +17831,9 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 			<div class="fed-agent-columns">
 				<div class="fed-agent-column">
 					<h5>Agents on this SAGE</h5>
-					<p class="muted">Only agents you add here appear to ${peerName}. Local Access Groups do not cross this connection.</p>
+					<p class="muted">These are explicit memory exports. Removing an export stops its Read grant; automatic agent discovery and messaging remain available on upgraded nodes.</p>
 					<div class="fed-agent-picker">
-						<label for=${`fed-agent-picker-${chain}`}>Add a local agent</label>
+						<label for=${`fed-agent-picker-${chain}`}>Share an agent’s owned memory</label>
 						<select id=${`fed-agent-picker-${chain}`} value=${selectedLocalAgentID}
 							disabled=${busy || !!pipeContactBusy || pipeContactLookupBusy || localAgentDirectory === null || localAgentOptions.length === 0}
 							aria-busy=${pipeContactLookupBusy}
@@ -17643,29 +17847,29 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 					</div>
 					${localAgentDirectoryErr && html`<div class="fed-agent-directory-error muted" role="status">${localAgentDirectoryErr}</div>`}
 					${localPipeContacts === null && html`<div class="fed-agent-empty muted">Loading local agents…</div>`}
-					${localPipeContacts !== null && localAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">No local agents have been explicitly added to this federation.</div>`}
+					${localPipeContacts !== null && localAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">No agent-owned memory has been shared through this control.</div>`}
 					${localAgentContacts.map(contact => {
 						const domains = Array.isArray(contact.domains) ? contact.domains.map(item => item.domain).filter(Boolean) : [];
 						return html`<div class="fed-agent-row" key=${contact.agent_id}>
 							<div class="fed-agent-identity">
 								<strong>${contact.display_name || contact.handle || 'Local agent'}</strong>
 								${contact.handle && html`<code>${contact.handle}</code>`}
-								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'Shared-domain access'}</span>
+								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'No memory access implied'}</span>
 							</div>
 							<div class="fed-agent-remote-actions">
 								<span class=${contact.accepting ? 'on' : ''}>${contact.accepting ? 'Federated · messages on' : 'Federated · messages blocked by Agent RBAC'}</span>
 								<button class="btn btn-sm btn-danger"
 									disabled=${busy || !!pipeContactBusy}
-									onClick=${() => removeLocalAgentExport(contact)}>Remove…</button>
+									onClick=${() => removeLocalAgentExport(contact)}>Stop sharing…</button>
 							</div>
 						</div>`;
 					})}
 				</div>
 				<div class="fed-agent-column fed-agent-remote">
 					<h5>Agents on ${peerName}</h5>
-					<p class="muted">These are the shared-domain agents their SAGE makes visible. Copy a private routing address only when configuring an agent; CEREBRUM manages the connection.</p>
+					<p class="muted">Their agent directory is shown above. Memory permissions they grant to this SAGE remain separate.</p>
 					${!remotePipeKnown && html`<div class="fed-agent-empty muted">Their SAGE has not reported agent contacts yet.</div>`}
-					${remotePipeKnown && remoteAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">They are not exposing any shared-domain agents to this connection.</div>`}
+					${remotePipeKnown && remoteAgentContacts.length === 0 && html`<div class="fed-agent-empty muted">No remote agent contacts have been reported.</div>`}
 					${remoteAgentContacts.map(contact => {
 						const domains = Array.isArray(contact.domains) ? contact.domains.map(item => item.domain).filter(Boolean) : [];
 						const ready = contact.available !== false && contact.accepting === true && !remotePipeContacts.paused;
@@ -17673,7 +17877,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy }) {
 							<div class="fed-agent-identity">
 								<strong>${contact.display_name || contact.handle || 'Remote agent'}</strong>
 								${contact.handle && html`<span class="fed-agent-handle muted">${contact.handle}</span>`}
-								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'Shared-domain access'}</span>
+								<span class="muted">${domains.length ? domains.slice(0, 3).join(', ') + (domains.length > 3 ? ` +${domains.length - 3}` : '') : 'No memory access implied'}</span>
 							</div>
 							<div class="fed-agent-remote-actions">
 								<span class="fed-agent-readiness ${ready ? 'ready' : ''}">${ready ? 'Ready' : (remotePipeContacts.paused ? 'Paused' : (contact.available === false ? 'Unavailable' : 'Not accepting'))}</span>
@@ -18335,9 +18539,12 @@ function FederationPage() {
     const [recoveryPeer, setRecoveryPeer] = useState('');
     const [conns, setConns] = useState(null);
     const [localChain, setLocalChain] = useState('');
+    const [localName, setLocalName] = useState('');
     const [err, setErr] = useState('');
     const [remoteNotice, setRemoteNotice] = useState(null);
     const [connectionReachability, setConnectionReachability] = useState({});
+    const [showConnect, setShowConnect] = useState(false);
+    const [fedSummaries, setFedSummaries] = useState({});
     const [hiddenPastConnections, setHiddenPastConnections] = useState(() => {
         try {
             const saved = JSON.parse(localStorage.getItem('sage-fed-hidden-past-connections') || '[]');
@@ -18391,7 +18598,7 @@ function FederationPage() {
             // last-known route diagnostics are all local facts. Paint them
             // before probing an offline peer so this section never sits blank
             // for the network timeout.
-            setConns(next); setLocalChain(r.local_chain_id || ''); setErr('');
+            setConns(next); setLocalChain(r.local_chain_id || ''); setLocalName(r.local_network_name || r.local_chain_id || ''); setErr('');
             setConnectionReachability(current => {
                 const seeded = { ...current };
                 active.forEach(connection => {
@@ -18529,20 +18736,53 @@ function FederationPage() {
         setMode('landing');
     };
 
-    if (mode === 'guest') return html`<div class="page fed-page"><${GuestJoinWizard} recoveryPeer=${recoveryPeer} onExit=${exitJoinWizard} /></div>`;
-    if (mode === 'host') return html`<div class="page fed-page"><${HostJoinWizard} onExit=${() => setMode('landing')} /></div>`;
-
     const liveConns = (conns || []).filter(c => c.status === 'active' && !c.expired);
     const pastConns = (conns || []).filter(c => c.status !== 'active' || c.expired);
     const visiblePastConns = pastConns.filter(c => !hiddenPastConnections.includes(pastConnectionKey(c)));
     const hiddenPastCount = pastConns.length - visiblePastConns.length;
+    const liveChainKey = liveConns.map(c => c.remote_chain_id).sort().join(',');
+
+    // Per-connection at-a-glance summary for the connection rows. Discovery
+    // posture is one operator decision per link, so the row states it without
+    // expanding the whole management panel: one bounded read per live
+    // connection, and a failed read leaves the badge absent rather than
+    // guessing at a posture the node did not confirm.
+    useEffect(() => {
+        if (!fedOn || liveConns.length === 0) { setFedSummaries({}); return; }
+        let live = true;
+        Promise.allSettled(liveConns.map(async conn => {
+            const result = await fedAgentExposureGet(conn.remote_chain_id);
+            return [conn.remote_chain_id, result && result.exposure ? result.exposure : null];
+        })).then(results => {
+            if (!live) return;
+            const next = {};
+            results.forEach(result => {
+                if (result.status === 'fulfilled' && result.value[1]) {
+                    next[result.value[0]] = result.value[1];
+                }
+            });
+            setFedSummaries(next);
+        });
+        return () => { live = false; };
+    }, [fedOn, liveChainKey, openChain]);
+
+    if (mode === 'guest') return html`<div class="page fed-page"><${GuestJoinWizard} recoveryPeer=${recoveryPeer} onExit=${exitJoinWizard} /></div>`;
+    if (mode === 'host') return html`<div class="page fed-page"><${HostJoinWizard} onExit=${() => setMode('landing')} /></div>`;
 
     return html`<div class="page fed-page">
         <div class="fed-landing">
-            <h1>Federation</h1>
-            <p class="fed-landing-sub muted">Link your <strong>whole SAGE</strong> to <strong>someone else's SAGE</strong> so the two can share the topics you choose — on the same LAN or across the internet. A paired laptop can roam between networks and reconnect without pairing again. This is different from adding an AI tool to your own SAGE (do that under <strong>Agents</strong>) — here you're linking two separate brains.</p>
-            <${FedGreenRail} />
-            <${FederationMasterSwitch} onChange=${setFedOn} />
+            <header class="fed-page-head">
+                <div class="fed-page-title">
+                    <h1>Federation</h1>
+                    <p class="fed-landing-sub muted">Connect independent SAGE nodes so their agents can find and message each other. Memory sharing stays optional and explicitly configured.</p>
+                    <${FedGreenRail} />
+                </div>
+                <div class="fed-page-actions">
+                    <${FederationMasterSwitch} onChange=${setFedOn} />
+                    ${fedOn && liveConns.length > 0 && html`<button class="btn ${showConnect ? '' : 'btn-primary'}"
+                        onClick=${() => setShowConnect(current => !current)}>${showConnect ? 'Close' : 'Connect a SAGE'}</button>`}
+                </div>
+            </header>
             ${fedOn && html`<${NetworkNameEditor} />`}
             ${err && html`<div class="fed-err" role="alert">Couldn't load connections: ${err}</div>`}
             ${remoteNotice && html`<div class="fed-peer-revoke-notice" role="status">
@@ -18557,29 +18797,17 @@ function FederationPage() {
             </div>`}
             ${fedOn === false && html`<div class="fed-off-note muted">Federation is off, so joining or hosting a connection is unavailable. Turn it on above to connect.</div>`}
             ${html`<${FederationWarmup} onState=${(ready) => setWarming(!ready)} />`}
-            ${fedOn && !warming && html`<div class="fed-roles">
-                <button class="fed-role-card" onClick=${() => setMode('guest')}>
-                    <div class="fed-role-glyph">${icons.federation}</div>
-                    <div class="fed-role-title">Scan a connection code</div>
-                    <div class="fed-role-desc">Use the code shown by the other SAGE. Both sides manage their own sharing after trust is established.</div>
-                </button>
-                <button class="fed-role-card" onClick=${() => setMode('host')}>
-                    <div class="fed-role-glyph">${icons.federation}</div>
-                    <div class="fed-role-title">Create a connection code</div>
-                    <div class="fed-role-desc">SAGE automatically chooses Direct or Secure relay. Pairing alone shares no domains.</div>
-                </button>
-            </div>`}
             ${(fedOn || (conns && conns.length > 0)) && html`<div class="fed-conns">
                 <h3>Your trusted SAGEs <${HelpTip} text="A trusted SAGE is a live, approved link to another SAGE. Its sharing and sync controls only work while this link is active." /></h3>
-                ${liveConns.length > 0 && html`<div class="fed-conns-explain muted">The scan and spoken code establish <strong>trust</strong>. Open a connection to manage domain permissions. <strong>Pause</strong> temporarily stops what you share without losing the pairing; permanent revocation lives inside the connection details.</div>`}
+                ${liveConns.length > 0 && html`<div class="fed-conns-explain muted">The scan and spoken code establish <strong>trust</strong>. Open a connection to manage domain permissions. <strong>Pause</strong> temporarily stops sharing and work requests without losing the pairing; permanent revocation lives inside the connection details.</div>`}
                 ${conns === null && html`<div class="muted">Loading…</div>`}
                 ${conns && liveConns.length === 0 && html`
                     <${EmptyState} icon="federation"
-                        headline="No trusted SAGE is connected"
+                        headline="Your federation starts here"
                         hint=${fedOn
-                            ? "Link your whole SAGE to another SAGE to share memories across networks. Join someone's network with a code they share, or host one and hand out a code."
-                            : "Turn federation on above to link your whole SAGE to another SAGE and share memories across networks."}
-                        actionLabel=${fedOn ? 'Join someone’s network' : null}
+                            ? "Connect another SAGE to discover its agents and collaborate across computers. Choose memory access after connecting."
+                            : "Turn federation on above to connect another SAGE and discover its agents."}
+                        actionLabel=${fedOn ? 'Use a connection code' : null}
                         onAction=${fedOn ? (() => setMode('guest')) : null} />
                 `}
                 ${liveConns.map(c => {
@@ -18595,6 +18823,15 @@ function FederationPage() {
                         ? `Last check: ${routeView.label} · checking again in the background`
                         : `${routeView.label} · ${routeView.detail}`;
                     const role = c.local_role === 'host' ? 'connection code created here' : (c.local_role === 'guest' ? 'connection code scanned here' : 'older direct relationship');
+                    const summary = fedSummaries[c.remote_chain_id];
+                    const summaryCount = summary && Array.isArray(summary.agent_ids) ? summary.agent_ids.length : 0;
+                    const discoveryLabel = !summary
+                        ? ''
+                        : (summary.mode === 'none'
+                            ? 'No agents visible'
+                            : (summary.mode === 'all'
+                                ? 'All agents visible'
+                                : `${summaryCount} agent${summaryCount === 1 ? '' : 's'} visible`));
                     return html`<div class="fed-conn-wrap" key=${c.remote_chain_id}>
                     <div class="fed-conn-row">
                         <button class="fed-conn-main fed-conn-expand" aria-expanded=${openChain === c.remote_chain_id}
@@ -18602,6 +18839,7 @@ function FederationPage() {
                             onClick=${() => setOpenChain(openChain === c.remote_chain_id ? '' : c.remote_chain_id)}>
                             <span class="fed-conn-status ${routeUsable ? (c.sharing_paused ? 'paused' : 'on') : (routeView.tone === 'danger' ? 'blocked' : 'off')}"></span>
                             <span class="fed-conn-name">${c.peer_name || 'Other SAGE'}</span>
+                            ${discoveryLabel && html`<span class="fed-conn-badge ${summary.mode === 'all' ? '' : 'narrowed'}">${discoveryLabel}</span>`}
                             <span class="fed-conn-role">${role}</span>
                             <span class="fed-conn-meta muted">${c.sharing_paused && routeUsable ? 'sharing paused · pairing preserved' : routeDetail}</span>
                             <span class="fed-conn-chev">${openChain === c.remote_chain_id ? '▾' : '▸'}</span>
@@ -18616,7 +18854,7 @@ function FederationPage() {
                                     : pause(c, !c.sharing_paused)}>${busyChain === c.remote_chain_id ? 'Working…' : actionLabel}</button>
                     </div>
                     ${openChain === c.remote_chain_id && html`<div id=${`fed-connection-${c.remote_chain_id}`}>
-                        <${FedPermissionsPanel} conn=${c} connectionStatus=${status} revokeBusy=${busyChain === c.remote_chain_id} onRevoke=${() => revoke(c)} />
+                        <${FedPermissionsPanel} conn=${c} localName=${localName} connectionStatus=${status} revokeBusy=${busyChain === c.remote_chain_id} onRevoke=${() => revoke(c)} />
                     </div>`}
                 </div>`; })}
                 ${pastConns.length > 0 && html`<div class="fed-past">
@@ -18640,7 +18878,39 @@ function FederationPage() {
                     </div>`}
                 </div>`}
             </div>`}
-            ${fedOn && html`<${SharingSyncGroupsPanel} connections=${liveConns} reachability=${connectionReachability} />`}
+            ${fedOn && !warming && (liveConns.length === 0 || showConnect) && html`<section class="fed-onboarding" aria-label="Connect another SAGE">
+                <h2>Connect another SAGE</h2><p>Open Federation on both computers. Create a code on one, then scan or paste it on the other.</p>
+                <ol class="fed-onboarding-steps"><li><span>1</span><div><strong>Exchange codes</strong><small>Introduce the two computers.</small></div></li><li><span>2</span><div><strong>Verify together</strong><small>Each person confirms a short number.</small></div></li><li><span>3</span><div><strong>Explore agents</strong><small>Find agents. Choose memory sharing separately.</small></div></li></ol>
+                <div class="fed-roles">
+                <button class="fed-role-card" onClick=${() => setMode('guest')}>
+                    <div class="fed-role-glyph">${icons.federation}</div>
+                    <div class="fed-role-title">I have a connection code</div>
+                    <div class="fed-role-desc">Scan or paste the code from the other computer to begin.</div>
+                </button>
+                <button class="fed-role-card" onClick=${() => setMode('host')}>
+                    <div class="fed-role-glyph">${icons.federation}</div>
+                    <div class="fed-role-title">Create a connection code</div>
+                    <div class="fed-role-desc">Start here if neither computer has a code yet. Show it to the other SAGE.</div>
+                </button>
+                </div><p class="fed-onboarding-note">Already paired? Use your existing connection above. A laptop can move between networks without pairing again.</p>
+            </section>`}
+
+            ${liveConns.length > 0 && html`<details class="fed-collapsible">
+                <summary>
+                    <span><strong>Explore agents</strong><small class="muted">Every agent across this federation, who they belong to, and what they can reach.</small></span>
+                </summary>
+                <${FederationConnectome}
+                    connections=${liveConns} statuses=${connectionReachability} localChain=${localChain} localName=${localName}
+                    enabled=${fedOn === true} busyChain=${busyChain} onPause=${pause} onRevoke=${revoke}
+                    onManage=${conn => { setOpenChain(conn.remote_chain_id); setTimeout(() => document.getElementById(`fed-connection-${conn.remote_chain_id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 100); }} />
+            </details>`}
+
+            ${fedOn && html`<details class="fed-collapsible">
+                <summary>
+                    <span><strong>Sharing groups</strong><small class="muted">Share one set of topics with more than one trusted SAGE at once.</small></span>
+                </summary>
+                <${SharingSyncGroupsPanel} connections=${liveConns} reachability=${connectionReachability} />
+            </details>`}
         </div>
     </div>`;
 }

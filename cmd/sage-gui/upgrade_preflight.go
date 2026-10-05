@@ -105,24 +105,48 @@ func runUpgradePreflight(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read persisted app state: %w", err)
 	}
+	// Two different questions, two different ceilings: can this binary SERVE
+	// this chain (compiled gates), and how far will its auto-voter go on its own
+	// (the readiness ceiling)? A dormant gate is compiled and servable while the
+	// auto-voter still abstains (app-v28 before its ceiling bump), so
+	// compatibility must use the compiled ceiling or a node that CAN run the
+	// chain is reported incompatible.
 	maxSupported := sageabci.MaxSupportedAppVersion()
+	maxCompiled := sageabci.MaxCompiledAppVersion()
+	reached := highestAppliedVersion(bs, maxCompiled)
+	genesis, genesisErr := bs.GetAppV23GenesisActivation()
+	currentAppVersion := reached
+	if genesisErr == nil && genesis != nil && currentAppVersion < 23 {
+		currentAppVersion = 23
+	}
+	if currentAppVersion == 0 {
+		currentAppVersion = 1
+	}
+	governanceStatus, err := sageabci.InspectUpgradeGovernanceState(bs, currentAppVersion)
+	if err != nil {
+		return fmt.Errorf("inspect stopped-node upgrade governance state: %w", err)
+	}
 
 	fmt.Printf("SAGE upgrade preflight\n")
 	fmt.Printf("  data dir        : %s\n", resolvedDataDir)
 	fmt.Printf("  persisted height: %d\n", state.Height)
-	fmt.Printf("  binary supports : up to app-v%d\n", maxSupported)
+	fmt.Printf("  binary supports : up to app-v%d\n", maxCompiled)
+	if maxCompiled != maxSupported {
+		fmt.Printf("  auto-vote ceiling: app-v%d (a target above this needs explicit votes)\n", maxSupported)
+	}
 	fmt.Printf("  this binary     : sage-gui %s\n\n", version)
+	if compatibilityErr := printStoppedUpgradeGovernanceStatus(governanceStatus, maxCompiled); compatibilityErr != nil {
+		return fmt.Errorf("upgrade preflight: binary replacement is incompatible with canonical upgrade governance state: %w", compatibilityErr)
+	}
 
 	// A chain born directly at app-v23 has no app-v6..v21 history and consensus
 	// explicitly exempts it (internal/abci/appv23_local_rbac.go validateAppV23Prerequisite
 	// returns early on appV23GenesisActive). Applying the ladder to it would be
 	// a pure false alarm.
-	genesis, genesisErr := bs.GetAppV23GenesisActivation()
 	if genesisErr == nil && genesis != nil {
-		return reportDirectV23Genesis(bs, maxSupported)
+		return reportDirectV23Genesis(bs, maxCompiled)
 	}
 
-	reached := highestAppliedVersion(bs, maxSupported)
 	fmt.Printf("Highest applied activation record: app-v%d\n\n", reached)
 
 	rungs := inspectLadder(bs, state.Height, reached)
@@ -149,11 +173,11 @@ func runUpgradePreflight(args []string) error {
 		fmt.Println("  No agent holds Role==admin on chain, so the migration has no legacy Admin")
 		fmt.Println("  to promote to the singleton CEREBRUM Root.")
 		fmt.Println("  Register or materialize an admin agent before starting the climb.")
-	case reached >= maxSupported:
-		fmt.Printf("VERDICT: nothing to do — the chain is already at app-v%d, this binary's ceiling.\n", maxSupported)
+	case reached >= maxCompiled:
+		fmt.Printf("VERDICT: nothing to do — the chain is already at app-v%d, this binary's ceiling.\n", maxCompiled)
 	default:
-		fmt.Printf("VERDICT: clear to climb from app-v%d to app-v%d.\n", reached, maxSupported)
-		fmt.Printf("  %d fork activation(s) remain. Each waits out a governance delay of at least\n", maxSupported-reached)
+		fmt.Printf("VERDICT: clear to climb from app-v%d to app-v%d.\n", reached, maxCompiled)
+		fmt.Printf("  %d fork activation(s) remain. Each waits out a governance delay of at least\n", maxCompiled-reached)
 		fmt.Println("  200 blocks, so the full climb takes a while — see docs/UPGRADING.md.")
 	}
 
@@ -172,6 +196,41 @@ func runUpgradePreflight(args []string) error {
 	fmt.Println()
 	fmt.Println("Full procedure: docs/UPGRADING.md")
 	return nil
+}
+
+// printStoppedUpgradeGovernanceStatus reports the same compatibility decision
+// the in-app updater makes automatically. A supported pending plan or upgrade
+// ballot is carried through the verified snapshot and is not a deadlock.
+func printStoppedUpgradeGovernanceStatus(status *sageabci.UpgradeGovernanceStatus, maxSupported uint64) error {
+	fmt.Println("Binary replacement guard (canonical stopped-node state):")
+	if status.PendingPlan == nil {
+		fmt.Println("  pending plan : none")
+	} else {
+		plan := status.PendingPlan
+		fmt.Printf("  pending plan : %s (target app-v%d, activation height %d)\n",
+			plan.Name, plan.TargetAppVersion, plan.ActivationHeight)
+	}
+	if status.ActiveProposal == nil {
+		fmt.Println("  active ballot: none")
+	} else {
+		proposal := status.ActiveProposal
+		fmt.Printf("  active ballot: %s (%s, target %s, status %s",
+			proposal.ProposalID, proposal.Operation, proposal.TargetID, proposal.Status)
+		if proposal.TargetAppVersion != nil {
+			fmt.Printf(", target app-v%d", *proposal.TargetAppVersion)
+		}
+		fmt.Println(")")
+	}
+	compatibilityErr := status.ValidateBinaryReplacement(maxSupported)
+	if compatibilityErr != nil {
+		fmt.Println("  VERDICT      : INCOMPATIBLE — replacement cannot safely execute canonical app state.")
+	} else if status.PendingPlan != nil || status.ActiveProposal != nil {
+		fmt.Println("  VERDICT      : COMPATIBLE — the supported in-flight operation continues after restart.")
+	} else {
+		fmt.Println("  VERDICT      : COMPATIBLE — no in-flight upgrade governance state.")
+	}
+	fmt.Println()
+	return compatibilityErr
 }
 
 // printLadderFailureRecovery keeps preflight's operator guidance aligned with
@@ -271,8 +330,8 @@ func explainBadgerOpenFailure(badgerPath string, err error) error {
 
 // reportDirectV23Genesis handles chains born at app-v23, which have no
 // app-v6..v21 lineage by design.
-func reportDirectV23Genesis(bs *store.BadgerStore, maxSupported uint64) error {
-	reached := highestAppliedVersion(bs, maxSupported)
+func reportDirectV23Genesis(bs *store.BadgerStore, ceiling uint64) error {
+	reached := highestAppliedVersion(bs, ceiling)
 	if reached < 23 {
 		reached = 23
 	}
@@ -280,10 +339,10 @@ func reportDirectV23Genesis(bs *store.BadgerStore, maxSupported uint64) error {
 	fmt.Println("The app-v22 predecessor ladder does not apply to it — consensus exempts")
 	fmt.Println("direct-v23 genesis chains from that invariant.")
 	fmt.Printf("\nHighest applied activation record: app-v%d\n\n", reached)
-	if reached >= maxSupported {
-		fmt.Printf("VERDICT: nothing to do — the chain is already at app-v%d, this binary's ceiling.\n", maxSupported)
+	if reached >= ceiling {
+		fmt.Printf("VERDICT: nothing to do — the chain is already at app-v%d, this binary's ceiling.\n", ceiling)
 	} else {
-		fmt.Printf("VERDICT: clear to climb from app-v%d to app-v%d.\n", reached, maxSupported)
+		fmt.Printf("VERDICT: clear to climb from app-v%d to app-v%d.\n", reached, ceiling)
 	}
 	fmt.Println()
 	fmt.Println("Full procedure: docs/UPGRADING.md")

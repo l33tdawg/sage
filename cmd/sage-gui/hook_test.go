@@ -25,6 +25,8 @@ import (
 	"github.com/l33tdawg/sage/internal/auth"
 )
 
+const testInboxActivityEpoch = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
 // withTestSageEnv plants a temporary $HOME, $SAGE_HOME, $SAGE_AGENT_KEY, and
 // $SAGE_API_URL so the hook subcommand resolves to the test fixture rather
 // than the developer's real machine. Returns the key file path so callers
@@ -160,6 +162,10 @@ func TestHookInboxStatusIsPayloadFreeAndIdentityScoped(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestedPaths = append(requestedPaths, r.URL.RequestURI())
 		assert.NotEmpty(t, r.Header.Get("X-Agent-ID"))
+		if r.URL.Path == "/v1/inbox/activity-state" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": 1, "epoch": testInboxActivityEpoch, "seq": 0})
+			return
+		}
 		if r.URL.Path == "/v1/messages/wake-state" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"version": 1, "seq": 2, "pending": true})
 			return
@@ -173,7 +179,7 @@ func TestHookInboxStatusIsPayloadFreeAndIdentityScoped(t *testing.T) {
 	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
 
 	stdout := captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) })
-	assert.Equal(t, []string{"/v1/pipe/history/inbox?count_only=1", "/v1/messages/wake-state"}, requestedPaths)
+	assert.Equal(t, []string{"/v1/pipe/history/inbox?count_only=1", "/v1/messages/wake-state", "/v1/inbox/activity-state"}, requestedPaths)
 	assert.Contains(t, stdout, "2 unclaimed item(s)")
 	assert.Contains(t, stdout, hex.EncodeToString(pub))
 	assert.Contains(t, stdout, "Call sage_inbox with a fresh poll")
@@ -183,11 +189,14 @@ func TestHookInboxStatusIsPayloadFreeAndIdentityScoped(t *testing.T) {
 
 func TestHookInboxStatusZeroIsSilentAndFailureIsNotZero(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/messages/wake-state" {
+		switch r.URL.Path {
+		case "/v1/messages/wake-state":
 			_ = json.NewEncoder(w).Encode(map[string]any{"version": 1, "seq": 0, "pending": false})
-			return
+		case "/v1/inbox/activity-state":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": 1, "epoch": testInboxActivityEpoch, "seq": 0})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "unread": false})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "unread": false})
 	}))
 	withTestSageEnv(t, srv.URL)
 	assert.Empty(t, captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) }))
@@ -199,14 +208,17 @@ func TestHookInboxStatusZeroIsSilentAndFailureIsNotZero(t *testing.T) {
 
 func TestHookInboxStatusReportsClaimedUnfinishedWorkWithoutLeakingIt(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/messages/wake-state" {
+		switch r.URL.Path {
+		case "/v1/messages/wake-state":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"version": 1, "seq": 7, "pending": true,
 				"message_id": "must-not-be-read", "payload": "must-not-leak",
 			})
-			return
+		case "/v1/inbox/activity-state":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": 1, "epoch": testInboxActivityEpoch, "seq": 0})
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "unread": false})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "unread": false})
 	}))
 	defer srv.Close()
 	withTestSageEnv(t, srv.URL)
@@ -215,6 +227,186 @@ func TestHookInboxStatusReportsClaimedUnfinishedWorkWithoutLeakingIt(t *testing.
 	require.Contains(t, stdout, "no unclaimed item is waiting")
 	require.NotContains(t, stdout, "must-not-be-read")
 	require.NotContains(t, stdout, "must-not-leak")
+}
+
+func TestHookInboxActivityCueIsPayloadFreeAndMonotonic(t *testing.T) {
+	project := t.TempDir()
+	withHookWorkingDirectory(t, project)
+	var seq uint64 = 4
+	epoch := testInboxActivityEpoch
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/pipe/history/inbox":
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "unread": false})
+		case "/v1/messages/wake-state":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": 1, "seq": 0, "pending": false})
+		case "/v1/inbox/activity-state":
+			assert.NotEmpty(t, r.Header.Get("X-Signature"))
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"version": 1, "epoch": epoch, "seq": seq,
+				"reply": "must-not-leak", "task": map[string]any{"payload": "must-not-leak"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	withTestSageEnv(t, srv.URL)
+	t.Setenv("SAGE_PROVIDER", "codex")
+	t.Setenv("SAGE_PROJECT", "activity-test")
+
+	first := captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) })
+	require.Contains(t, first, "SAGE inbox activity changed")
+	require.Contains(t, first, "Call sage_inbox with a fresh poll")
+	require.NotContains(t, first, "must-not-leak")
+	assert.Empty(t, captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) }))
+
+	seq = 5
+	advanced := captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) })
+	assert.Equal(t, 1, strings.Count(advanced, "SAGE inbox activity changed"))
+	seq = 3
+	assert.Empty(t, captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) }),
+		"a lower server sequence must never rewind and replay the cursor")
+	epoch = strings.Repeat("f", 32)
+	reset := captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) })
+	assert.Equal(t, 1, strings.Count(reset, "SAGE inbox activity changed"),
+		"a new database incarnation must not be suppressed by an older higher cursor")
+}
+
+func TestHookInboxActivityMissingRouteDoesNotHideOrdinaryPointer(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusNotImplemented} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/pipe/history/inbox":
+					_ = json.NewEncoder(w).Encode(map[string]any{"count": 2, "unread": true})
+				case "/v1/messages/wake-state":
+					_ = json.NewEncoder(w).Encode(map[string]any{"version": 1, "seq": 8, "pending": true})
+				case "/v1/inbox/activity-state":
+					http.Error(w, "route unavailable", status)
+				}
+			}))
+			defer srv.Close()
+			withTestSageEnv(t, srv.URL)
+
+			stdout := captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) })
+			assert.Contains(t, stdout, "2 unclaimed item(s)")
+			assert.NotContains(t, stdout, "activity changed")
+		})
+	}
+}
+
+func TestHookInboxActivityFailureIsNotReportedAsAuthoritativeZero(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/pipe/history/inbox":
+			_ = json.NewEncoder(w).Encode(map[string]any{"count": 0, "unread": false})
+		case "/v1/messages/wake-state":
+			_ = json.NewEncoder(w).Encode(map[string]any{"version": 1, "seq": 0, "pending": false})
+		case "/v1/inbox/activity-state":
+			http.Error(w, "temporarily unavailable", http.StatusInternalServerError)
+		}
+	}))
+	defer srv.Close()
+	withTestSageEnv(t, srv.URL)
+	err := runHookInboxStatus()
+	require.ErrorContains(t, err, "inbox activity check unavailable")
+}
+
+func TestHookInboxActivityCursorScopeIsStableAndExact(t *testing.T) {
+	home := t.TempDir()
+	project := t.TempDir()
+	withHookWorkingDirectory(t, project)
+	t.Setenv("SAGE_HOME", home)
+	t.Setenv("SAGE_PROVIDER", "codex")
+	t.Setenv("SAGE_PROJECT", "project-a")
+
+	base, err := hookInboxActivityMarkerPath("agent-a")
+	require.NoError(t, err)
+	again, err := hookInboxActivityMarkerPath("agent-a")
+	require.NoError(t, err)
+	assert.Equal(t, base, again)
+
+	t.Setenv("SAGE_PROVIDER", "claude-code")
+	otherProvider, err := hookInboxActivityMarkerPath("agent-a")
+	require.NoError(t, err)
+	assert.NotEqual(t, base, otherProvider)
+	t.Setenv("SAGE_PROVIDER", "codex")
+	t.Setenv("SAGE_PROJECT", "project-b")
+	otherProject, err := hookInboxActivityMarkerPath("agent-a")
+	require.NoError(t, err)
+	assert.NotEqual(t, base, otherProject)
+	otherAgent, err := hookInboxActivityMarkerPath("agent-b")
+	require.NoError(t, err)
+	assert.NotEqual(t, otherProject, otherAgent)
+}
+
+func TestHookInboxActivityConcurrentEmitHasOneWinner(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), strings.Repeat("a", sha256.Size*2))
+	var out bytes.Buffer
+	const callers = 12
+	start := make(chan struct{})
+	errs := make(chan error, callers)
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			errs <- emitHookInboxActivity(marker, 9, &out)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, strings.Count(out.String(), "SAGE inbox activity changed"))
+	assert.Equal(t, uint64(9), loadHookInboxActivityCursor(marker))
+	info, err := os.Stat(filepath.Dir(marker))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+}
+
+type failingHookWriter struct{}
+
+func (failingHookWriter) Write([]byte) (int, error) { return 0, fmt.Errorf("write failed") }
+
+func TestHookInboxActivityDoesNotPersistBeforeCue(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), strings.Repeat("b", sha256.Size*2))
+	err := emitHookInboxActivity(marker, 11, failingHookWriter{})
+	require.ErrorContains(t, err, "emit inbox activity cue")
+	assert.Zero(t, loadHookInboxActivityCursor(marker), "failed output must leave the generation replayable")
+
+	var out bytes.Buffer
+	require.NoError(t, emitHookInboxActivity(marker, 11, &out))
+	assert.Contains(t, out.String(), "SAGE inbox activity changed")
+	assert.Equal(t, uint64(11), loadHookInboxActivityCursor(marker))
+}
+
+func TestHookInboxActivityMarkerNamespaceIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < maxHookInboxActivityMarkers+7; i++ {
+		sum := sha256.Sum256([]byte(strconv.Itoa(i)))
+		path := filepath.Join(dir, hex.EncodeToString(sum[:]))
+		require.NoError(t, os.WriteFile(path, []byte("1\n"), 0o600))
+		require.NoError(t, os.Chtimes(path, time.Unix(int64(i+1), 0), time.Unix(int64(i+1), 0)))
+	}
+	// Temporary files and lock directories are not cursors and are not counted.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "not-a-cursor.tmp"), []byte("x"), 0o600))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, strings.Repeat("c", sha256.Size*2)+".lock"), 0o700))
+
+	pruneHookInboxActivityMarkers(dir)
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	markers := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && isStopNudgeMarkerName(entry.Name()) {
+			markers++
+		}
+	}
+	assert.Equal(t, maxHookInboxActivityMarkers, markers)
 }
 
 func TestHookInboxStatusRejectsIncompleteOrInconsistentProbe(t *testing.T) {

@@ -259,7 +259,7 @@ func readNodeMetadata(badgerPath string) (height int64, appVersion uint64) {
 	if state, stateErr := sageabci.LoadState(bs); stateErr == nil && state != nil {
 		height = state.Height
 	}
-	appVersion = highestAppliedVersion(bs, sageabci.MaxSupportedAppVersion())
+	appVersion = highestAppliedVersion(bs, sageabci.MaxCompiledAppVersion())
 	return height, appVersion
 }
 

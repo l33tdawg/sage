@@ -76,6 +76,7 @@ func TestCanonicalMessageToolsSendReceiveReplyAndStatus(t *testing.T) {
 		var body map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		require.Equal(t, "mcp-helper", body["from_session_id"])
+		require.Equal(t, float64(0), body["from_revision"])
 		require.Equal(t, claimantSessionID, body["to_session_id"])
 		_ = json.NewEncoder(w).Encode(map[string]any{"message_id": "local-a", "claimant_session_id": claimantSessionID})
 	})
@@ -118,8 +119,13 @@ func TestCanonicalMessageToolsSendReceiveReplyAndStatus(t *testing.T) {
 	require.ElementsMatch(t, []string{"/v1/messages/local-a/read", "/v1/messages/local-b/read"}, readPaths)
 	mu.Unlock()
 
+	_, err = s.toolMessageHandoff(context.Background(), map[string]any{
+		"message_id": "local-a", "from_session_id": "mcp-helper", "from_revision": 0.5,
+	})
+	require.ErrorContains(t, err, "exact non-negative integer")
+
 	handed, err := s.toolMessageHandoff(context.Background(), map[string]any{
-		"message_id": "local-a", "from_session_id": "mcp-helper",
+		"message_id": "local-a", "from_session_id": "mcp-helper", "from_revision": float64(0),
 	})
 	require.NoError(t, err)
 	require.Equal(t, claimantSessionID, handed.(map[string]any)["claimant_session_id"])
@@ -1724,4 +1730,60 @@ func TestCanonicalMessageToolsRejectKeylessBearerBeforeSharedSignerUse(t *testin
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestFederatedReplyReplayReportsActualDeliveryState(t *testing.T) {
+	for _, tc := range []struct{ state, message string }{
+		{"queued", "queued for delivery"},
+		{"delivered", "Reply delivered"},
+		{"failed", "delivery failed"},
+		{"", "delivery status is not confirmed"},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/messages/foreign-request/reply", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/problem+json")
+				w.WriteHeader(http.StatusConflict)
+				_ = json.NewEncoder(w).Encode(map[string]any{"type": federatedCompatibilityProblemType, "status": http.StatusConflict, "title": "Federated reply path required", "detail": "Use the negotiated federated reply path."})
+			})
+			mux.HandleFunc("/v1/pipe/foreign-request", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"source_pipe_id": "origin-event", "reply_source_chain_id": "replying-chain"})
+			})
+			mux.HandleFunc("/v1/pipe/foreign-request/result", func(w http.ResponseWriter, r *http.Request) {
+				var body map[string]any
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+				require.NotEmpty(t, body["claimant_session_id"])
+				response := map[string]any{"status": "completed", "reply_event_id": "same-reply-event", "reply_status": tc.state, "transport_status": tc.state, "idempotent_replay": true}
+				if tc.state == "failed" {
+					response["last_error"] = "untrusted peer diagnostic"
+				}
+				if tc.state == "delivered" {
+					response["delivered_at"] = "2026-09-06T09:00:00Z"
+				}
+				_ = json.NewEncoder(w).Encode(response)
+			})
+			ts := httptest.NewServer(mux)
+			defer ts.Close()
+			_, key, err := ed25519.GenerateKey(nil)
+			require.NoError(t, err)
+			s := NewServer(ts.URL, key)
+			result, err := s.toolMessageReply(context.Background(), map[string]any{"message_id": "foreign-request", "result": "same result"})
+			require.NoError(t, err)
+			response := result.(map[string]any)
+			require.Equal(t, tc.state, response["reply_status"])
+			require.Equal(t, "same-reply-event", response["reply_event_id"])
+			require.Equal(t, true, response["idempotent_replay"])
+			require.Contains(t, response["message"], tc.message)
+			if tc.state != "queued" {
+				require.NotContains(t, response["message"], "queued for delivery")
+			}
+			if tc.state == "failed" {
+				require.Equal(t, "untrusted peer diagnostic", response["last_error"])
+				require.Contains(t, response["security_notice"], "Untrusted")
+			}
+			if tc.state == "delivered" {
+				require.Equal(t, "2026-09-06T09:00:00Z", response["delivered_at"])
+			}
+		})
+	}
 }

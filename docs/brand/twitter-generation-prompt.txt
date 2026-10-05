@@ -1,0 +1,20 @@
+SAGE Twitter/X cover — 2026-10-03
+Generated with the built-in image_gen tool using the approved Facebook master as a reference.
+Final export: sage-twitter-cover.png, 1500 x 500.
+Master preserved at masters/sage-twitter-master.png, 2172 x 724.
+Native sips used only for mechanical final pixel sizing.
+Verified platform dimensions and possible top/bottom crop from X Help:
+https://help.x.com/en/managing-your-account/common-issues-when-uploading-profile-photo
+https://help.x.com/en/managing-your-account/how-to-customize-your-profile
+
+FINAL GENERATION PROMPT
+Use case: ads-marketing
+Asset type: finished Twitter/X profile cover for SAGE, matching its existing Facebook and LinkedIn covers.
+Primary request: Adapt the supplied SAGE cover artwork into a refined 3:1 Twitter/X header. Create a complete edge-to-edge horizontal banner at 1500 x 500 pixels. Preserve the approved violet brand identity, elegant wordmark, exact subtitle, luminous neural-brain sculpture, and fine flowing filaments.
+Input image: supplied SAGE Facebook master is the exact identity, typography, palette, and artwork reference.
+Scene/backdrop: deep plum-black #06020e and #110b22, luminous lavender #a78bfa and #c4b5fd, restrained violet light, tiny teal accents on a few neural nodes. Fine filaments arc horizontally across generous dark negative space.
+Composition: place the SAGE text block at roughly x=30% of canvas width, vertically centered slightly above the middle. The beautiful complete brain-shaped connectome sits at x=72%, y=47%, with its solid visual body occupying approximately y=18% to 75% of the image height. Fit the brain and wordmark within this header without distorting their proportions. All essential text must fit between y=27% and y=64% of image height. Top and bottom 14% have atmospheric background and optional fine decorative strands only, to protect against platform cropping. Leftmost 24% and bottom-left are quiet and dark to accommodate the avatar. Avoid adding labels or guides for these areas.
+Text (verbatim): "SAGE" in large bold clean geometric sans serif, pale lavender-white, gently spaced uppercase letters. Directly beneath: "Persistent memory for AI agents." in a smaller readable single line.
+Style: premium editorial technology cover, refined cinematic 3D neural sculpture, clear beautiful typography. Preserve the recognizable aesthetic of the supplied artwork.
+Constraints: only those two text elements, exact spelling and punctuation. No new slogan, URL, version number, platform logo, mockup, UI, border, watermark, people or robots. Do not stretch or squash the artwork. Produce a finished 3:1 cover, not a presentation slide.
+

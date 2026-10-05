@@ -180,6 +180,9 @@ func TestAssignTaskAndNotify_IdempotentAndVersioned(t *testing.T) {
 	require.True(t, first.Changed)
 	require.EqualValues(t, 1, first.AssignmentVersion)
 	require.True(t, first.NotificationCreated)
+	seq, err := s.GetInboxActivitySequence(ctx, "agent-a")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), seq)
 
 	notices, err := s.TakeAgentNotifications(ctx, "agent-a", 5)
 	require.NoError(t, err)
@@ -205,6 +208,9 @@ func TestAssignTaskAndNotify_IdempotentAndVersioned(t *testing.T) {
 	require.False(t, repeat.Changed)
 	require.EqualValues(t, 1, repeat.AssignmentVersion)
 	require.False(t, repeat.NotificationCreated)
+	seq, err = s.GetInboxActivitySequence(ctx, "agent-a")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), seq, "idempotent assignment must not manufacture activity")
 	var pickedBy string
 	require.NoError(t, s.conn.QueryRowContext(ctx,
 		`SELECT COALESCE(task_picked_up_by, '') FROM memories WHERE memory_id = 'task-1'`).Scan(&pickedBy))
@@ -217,6 +223,9 @@ func TestAssignTaskAndNotify_IdempotentAndVersioned(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, reassigned.Changed)
 	require.EqualValues(t, 2, reassigned.AssignmentVersion)
+	seq, err = s.GetInboxActivitySequence(ctx, "agent-b")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), seq)
 	notices, err = s.TakeAgentNotifications(ctx, "agent-b", 5)
 	require.NoError(t, err)
 	require.Len(t, notices, 1)
@@ -226,6 +235,9 @@ func TestAssignTaskAndNotify_IdempotentAndVersioned(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 3, backToA.AssignmentVersion)
 	require.True(t, backToA.NotificationCreated)
+	seq, err = s.GetInboxActivitySequence(ctx, "agent-a")
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), seq)
 	notices, err = s.TakeAgentNotifications(ctx, "agent-a", 5)
 	require.NoError(t, err)
 	require.Len(t, notices, 1)
@@ -235,9 +247,36 @@ func TestAssignTaskAndNotify_IdempotentAndVersioned(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, unassigned.Changed)
 	require.False(t, unassigned.NotificationCreated)
+	seq, err = s.GetInboxActivitySequence(ctx, "agent-a")
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), seq, "unassignment is not an assignee inbox event")
 	notices, err = s.TakeAgentNotifications(ctx, "agent-a", 5)
 	require.NoError(t, err)
 	require.Empty(t, notices)
+}
+
+func TestAssignTaskAndNotifyRollsBackWhenActivityCannotAdvance(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "task-activity-rollback", "codex")
+	insertActiveTestAgent(t, s, "agent-a", "codex")
+	_, err := s.writeExecContext(ctx, `DROP TABLE agent_inbox_activity`)
+	require.NoError(t, err)
+
+	_, err = s.AssignTaskAndNotify(ctx, "task-activity-rollback", "agent-a")
+	require.ErrorContains(t, err, "advance task inbox activity")
+	var assignee, status string
+	var version int64
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COALESCE(assignee,''),task_assignment_version,task_status FROM memories WHERE memory_id=?`,
+		"task-activity-rollback").Scan(&assignee, &version, &status))
+	require.Empty(t, assignee)
+	require.Zero(t, version)
+	require.Equal(t, string(memory.TaskStatusPlanned), status)
+	var notices int
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agent_notifications WHERE task_id=?`, "task-activity-rollback").Scan(&notices))
+	require.Zero(t, notices)
 }
 
 func TestConcurrentTaskReassignmentLeavesOneCurrentNotice(t *testing.T) {

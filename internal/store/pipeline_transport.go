@@ -89,6 +89,8 @@ func (s *SQLiteStore) migratePipelineTransport(ctx context.Context) {
 		expires_at      TEXT NOT NULL,
 		PRIMARY KEY (remote_chain_id, policy_epoch, agreement_id, source_agent_id, event_kind, remote_pipe_id)
 	)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_transport_activity ON pipeline_transport_outbox(created_at) WHERE event_kind IN ('send','result')`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_transport_activity_delivered ON pipeline_transport_outbox(delivered_at) WHERE event_kind IN ('send','result')`)
 	// Development builds may already have created the pre-v11.10 draft table.
 	// These additive migrations are harmless on the final schema; errors mean
 	// the column already exists and are intentionally ignored.
@@ -172,7 +174,7 @@ func validatePipelineTransportOutbox(event *PipelineTransportOutbox) error {
 		return fmt.Errorf("unsupported federated pipeline receipt protocol version")
 	}
 	switch event.AuthorizationMode {
-	case "":
+	case "", "node-messaging-v1":
 		if len(event.LinkedRelation) != 0 {
 			return fmt.Errorf("ordinary pipeline transport cannot carry a linked relation")
 		}
@@ -257,7 +259,7 @@ func validatePipelineTransportDedup(dedup *PipelineTransportDedup) error {
 		return fmt.Errorf("unsupported federated pipeline dedup kind %q", dedup.EventKind)
 	}
 	switch dedup.AuthorizationMode {
-	case "":
+	case "", "node-messaging-v1":
 		if dedup.LinkedRelationDigest != "" {
 			return fmt.Errorf("ordinary pipeline dedup cannot carry a linked relation")
 		}
@@ -273,7 +275,8 @@ func validatePipelineTransportDedup(dedup *PipelineTransportDedup) error {
 }
 
 func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineMessage, dedup *PipelineTransportDedup) (localPipeID string, duplicate bool, err error) {
-	if msg == nil || msg.SourceChainID == "" || msg.SourcePipeID == "" || msg.DestinationChainID != "" {
+	if msg == nil || msg.SourceChainID == "" || msg.SourcePipeID == "" || msg.DestinationChainID != "" ||
+		strings.TrimSpace(msg.ToAgent) == "" || msg.ToProvider != "" || msg.Status != "pending" {
 		return "", false, fmt.Errorf("imported pipeline provenance is invalid")
 	}
 	if validationErr := validatePipelineTransportDedup(dedup); validationErr != nil {
@@ -314,6 +317,8 @@ func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineM
 			return "", false, validationErr
 		}
 	}
+	msg.WakeSeq = 0
+	var wakeSeq int64
 	err = s.runPipelineTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)
 		var existingHash []byte
@@ -372,9 +377,22 @@ func (s *SQLiteStore) AdmitFederatedPipeline(ctx context.Context, msg *PipelineM
 			dedup.ProofHash, dedup.LocalPipeID, dedup.Outcome, formatTime(dedup.ExpiresAt)); execErr != nil {
 			return fmt.Errorf("insert pipeline transport dedup: %w", execErr)
 		}
+		if wakeErr := tx.conn.QueryRowContext(ctx,
+			`INSERT INTO message_wake_state(recipient_agent_id,seq) VALUES(?,1)
+			 ON CONFLICT(recipient_agent_id) DO UPDATE SET seq=message_wake_state.seq+1
+			 RETURNING seq`, msg.ToAgent).Scan(&wakeSeq); wakeErr != nil {
+			return wakeErr
+		}
+		if wakeSeq < 1 {
+			return errors.New("federated wake sequence did not advance")
+		}
 		localPipeID = msg.PipeID
 		return nil
 	})
+	// Publishable metadata is exposed only after the entire transaction commits.
+	if err == nil && !duplicate {
+		msg.WakeSeq = uint64(wakeSeq)
+	}
 	return localPipeID, duplicate, err
 }
 
@@ -570,6 +588,11 @@ func (s *SQLiteStore) ApplyFederatedPipelineResult(ctx context.Context, pipeID, 
 		if n, _ := res.RowsAffected(); n != 1 {
 			return fmt.Errorf("outbound pipeline %s is not awaiting a result", pipeID)
 		}
+		if msg.FromAgent != "" {
+			if _, activityErr := tx.AdvanceInboxActivity(ctx, msg.FromAgent); activityErr != nil {
+				return fmt.Errorf("advance federated reply inbox activity: %w", activityErr)
+			}
+		}
 		_, insertErr := tx.writeExecContext(ctx, `INSERT INTO pipeline_transport_dedup
 			(remote_chain_id, policy_epoch, agreement_id, contact_id, contact_revision,
 			 authorization_mode, linked_relation_digest,
@@ -729,6 +752,60 @@ func (s *SQLiteStore) RecordPipelineTransportFailure(ctx context.Context, eventI
 		}
 		return err
 	})
+}
+
+// WakePipelineTransportForPeer clears the retry backoff of every OTHER pending
+// event for one peer, and returns how many rows it made due.
+//
+// Why this exists: the drain only attempts rows whose next_attempt_at has
+// passed, and a row that has failed a few times sleeps up to the backoff ceiling.
+// A peer that flaps therefore hands out short windows of reachability, and each
+// window is spent on whichever events happen to be due — typically a freshly
+// queued one, whose first attempt is due immediately — while the backlog sits in
+// backoff through the same window and misses it. The observed shape is a message
+// created at 21:15 delivered while messages created at 21:10 and 21:11 are still
+// queued: not a lost queue, a queue that slept through its own opportunity.
+//
+// A successful delivery is proof the peer is reachable RIGHT NOW, so the rest of
+// that peer's backlog is made due immediately and the next drain uses the window
+// instead of missing it. Attempts are deliberately NOT reset: the count and the
+// last error stay truthful, and only the sleep between them is cleared.
+func (s *SQLiteStore) WakePipelineTransportForPeer(ctx context.Context, remoteChainID string, now time.Time) (int64, error) {
+	if strings.TrimSpace(remoteChainID) == "" {
+		return 0, errors.New("pipeline transport wake requires a remote chain id")
+	}
+	result, err := s.writeExecContext(ctx, `
+		UPDATE pipeline_transport_outbox SET next_attempt_at=?
+		WHERE state='pending' AND remote_chain_id=?
+		AND julianday(next_attempt_at) > julianday(?)`,
+		formatTime(now), remoteChainID, formatTime(now))
+	if err != nil {
+		return 0, fmt.Errorf("wake pipeline transport backlog: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil // the update applied; only the count is unavailable
+	}
+	return affected, nil
+}
+
+// DowngradeFederatedResultLifetime narrows one pending result row to the legacy
+// reply window so its next attempt can satisfy a destination that predates
+// federation.PipeEventResultLifetime. It reports false when the row is already
+// at the legacy window (or is no longer pending), which is how the delivery loop
+// knows that a second refusal is terminal. The legacy value is spelled out in
+// SQL because this package cannot import the federation constants; keep it in
+// step with legacyPipeEventResultLifetime.
+func (s *SQLiteStore) DowngradeFederatedResultLifetime(ctx context.Context, eventID string) (bool, error) {
+	res, err := s.writeExecContext(ctx, `UPDATE pipeline_transport_outbox
+		SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ',created_at,'+24 hours')
+		WHERE event_id=? AND event_kind='result' AND state='pending'
+		  AND strftime('%s',expires_at)>strftime('%s',created_at,'+24 hours')`, eventID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
 }
 
 // ListPipelineDeliveryUpdates atomically claims payload-free terminal notices

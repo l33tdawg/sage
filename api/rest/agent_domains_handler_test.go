@@ -220,4 +220,35 @@ func TestOwnedDomainPageDiscoversTransferredNeverAuthoredDomain(t *testing.T) {
 	var readable callerReadableDomainsResponse
 	require.NoError(t, json.Unmarshal(readableRec.Body.Bytes(), &readable))
 	require.Contains(t, readable.OwnedDomains, "transferred.unseen")
+	require.Contains(t, readable.ReadableDomains, "transferred.unseen")
+	require.Contains(t, readable.WritableDomains, "transferred.unseen")
+}
+
+func TestAppV26ReadableDomainsDiscoverGroupPeerTransferredDomain(t *testing.T) {
+	srv, badgerStore, memberID, ownerID, outsiderID := setupAppV23RESTAccess(t)
+	require.NoError(t, badgerStore.RegisterDomain("user-historical", outsiderID, "", 30))
+	require.NoError(t, badgerStore.MigrateAppV26AccessGroupAuthorities(31))
+	_, err := badgerStore.TransferDomainAppV26CAS(
+		"user-historical", ownerID, "", outsiderID,
+		"proposal-user-historical", 32, false, 256,
+	)
+	require.NoError(t, err)
+	root, err := badgerStore.GetAppV23Root()
+	require.NoError(t, err)
+	require.NotNil(t, root)
+	require.NoError(t, badgerStore.MutateAppV26AccessGroup(
+		root.PrincipalID, "local-team", "Local team", []string{memberID, ownerID},
+		store.AppV26GroupAuthorityReadWrite, 1, false, 33,
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/agent/me/domains", nil)
+	req = req.WithContext(middleware.WithAgentID(context.Background(), memberID))
+	rec := httptest.NewRecorder()
+	srv.handleGetAgentReadableDomains(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var response callerReadableDomainsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+	require.Contains(t, response.ReadableDomains, "user-historical")
+	require.Contains(t, response.WritableDomains, "user-historical")
+	require.NotContains(t, response.OwnedDomains, "user-historical")
 }

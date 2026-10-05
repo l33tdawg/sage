@@ -585,6 +585,51 @@ test('mode controls retain visible pressed and keyboard-focus styling in both th
   assert.deepEqual(focus, { outline: '2px solid #39d0ff', 'outline-offset': '2px' });
 });
 
+test('memory mode isolates typed reasoning links behind the ◈ filter toggle', () => {
+  // supersedes + duplicates were previously uncoloured — they fell through to the
+  // "related" style. They must now be first-class typed link types.
+  const linkTypes = bracedBlock(mriSource, 'const LINK_TYPES =').body;
+  for (const t of ['supersedes', 'duplicates']) {
+    assert.match(linkTypes, new RegExp(`\\b${t}:\\s*\\{[^}]*typed:\\s*true`),
+      `${t} must be a first-class typed link type with its own colour`);
+  }
+
+  // linkVisibleFor is the filter itself: pass-through when off; when on, ONLY the
+  // domain-grouping + lineage scaffolding are hidden — every typed reasoning link
+  // (plus transient focus + connectome synapse/bridge) stays visible.
+  const start = mriSource.indexOf('function linkVisibleFor(');
+  assert.notEqual(start, -1, 'linkVisibleFor() not found');
+  const open = mriSource.indexOf('{', start);
+  let depth = 0, body = '';
+  for (let i = open; i < mriSource.length; i++) {
+    if (mriSource[i] === '{') depth++;
+    else if (mriSource[i] === '}' && --depth === 0) { body = mriSource.slice(open + 1, i); break; }
+  }
+  const visible = (typedOnly, link_type) => new Function('typedOnly', 'l', body)(typedOnly, { link_type });
+  for (const t of ['domain', 'parent', 'supersedes', 'contradicts', 'focus', 'synapse']) {
+    assert.equal(visible(false, t), true, `${t} is visible when the filter is off`);
+  }
+  assert.equal(visible(true, 'domain'), false, 'domain grouping hidden when isolating typed links');
+  assert.equal(visible(true, 'parent'), false, 'lineage hidden when isolating typed links');
+  for (const t of ['supersedes', 'contradicts', 'refines', 'supports', 'causes', 'precedes',
+                   'related', 'duplicates', 'focus', 'synapse', 'engram-bridge']) {
+    assert.equal(visible(true, t), true, `${t} stays visible when isolating typed links`);
+  }
+
+  // The toggle button, its wiring, and its pressed styling must all be present.
+  assert.match(mriSource, /class="btn b-typed"[^>]*aria-pressed="false"/, 'the ◈ typed-links toggle must exist');
+  const handler = mriSource.indexOf("$('.b-typed').onclick");
+  assert.notEqual(handler, -1, 'the ◈ toggle must be wired');
+  assert.match(mriSource.slice(handler, handler + 500), /Graph\.linkVisibility\(linkVisibleFor\)/,
+    'toggling the filter must re-evaluate link visibility');
+  assert.match(mriSource, /\.b-typed\[aria-pressed="true"\]\{[^}]*background:/,
+    'the isolate-typed pressed state must stay visible');
+
+  // The filter is memory-mode only — connectome mode has no domain/lineage edges.
+  assert.match(mriSource, /typedFilterBtn = \$\('\.b-typed'\); if \(typedFilterBtn\) typedFilterBtn\.hidden = connectome;/,
+    'the typed-links toggle must be hidden in connectome mode');
+});
+
 test('mode chrome exposes coherent toggle state, active guidance, and live status', () => {
   const functionBody = name => {
     const start = mriSource.indexOf(`function ${name}(`);

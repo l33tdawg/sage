@@ -117,6 +117,17 @@ type QueryOptions struct {
 	// serialized confidence exactly consistent with the filter decision.
 	DecayFloor float64   `json:"-"`
 	DecayNow   time.Time `json:"-"`
+	// DecayFloorDropped, when non-nil, receives the number of candidates the
+	// decayed-confidence floor REMOVED, summed across every page the store
+	// scanned for this query.
+	//
+	// The floor is a silent filter: without this count the caller cannot tell
+	// "nothing matched" from "matching records were filtered out", which is the
+	// difference between a memory that was never written and one that exists but
+	// sits below the operator's confidence threshold. Callers that serialize a
+	// recall response are expected to pass a sink and disclose it; consensus
+	// paths leave it nil and are unaffected.
+	DecayFloorDropped *int `json:"-"`
 	// CandidateFilter is a trusted, read-only admission hook used by app-v23
 	// recall to apply live authorization before TopK is consumed. Stores must
 	// preserve rank order, continue scanning until TopK admitted records are
@@ -209,14 +220,15 @@ const DisputedConfidenceHaircut = 0.8
 // array, so callers must use the returned slice. Because it is reached only when a
 // caller sets a positive floor (REST/federation recall, never consensus tx paths),
 // the wall-clock default never executes during deterministic block execution.
-func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, counts map[string]int, includeDisputed bool) []*memory.MemoryRecord {
+func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, counts map[string]int, includeDisputed bool) ([]*memory.MemoryRecord, int) {
 	if floor <= 0 || len(recs) == 0 {
-		return recs
+		return recs, 0
 	}
 	if now.IsZero() {
 		now = time.Now()
 	}
 	out := recs[:0]
+	dropped := 0
 	for _, r := range recs {
 		confidence := memory.ComputeConfidenceForRecord(r, now, counts[r.MemoryID])
 		if includeDisputed && r.Status == memory.StatusChallenged {
@@ -224,9 +236,14 @@ func applyDecayFloor(recs []*memory.MemoryRecord, floor float64, now time.Time, 
 		}
 		if confidence >= floor {
 			out = append(out, r)
+		} else {
+			// Counted, never logged with the record itself: the count is what
+			// makes the filter visible, and naming a hidden record in a log
+			// would leak exactly what the caller was not allowed to see.
+			dropped++
 		}
 	}
-	return out
+	return out, dropped
 }
 
 // ListOptions defines parameters for listing memories.
@@ -404,8 +421,14 @@ type MemoryStore interface {
 	GetTagsBatch(ctx context.Context, memoryIDs []string) (map[string][]string, error)
 	ListAllTags(ctx context.Context) ([]TagCount, error)
 	ListMemoriesByTag(ctx context.Context, tag string, limit, offset int) ([]*memory.MemoryRecord, int, error)
-	// FindByContentHash checks if a committed memory with this content hash exists.
-	FindByContentHash(ctx context.Context, contentHash string) (bool, error)
+	// FindByContentHash reports whether a DIFFERENT memory (memory_id !=
+	// excludeMemoryID, which may be empty) that has left status='proposed'
+	// already carries this content hash. The candidate's own row never matches
+	// itself, and content that was already rejected or deprecated stays
+	// unsubmittable (sticky rejection). Other still-proposed rows are
+	// deliberately NOT duplicates: two concurrent identical submissions must
+	// not reject each other and leave the content with no surviving row.
+	FindByContentHash(ctx context.Context, contentHash, excludeMemoryID string) (bool, error)
 	// RepairSelfDupRejected resurrects memories wrongly deprecated by the voter
 	// dedup self-match bug: deprecated memories whose only recorded vote is selfID
 	// rejecting as "duplicate content" flip back to proposed (after flipChain
@@ -845,11 +868,14 @@ type PipelineMessage struct {
 	// ClaimedSessionID is opaque MCP coordination metadata. It distinguishes
 	// concurrent runtimes that intentionally share one signed agent identity;
 	// it is not an authorization principal.
-	ClaimedSessionID string     `json:"claimant_session_id,omitempty"`
-	ClaimedAt        *time.Time `json:"claimed_at,omitempty"`
-	CompletedAt      *time.Time `json:"completed_at,omitempty"`
-	ExpiresAt        time.Time  `json:"expires_at"`
-	JournalID        string     `json:"journal_id,omitempty"`
+	ClaimedSessionID string `json:"claimant_session_id,omitempty"`
+	// ClaimRevision is a monotonic ABA fence for explicit session handoff.
+	// It changes only when claimant-session ownership changes.
+	ClaimRevision uint64     `json:"claim_revision,omitempty"`
+	ClaimedAt     *time.Time `json:"claimed_at,omitempty"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	ExpiresAt     time.Time  `json:"expires_at"`
+	JournalID     string     `json:"journal_id,omitempty"`
 	// Federation provenance is additive. Empty fields identify an ordinary
 	// local pipe. Imported work always receives a fresh local PipeID and keeps
 	// the peer's ID in SourcePipeID; outbound work names DestinationChainID so
@@ -871,7 +897,7 @@ type PipelineMessage struct {
 	FederationReceiptContentDigest    string `json:"-"`
 	FederationReceiptRecipientChainID string `json:"-"`
 	// WakeSeq is the durable exact-recipient wake sequence allocated in the
-	// same transaction as a fresh canonical local inbox insertion. It is
+	// same transaction as a fresh local or inbound federated inbox insertion. It is
 	// process-local return metadata only and is never stored in the pipeline
 	// row or exposed as message/delivery/read evidence.
 	WakeSeq uint64 `json:"-"`
@@ -1002,6 +1028,7 @@ type MessageWakeState struct {
 type ClaimedElsewhereMessage struct {
 	MessageID         string
 	ClaimantSessionID string
+	ClaimRevision     uint64
 	CreatedAt         time.Time
 	CreatedAtCursor   string
 	ClaimedAt         *time.Time
@@ -1023,14 +1050,24 @@ type MessageStore interface {
 	AdmitLocalMessage(ctx context.Context, msg *PipelineMessage) (*PipelineMessage, error)
 	SendFederatedMessage(ctx context.Context, idempotencyKey string, msg *PipelineMessage, event *PipelineTransportOutbox) (*PipelineMessage, bool, error)
 	ReceiveLocalMessages(ctx context.Context, agentID, provider, receiveToken string, limit int, claimantSessionID ...string) ([]*PipelineMessage, bool, error)
+	ClaimExactLocalMessageWithSession(ctx context.Context, receiverID, messageID, claimantSessionID string) error
 	GetOwnClaimedUnfinishedMessages(ctx context.Context, receiverID, claimantSessionID string, limit int) ([]*PipelineMessage, int, error)
 	CountClaimedLocalMessagesElsewhere(ctx context.Context, receiverID, claimantSessionID string) (int, error)
 	GetClaimedMessagesElsewhere(ctx context.Context, receiverID, claimantSessionID string, limit int, afterCreatedAt, afterMessageID string) ([]ClaimedElsewhereMessage, int, bool, error)
-	HandoffLocalMessageClaim(ctx context.Context, receiverID, messageID, fromSessionID, toSessionID string) (bool, error)
+	HandoffLocalMessageClaim(ctx context.Context, receiverID, messageID, fromSessionID, toSessionID string, expectedRevision uint64) (bool, uint64, error)
 	ReplyLocalMessage(ctx context.Context, receiverID, messageID, result string, claimantSessionID ...string) (bool, error)
 	AcknowledgeLocalMessageRead(ctx context.Context, receiverID, messageID string) (bool, error)
 	GetMessageStatusForSender(ctx context.Context, senderID, messageID string) (*MessageStatus, error)
 	GetMessageWakeState(ctx context.Context, recipientID string) (MessageWakeState, error)
+}
+
+// InboxActivityStore is the payload-free novelty clock shared by task notices
+// and sender-visible replies. It is deliberately separate from MessageWakeState:
+// activity is something to inspect, never unfinished work that may block Stop.
+type InboxActivityStore interface {
+	AdvanceInboxActivity(ctx context.Context, agentID string) (uint64, error)
+	GetInboxActivitySequence(ctx context.Context, agentID string) (uint64, error)
+	GetInboxActivityEpoch(ctx context.Context) (string, error)
 }
 
 // PipelineAgentProof preserves the exact already-verified local REST request

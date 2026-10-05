@@ -332,6 +332,9 @@ func (m *Manager) initializePeerRBACPolicy(ctx context.Context, remoteChainID st
 	if _, err := ss.ResetFederatedReaderRestrictionsForBinding(ctx, binding); err != nil {
 		return fmt.Errorf("reset retired reader restrictions for fresh connection: %w", err)
 	}
+	if _, err := ss.ResetFederatedAgentExposureForBinding(ctx, binding); err != nil {
+		return fmt.Errorf("reset retired agent exposure for fresh connection: %w", err)
+	}
 	m.federatedReaderPolicyRevision.Add(1)
 	return nil
 }

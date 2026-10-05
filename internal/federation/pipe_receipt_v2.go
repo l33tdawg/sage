@@ -270,7 +270,9 @@ func (m *Manager) revalidateOutboundReceiptTarget(ctx context.Context, outbox *s
 	} else {
 		resolve := m.pipeTargetResolveFn
 		if resolve == nil {
-			resolve = m.resolveRemotePipeTargetLive
+			resolve = func(ctx context.Context, address string) (*RemotePipeTarget, error) {
+				return m.resolveRemotePipeTarget(ctx, address, false, outbox.AuthorizationMode)
+			}
 		}
 		target, err = resolve(ctx, address)
 	}
@@ -372,7 +374,7 @@ func (m *Manager) handlePipeReceiptV2(w http.ResponseWriter, r *http.Request) {
 	}
 	msg, err := ss.GetPipeline(r.Context(), outbox.PipeID)
 	if err != nil || event.EventAt.Before(msg.CreatedAt.Add(-maxTimestampSkew)) ||
-		event.EventAt.After(msg.ExpiresAt.Add(pipeEventResultLifetime)) ||
+		event.EventAt.After(msg.ExpiresAt.Add(receiptEvidenceGrace)) ||
 		pipeReceiptContentDigest(event.MessageID, m.localChainID, peer.ChainID, msg) != event.ContentDigest {
 		httpError(w, http.StatusConflict, "federated pipeline receipt content changed")
 		return

@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/governance"
+	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -264,6 +265,50 @@ func TestAppV23RejectPendingRegistrationWithoutForceIsBlockedByMemories(t *testi
 	require.NoError(t, err)
 	require.Equal(t, "active", local.Status)
 	require.Nil(t, local.RemovedAt)
+}
+
+func TestAppV23RejectPendingRegistrationIgnoresDeprecatedAuditHistory(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	_, pendingKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	pendingID := agentIDForKey(pendingKey)
+	require.NoError(t, fixture.badger.RegisterAgentWithCapabilities(
+		pendingID, "Pending with deprecated history", store.AppV23RoleMember, "", "test", "", 2,
+		store.DefaultSelfRegisteredAgentCapabilities,
+	))
+
+	sqlStore, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "sage.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlStore.Close()) })
+	require.NoError(t, sqlStore.CreateAgent(context.Background(), &store.AgentEntry{
+		AgentID: pendingID, Name: "Pending with deprecated history", Role: "member",
+		Status: "active", Clearance: 1,
+	}))
+	insertTestMemoryWithAgent(t, sqlStore, "pending-deprecated-history", "pending-domain", pendingID)
+	require.NoError(t, sqlStore.UpdateStatus(
+		context.Background(), "pending-deprecated-history", memory.StatusDeprecated, time.Now().UTC(),
+	))
+
+	h := appV23AccessTestHandler(fixture, "http://unused.invalid", map[string]ed25519.PrivateKey{pendingID: pendingKey})
+	req := appV23AccessRequest(
+		t, http.MethodDelete, "/agents/"+pendingID, "id", pendingID, nil,
+	)
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleRemoveAgent(sqlStore).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"local_only":true`)
+	local, err := sqlStore.GetAgent(context.Background(), pendingID)
+	require.NoError(t, err)
+	require.Equal(t, "removed", local.Status)
+	require.NotNil(t, local.RemovedAt)
+
+	record, err := sqlStore.GetMemory(context.Background(), "pending-deprecated-history")
+	require.NoError(t, err)
+	require.Equal(t, memory.StatusDeprecated, record.Status,
+		"rejection must preserve deprecated audit history and original attribution")
+	require.Equal(t, pendingID, record.SubmittingAgent)
 }
 
 func TestAppV26RemoveDoesNotTrustStaleRemovedProjectionOverActiveConsensus(t *testing.T) {

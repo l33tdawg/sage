@@ -1,8 +1,8 @@
-Reconciled against internal/mcp for SAGE v11.19.0.
+Reconciled against internal/mcp for SAGE v11.23.15.
 
 # SAGE MCP Tools Reference
 
-SAGE advertises exactly 33 MCP tools over JSON-RPC 2.0. Four deprecated
+SAGE advertises exactly 35 MCP tools over JSON-RPC 2.0. Four deprecated
 `sage_pipe*` compatibility names remain callable for one migration window but
 are intentionally absent from `tools/list`, so new clients learn the canonical
 Messages API. Stdio tools sign REST calls with
@@ -132,6 +132,15 @@ CEREBRUM operator-only `/v1/dashboard/stats` surface.
 `GET /v1/dashboard/settings/memory-mode`, `POST /v1/embed`,
 `POST /v1/memory/submit`
 
+For an unpinned user-level Codex MCP registration, the MCP process working
+directory must resolve to a real workspace boundary. A filesystem-root working
+directory is rejected before Git discovery, project-config lookup, key loading,
+or key generation; it never falls back to the retired `global-codex` signer and
+cannot auto-register a synthetic `codex//` identity. Start the task in its
+intended workspace, or deliberately configure `SAGE_IDENTITY_PATH` when a
+non-workspace, explicitly shared identity is required (`cmd/sage-gui/mcp.go`,
+`canonicalWorkspaceRootWithProbe`).
+
 **When to call:** First action of every new conversation. No exceptions —
 not even for greetings. Since v11.18.1, a compliant MCP session runs the
 adaptive auto-inception standing once during `initialize` and returns it in
@@ -164,8 +173,8 @@ most important operational tool.
 - `recalled`: array of relevant committed memories from the exact requested
   domain. Cross-domain rows are dropped client-side as a fail-closed safeguard.
 - `recalled_count`: number of recalled memories.
-- `stored`: `true` if observation was stored, `false` if skipped (duplicate or
-  low-value).
+- `stored`: `true` if observation was stored, `false` if skipped — either the
+  node's dedup check refused identical content, or the observation is low-value.
 - `skip_reason`: populated when `stored` is false.
 - `store_mode`: set to `no_vector` when the observation was committed but the
   node's selected embedder was unavailable, so the REST boundary queued it
@@ -278,7 +287,8 @@ went wrong (don'ts) to improve future performance.
 **Returns:**
 - `status: "reflected"`
 - `memories_stored`: count of new memories written.
-- `skipped_duplicates`: count of near-duplicate memories that were not stored.
+- `skipped_duplicates`: count of components the node's dedup check refused
+  because identical content already exists in the domain.
 - Returns `vault_locked` error if the Synaptic Ledger is locked.
 
 **Note:** Stored content is prefixed: `[Task Reflection] ...`, `[DO] ...`,
@@ -308,7 +318,8 @@ replacement first, old-memory challenge second.
 | `type` | string | no | `fact`, `observation`, `inference`, or `task`. Default: `observation`; a correction inherits the original type when omitted. |
 | `confidence` | number | no | Score 0–1. Default: 0.80. |
 | `tags` | string[] | no | User-defined labels (e.g. `important`, `project-x`). Git branch is auto-appended. |
-| `replaces_memory_id` | string | no | Live committed/challenged memory this content corrects. Bypasses similarity suppression for the intentional overlap. |
+| `evidence` | string | no | Optional source text, up to 32 KiB, for non-task memories. Uploaded separately and kept on this node; an enabled memory gate checks whether it supports the claim. |
+| `replaces_memory_id` | string | no | Live committed/challenged memory this content corrects. The replacement is pre-validated like any other write, so a body byte-identical to its source is refused as a duplicate — the voter would have deprecated it — and the correction must actually change the content. |
 | `replacement_reason` | string | no | Audit reason used when challenging the old memory after the replacement commits. |
 
 **Returns:**
@@ -316,8 +327,11 @@ replacement first, old-memory challenge second.
 - A vectorless but committed write reports `embedding_queued: true`,
   `store_mode: "no_vector"`, `semantic_degraded: true`, and `degraded_reason`.
   The memory remains durable and is queued for automatic re-embedding.
-- `status: "skipped"` if a similar memory already exists in the domain (>60%
-  word overlap with an existing committed memory).
+- `status: "skipped"` when the node's own dedup check refuses the content
+  because those exact bytes already exist in the domain. That check is the one
+  the real vote applies (`POST /v1/memory/pre-validate` runs the same named
+  checks), it is sticky — a rejected or deprecated memory keeps its bytes out —
+  and a skipped write is never broadcast.
 - `status: "rejected"` with `votes` array if pre-validators reject the content.
 - Returns `vault_locked` error if the Synaptic Ledger is locked.
 - Uses the same typed effective-denial taxonomy as `sage_turn`: the MCP error
@@ -346,6 +360,7 @@ until its first explicit policy review; this does not authorize MCP challenge,
 deprecate, reinstate, or any other level-3 Modify operation.
 
 **REST:** `POST /v1/memory/pre-validate` (optional), `POST /v1/embed`,
+`POST /v1/memory/evidence` when evidence is supplied,
 `POST /v1/memory/submit`, and for a correction
 `GET /v1/memory/{memory_id}` plus
 `POST /v1/memory/{replaces_memory_id}/challenge`.
@@ -606,6 +621,30 @@ to another memory for future traversal.
 
 ---
 
+### sage_get_links
+
+**Purpose:** Read the typed links among a set of memories — the read side of the
+knowledge graph.
+
+**Source:** `internal/mcp/tools.go` (`registerTools` entry `sage_get_links`; `Server.toolGetLinks`).
+
+**Parameters:**
+
+| Name         | Type     | Required | Description |
+|--------------|----------|----------|-------------|
+| `memory_ids` | string[] | yes      | Memory IDs to look up links among. Both endpoints of a returned link are in this set. |
+
+**Returns:**
+- `links`: array of `{source_id, target_id, link_type}`.
+
+**REST:** `POST /v1/memory/links`
+
+**When to call:** After a recall, to reason over the relationships among the
+memories you already have — what supersedes, contradicts, supports, or refines what.
+Discloses only links between memories the caller can read.
+
+---
+
 ### sage_list
 
 **Purpose:** Browse memories with filters. See what exists in a domain, with a
@@ -696,9 +735,12 @@ are bounded caller-only samples: owned identifies domains whose current owning
 ancestor is the caller, readable identifies scoped recall targets, and writable
 identifies candidates that pass current effective write policy. The readable-domain list is a bounded sample of
 currently authorized targets derived from the caller's own home/provenance,
-direct grants, and local Access Groups; every candidate is checked against
-live policy before it is returned. It is not a global domain roster and does
-not claim to enumerate every domain a read-all or ancestor grant can reach.
+current owned-domain index, direct grants, and the bounded current owned-domain
+indexes of active local Access Group peers; every candidate is checked against
+live policy before it is returned. This lets transferred domains appear even
+when their current owner never authored a memory there. It is not a global
+domain roster and does not claim to enumerate every domain a read-all or
+ancestor grant can reach.
 The access booleans are explicitly scoped to `home_domain`. A
 pending or inactive caller receives this standing with
 `memory_access_available:false` and SAGE does not probe a forbidden memory
@@ -730,6 +772,52 @@ and obtain bounded exact domain targets before scoped recall. It is not a node
 health check, a global store-size endpoint, or proof that a newly submitted
 memory reached its terminal projection; use the write receipt and exact memory
 read/status surface for that evidence.
+
+---
+
+### sage_node_health
+
+**Purpose:** Read this node's health, including its signer-fence state, when a
+signed write has been refused. Use it to tell a fence that is still being worked
+on from one that will not clear without an operator.
+
+**Source:** `internal/mcp/tools.go` (`registerTools` entry `sage_node_health`;
+`Server.toolNodeHealth`, `signerFenceGuidance`).
+
+**Parameters:** `timeout_seconds` (optional integer, 1–30, default 10) bounds
+the local health read. No other parameters.
+
+**Returns:** `version`, `boot_id`, `uptime`, `encrypted`, `vault_locked`, the
+node's `signer_fences` block forwarded verbatim, and a computed
+`signer_fence_guidance` sentence. The fence block carries `active` and
+`oldest_age_seconds` for every caller, plus `explanation`; for an operator
+caller it also carries per-fence rows (`signer`, `tx_hash`, `nonce`,
+`held_seconds`, `attempts`, `cause`, `resolution`, `last_cause`,
+`last_detail`). Everything in the block is public-on-chain data.
+
+`resolution` is the field that decides what an agent should do, and the guidance
+is rendered from it:
+
+- `reconciling` — the fence still holds the exact signed bytes and reconciliation
+  is re-submitting them until consensus answers, so it clears itself. Wait; do
+  not resubmit the write and do not restart the node.
+- `proof_or_operator` — the fence was restored from a previous process's durable
+  intent and its signed bytes did not survive, so re-submission cannot settle
+  it. It lifts only on a proof read from the chain (the recorded transaction in
+  a committed block, or the signer's committed nonce having reached the fenced
+  allocation) or on an explicit operator abandon
+  (`POST /v1/dashboard/signer-fence/abandon`). Report `signer`, `tx_hash`,
+  `nonce` and `last_detail` to the operator; waiting is not a recovery.
+
+When the node reports no `resolution` (an older build) or withholds per-fence
+rows from this caller, the guidance says the answer is not knowable from here
+rather than guessing.
+
+**REST:** Signed `GET /v1/dashboard/health`.
+
+**When to call:** After a write is refused with `503` and the message names a
+held signing key, and whenever an agent needs to explain a stalled write rather
+than retry it blind. It is read-only and changes nothing.
 
 ---
 
@@ -766,7 +854,7 @@ open. Their consensus-backed content is immutable after creation.
 |-------------|----------|----------|-------------|
 | `content`   | string   | no*      | Task description. Required when creating and rejected when `memory_id` is present. Stored with exactly one `[TASK] ` prefix, including when the input is already marked. |
 | `domain`    | string   | no       | Exact domain tag. Omit to use the approved app-v23 owned home domain (legacy nodes use `general`). An explicit value is never remapped. |
-| `memory_id` | string   | no*      | Existing task memory ID. Required when updating. |
+| `memory_id` | string   | no*      | Existing task memory ID. Required when updating. A unique prefix of at least 8 characters is resolved against this agent's open tasks, so a predecessor named only by prefix in an older entry ("superseded by `958760b4`") can be closed directly. An ambiguous prefix returns an error naming the matches and no mutation is attempted; the result carries `resolved_from_prefix` when resolution happened. |
 | `status`    | string   | no       | `planned`, `in_progress`, `done`, `dropped`. New tasks default to `planned`. Existing tasks require an explicit mutable status; agents cannot re-plan them. |
 | `link_to`   | string[] | no       | Memory IDs to link this task to via `related` link type. May be used with `memory_id` without changing task status. |
 | `idempotency_key` | string | no | Permanent creation identity. When omitted, SAGE derives a deterministic key from the signed caller, resolved domain, and canonical `[TASK] ` content. Repeating that semantic task returns the original task at its current status, including `done` or `dropped`. Supply a new explicit key only when intentionally creating another task with identical content and domain. |
@@ -830,11 +918,21 @@ Unassigned tasks remain visible only to the local CEREBRUM operator for triage.
 | Name     | Type   | Required | Description |
 |----------|--------|----------|-------------|
 | `domain` | string | no       | Filter by domain. Omit for all domains. |
+| `limit`  | int    | no       | Tasks per page. Default 25, maximum 100. |
+| `offset` | int    | no       | Zero-based offset into the same stable order (`created_at DESC`, then `memory_id`). Pass the previous page's `next_offset`. |
 
 **Returns:**
-- `tasks_by_domain`: map of domain → array of `{memory_id, content, task_status, confidence, created_at, assignee, assigned_to_you, task_picked_up_by, task_picked_up_at}`. Every row has `assignee` equal to the signed agent ID and `assigned_to_you: true`.
-- `total_open`: total open task count.
-- `message`: human-readable summary.
+- `tasks_by_domain`: map of domain → array of `{memory_id, content, task_status, confidence, created_at, assignee, assigned_to_you, task_picked_up_by, task_picked_up_at}` for THIS page. Every row has `assignee` equal to the signed agent ID and `assigned_to_you: true`.
+- `total_open`: how many open tasks this agent can enumerate in total — not the page size.
+- `returned`: rows in this page. `limit` and `offset` echo the request.
+- `has_more` and `next_offset`: set while more pages remain. **This listing is paged: one call is never the whole board.** Page with `offset` until `has_more` is false before claiming you have seen every task.
+- `scan_capped`: present and true when the node stopped scanning at its own bound, so `total_open` may undercount the true board. Narrow by `domain` or provider to see the remainder. It is never set for a board inside the bound.
+- `message`: human-readable summary, including the next `offset` when a page remains.
+
+The order is stable (`created_at DESC`, then `memory_id`), so paging cannot skip
+or repeat a task between calls. Earlier versions returned the whole board in one
+payload with no paging fields; a client with a large board could then show a
+partial list that looked complete.
 
 Assignment does not bypass live authorization. Every returned task must also
 pass the caller's current domain/group/grant scope and classification
@@ -1019,22 +1117,26 @@ clients must not treat the legacy value as immutable registration history.
 
 **Purpose:** Deterministically transfer one already-claimed canonical local or
 inbound federated message between concurrent MCP runtimes that share the same signed agent
-identity. The caller supplies the `claimant_session_id` currently shown by
+identity. The caller supplies the `claimant_session_id` and `claim_revision`
+currently shown by
 `sage_message_history(folder="claimed_elsewhere")` (or the first payload-free
-`claimed_elsewhere_items` page embedded in `sage_inbox`); SAGE atomically compares that value and
+`claimed_elsewhere_items` page embedded in `sage_inbox`); SAGE atomically compares both values and
 reassigns the message to the calling MCP session. A stale or concurrent handoff
-returns a conflict instead of silently duplicating ownership. Session IDs are
+returns a conflict instead of silently duplicating ownership, and a successful
+transfer increments the revision. Session IDs are
 opaque coordination metadata, not authorization principals.
 
-For stdio MCP, the primary runtime persists one claimant identity per exact
-signed agent, provider, and project under `SAGE_HOME/runtime/mcp-claimants/`.
+The primary runtime persists one claimant identity per exact signed agent,
+provider, project, and transport scope under `SAGE_HOME/runtime/mcp-claimants/`.
 It holds an OS advisory lock for the runtime lifetime, so an ordinary restart
 reuses that identity only after the prior process is no longer live. A truly
 concurrent runtime cannot acquire the lock and keeps an independent opaque
 session ID, preserving one-handler and compare-and-swap handoff semantics. An
 installed-runtime executable handoff carries the current identity while the
-old process retains the lock as its liveness fence. HTTP transport conversation
-IDs remain transport-scoped and are not collapsed into the stdio identity.
+old process retains the lock as its liveness fence. Streamable HTTP and SSE use
+separate bearer-bound scopes and are not collapsed into the stdio identity.
+`sage_inbox` reports the resulting `claimant_identity_mode`; corrupt or
+unreadable identity state is `unavailable` and fails closed.
 
 **Source:** `internal/mcp/claimant_identity.go` (`acquireDurableClaimantIdentity`);
 `internal/mcp/server.go` (`conversation`, `trustedHandoffClaimantSessionID`);
@@ -1055,6 +1157,12 @@ competing bind conflicts instead of overwriting the first session.
 |---|---|---:|---|
 | `message_id` | string | yes | Exact claimed local or inbound federated message to transfer. |
 | `from_session_id` | string | yes | Expected current claimant session from passive inbox history. |
+| `from_revision` | integer | yes | Exact non-negative `claim_revision` from passive inbox history. Revision 0 covers legacy claims. |
+
+The MCP tool always requires `from_revision`. The underlying REST route alone
+accepts omission as revision 0 for pre-v11.19.5 first-generation clients; that
+compatibility request conflicts after any transfer, and every success returns
+the incremented revision.
 
 **Watcher and voice-bridge contract:** A watcher calls `sage_inbox` normally;
 the first concurrent session to receive a message remains its one handler. An
@@ -1064,7 +1172,7 @@ metadata-only projection with `sage_message_history(folder="claimed_elsewhere")`
 Call `sage_message_handoff` only when takeover is intentional and the previous
 claimant has been judged dead or stale. The compare-and-swap conflict is the
 signal to refresh the claimed-elsewhere projection, not permission to process a
-stale copy. SSE
+stale copy. There is no timeout or age-based auto-steal. SSE
 `notifications/sage_message` is wake-up metadata only and never assigns a
 session. Mynah / SAGE Voice Bridge should normally use its dedicated registered
 agent key; if an operator deliberately runs multiple bridge/watch processes
@@ -1098,8 +1206,10 @@ retained provider pipeline endpoint, carrying the same claimant session. A
 generic 409, canonical typed 404, mismatched body status/type, or wrong content
 type never enables that path.
 
-A federated reply result includes an immutable `reply_event_id` and its initial
-`reply_status:queued`. This is the signed result outbox event already created by
+A federated reply result includes an immutable `reply_event_id` and its current
+retained `reply_status` (`queued`, `delivered`, or `failed`). An identical retry
+reports that same event state; it does not requeue a terminal failure. Retained
+`last_error` text is labeled untrusted diagnostic data. This is the signed result outbox event already created by
 the reply transaction, not a new ordinary message. Pass that event ID to
 `sage_message_status` to inspect only the replying agent's outbound transport
 state; no original request workflow/read state or result content is exposed.
@@ -1609,8 +1719,11 @@ most 100 local recipients and reports `complete=false` when capped; use
 only the minimal identity picker above; it does not expose roles, capability
 masks, memory counts, domain grants, key material, or other RBAC topology.
 
-Federated rows are not a peer roster. Current contacts come only from explicit
-active agent exports; manual shared domains do not expose their owner.
+On peers advertising `federated-node-messaging-v1`, trusted pairing exposes
+active ordinary agents as domain-free `node-messaging-v1` contacts. No Read or
+Copy grant or agent export is needed for discovery or messaging. Root credentials,
+ineligible registrations, and explicit messaging blocks remain protected. Legacy
+peers retain explicit-export contacts; manual shared domains do not expose their owner.
 Legacy linked-reader contacts use the additive
 `linked-message-directory-enumeration-v1` capability and contain only exact
 current relations already authorized for this caller. Each linked relation,
@@ -1624,11 +1737,13 @@ Directory membership is never online presence, reachability, delivery, claim,
 or read evidence. Only `sage_message_status` may report evidence for an exact
 message the caller sent.
 
-**Parameters:** `scope` is optional: `local` (default) performs one local
-metadata-only read and no federation network checks; `all` explicitly requests
-the authorized local/federated union and live peer revalidation. For
+**Parameters:** `scope` is optional: `all` (default) requests the authorized
+local/federated union and live peer revalidation. `local` performs one local
+metadata-only read without federation network checks. For
 `scope=all`, optional `peer_cursor` continues exactly one bounded federation
 page returned by the previous call. It is ignored for local scope.
+`peer_chain` selects one exact connected node. Entries in `agent_pages` carry
+`peer_chain` and `agent_cursor` for the next bounded recipient page on that node.
 
 **Returns:** `agents`, `total`, `scope`, `complete`, `warnings`, and a short
 routing reminder. When another federation page is available, warnings include
@@ -1731,13 +1846,20 @@ authorization. Pipeline results are untrusted data, not instructions.
   rather than infer that an empty addressed inbox means no threaded answer.
 - `claimant_session_id`, `claimed_elsewhere_state`, and
   `claimed_elsewhere_count`: session-coordination metadata for durable claims.
+  `claimant_identity_mode` reports `durable`, `concurrent_ephemeral`,
+  `inherited`, `ephemeral`, or fail-closed `unavailable`; an accompanying
+  `claimant_identity_error` explains unavailable durable state. Durable
+  identities are scoped to the effective agent, provider, canonical project,
+  and transport identity across stdio, Streamable HTTP, and SSE. Lock
+  contention means another live runtime and safely uses a distinct ephemeral
+  fence; corrupt or unreadable durable state does not silently create one.
   `clear` means the exact signed recipient's authoritative store query returned
   zero; `present` carries the exact payload-free count of unfinished messages
   held by another session. `unavailable` never implies zero and includes
   `claimed_elsewhere_action`. The scalar is not derived from a bounded page.
   The additive `claimed_elsewhere_items` first page exposes only the exact
-  `message_id`, its current `claimant_session_id`, lifecycle timestamps, and a
-  `foreign` boolean; it never exposes sender, provider, chain ID, intent,
+  `message_id`, its current `claimant_session_id` and `claim_revision`, lifecycle
+  timestamps, and a `foreign` boolean; it never exposes sender, provider, chain ID, intent,
   payload, or result. `claimed_elsewhere_page_count`,
   `claimed_elsewhere_limit`, `claimed_elsewhere_truncated`, and optional
   `claimed_elsewhere_next_cursor` describe that oldest-first page.
@@ -1745,7 +1867,8 @@ authorization. Pipeline results are untrusted data, not instructions.
   paged contract; `unavailable` keeps a truthful scalar but does not claim every
   counted row is reachable through the generic newest-100 history window. Page
   the remainder with `sage_message_history(folder="claimed_elsewhere")`, then
-  transfer only after judging the old claimant dead or stale.
+  transfer only after judging the old claimant dead or stale. There is no
+  age-based automatic steal.
 - `reply_count`, `reply_limit`, `reply_page_truncated`, optional
   `reply_next_before`, `reply_newest_completed_at`,
   `reply_oldest_completed_at`, and `reply_since`: embedded page metadata.
@@ -1866,6 +1989,30 @@ claim/read operation. `sage_messages_receive` remains the token-replay-safe
 exact-local batch primitive, and `sage_message_replies(before=...)` remains the
 explicit backward pager.
 
+**Stdio request scheduling:** up to 16 tool requests run concurrently, with
+responses serialized through one stdout writer. A slow HTTP-backed tool does
+not hold later `tools/list` frames or independent tool calls. A full pool returns
+a retryable JSON-RPC server error for excess tool requests while continuing to
+read control frames. `notifications/cancelled` cancels the matching in-flight
+tool context; unknown, malformed or late cancellation emits no response.
+Cancellation never retries a mutation or proves that consensus did not commit
+it. Use the normal reconciliation contract for an indeterminate write. EOF and
+installed-runtime handoff drain already-dispatched requests before closing or
+transferring stdout (`Wait`, `internal/mcp/stdio_requests.go:91`;
+`Run`, `internal/mcp/server.go:439`).
+
+**Stdio client lifetime:** the bridge watches its launch parent when that
+process can be identified. Confirmed parent death cancels the session and
+allows two seconds for cleanup. If a blocked pipe or replacement-runtime pump
+prevents cleanup from finishing, the orphan terminates. A live client may stay
+silent indefinitely; inactivity does not end its session. The guard remains
+active during installed-runtime handoff, so the retained pump also exits when
+its client disappears. Cancellation retains the normal reconciliation
+requirements for an in-flight mutation (`Run`, `internal/mcp/server.go:439`).
+An initial Unix parent PID of 0 or 1 is treated conservatively: it may be a
+container or system launcher, so that starting state alone never triggers
+termination.
+
 **Installed-runtime handoff (v11.18.5):** a stdio MCP process snapshots the
 exact executable that started it. If an in-place app/binary update replaces
 that path, the next unread JSON-RPC frame and the remaining stdio stream are
@@ -1924,14 +2071,18 @@ remote delivery or reading.
 With `folder="claimed_elsewhere"`, the response instead carries the page-local
 `count`, exact current `claimed_elsewhere_count`, `limit`, `truncated`,
 `passive_read:true`, and optional `next_cursor`. Items are oldest first and
-contain only `message_id`, `claimant_session_id`, `created_at`, optional
+contain only `message_id`, `claimant_session_id`, `claim_revision`, `created_at`, optional
 `claimed_at`, `expires_at`, `foreign`, plus MCP-derived
 `passive_history:true`, `new_work:false`, and `requires_handoff:true`. They do
 not contain sender, provider, chain ID, intent, payload, or result. A truncated
 page without `next_cursor` fails visibly instead of describing older rows as
 reachable. Copy `next_cursor` into the next call until `truncated:false`; before
 calling `sage_message_handoff`, independently judge the named claimant session
-dead or stale. Paging is passive and changes no claim, receipt, wake, or
+dead or stale, then copy both `claimant_session_id` and `claim_revision`
+exactly. Handoff is a revisioned compare-and-swap: each transfer increments the
+revision, so stale concurrent and A→B→A delayed requests fail rather than
+reclaiming ownership. Age alone never authorizes a transfer. Paging is passive
+and changes no claim, receipt, wake, or
 workflow state.
 
 For local exact-agent rows, `counterparty` prefers current display name, then
@@ -2166,6 +2317,13 @@ proposal (if any) with vote tally and quorum progress.
 **When to call:** Before voting (to get `proposal_id` and understand the
 proposal); to monitor quorum progress; to verify a proposal was accepted or
 rejected.
+
+`sage_gov_status` reads the off-chain dashboard governance projection. It is
+not authoritative proof that no upgrade ballot exists, and that projection
+does not retain an upgrade proposal's consensus payload. Before binary
+replacement, use `sage-gui upgrade status`, whose
+`/upgrade/governance-status` ABCI query reads the canonical pending-plan and
+active-proposal records and fails closed on storage or decode errors.
 
 ---
 

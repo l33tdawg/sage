@@ -343,13 +343,15 @@ func TestMessageReceiveAttributesWinningSessionAndDeterministicHandoff(t *testin
 	if winner == target {
 		target = "mcp-helper"
 	}
-	replayed, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg-session", winner, target)
+	replayed, revision, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg-session", winner, target, 0)
 	require.NoError(t, err)
 	require.False(t, replayed)
-	replayed, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-session", winner, target)
+	require.Equal(t, uint64(1), revision)
+	replayed, revision, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-session", winner, target, 0)
 	require.NoError(t, err)
 	require.True(t, replayed)
-	_, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-session", winner, "mcp-third")
+	require.Equal(t, uint64(1), revision)
+	_, _, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-session", winner, "mcp-third", 0)
 	require.ErrorIs(t, err, ErrMessageReceiveConflict)
 
 	history, err = s.GetInboxHistory(ctx, "bob", "", 10)
@@ -637,7 +639,7 @@ func TestExpiredClaimCannotBeRecoveredHandedOffOrRepliedBeforeSweep(t *testing.T
 	require.False(t, truncated)
 	require.Empty(t, items)
 
-	_, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-expiry-race", "dead-session", "live-session")
+	_, _, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-expiry-race", "dead-session", "live-session", 0)
 	require.ErrorIs(t, err, ErrMessageNotFound)
 	require.Error(t, s.CompletePipeline(ctx, "msg-expiry-race", "bob", "late-direct", ""))
 	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-expiry-race", "late", "dead-session")
@@ -769,9 +771,10 @@ func TestProviderAddressedClaimIsSessionBoundRecoverableAndCompatibilityScoped(t
 	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-provider-session", "done", "session-a")
 	require.ErrorIs(t, err, ErrMessageLegacyProviderCompatibilityScope)
 
-	replayed, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg-provider-session", "session-a", "session-b")
+	replayed, revision, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg-provider-session", "session-a", "session-b", 0)
 	require.NoError(t, err)
 	require.False(t, replayed)
+	require.Equal(t, uint64(1), revision)
 	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-provider-session", "done", "session-b")
 	require.ErrorIs(t, err, ErrMessageLegacyProviderCompatibilityScope)
 }
@@ -1109,9 +1112,10 @@ func TestMessageReplyFenceFollowsAnExplicitHandoff(t *testing.T) {
 
 	// The bool is "replayed" (an idempotent re-handoff), not "moved": a fresh
 	// handoff reports false.
-	replayedHandoff, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg", "session-a", "session-b")
+	replayedHandoff, revision, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg", "session-a", "session-b", 0)
 	require.NoError(t, err)
 	require.False(t, replayedHandoff)
+	require.Equal(t, uint64(1), revision)
 
 	_, err = s.ReplyLocalMessage(ctx, "bob", "msg", "stale", "session-a")
 	require.ErrorIs(t, err, ErrMessageClaimedByOtherSession)
@@ -1170,9 +1174,10 @@ func TestFederatedClaimSessionBindingAndHandoffAreCASFenced(t *testing.T) {
 	_, err = s.BindFederatedMessageClaimSession(ctx, "bob", "msg-fed-session", "session-b")
 	require.ErrorIs(t, err, ErrMessageReceiveConflict)
 
-	replayed, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-fed-session", "session-a", "session-b")
+	replayed, revision, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg-fed-session", "session-a", "session-b", 0)
 	require.NoError(t, err)
 	require.False(t, replayed)
+	require.Equal(t, uint64(1), revision)
 	history, err := s.GetInboxHistory(ctx, "bob", "", 10)
 	require.NoError(t, err)
 	require.Len(t, history, 1)
@@ -1232,8 +1237,9 @@ func TestFederatedClaimMigrationCreatesExplicitLegacyHandoffFence(t *testing.T) 
 	require.NoError(t, err)
 	require.Len(t, history, 1)
 	require.Equal(t, "legacy", history[0].ClaimedSessionID)
-	_, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-fed-legacy", "legacy", "session-new")
+	_, revision, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg-fed-legacy", "legacy", "session-new", 0)
 	require.NoError(t, err)
+	require.Equal(t, uint64(1), revision)
 	history, err = s.GetInboxHistory(ctx, "bob", "", 10)
 	require.NoError(t, err)
 	require.Equal(t, "session-new", history[0].ClaimedSessionID)
@@ -1449,4 +1455,153 @@ func TestAdmitLocalMessageRefusesNonExactLocalRows(t *testing.T) {
 	federated.DestinationChainID = "remote-chain"
 	_, err = s.AdmitLocalMessage(ctx, federated)
 	require.Error(t, err)
+}
+
+func TestExactLocalSessionClaimCreatesRecoveryFenceAtomically(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	require.NoError(t, s.InsertPipeline(ctx, testLocalMessage("msg-exact-session", "alice", "bob", "work")))
+	require.NoError(t, s.ClaimExactLocalMessageWithSession(ctx, "bob", "msg-exact-session", "session-a"))
+
+	own, total, err := s.GetOwnClaimedUnfinishedMessages(ctx, "bob", "session-a", 20)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, own, 1)
+	require.Equal(t, uint64(0), own[0].ClaimRevision)
+}
+
+func TestAuthorizedOperatorExactLocalClaimHasRecoverableSessionFence(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	require.NoError(t, s.InsertPipeline(ctx, testLocalMessage("msg-operator-session", "alice", "bob", "work")))
+	require.NoError(t, s.ClaimExactLocalMessageWithSession(ctx, "operator", "msg-operator-session", "operator-session"))
+
+	own, total, err := s.GetOwnClaimedUnfinishedMessages(ctx, "operator", "operator-session", 20)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, own, 1)
+	require.Equal(t, "bob", own[0].ToAgent, "the original addressee remains distinct from the authorized claimant")
+	_, revision, err := s.HandoffLocalMessageClaim(ctx, "operator", "msg-operator-session", "operator-session", "operator-next", 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), revision)
+}
+
+func TestMessageClaimHandoffRevisionRejectsABAReplay(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	_, _, err := s.SendLocalMessage(ctx, "send-aba", testLocalMessage("msg-aba", "alice", "bob", "work"))
+	require.NoError(t, err)
+	_, _, err = s.ReceiveLocalMessages(ctx, "bob", "", "receive-aba", 1, "session-a")
+	require.NoError(t, err)
+
+	_, revision, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg-aba", "session-a", "session-b", 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), revision)
+	_, revision, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-aba", "session-b", "session-a", 1)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), revision)
+	_, _, err = s.HandoffLocalMessageClaim(ctx, "bob", "msg-aba", "session-a", "session-b", 0)
+	require.ErrorIs(t, err, ErrMessageReceiveConflict, "delayed first-generation retry must not match A again")
+}
+
+func TestMessageMigrationFencesReceiptlessExactLocalClaim(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "receiptless.db")
+	s, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	require.NoError(t, s.InsertPipeline(ctx, testLocalMessage("msg-receiptless", "alice", "bob", "work")))
+	require.NoError(t, s.ClaimPipeline(ctx, "msg-receiptless", "bob"))
+	require.NoError(t, s.Close())
+
+	s, err = NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	items, total, truncated, err := s.GetClaimedMessagesElsewhere(ctx, "bob", "live-session", 20, "", "")
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.False(t, truncated)
+	require.Len(t, items, 1)
+	require.Equal(t, "legacy", items[0].ClaimantSessionID)
+	require.Equal(t, uint64(0), items[0].ClaimRevision)
+	_, revision, err := s.HandoffLocalMessageClaim(ctx, "bob", "msg-receiptless", "legacy", "session-new", 0)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), revision)
+	require.NoError(t, s.Close())
+	s, err = NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	defer s.Close() //nolint:errcheck
+	own, ownTotal, err := s.GetOwnClaimedUnfinishedMessages(ctx, "bob", "session-new", 20)
+	require.NoError(t, err)
+	require.Equal(t, 1, ownTotal)
+	require.Len(t, own, 1)
+	require.Equal(t, uint64(1), own[0].ClaimRevision, "idempotent migration must not overwrite a concrete handoff fence")
+}
+
+func TestFreshLocalReplyAdvancesActivityOnce(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	_, _, err := s.SendLocalMessage(ctx, "send-activity", testLocalMessage("msg-activity", "alice", "bob", "work"))
+	require.NoError(t, err)
+	_, _, err = s.ReceiveLocalMessages(ctx, "bob", "", "receive-activity", 1, "session-b")
+	require.NoError(t, err)
+	replayed, err := s.ReplyLocalMessage(ctx, "bob", "msg-activity", "done", "session-b")
+	require.NoError(t, err)
+	require.False(t, replayed)
+	seq, err := s.GetInboxActivitySequence(ctx, "alice")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), seq)
+	replayed, err = s.ReplyLocalMessage(ctx, "bob", "msg-activity", "done", "session-b")
+	require.NoError(t, err)
+	require.True(t, replayed)
+	seq, err = s.GetInboxActivitySequence(ctx, "alice")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), seq, "idempotent reply replay must not manufacture activity")
+}
+
+func TestFreshLocalReplyRollsBackWhenActivityCannotAdvance(t *testing.T) {
+	ctx := context.Background()
+	s := newMessageTestStore(t)
+	_, _, err := s.SendLocalMessage(ctx, "send-activity-rollback", testLocalMessage("msg-activity-rollback", "alice", "bob", "work"))
+	require.NoError(t, err)
+	_, _, err = s.ReceiveLocalMessages(ctx, "bob", "", "receive-activity-rollback", 1, "session-b")
+	require.NoError(t, err)
+	_, err = s.writeExecContext(ctx, `DROP TABLE agent_inbox_activity`)
+	require.NoError(t, err)
+
+	_, err = s.ReplyLocalMessage(ctx, "bob", "msg-activity-rollback", "done", "session-b")
+	require.Error(t, err)
+	item, err := s.GetPipeline(ctx, "msg-activity-rollback")
+	require.NoError(t, err)
+	require.Equal(t, "claimed", item.Status)
+	require.Empty(t, item.Result)
+	var replies, reads int
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM message_replies WHERE message_id=?`, "msg-activity-rollback").Scan(&replies))
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM message_read_receipts WHERE message_id=?`, "msg-activity-rollback").Scan(&reads))
+	require.Zero(t, replies)
+	require.Zero(t, reads)
+}
+
+func TestInboxActivityEpochSurvivesRestartAndDiffersAcrossFreshDatabases(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "activity-epoch.db")
+	s, err := NewSQLiteStore(ctx, path)
+	require.NoError(t, err)
+	epoch, err := s.GetInboxActivityEpoch(ctx)
+	require.NoError(t, err)
+	require.Len(t, epoch, 32)
+	require.NoError(t, s.Close())
+	s, err = NewSQLiteStore(ctx, path)
+	require.NoError(t, err)
+	restarted, err := s.GetInboxActivityEpoch(ctx)
+	require.NoError(t, err)
+	require.Equal(t, epoch, restarted)
+	require.NoError(t, s.Close())
+
+	fresh, err := NewSQLiteStore(ctx, filepath.Join(t.TempDir(), "fresh-activity.db"))
+	require.NoError(t, err)
+	defer fresh.Close() //nolint:errcheck
+	freshEpoch, err := fresh.GetInboxActivityEpoch(ctx)
+	require.NoError(t, err)
+	require.NotEqual(t, epoch, freshEpoch)
 }

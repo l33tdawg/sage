@@ -72,6 +72,12 @@ func TestAvailabilityTextAloneStillClassifiesAsAvailability(t *testing.T) {
 		"relay unavailable for peer chain-b": "relay_unavailable",
 		"direct route is stale for peer":     "stale_direct",
 		"vault is locked; unlock this sage":  "locked",
+		// Transport verdicts must not be folded into the relay verdict: the
+		// operator remedy differs, and a healthy-but-slow relay is the common
+		// case on a cross-region link.
+		"p2p dial: context deadline exceeded": "timeout",
+		"tls handshake: EOF":                  "handshake_failed",
+		"stream reset by peer":                "handshake_failed",
 	} {
 		if got := federationDashboardFailureState(errors.New(message), federation.RouteDiagnostics{}); got != want {
 			t.Fatalf("%q: got %q, want %q", message, got, want)

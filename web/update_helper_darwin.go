@@ -53,6 +53,10 @@ func platformStartPendingUpdateRecovery(execPath string) (func(), func(), error)
 	if err := removeFileDurable(pendingAppStartupMarker(execPath)); err != nil && !os.IsNotExist(err) {
 		return nil, nil, fmt.Errorf("clear prior update startup guard: %w", err)
 	}
+	// Deliberately not exec.CommandContext: the helper is setsid-detached so it
+	// survives the node it is about to replace. A context here would cancel the
+	// updater at exactly the moment it must keep running.
+	//nolint:noctx // setsid-detached helper must survive the node it replaces
 	cmd := exec.Command(helperPath, "watch", "--pid", strconv.Itoa(os.Getpid()), "--exec", execPath) // #nosec G204 -- exact updater-owned signed helper and executable
 	cmd.Dir = filepath.Dir(helperPath)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil

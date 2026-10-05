@@ -221,7 +221,7 @@ test('metadata, source, race, frontend, and fault checks converge before packagi
 
 test('release and CI vulnerability gates scan the exact mandated Go floor', () => {
   for (const source of [workflow, ciWorkflow, codeqlWorkflow, faultWorkflow]) {
-    assert.doesNotMatch(source, /^\s+go-version: '1\.25'$/m);
+    assert.doesNotMatch(source, /^\s+go-version: '1\.26'$/m);
     assert.match(source, /go-version-file: go\.mod/);
   }
   for (const source of [job('vulncheck'), ciJob('vulncheck')]) {
@@ -233,7 +233,7 @@ test('release and CI vulnerability gates scan the exact mandated Go floor', () =
     '../go.mod',
     '../natter/go.mod',
   ]) {
-    assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /^go 1\.25\.13$/m);
+    assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /^go 1\.26\.8$/m);
   }
   for (const [path, stage] of [
     ['../Dockerfile', 'builder'],
@@ -243,11 +243,11 @@ test('release and CI vulnerability gates scan the exact mandated Go floor', () =
     ['../deploy/federation-acceptance/Dockerfile.natter', 'build'],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), 'utf8');
-    assert.match(source, new RegExp(`^FROM golang:1\\.25\\.13-alpine AS ${stage}$`, 'm'));
+    assert.match(source, new RegExp(`^FROM golang:1\\.26\\.8-alpine AS ${stage}$`, 'm'));
   }
   assert.match(
     readFileSync(new URL('../deploy/init-testnet.sh', import.meta.url), 'utf8'),
-    /golang:1\.25\.13-alpine/,
+    /golang:1\.26\.8-alpine/,
   );
 });
 
@@ -303,8 +303,8 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(evidence, /SAGE_DAEMON_VERSION/);
   assert.match(
     daemonStager,
-    /SEMVER_PATTERN='\^11\\\.\(10\|11\|12\|13\|14\|15\|16\|17\|18\|19\)\\\./,
-    'the tagged daemon stager must accept the current v11.19 release series',
+    /SEMVER_PATTERN='\^11\\\.\(10\|11\|12\|13\|14\|15\|16\|17\|18\|19\|20\|21\|22\|23\)\\\./,
+    'the tagged daemon stager must accept the current v11.23 release series',
   );
   assert.match(evidence, /Repair v11\.12\.0 native staging helper for immutable-tag recovery/);
   assert.match(evidence, /github\.event_name == 'workflow_dispatch'.*RELEASE_TAG == 'v11\.12\.0'/);
@@ -440,9 +440,21 @@ test('wheel smoke installs declared runtime dependencies before importing the SD
 test('PR and main CI require the same v11.9 composite proofs as release', () => {
   assert.match(ciJob('v119-fault-gates'), /require_scoped_reconfiguration: true/);
   assert.match(ciJob('v119-fault-gates'), /require_authorized_state_sync: true/);
-  for (const testJob of [ciJob('test'), job('test')]) {
-    assert.match(testJob, /go test \.\/\.\.\.(?: -v)? -count=1 -timeout 20m/);
-    assert.match(testJob, /go test -race -count=1 -timeout 25m/);
+  // Both workflows run the plain suite and the race checks as SEPARATE jobs:
+  // bundling them put both behind one 40-minute job budget, and a slow suite run
+  // (8-17 minutes) cancelled the ~23-minute race step at the wall clock rather
+  // than failing a suite. The commands are asserted where they now live, and
+  // both workflows must still run the identical set.
+  for (const suiteJob of [ciJob('test-suite'), job('test-suite')]) {
+    assert.match(suiteJob, /go test \.\/\.\.\.(?: -v)? -count=1 -timeout 30m/);
+  }
+  for (const raceJob of [ciJob('test-race'), job('test-race')]) {
+    // The eight shared-state packages are race-checked one GROUP PER RUNNER.
+    // Sharing one 4-core runner made internal/federation cross its per-package
+    // timeout while still making progress (main, run 36101755840), so the
+    // timeout now matches the plain suite's 30m and the assertion below still
+    // has to find every package inside the job.
+    assert.match(raceJob, /go test -race -count=1 -timeout 30m/);
     for (const sharedStatePackage of [
       './api/rest',
       './internal/store',
@@ -453,11 +465,21 @@ test('PR and main CI require the same v11.9 composite proofs as release', () => 
       './internal/statesync',
       './internal/tx',
     ]) {
-      assert.match(testJob, new RegExp(sharedStatePackage.replaceAll('/', '\\/')));
+      assert.match(raceJob, new RegExp(sharedStatePackage.replaceAll('/', '\\/')));
     }
-    assert.match(testJob, /go test -race -count=1 -timeout 5m/);
-    assert.match(testJob, /-run 'Race\|Concurrent\|TOCTOU\|Linear'/);
-    assert.match(testJob, /\.\/internal\/abci \.\/web/);
+    assert.match(raceJob, /go test -race -count=1 -timeout 5m/);
+    assert.match(raceJob, /-run 'Race\|Concurrent\|TOCTOU\|Linear'/);
+    assert.match(raceJob, /\.\/internal\/abci \.\/web/);
+  }
+  // The required "Test" context is the fan-in for both jobs, and it has to FAIL
+  // when either suite fails: without `if: always()` GitHub skips it when a
+  // dependency fails, which reports the required check as missing rather than as
+  // the failure it is.
+  for (const fanIn of [ciJob('test'), job('test')]) {
+    assert.match(fanIn, /needs: \[test-suite, test-race\]/);
+    assert.match(fanIn, /if: always\(\)/);
+    assert.match(fanIn, /needs\.test-suite\.result/);
+    assert.match(fanIn, /needs\.test-race\.result/);
   }
 });
 
@@ -489,18 +511,18 @@ test('the Linux cold gate proves the closed placeholder through the real Comet d
   assert.doesNotMatch(v119StateSync, /busybox nslookup provider-p2p/);
 });
 
-test('the mandatory cold gate transfers one exact app-v27 session', () => {
+test('the mandatory cold gate transfers one exact app-v28 session', () => {
   const realCometChaos = faultJob('real-comet-chaos');
   assert.match(
     realCometChaos,
-    /name: App-v27 real Comet\/ABCI crash, partition, and state-sync gate/,
+    /name: App-v28 real Comet\/ABCI crash, partition, and state-sync gate/,
   );
   assert.equal(
     (realCometChaos.match(/^    timeout-minutes: 40$/gm) || []).length,
     1,
     'the bounded job ceiling must cover pinned image builds, the real-process gate, and cleanup',
   );
-  assert.match(v119StateSync, /^TARGET_APP_VERSION=27$/m);
+  assert.match(v119StateSync, /^TARGET_APP_VERSION=28$/m);
   assert.match(v119StateSync, /"app_version": \$\{TARGET_APP_VERSION\}/);
   assert.doesNotMatch(v119StateSync, /"app_version": (?:20|21|22|23)/);
   assert.match(
@@ -664,12 +686,12 @@ test('the mandatory cold gate fails closed unless every seed reports its exact s
   assert.match(seedMemories, /lines\[-1\] != summary/);
   assert.match(seedMemories, /matches\[0\] != summary/);
   assert.doesNotMatch(seedMemories, />\/dev\/null/);
-  assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/post-v27\.txt 1/);
+  assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/post-v28\.txt 1/);
   assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/advance\.txt 2/);
   assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/restart\.txt 1/);
   assert.match(
     v119StateSync,
-    /seed_memories "\$\{PROVIDER\}" \/sage\/post-v27\.txt 1\nwait_height_at_least/,
+    /seed_memories "\$\{PROVIDER\}" \/sage\/post-v28\.txt 1\nwait_height_at_least/,
   );
   assert.match(
     v119StateSync,
@@ -1162,7 +1184,15 @@ test('all private artifacts converge at one publication gate', () => {
     'native-shell-production-promotion',
   ]);
   assert.match(job('publication-gate'), /sha256sum -c checksums\.txt/);
-  assert.match(job('publication-gate'), /PYPI_API_TOKEN/);
+  // The gate used to require a PyPI token; publishing is Trusted Publishing
+  // (OIDC) now, so the token must be gone from both the gate and the publish
+  // step, and the step must carry the OIDC + environment binding that PyPI
+  // authenticates. A password in the publish step silently disables
+  // attestations, so this asserts the exact inverse of the old contract.
+  assert.doesNotMatch(job('publication-gate'), /PYPI_API_TOKEN/);
+  assert.doesNotMatch(job('publish-pypi'), /password:/);
+  assert.match(job('publish-pypi'), /id-token: write/);
+  assert.match(job('publish-pypi'), /environment: pypi/);
   assert.match(job('publication-gate'), /PyPI is immutable/);
   assert.match(job('publication-gate'), /remote != local/);
 });

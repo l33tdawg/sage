@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.19.0. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.23.15. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -46,6 +46,32 @@ The optional tail is emitted only after the app-v17 activation block commits. Be
 
 ## 1. Memory
 
+### `POST /v1/memory/evidence`
+
+Upload source text for the optional memory gate before submitting a non-task
+memory. Requires Ed25519 authentication and, after app-v23, an active ordinary
+agent. SQLite implements this node-local route; an unsupported store returns
+`501` (`api/rest/memory_evidence.go`, `handleUploadEvidence`).
+
+```json
+{"evidence": "Datasheet: rated power 40 kW."}
+```
+
+The text must be nonempty and at most 32 KiB (UTF-8 bytes). A `201` response
+contains `{"evidence_id":"<random id>","expires_in_seconds":3600}`. Include
+that ID as `evidence_id` in the same agent's signed memory submission. Unknown,
+expired, already-claimed or another agent's IDs return `400`; evidence is never
+silently dropped. At most 64 unclaimed uploads per agent are retained; excess
+uploads return `429` (`internal/store/sqlite_gate.go`, `CreateMemoryEvidence`,
+`ClaimMemoryEvidence`).
+
+Unclaimed uploads expire after one hour. Claimed text stays while its memory
+is proposed and is pruned after a final memory decision. If no memory appears
+within 24 hours of claiming it, the text expires but an expired marker remains:
+a late memory is held for review rather than judged without its evidence.
+Uploading evidence broadcasts nothing; only its random ID, never its source
+text, enters the signed submission. See [the memory-gate guide](write-gate.md).
+
 ### `POST /v1/memory/submit`
 
 Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (FinalizeBlock completes). Default timeout 60 s; override via `SAGE_TX_COMMIT_TIMEOUT_MS`.
@@ -66,6 +92,7 @@ Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (F
 | `linked_memories` | []string | no | Related memory IDs for legacy/non-idempotent submission paths. App-v23 task creation rejects this field because links are not part of the canonical task transaction; create links separately after the task is confirmed. |
 | `tags` | []string | no | Up to 32 labels of 128 UTF-8 bytes each. Above app-v20 they are sorted/deduplicated into the signed tx; scoped-domain tags are also AppHash-covered and projection-recoverable. Ordinary-domain tags remain node-local. OR-filter on query/search. |
 | `provider` | string | no | Stored off-chain only; not on-chain |
+| `evidence_id` | string | no | Random ID from `POST /v1/memory/evidence`, claimed once by the same signed agent. Not accepted for tasks. Only the ID enters the signed submission; source text stays node-local. |
 | `idempotency_key` | string | no | App-v23 tasks only; 1–128 visible ASCII bytes without spaces. If omitted, REST derives the same permanent semantic key as MCP from the exact signed agent ID, resolved domain, and task content. Repeating that semantic task returns the original receipt at its current status. Supply a fresh explicit key only to intentionally create another occurrence with identical content/domain. |
 
 **Classification values** (`internal/tx/types.go:84-90`):
@@ -128,6 +155,45 @@ A confirmed replay adds `"idempotent_replay":true` and
 The node performs bounded exact-assignee projection confirmation before it
 chooses `201`, `200`, or `202`. An idempotent replay whose projection is still
 unconfirmed also returns `202` and adds `"idempotent_replay":true`.
+
+**Ambiguous outcome — `202 Accepted` with `"status":"indeterminate"`:**
+
+A caller can outlive the node's own wait for block inclusion. When that happens
+the transaction **is on the wire and may still commit** — the node is already
+reconciling it through the signer nonce fence — and the endpoint now says exactly
+that instead of returning a failure:
+
+```json
+{
+  "status": "indeterminate",
+  "tx_hash": "<hex of the exact transaction that was broadcast>",
+  "nonce": 1789468101758619000,
+  "committed": false,
+  "retryable": false,
+  "message": "The transaction reached the network, but this node could not observe its fate before the broadcast wait expired. It may still commit, and this node's nonce fence is already reconciling it. Do not resubmit: look the transaction up by tx_hash and re-read the target state before deciding anything."
+}
+```
+
+`retryable:false` is the load-bearing field. Resubmitting is not a retry: it
+signs a **new** transaction, so a client that retries on a failure status can
+apply the same change twice. Poll the target state, or the transaction by hash,
+instead. Before this contract existed the same condition arrived as an opaque
+`500 Broadcast error`, indistinguishable from a genuine internal fault — and the
+observed result in the field was a caller re-signing a write that had already
+committed.
+
+Terminology, because it decides what a client may assume: **definitive** means
+the node knows the transaction's fate. A CheckTx or FinalizeBlock rejection is
+definitive and keeps its own status (`400`, `403`, `404`, `409`) — it is never
+reported as indeterminate. So is `429 Mempool full`, which stays a 429 with
+`Retry-After` even though the transaction was never admitted. Indeterminate
+means only one thing: sent, fate unknown.
+
+Operators can usually avoid the ambiguous window entirely, because it opens when
+the node's own wait expires before the block lands. `timeout_broadcast_tx_commit`
+in the node's `config.toml` must stay **below** `SAGE_TX_COMMIT_TIMEOUT_MS`
+(60 s default) so the node always answers first; `deploy/init-testnet.sh` sets it
+to 45 s for generated testnets.
 
 The key is permanently scoped to the effective policy principal. Its canonical
 binding covers that principal, exact assignee, stable memory ID, content hash,
@@ -485,17 +551,23 @@ Open task memories (type=`task`, status != `done`/`dropped`).
 
 **Query parameters:** `domain`, `provider`
 
-**Response:** `{"tasks": [{memory_id, content, domain_tag, task_status, assignee, task_picked_up_by, task_picked_up_at, confidence_score, created_at}], "total": N}`.
+**Response:** `{"tasks": [{memory_id, content, domain_tag, task_status, assignee, task_picked_up_by, task_picked_up_at, confidence_score, created_at}], "total": N, "returned": N, "scan_capped": false}`.
 For a signed agent this is an assigned-only feed: `assignee` is the exact
 authenticated agent ID, and unassigned or differently assigned tasks are not
 returned. Assignment is necessary but not sufficient: each row must also pass
 the caller's current domain/group/grant and classification authority. `total`
-is the visible number returned, never an underlying or denied task count.
+and `returned` are the visible number returned, never an underlying or denied
+task count. `scan_capped: true` means this response stopped at the node's scan
+bound, so the caller must narrow by domain or provider instead of treating the
+list as the whole board.
 
 Under app-v23, the built-in stores page the exact-assignee feed and apply live
 record disclosure before the 500-visible-task response ceiling. A revoked or
 above-clearance prefix therefore cannot make a later readable assigned task
-disappear. Pre-app-v23 callers retain the historical one-query behavior.
+disappear. The order is `created_at DESC` with a `memory_id` tiebreaker, so an
+offset-based caller can page the feed without skipping or repeating a task whose
+timestamp ties with another. Pre-app-v23 callers retain the historical
+one-query behavior.
 Current-generation Admins may use this ordinary-agent surface only from
 localhost. Root and historical Root credentials are never task assignees;
 remote or stale Admin credentials are denied. A Manager's group Modify
@@ -672,6 +744,45 @@ Link two memories. Off-chain relation, no tx.
 | `link_type` | string | no | Defaults to `related` |
 
 **Response** (HTTP 200): `{"source_id": "...", "target_id": "...", "link_type": "..."}`
+
+A `(source_id, target_id)` pair holds a single relationship. Re-linking an existing
+pair **updates** its `link_type` (idempotent, last-write-wins), so a relationship can
+be re-typed (for example `related` → `supersedes`). The reverse direction
+(`target_id` → `source_id`) is an independent link.
+
+---
+
+### `POST /v1/memory/links`
+
+Read the typed links among a set of memories (the read side of the knowledge
+graph). Off-chain lookup, no tx. Requires an active registered agent identity.
+
+**Request body:**
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `memory_ids` | string[] | yes | The set of memory IDs to look up links among. At most **256** per request. |
+
+**Response** (HTTP 200): `{"links": [{"source_id": "...", "target_id": "...", "link_type": "..."}, ...]}`
+
+A link is returned only when **both** of its endpoints are in `memory_ids` **and**
+readable by the caller under the same per-record read authority as
+`GET /v1/memory/{memory_id}` and `GET /v1/memory/list` (domain access, app-v23
+record disclosure, and classification/clearance). The requested IDs are filtered
+to the caller-readable subset before the lookup, so a link can never disclose the
+existence of a memory the caller cannot read. An unreadable, protected, or
+nonexistent ID is withheld identically — its presence or absence is never
+distinguishable from the response.
+
+**Errors:**
+
+| Status | When |
+|---|---|
+| `400` | `memory_ids` contains more than 256 entries (the request is rejected, never silently truncated). |
+| `403` | No active registered agent identity. |
+| `503` | Authorization or memory-lookup backend is temporarily unavailable (retry). Never returned to signal that a specific record exists. |
+
+An empty `memory_ids` returns `{"links": []}` (after the identity check).
 
 ---
 
@@ -906,7 +1017,11 @@ Signed caller-only bounded policy projection. `domains` and
 `owned_domains` is a bounded ownership sample. `truncated:true` means at least
 one sample is incomplete. These arrays deliberately avoid a global roster or
 memory scan and are suitable for choosing an exact scope, not proving complete
-ownership.
+ownership. Candidate discovery includes the caller's current owned-domain index
+and the bounded current owned-domain indexes of active local Access Group peers,
+so a transferred historical domain can appear even when its current owner never
+authored a memory there. Every candidate is re-authorized against live policy;
+group membership never turns the peer's domain into caller ownership.
 
 ### `GET /v1/agent/me/domains/owned`
 
@@ -943,6 +1058,18 @@ require the current Root or an active same-machine Admin signing the exact
 action; Admin actions also carry a fresh, single-use Root elevation
 countersignature. Capability bits are returned only as diagnostics derived
 from the selected named profile.
+
+An amid-only validator fleet has no CEREBRUM SPA. `amid` mounts exactly two of
+these routes on its own REST listener — `GET /v1/dashboard/network/access` and
+`PUT /v1/dashboard/network/access/agents/{id}/policy` — with the same handlers
+and operator gate that CEREBRUM serves, so a policy write produces the
+identical `TxTypeAgentRoleChange`. The caller signs the exact request as the
+current Root, using the operator key material the host already holds; that
+same configured broker key (`--cerebrum-root-key-file` /
+`SAGE_CEREBRUM_ROOT_KEY_FILE`) is what produces the elevation countersignature
+on the promoted-Admin path. Nothing else from the dashboard router is mounted
+on amid, and a node without a broker key answers `root_key_unavailable`
+instead of degrading open.
 
 The Add Agent wizard is identity/connection enrollment only. It creates a
 restricted pending Member and deliberately does not collect, stage, or persist
@@ -997,6 +1124,8 @@ Pre-app-v23 nodes retain their legacy projection behavior.
 | Method + path | Purpose |
 |---|---|
 | `GET /v1/dashboard/network/access` | Read Root/broker readiness plus non-Root agents, enrollment/role revisions, named profiles, Access Groups, linked-reader readiness, and separate linked-message consent readiness. |
+| `POST /v1/dashboard/signer-fence/lift` | CEREBRUM-operator recovery for one held signer fence, by full signer key or the prefix the health surface prints. The proof is read by the node, never asserted by the caller: the exact recorded transaction hash found in a committed block, or the signer's committed nonce having reached the fenced allocation (superseded when above it, spent when equal). A lookup miss is not proof, so a transaction still sitting unindexed in a mempool answers `409` with the reason. Lifting retires the fence's durable intent; see [`concepts/signer-nonce-fence.md`](concepts/signer-nonce-fence.md). |
+| `POST /v1/dashboard/signer-fence/abandon` | CEREBRUM-operator exit for a fence no proof can settle: one restored from durable intent whose transaction never committed and that nothing can deliver back. Requires `acknowledge_payload_loss: true` and a `reason`; the node then requires no copy in its own mempool, no committed hash and an unspent allocation, answers `409` with the evidence otherwise, and records the accepted decision as `fence_abandoned` with fate `abandoned` — never as a proven fate. Its live P2P peer count is read and recorded, and when it is non-zero the request must also carry `peer_redelivery_acknowledged: true`, because a connected peer is a route those bytes could still take back into the mempool and only the operator can judge whether it ever held them; without that acknowledgement the route answers `409` naming the peer count. The abandoned nonce is reserved so the next allocation for that signer is above it. See [`concepts/signer-nonce-fence.md`](concepts/signer-nonce-fence.md). |
 | `PUT /v1/dashboard/network/access/agents/{id}/policy` | Atomically approve or change a non-Root local agent's role, named profile, clearance, and compatible owned home domain. On a writable approval, an omitted/blank `home_domain` generates `agent-<name-slug>-<random>` before the target consent signature is created; an explicit domain remains exact. |
 | `PUT /v1/dashboard/network/access/agents/{id}/name` | App-v26 H+1: current local Root/Admin changes only a governed non-Root agent's mutable display name. The handler copies the current boot bio into `AgentUpdate`; consensus rejects any operator attempt to alter that bio. `agent_id` and immutable `registered_name` never change. A no-op returns `status:"unchanged", committed:false`; a real change is reported only after commit or canonical reconciliation. |
 | `PUT /v1/dashboard/network/access/groups/{groupID}` | Create or replace a consensus local Access Group using `name`, local `members` (canonicalized and sorted by the handler), app-v26 `member_authority` (`read`, `read_write`, or `read_write_modify`), and an `expected_revision` binding. See [`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md). |
@@ -1483,6 +1612,8 @@ dashboard-agent auth (`web/federation_join.go:71-102`, `1021-1037`).
 | `PUT /v1/dashboard/federation/connections/{chain_id}/permissions` | Full replacement body: `{"permissions":[{"domain":"tii.work","read":true,"copy":false}]}`. Omitted domains are revoked; `[]` is explicit deny-all. Copy implies Read. Every enabled domain must already exist and be controlled by this operator. A `write:true` member is rejected with `400` because no consensus-bound federation ingress capability exists (`web/federation_permissions.go:223-258`, `279-305`). |
 | `GET /v1/dashboard/federation/connections/{chain_id}/agent-exports` | List explicitly exported local agents for this pairwise federation. Each row is bound to the active peer operator, CA pin, policy epoch, CAS revision, classification ceiling, and optional owned-domain exclusions. Manual domain-only shares never create an exported identity. |
 | `PUT /v1/dashboard/federation/connections/{chain_id}/agent-exports` | Operator-only CAS mutation of one exact active ordinary local agent using `agent_id`, `state` (`active` or `paused`), `max_classification`, `domain_exclusions`, and `expected_revision`. Active export makes the agent's current owned domain tree readable remotely and exposes its messaging identity; pause removes both derived lanes immediately. Revoked rows are internal generation-retirement state and are not accepted from this dashboard route. |
+| `GET /v1/dashboard/federation/connections/{chain_id}/agent-exposure` | Read this connection's messaging-discovery policy: which of this node's agents the peer may find by listing or by exact-name/id lookup. Returns `{mode, agent_ids, revision, configured}`; an unconfigured connection reports `mode: "all"` with `configured: false`, which is the shipped default. Discovery only: it grants no memory Read and authorizes no delivery. |
+| `PUT /v1/dashboard/federation/connections/{chain_id}/agent-exposure` | Operator-only CAS replacement of that policy using `mode` (`all`, `selected`, or `none`), a complete `agent_ids` allow list, and `expected_revision`. `selected` requires at least one agent and every listed agent must be a currently eligible ordinary local agent; `all` and `none` carry no list. A stale revision, a mismatched agreement generation, or a retired generation returns 409 and never merges rosters. |
 | `GET /v1/dashboard/federation/connections/{chain_id}/reader-restrictions` | List this SAGE's local per-agent exceptions to default federation Read. Absent/revoked means allow; rows are exact-binding, revisioned, and never positive cross-node grants. |
 | `PUT /v1/dashboard/federation/connections/{chain_id}/reader-restrictions` | Operator-only CAS mutation for one active ordinary local reader using `agent_id`, `state` (`active` or `revoked`), `deny_all`, `denied_domains`, and `expected_revision`. Domain denies use symmetric subtree protection so a broad parent query cannot return a denied child. |
 | `GET /v1/dashboard/federation/connections/{chain_id}/sync` | Returns `publish_domains`, `subscribe_domains`, `remote_publish_domains`, `remote_subscribe_domains`, and revision state. |
@@ -1968,7 +2099,7 @@ vault-backed. A foreign request or result is never automatically journaled,
 embedded, indexed as memory, written to Badger/AppHash, or treated as trusted
 instructions (`internal/store/sqlite.go:4764-4837`,
 `internal/store/pipeline_transport.go:92-176`,
-	`shouldAutoJournalPipeline`, `api/rest/pipe_handler.go:2217-2226`).
+	`shouldAutoJournalPipeline`, `api/rest/pipe_handler.go:2259-2268`).
 
 ### `POST /v1/pipe/resolve`
 
@@ -1977,14 +2108,14 @@ pipeline row. The MCP client calls this immediately before `send`, then signs
 the exact returned destination (`api/rest/pipe_handler.go:47-126`,
 `internal/mcp/tools.go:2108-2167`).
 
-**Request:** `{"to":"provider, display/registered name, #node/agent-prefix, or agent@chain"}`
+**Request:** `{"to":"exact local agent ID, display/registered name, provider field, #node/agent-prefix, or agent_id@chain"}`
 
 **Response** (HTTP 200):
 
 ```json
 {
-  "to_agent": "<exact 64-hex agent id, or empty for a local provider>",
-  "to_provider": "<local provider, or empty>",
+  "to_agent": "<exact 64-hex agent id>",
+  "to_provider": "",
   "source_chain_id": "<exact local chain for a federated target, otherwise empty>",
   "destination_chain_id": "<exact remote chain id, or empty for local>",
   "address": "<agent@chain for a federated contact>",
@@ -1996,8 +2127,13 @@ the exact returned destination (`api/rest/pipe_handler.go:47-126`,
 Canonical agent IDs remain exact and never invoke friendly-name discovery.
 Friendly labels match local display/registered/provider fields and federated
 display or registered names exactly (case-insensitive); substring matches are
-discovery-only. A friendly label must identify one caller-authorized target
-across local and federated scope. Local/local, federated/federated, and
+discovery-only. Arbitrary provider aliases are not inferred: a label must
+match the saved metadata. Use `sage_find_agent` for named discovery or
+`sage_directory(scope="local")` for exact local agent IDs. `to_provider` is a
+retained compatibility field; the current resolver returns a concrete
+`to_agent`, rather than a provider-addressed queue. A friendly label must
+identify one caller-authorized target across local and federated scope.
+Local/local, federated/federated, and
 local/federated collisions return HTTP 409 with a bounded set of immutable
 choices instead of selecting the first match. Consequently a display-name
 rename changes that alias immediately while the immutable registered name and
@@ -2016,6 +2152,14 @@ identity, malformed response, and binding failures never use the cache
 (`internal/federation/client.go:47-67,154-160`;
 `internal/federation/pipe_targets.go:87-167,169-295`;
 `internal/store/federated_pipe_contacts.go:49-195`).
+
+A peer that explicitly lacks federated pipeline capability returns HTTP 501
+`Peer update required`. Missing local SQLite federation storage returns
+HTTP 503 `Local federated pipeline unavailable`; an incomplete peer scan
+returns HTTP 503 `Federated agent lookup incomplete`. A local storage fault
+is not evidence that the receiving peer needs an update
+(`internal/federation/pipe_targets.go`, `resolveRemotePipeTarget`;
+`api/rest/pipe_handler.go`, `writeRemotePipeTargetError`).
 
 Any legacy cached result is only a local queue-routing hint. Immediately before every
 delivery attempt, the durable outbox performs a fresh authenticated live
@@ -2152,6 +2296,147 @@ they do not promise a dedicated high-level visual treatment for every event.
 Route-local message wake, MCP, and wizard SSE protocols are intentionally
 outside this registry.
 
+### Auxiliary workflow journal (current source)
+
+`GET /v1/workflows/{uuid}` and `PUT /v1/workflows/{uuid}` require an exact,
+fresh nonce-bound ordinary-agent signature, the post-v23 pipeline-agent boundary,
+and concrete SQLite storage with an expected active vault. Actor identity comes
+only from authentication. UUIDs must be canonical, lowercase, and nonzero.
+
+PUT requires the three fields shown below; it additionally accepts one optional
+`guard` object, described below. Existing three-field requests are unchanged:
+```json
+{"kind":"mesh_outbound","expected_revision":0,"payload":{"example":"untrusted auxiliary state"}}
+```
+Kinds: `mesh_outbound`, `mesh_inbound`, `public_proposal`,
+`conversation_control`, `conversation_session`. Payload is strict JSON
+at most 16384 bytes; duplicate/unknown outer fields and duplicate nested payload
+keys are rejected. Revisions are exact JSON integers, not booleans, strings,
+nulls, or floats. Zero creates; updates require exact current revision. The
+maximum resulting revision is `9007199254740991`, so that value cannot itself
+be used as `expected_revision`. Create replay is allowed only at revision 1
+with byte-identical kind/payload; ambiguous updates require GET reconciliation.
+
+Optional conversation revision guard:
+```json
+{"kind":"conversation_session","expected_revision":0,"payload":{"example":"untrusted auxiliary state"},"guard":{"record_id":"9726bde5-5f3d-49f0-b420-33a16875b59c","expected_revision":1}}
+```
+Omission means no guard; explicitly supplied `null` is invalid. The guard must
+be an object with exactly `record_id` and `expected_revision`; duplicate keys
+(including escaped aliases), unknown fields, and missing fields are rejected.
+Its UUID must be canonical lowercase/nonzero, distinct from the target UUID.
+Its revision is a canonical decimal JSON integer from 1 through
+`9007199254740991` inclusive; booleans, null, quoted integers, fractions,
+exponent notation, and negative zero are not accepted. The target revision
+retains its existing stricter upper bound because a successful write increments it.
+
+Guards are permitted only for `conversation_session` targets. The source is
+looked up only under the authenticated actor and must decrypt/bind as
+`conversation_control` at the exact requested revision. The guard check and
+target CAS share one vault-protected SQL transaction; the control record is
+not modified. Guard checks also apply to revision-1 create replays. Missing,
+stale, other-actor-only, or wrong-kind control records produce 409 with no
+target mutation; corrupted controls produce 503, never false absence. Invalid
+guard shape/UUID/revision, self-guards, and guards on other target kinds produce
+400. Locked or encryption-disabled storage produces 503. A guard checks a
+revision, **not the meaning of consent fields or permission to submit memory**;
+auxiliary payloads remain untrusted. This adds no batch write, suppression,
+publication, canonical-proposal idempotency, or automatic retry operation.
+
+The request-body bound remains 16896 bytes (16384 payload bytes plus 512 bytes
+of envelope allowance), including any guard. SDKs must sign the full exact PUT
+body including the guard, omit the field for unguarded requests, and preserve
+the existing seven-field response shape. Do not send an actor ID in either
+object. Conflicts and uncertain outcomes require explicit reconciliation;
+GET of a target alone does not grant fresh dispatch authority after opt-out.
+
+GET and PUT return HTTP 200 with exactly `schema="sage.workflow-journal.v1"`,
+`agent_id`, `record_id`, `revision`, `kind`, `payload`, and
+`trust="untrusted_auxiliary"`. There is no delete operation or send side effect.
+
+`GET /v1/workflows` discovers only the caller's encrypted records, ordered by
+UUID. Optional query fields are `after` (exclusive canonical UUID; empty/omitted
+starts the scan) and `limit` (canonical integer 1–50, default 20). Duplicate or
+unknown query fields, actor/kind filters, and GET bodies are rejected. Response:
+```json
+{"schema":"sage.workflow-journal.v1","items":[],"next_after":null,"has_more":false}
+```
+Items use the seven-field record shape. With `has_more=true`, `next_after` is
+the last returned UUID. Corruption fails the page rather than producing partial
+or false-empty results. Separate pages are not a consistent snapshot; concurrent
+inserts before the cursor require a new scan.
+
+Responses are `Cache-Control: no-store`. Invalid requests are 400, genuinely
+absent caller-owned records 404, CAS/kind conflicts 409, size violations 413,
+actor/node quota exhaustion 429, and locked/corrupt/unsupported storage 503.
+The store seals actor/UUID/revision/kind/payload using the existing SAGE vault;
+this is not canonical memory, verified foreign provenance, public approval,
+history migration, or an E2E guarantee. No new key or activation is provided.
+Sources: `api/rest/workflow_journal_handler.go`,
+`internal/store/workflow_journal.go`, and routes in `api/rest/server.go`.
+
+### Private original JPEG objects (current source, disabled by default)
+
+`PUT /v1/private-media/{uuid}` and `GET /v1/private-media/{uuid}` require an
+exact fresh nonce-bound ordinary-agent signature and the post-v23 active local
+agent boundary. Root and pending agents cannot use this surface. Actor identity
+comes only from authentication; UUIDs must be canonical, lowercase, and nonzero.
+Query parameters and encoded-path aliases are rejected.
+
+PUT signs the **original raw JPEG request bytes**, not JSON or base64. Require
+exactly one `Content-Type: image/jpeg` and no `Content-Encoding`. The maximum
+body is 2097152 bytes; only PUT on this exact canonical route receives the
+2 MiB authenticated-body allowance. Other authenticated routes retain 1 MiB.
+JPEG validation checks bounded headers (8-bit baseline/progressive, 1 or 3
+components, at most 1920 by 1080), not raster decoding. Original bytes, including
+embedded metadata, are preserved. PUT is create-only (implicit expected revision
+zero); identical-byte replay returns the same metadata, while replacement of
+the caller's existing object with different bytes returns 409.
+
+PUT returns HTTP 200 with exactly six fields:
+```json
+{"schema":"sage.private-media.v1","agent_id":"<lowercase hex public key>","object_id":"<canonical UUID>","revision":1,"length":1234,"digest":"<lowercase SHA-256 of original JPEG>"}
+```
+After successful exact authentication, UUID validation, and backend binding,
+responses carry `X-SAGE-Private-Media-Schema: sage.private-media.v1`, including
+actual missing-object 404. An unknown-router 404 lacks this marker; it is not
+evidence that a private object is absent. Unconfigured backend responses also
+lack the marker.
+
+GET requires an empty body and returns HTTP 200 raw `image/jpeg`, with the
+original byte length in `Content-Length`, caller actor in `X-SAGE-Agent-ID`,
+requested UUID in `X-SAGE-Media-ID`, and lowercase original-byte SHA-256 in
+`X-SAGE-Media-SHA256`. It verifies authenticated row binding,
+length, digest, and JPEG headers before exposing bytes. Another actor's object
+is not visible. Every private-media response, including authentication errors,
+has `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+
+Invalid UUID/JPEG/query/body is 400; authentication/authority failures are
+401/403; genuinely missing caller-owned objects are 404; conflicting bytes 409;
+oversize 413; unsupported content type/encoding 415; actor/node quota exhaustion
+429. Unconfigured, disabled, locked, corrupt, or unavailable storage and uncertain
+free-space admission return generic 503, never a fabricated 404. Following an
+ambiguous PUT failure, reconcile with GET or retry identical bytes under the same
+UUID with a fresh signature/nonce; do not generate a replacement object ID.
+
+`sage-gui` startup calls `Server.SetPrivateMediaStore` with an explicitly
+configured `store.NewPrivateMediaStore` only when the operator's `private_media`
+configuration enables it; otherwise the injected backend is nil. It uses the
+existing SQLite store, explicit positive actor/node ciphertext-byte and object
+quotas, a positive free-space reserve, and a native Linux/Darwin filesystem probe.
+Enabled provisioning on unsupported platforms fails closed. See
+`docs/PRIVATE_MEDIA_PROVISIONING.md` for the exact configuration and probe limits.
+No HTTP configuration or autonomous activation exists; nil or
+disabled injection fails closed. The probe runs outside vault/database locks;
+its free-space observation is not a filesystem reservation. Bytes are sealed by
+the existing SAGE vault before SQL persistence, with vault-write admission held
+through commit. This auxiliary local storage is not canonical memory, foreign
+provenance, E2E encryption, automatic history migration, or secure deletion.
+There is no list/delete API, new key, key export, or plaintext file staging.
+
+Sources: `api/rest/private_media_handler.go`, `api/rest/middleware/auth.go`,
+`internal/store/private_media.go`, and routes in `api/rest/server.go`.
+
 ### Canonical local Messages service (v11.17)
 
 The `/v1/messages` operations are one service over the existing
@@ -2159,21 +2444,81 @@ encrypted `pipeline_messages` rows. They do not create a second inbox. Every
 route is inside the active-ordinary-agent boundary; Root is not a messaging
 principal.
 
+The advertised MCP messaging tools use `sage_message_send`,
+`sage_messages_receive`, `sage_message_reply`, and `sage_message_status`.
+Retained `sage_pipe` and `sage_pipe_result` calls are compatibility aliases;
+they are not additional inboxes or a reason to bypass canonical errors.
+`sage_find_agent` and `sage_directory` return caller-authorized addressing
+metadata. Their results establish neither online presence nor delivery, claim,
+or read state (`internal/mcp/tools.go`, `registerTools`, `toolFindAgent`,
+`toolDirectory`).
+
 | Route | Contract |
 |---|---|
+| `GET /v1/messages/storage` | Exact signed active ordinary agent; no-store, payload-free storage observation. See the strict response and security boundary below. |
 | `POST /v1/messages` | Exact-local-agent send. Requires `to_agent`, `payload`, and a 1–256-byte caller-scoped `idempotency_key`; optional `intent` and `ttl_minutes` 0–1440. Omitted/0 is durable until handled; 1–1440 requests explicit expiry. Exact retry returns the original `message_id`; same key/different request is HTTP 409. |
 | `GET /v1/messages/wake` | Exact-caller payload-free catch-up/SSE. Requires a 1–128-byte `consumer_id`; accepts `after_seq` or matching `Last-Event-ID`. Events use `id:<seq>` and data exactly `{version,seq,pending}`, where `pending` means unfinished canonical work (`pending` or `claimed`). If unfinished work remains at the supplied cursor, reconnect immediately replays that same sequence as state catch-up. One exact agent has one active consumer lease; same-consumer reconnect supersedes its stale stream, while a different live consumer receives HTTP 409. |
 | `GET /v1/messages/wake-state` | Exact-caller lease-free payload-free snapshot returning exactly `{version,seq,pending}`. It reads the same durable unfinished-work state as the wake stream without acquiring, replacing, or releasing the live consumer lease; intended for short-lived host hooks that compare a monotonic cursor. |
-| `GET /v1/messages/claimed-elsewhere` | Exact-caller payload-free coordination and recovery projection. Requires this runtime's 1–128-byte `claimant_session_id`; accepts `limit` 1–20 (default 5) and an optional opaque `cursor`. Returns the exact full `claimed_elsewhere_count` plus an oldest-first bounded `items` page, `limit`, `truncated`, and `next_cursor` only when more rows remain. Each item contains only `message_id`, its current `claimant_session_id`, `created_at`, optional `claimed_at`, `expires_at`, and `foreign`; sender/provider/chain identity, intent, payload, result, and content never cross this surface. The exact claimed-owner predicate includes still-actionable local, provider-addressed compatibility, and inbound-federated claims held by a different session and is not bounded by generic history's newest-100 window. |
+| `GET /v1/inbox/activity-state` | Fresh exact-signed, payload-free snapshot returning exactly `{version,epoch,seq}`. `epoch` is an opaque 32-character database-incarnation fence: it survives process restart and backup restore, but a fresh database receives a different epoch so a preserved client cursor cannot suppress new cues after reinitialization. The per-agent sequence advances for newly created task-assignment notices and newly persisted replies. It is coordination to inspect, not unfinished work: it never changes `/v1/messages/wake` or `/v1/messages/wake-state`, whose v1 payload remains exactly `{version,seq,pending}`, and it never makes Stop block. |
+| `GET /v1/messages/claimed-elsewhere` | Exact-caller payload-free coordination and recovery projection. Requires this runtime's 1–128-byte `claimant_session_id`; accepts `limit` 1–20 (default 5) and an optional opaque `cursor`. Returns the exact full `claimed_elsewhere_count` plus an oldest-first bounded `items` page, `limit`, `truncated`, and `next_cursor` only when more rows remain. Each item contains only `message_id`, its current `claimant_session_id` and `claim_revision`, `created_at`, optional `claimed_at`, `expires_at`, and `foreign`; sender/provider/chain identity, intent, payload, result, and content never cross this surface. The exact claimed-owner predicate includes still-actionable local, provider-addressed compatibility, and inbound-federated claims held by a different session and is not bounded by generic history's newest-100 window. |
 | `GET /v1/messages/own-claimed-unfinished` | Exact-caller, exact-session passive visibility for local, provider-addressed compatibility, or inbound-federated work already claimed by this runtime. Requires `claimant_session_id`; `limit` defaults to 5 and is capped at 20. Returns a bounded `items` list, exact `count`, `limit`, and `truncated`. Rows are marked `already_claimed_by_you:true`; the route never claims, reclaims, acknowledges, refreshes, hands off, or changes wake/workflow state. Another session or agent receives no matching IDs or payloads. |
 | `POST /v1/messages/receive` | Requires a 1–256-byte `receive_token`; optional limit 1–20 and opaque `claimant_session_id` up to 128 bytes. Claims and persists one exact ordered batch with session attribution. Same caller/token/limit replays that batch after a lost response; a different limit is HTTP 409. Replay metadata is retained for 48 hours and capped at 4096 tokens per agent: capacity returns HTTP 429, while a purged/incomplete exact batch returns HTTP 410 instead of claiming later work. |
 | `PUT /v1/messages/{message_id}/claim-session` | Exact claimed recipient of inbound federated work only. Binds an unbound claim to one opaque MCP session; repeating the same bind is idempotent and a competing bind is HTTP 409. Retained pre-v11.18.24 claims are instead migrated to the explicit `legacy` fence and require handoff. |
-| `PUT /v1/messages/{message_id}/handoff` | Exact fetched recipient only. Atomically compare-and-swaps `from_session_id` to `to_session_id` for one still-claimed local or inbound federated message. A stale expected session is HTTP 409; repeating an already-applied transfer is idempotent. Session IDs coordinate runtimes sharing one agent identity and confer no authorization. |
+| `PUT /v1/messages/{message_id}/handoff` | Exact fetched recipient only. Current clients send `from_session_id`, `to_session_id`, and the exact non-negative `from_revision` from passive history. For pre-v11.19.5 REST compatibility only, omitted `from_revision` defaults to 0; `sage_message_handoff` always requires it. The route atomically compare-and-swaps both source fences for one still-claimed local or inbound federated message and always returns the incremented `claim_revision`. A stale or A→B→A delayed fence is HTTP 409, so omission can transfer only an untouched revision-0 claim; repeating an already-applied transfer is idempotent. Session IDs coordinate runtimes sharing one agent identity and confer no authorization. No timeout or age-based auto-steal exists. |
 | `POST /v1/messages/{message_id}/reply` | Exact fetched recipient only. MCP supplies its opaque `claimant_session_id`, which must still own the claim after any handoff. Local replies and federated compatibility dispatch are idempotent; different second results are HTTP 409. Federated session check, completion, result fingerprint, and return event commit atomically. A live provider-addressed compatibility claim returns typed HTTP 409 `https://sage.dev/errors/message-legacy-provider-compatibility-scope` only after proving the exact persisted claimant identity and matching claimant session; only that signal authorizes MCP's retained completion route. Canonical typed 404 remains an authoritative non-enumerating denial. |
 | `PUT /v1/messages/{message_id}/read` | Fresh nonce-bound exact-recipient signature. The message must already have been returned to that caller by canonical receive. Same acknowledgement is idempotent. |
 | `PUT /v1/messages/read-batch` | One fresh exact-recipient request acknowledges 1–20 already-fetched exact message IDs. Every item is authorized independently and returns `confirmed` or a generic per-item failure; one failure never rolls back independent successes. Exact replay is idempotent. |
 | `GET /v1/messages/{message_id}/status` | Exact sender only, payload-free metadata projection. Returns independent transport/read/workflow state and never decrypts content/proofs. |
 | `GET /v1/messages/replies/{reply_event_id}/status` | Exact federated replier only. Returns payload-free outbound result-event transport state. It is not another inbox request and exposes no original-message workflow/read status or result content. |
+
+#### Storage observation and encrypted send admission (current source)
+
+`GET /v1/messages/storage` returns exactly:
+
+```json
+{
+  "schema": "sage.message-storage.v1",
+  "instance_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "agent_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "encryption_expected": true,
+  "vault_active": true,
+  "vault_generation": "1",
+  "stable": true,
+  "canonical_send_idempotency": true,
+  "encrypted_send_admission": true
+}
+```
+
+IDs are lowercase 64-hex strings; generation is a canonical uint64 decimal
+string. All flags are booleans. `agent_id` is the authenticated caller;
+`instance_id` is randomly bound to this server/store instance, not a chain ID or
+durable identity. The route requires exact signed admission, emits
+`Cache-Control: no-store`, and returns 503 when the supported store/protocol
+observation is unavailable. Missing routes/fields are not positive evidence.
+The operator must separately authenticate and pin the endpoint to its chain.
+
+`POST /v1/messages` additionally accepts optional strict boolean
+`require_encrypted_storage` (omitted/false preserves existing behavior). True
+requires supported SQLite encrypted admission: encryption must be expected
+and the vault active while the vault-publication read lock spans canonical
+send/idempotency handling. Unsupported or unavailable encrypted admission is
+503; invalid/non-boolean/duplicate flag values are 400. A prior metadata read
+alone does not close the race; clients requiring this property must check the
+advertised capability and send the flag. Never assume an older server enforces it.
+
+These are source contracts, not deployment/activation evidence, an audit or
+migration of historical plaintext messages, or a recipient-only E2E guarantee.
+Sources: `api/rest/message_storage_status.go:handleMessageStorageStatus`,
+`api/rest/messages_handler.go:handleMessageSend`, and
+`internal/store/message_storage_status.go:SendEncryptedLocalMessage`.
+
+Deprecated exact-local `GET /v1/pipe/inbox` and explicit
+`PUT /v1/pipe/{pipe_id}/claim` use the same session-aware claim transaction as
+canonical Messages. Each exact-local path atomically changes the pending row to
+claimed and creates its session receipt, so a crash cannot commit ownership
+without the recovery fence. This retained pipeline surface is SQLite-only;
+PostgreSQL does not implement `PipelineStore`. Provider-only and federated
+paths keep their separate receipt rules.
 
 Claimed local items returned by `POST /v1/messages/receive` keep the persisted
 `from_agent` and `from_provider` fields unchanged and add response-only
@@ -2235,10 +2580,21 @@ recipient is online. Stdio and Streamable HTTP have no server-push contract.
 This compatibility notification is separate from the durable ordinary-agent
 Wake Bus above and does not use its sequence or consumer lease.
 
-A successful federated reply returns its immutable `reply_event_id` and
-`reply_status:queued`. That ID names the already-existing signed result outbox
+A recorded federated reply returns its immutable `reply_event_id` and the
+current retained `reply_status`/`transport_status`: `queued`, `delivered`, or
+`failed`. Identical retries preserve that state and never imply a terminal event
+was requeued. A retained `last_error` is explicitly untrusted diagnostic data.
+That ID names the already-existing signed result outbox
 event; it does not create a duplicate message. Only its signing replier can use
 the reply-status route, and unrelated/missing IDs share the same generic 404.
+
+A federated reply stays deliverable for seven days after the proof that signs it
+(`federation.PipeEventResultLifetime`), which is also its retained outbox
+deadline. The destination re-derives that window from the signed proof and admits
+the legacy 24-hour window as well, so a peer that has not adopted the longer one
+can still return results. If a destination refuses a reply with the generic
+`invalid pipeline agent proof` refusal, the sender narrows that one pending event
+to the legacy window and retries once before reporting a terminal failure.
 
 The canonical same-node Messages routes remain separate from the
 capability-gated federated receipt-v2 surface. A negotiated imported pipe adds
@@ -2273,9 +2629,18 @@ share generic non-enumerating behavior. Peers negotiate
 `federated-pipeline-receipts-v2`; v1 peers and historical rows without the
 generation-bound v2 binding remain explicitly `unsupported`/`unconfirmed`.
 Upgrade migration never invents delivery, claim, or read evidence.
-Legacy `sage_pipe`, `sage_inbox`, and `sage_pipe_result` use the canonical local
-service when available and fall back only on a definitive route-not-found from
-an older node. Passive pipe history remains unchanged.
+The retained `sage_pipe` alias delegates exact local sends to the canonical
+Messages service with a fresh internal idempotency key per invocation; callers
+that need lost-response replay use `sage_message_send` with their own key.
+Local send fallback requires a definitive route-not-found from an older node.
+`sage_inbox` claims through canonical receive when available and also exposes
+compatibility work. Local completion through `sage_pipe_result` uses canonical
+reply first; the exact typed provider-compatibility signal also permits its
+retained completion path. Generic conflicts, transport errors, and canonical
+typed 404 denials do not permit that fallback. Federated completion has its own
+signed pipe result path. Passive pipe history remains unchanged
+(`internal/mcp/tools.go`, `toolPipe`, `toolInbox`, `toolPipeResult`,
+`isLegacyMessagesRouteNotFound`, `isLegacyProviderCompatibilityScope`).
 
 ---
 
@@ -2288,13 +2653,31 @@ Send a pipeline message to another agent or provider.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `to_agent` | string | no* | Exact agent_id (* one of to_agent or to_provider required) |
-| `to_provider` | string | no* | Provider name or agent name; resolves to agent_id if unambiguous |
+| `to_provider` | string | no* | Legacy local routing: an exact provider field addresses its shared inbox; a local agent-name fallback can resolve to `to_agent`. Use `/v1/pipe/resolve` first to address one exact recipient. |
 | `source_chain_id` | string | for federation | Exact local chain returned by `/v1/pipe/resolve`; source-node binding inside the signed agent proof |
 | `destination_chain_id` | string | no | For a federated send, the exact chain returned by `/v1/pipe/resolve`; requires exact `to_agent` and empty `to_provider` |
 | `intent` | string | no | Human description of the work |
 | `payload` | string | yes | Arbitrary content |
 | `ttl_minutes` | int | no | 0–1440. With `idempotency_key`, omitted/0 is durable until handled; without a key, the legacy route defaults omitted/0 to 1440 minutes. Values 1–1440 request explicit expiry. |
 | `idempotency_key` | string | no | Caller-scoped 1–256-byte token. Exact retry returns the original row; reusing the key for different content is HTTP 409. Omit only when replay protection is not required. |
+
+Python sync/async `pipe_send(..., idempotency_key=...)` exposes this existing
+field without automatic retries; omitted/`None` leaves the legacy body unchanged.
+Direct legacy `to_provider` routing differs from the MCP resolver: when the
+field matches a local provider, it remains a shared provider inbox, claimable
+by any matching active agent. It does not select one agent or require that the
+provider be unique. Arbitrary provider aliases are not inferred. To address
+one recipient, call `POST /v1/pipe/resolve`, then sign its returned exact
+`to_agent` and, for federation, `source_chain_id` and `destination_chain_id`.
+MCP clients can discover those exact addresses with `sage_find_agent` or
+`sage_directory` (`api/rest/pipe_handler.go`, `handlePipeSend`,
+`handlePipeInbox`; `internal/mcp/tools.go`, `toolPipe`).
+
+For federated exact-agent sends, `handlePipeSend` uses
+`SQLiteStore.SendFederatedMessage` to atomically persist the original message,
+transport event, and sender-scoped idempotency binding. This is not a radio
+endpoint or proof of remote delivery; provider-addressed routing does not gain
+the canonical exact-agent idempotency guarantee.
 
 For a local send, the target must be registered here. For a federated send,
 call `/v1/pipe/resolve` first and sign its exact `source_chain_id`, `to_agent`,
@@ -2308,11 +2691,11 @@ local policy (`api/rest/pipe_handler.go`).
 
 For an exact local recipient, both keyed and unkeyed admissions insert the
 `msg-*` row and advance that recipient's durable wake sequence in one
-transaction. Keyed sends use `SendLocalMessage` (`internal/store/messages.go:295-373`);
-unkeyed sends use `AdmitLocalMessage` (`internal/store/messages.go:374-410`). The route publishes
+transaction. Keyed sends use `SendLocalMessage` (`internal/store/messages.go:324-402`);
+unkeyed sends use `AdmitLocalMessage` (`internal/store/messages.go:403-439`). The route publishes
 the returned non-zero generation only after commit. A backend without that
 atomic canonical capability returns HTTP 501 before insertion
-(`handlePipeSend`, `api/rest/pipe_handler.go:640-1054`). Provider-only and
+(`handlePipeSend`, `api/rest/pipe_handler.go:652-1066`). Provider-only and
 federated rows do not allocate an exact-local wake sequence.
 
 **Response** (HTTP 201 fresh; HTTP 200 exact keyed replay):
@@ -2326,7 +2709,7 @@ address resolved from a bounded legacy-status offline cache can be accepted
 locally while the peer is down. Delivery waits for that peer to return and pass
 the fresh live authorization preflight above.
 
-**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:513-515`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6513` payload, `:6516` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:527-529`) to 413.
+**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:771-777`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6620` declaration, `:6619` payload, `:6622` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:792-794`) to 413.
 
 **Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`). An index-backed COUNT and its INSERT run under the same write critical section, so parallel sends cannot race past either cap. Over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
 
@@ -2552,7 +2935,7 @@ HTTP 409 if already claimed.
 Submit a result for a claimed message. Purely local completion keeps the
 existing auto-journal summary. Federated completion does not journal and queues
 the result over the original agreement-bound return route
-(`handlePipeResult`, `api/rest/pipe_handler.go:1580-1869`).
+(`handlePipeResult`, `api/rest/pipe_handler.go:1615-1924`).
 
 **Request body:**
 
@@ -2563,7 +2946,7 @@ the result over the original agreement-bound return route
 | `source_chain_id` | string | for foreign work | Exact local reply-source chain returned as `reply_source_chain_id` by the pipe status preflight; prevents another node relabeling the signed result |
 | `claimant_session_id` | string | for foreign work; recommended for provider-addressed compatibility work | Opaque 1–128-byte session currently holding the claim. A provider-addressed row claimed by an older sessionless caller is fenced as `legacy`, and an omitted result session selects only that exact fence; it cannot bypass a named sibling session. |
 
-`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:513`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6779`, mapping `ErrPipeResultTooLarge`).
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6886`, mapping `ErrPipeResultTooLarge` at `:6885-6886`).
 
 **Response** (HTTP 200):
 `{"status":"completed","journal_id":"<memory_id or empty>","journaled":true|false}`.
@@ -2588,8 +2971,9 @@ without duplicating its journal; a different result returns HTTP 409 `Reply
 conflict`.
 
 `completed` means the foreign result and its signed return event were committed
-atomically to the local durable outbox. It is queued, not yet a peer delivery
-receipt; terminal delivery feedback is claimed through `/v1/pipe/updates`.
+atomically to the local durable outbox. This workflow state alone does not prove
+peer delivery; the response separately reads the current transport state, and
+terminal delivery feedback is claimed through `/v1/pipe/updates`.
 An identical lost-response retry returns the original `reply_event_id` with
 `idempotent_replay:true`, even if the federation relationship was paused or
 revoked after commit. A different retry conflicts; only a genuinely new
@@ -2940,6 +3324,7 @@ domain/group/grant, and clearance decision for every returned record.
 | `SAGE_TX_COMMIT_TIMEOUT_MS` | 60000 | `broadcast_tx_commit` client timeout |
 | `VALIDATOR_KEY_FILE` | — | Path to CometBFT `priv_validator_key.json`; `amid` injects this concrete key into REST in socket mode, while in-process runtimes inject the key under `--home`. Governance is disabled rather than using the compatibility random key when unavailable. |
 | `SAGE_GOVERNANCE_OPERATOR_ID` | — | `amid` only: canonical hex Ed25519 identity allowed to authorize this validator's REST governance mutations. Equivalent flag: `--governance-operator-id`. Empty disables governance mutations. `sage-gui` wires its local `agent.key` identity directly. |
+| `SAGE_CEREBRUM_ROOT_KEY_FILE` | — | `amid` only: raw 32-byte seed or 64-byte Ed25519 CEREBRUM Root key that authenticates local Root-signed operator requests and countersigns promoted-Admin actions on the mounted app-v23 access pair. Equivalent flag: `--cerebrum-root-key-file`. Empty keeps those routes mounted but failing closed with `root_key_unavailable`. |
 | `CORS_ALLOWED_ORIGINS` | `*` | Comma-separated allowed origins |
 
 ---

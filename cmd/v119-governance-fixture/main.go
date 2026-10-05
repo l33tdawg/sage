@@ -37,6 +37,19 @@ func main() {
 	body := flag.String("body", "", "exact JSON body for request mode")
 	flag.Parse()
 
+	args := flag.Args()
+	if len(args) == 1 && args[0] == "rpc" {
+		if *keyPath != "" || *nodeIndex != -1 || *local || *method != http.MethodGet || *body != "" {
+			fatal(errors.New("rpc mode accepts only --path"))
+		}
+		response, err := cometRPC(*path)
+		if err != nil {
+			fatal(err)
+		}
+		_, _ = os.Stdout.Write(response)
+		return
+	}
+
 	if *keyPath == "" {
 		fatal(errors.New("--key is required"))
 	}
@@ -45,7 +58,6 @@ func main() {
 		fatal(err)
 	}
 
-	args := flag.Args()
 	if len(args) != 1 {
 		fatal(errors.New("exactly one mode is required: identity or request"))
 	}

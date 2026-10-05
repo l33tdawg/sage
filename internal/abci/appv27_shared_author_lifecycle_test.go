@@ -43,7 +43,7 @@ func newAppV27SharedAuthorFixture(t *testing.T) (*SageApp, agentKey, agentKey) {
 
 func TestAppV27ConstantsRefreshAndStrictBoundary(t *testing.T) {
 	require.Equal(t, tx.CanonicalUpgradeName(27), appV27UpgradeName)
-	require.Equal(t, uint64(27), MaxSupportedAppVersion())
+	require.Equal(t, uint64(28), MaxSupportedAppVersion())
 	app := setupTestApp(t)
 	app.state.Height = 101
 	require.NoError(t, app.badgerStore.MarkUpgradeApplied(appV26UpgradeName, 26, 90))

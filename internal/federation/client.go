@@ -127,6 +127,9 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 }
 
 func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store.CrossFedRecord, method, path string, payload any, headers http.Header) ([]byte, int, error) {
+	if _, traced := ctx.Value(peerRouteTraceKey{}).(*peerRouteTrace); !traced {
+		ctx, _ = WithPeerRouteAttemptTrace(ctx)
+	}
 	if !m.transportIsEnabled() {
 		err := errors.New("federation transport is disabled")
 		m.recordRouteFailure(agreement.RemoteChainID, err, false)
@@ -207,6 +210,7 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 		}
 	}
 	generationBlockedP2POnly := false
+	generationBlockedConcrete := false
 	if generation := requiredRouteGeneration(ctx); generation != "" && routeDial != nil {
 		hooks := m.joinP2PHooks()
 		snapshot, ok := RouteSnapshot{}, false
@@ -227,9 +231,23 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 			// could replace the stale snapshot, so the peer can never recover its
 			// generation and stays unreachable until it is paired again.
 			//
+			// R2b. The same assumption fails for an agreement paired with a
+			// CONCRETE endpoint when that host moves: the endpoint is a real
+			// address, so nothing looks unroutable, but every outbound request
+			// dials a machine that no longer answers while the peer's own
+			// outbound traffic keeps arriving — the asymmetry operators report
+			// as "they can reach us, we cannot reach them". Nulling routeDial
+			// there also blocks the route exchange, which is the only thing that
+			// can replace the stale snapshot with the peer's current addresses,
+			// so the pair can never recover on its own and the queue drains only
+			// during the windows when the old address happens to answer.
+			//
 			// So the stale snapshot is admitted as a bootstrap hint for exactly
 			// one path: the authenticated route exchange that upgrades the
-			// generation. Every other request keeps the original rule.
+			// generation. That exemption is about the PATH, not about the
+			// agreement shape — it applies to p2p-only pairs (R2) and to
+			// concrete-endpoint pairs (R2b) alike. Every other request keeps the
+			// original rule.
 			//
 			// This does not import stale trust. A snapshot address is a HINT
 			// ABOUT WHERE TO CONNECT, not a credential: the connection is still
@@ -237,7 +255,7 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 			// agreement, so a stale or reassigned address fails authentication
 			// rather than being trusted. The rule's purpose — no cross-generation
 			// route inside a protected request — is preserved exactly.
-			if p2pOnly && path == p2pRoutesExchangePath {
+			if path == p2pRoutesExchangePath {
 				if ok {
 					// A snapshot exists but under another generation: use its
 					// addresses as the bootstrap hint.
@@ -253,6 +271,10 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 			} else {
 				routeDial = nil
 				generationBlockedP2POnly = p2pOnly
+				// A concrete-endpoint agreement keeps its one attempt (the stored
+				// address), but the caller must be able to tell a moved host from
+				// an offline one: the fallback was withheld here, not absent.
+				generationBlockedConcrete = !p2pOnly
 			}
 		} else {
 			// Preserve a non-nil empty slice: nil means a normal caller whose dialer
@@ -277,12 +299,15 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 			if !p2pOnly {
 				attempts = append(attempts, routeDialAttempt{
 					dial: func(attemptCtx context.Context) (PeerRouteDialResult, error) {
+						complete := BeginPeerRouteAttempt(attemptCtx, RouteKindDirect, address)
 						start := time.Now()
 						conn, dialErr := directDialer.DialContext(attemptCtx, network, address)
-						return authenticate(attemptCtx, PeerRouteDialResult{
+						result, dialErr := authenticate(attemptCtx, PeerRouteDialResult{
 							Conn: conn, Kind: RouteKindDirect, Target: address,
 							Latency: time.Since(start),
 						}, dialErr)
+						complete(dialErr)
+						return result, dialErr
 					},
 				})
 			}
@@ -294,6 +319,7 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 				attempts = append(attempts, routeDialAttempt{
 					delay: delay,
 					dial: func(attemptCtx context.Context) (PeerRouteDialResult, error) {
+						noteP2PSelectorStarted(attemptCtx)
 						result, handled, dialErr := routeDial(attemptCtx, agreement.RemoteChainID, frozenRouteTargets, authenticate)
 						if !handled {
 							return PeerRouteDialResult{}, errors.New("peer has no configured p2p route")
@@ -309,6 +335,18 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 			if dialErr != nil {
 				if isSecurityTransportError(dialErr) {
 					return nil, fmt.Errorf("peer %s route authentication failed: %w", agreement.RemoteChainID, dialErr)
+				}
+				if generationBlockedConcrete {
+					// The P2P fallback was withheld for this request because the
+					// route snapshot is from another trust generation, so the
+					// single attempt was the stored endpoint. Say that, instead of
+					// letting a moved host read as "peer offline": the peer's own
+					// traffic may still be arriving, and the repair is a route
+					// exchange (or a re-pair), not a network investigation.
+					return nil, routeRecoveryError(RouteRecoveryTrustGenerationMismatch,
+						fmt.Errorf("%w: peer %s: the stored endpoint is the only transport this agreement "+
+							"allowed for this request (no authenticated route for the required trust "+
+							"generation): %v", ErrPeerOffline, agreement.RemoteChainID, dialErr))
 				}
 				return nil, fmt.Errorf("%w: peer %s routes unavailable: %v", ErrPeerOffline, agreement.RemoteChainID, dialErr)
 			}
@@ -331,7 +369,9 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 	resp, err := client.Do(req)
 	if err != nil {
 		securityFailure := isSecurityTransportError(err)
-		m.recordRouteFailure(agreement.RemoteChainID, err, securityFailure)
+		verdict := peerTransportVerdict(err)
+		failure := newPeerRequestFailure(ctx, agreement.Endpoint, method, path, verdict, 0, err)
+		m.recordRouteFailure(agreement.RemoteChainID, failure, securityFailure)
 		if !securityFailure && path != p2pRoutesExchangePath {
 			// UI/status polling must not create a refresh storm while a peer is
 			// offline. One bounded refresh per minute is enough; the lifecycle
@@ -339,9 +379,22 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 			m.maybeTriggerRouteRefresh(agreement.RemoteChainID)
 		}
 		if isPeerOfflineDialError(err) {
-			return nil, 0, fmt.Errorf("%w: peer %s: %v", ErrPeerOffline, agreement.RemoteChainID, err)
+			// Keep a route-recovery verdict discoverable through this wrapper: the
+			// dial layer already established WHY only one transport was offered
+			// (a stale generation withheld the fallback), and flattening the inner
+			// error with %v here would reduce that to prose the caller cannot
+			// branch on. ErrPeerOffline stays in the chain either way, so retry
+			// classification is unchanged.
+			if code := RouteRecoveryFailureCode(err); code != "" {
+				cause := routeRecoveryError(code,
+					fmt.Errorf("%w: peer %s: %v", ErrPeerOffline, agreement.RemoteChainID, err))
+				return nil, 0, newPeerRequestFailure(ctx, agreement.Endpoint, method, path, verdict, 0, cause)
+			}
+			cause := fmt.Errorf("%w: peer %s: %v", ErrPeerOffline, agreement.RemoteChainID, err)
+			return nil, 0, newPeerRequestFailure(ctx, agreement.Endpoint, method, path, verdict, 0, cause)
 		}
-		return nil, 0, fmt.Errorf("peer %s unreachable: %w", agreement.RemoteChainID, err)
+		cause := fmt.Errorf("peer %s unreachable: %w", agreement.RemoteChainID, err)
+		return nil, 0, newPeerRequestFailure(ctx, agreement.Endpoint, method, path, verdict, 0, cause)
 	}
 	selectedMu.Lock()
 	chosen := selected
@@ -874,7 +927,7 @@ func (m *Manager) runPeerStatusRetry(parent context.Context, remoteChainID strin
 			m.routeRetryMu.Unlock()
 		})
 	}()
-	workflowCtx, cancel := context.WithTimeout(parent, routeRefreshTimeout+6*time.Second)
+	workflowCtx, cancel := context.WithTimeout(parent, m.routeRefreshBudget(remoteChainID)+6*time.Second)
 	defer cancel()
 	generation := routeBindingID(binding)
 	hint := m.routeRecoveryHint(remoteChainID, generation)
@@ -940,7 +993,9 @@ func (m *Manager) PeerStatusForPipeLookup(ctx context.Context, remoteChainID str
 // callers supply their request-time agreement/control binding separately so a
 // delayed response can never be relabeled with post-response policy state.
 func (m *Manager) fetchPeerStatus(ctx context.Context, agreement *store.CrossFedRecord) (*StatusResponse, error) {
-	return m.fetchPeerStatusWithHeaders(ctx, agreement, nil)
+	return m.fetchPeerStatusWithHeaders(ctx, agreement, http.Header{
+		HeaderClientCapabilities: {CapabilityNodeMessaging},
+	})
 }
 
 // fetchPeerStatusForPipeLookup asks a v11.13.1 peer to advertise capability
@@ -948,7 +1003,7 @@ func (m *Manager) fetchPeerStatus(ctx context.Context, agreement *store.CrossFed
 // ignore the advisory header and return the v1-compatible snapshot instead.
 func (m *Manager) fetchPeerStatusForPipeLookup(ctx context.Context, agreement *store.CrossFedRecord) (*StatusResponse, error) {
 	compact, err := m.fetchPeerStatusWithHeaders(ctx, agreement, http.Header{
-		HeaderClientCapabilities: {CapabilityFederatedPipelineContactLookup},
+		HeaderClientCapabilities: {CapabilityFederatedPipelineContactLookup + "," + CapabilityNodeMessaging},
 	})
 	if !errors.Is(err, errPeerResponseLimit) {
 		return compact, err
@@ -971,19 +1026,34 @@ func (m *Manager) fetchPeerStatusWithHeaders(ctx context.Context, agreement *sto
 	if agreement == nil {
 		return nil, fmt.Errorf("peer status agreement is unavailable")
 	}
+	ctx, _ = WithPeerRouteAttemptTrace(ctx)
 	body, status, err := m.doPeerRequestWithHeaders(ctx, agreement, http.MethodGet, "/fed/v1/status", nil, headers)
 	if err != nil {
+		if PeerRequestFailureDiagnostic(err) == nil {
+			err = newPeerRequestFailure(ctx, agreement.Endpoint, http.MethodGet, "/fed/v1/status", peerTransportVerdict(err), status, err)
+		}
+		m.recordPeerRequestFailure(agreement.RemoteChainID, err)
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("peer %s returned %d: %s", agreement.RemoteChainID, status, truncate(body, 200))
+		// Never retain the peer's response body in an operator failure string.
+		err = newPeerRequestFailure(ctx, agreement.Endpoint, http.MethodGet, "/fed/v1/status", "http_failure", status,
+			fmt.Errorf("peer %s returned %d", agreement.RemoteChainID, status))
+		m.recordPeerRequestFailure(agreement.RemoteChainID, err)
+		return nil, err
 	}
 	var out StatusResponse
 	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("decode peer response: %w", err)
+		failure := newPeerRequestFailure(ctx, agreement.Endpoint, http.MethodGet, "/fed/v1/status", "invalid_response", status,
+			fmt.Errorf("decode peer response: %w", err))
+		m.recordPeerRequestFailure(agreement.RemoteChainID, failure)
+		return nil, failure
 	}
 	if out.ChainID != agreement.RemoteChainID {
-		return nil, fmt.Errorf("peer identifies as %q, agreement expects %q", out.ChainID, agreement.RemoteChainID)
+		failure := newPeerRequestFailure(ctx, agreement.Endpoint, http.MethodGet, "/fed/v1/status", "peer_identity_mismatch", status,
+			fmt.Errorf("peer identifies as %q, agreement expects %q", out.ChainID, agreement.RemoteChainID))
+		m.recordPeerRequestFailure(agreement.RemoteChainID, failure)
+		return nil, failure
 	}
 	return &out, nil
 }

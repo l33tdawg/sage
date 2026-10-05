@@ -369,7 +369,7 @@ func validateFederatedReceiptBinding(b FederatedReceiptBinding) error {
 		if !validReceiptDigest(b.RelationDigest) {
 			return ErrFederatedReceiptInvalid
 		}
-	} else if b.AuthorizationMode != "" || b.RelationDigest != "" {
+	} else if (b.AuthorizationMode != "" && b.AuthorizationMode != "node-messaging-v1") || b.RelationDigest != "" {
 		return ErrFederatedReceiptInvalid
 	}
 	return nil

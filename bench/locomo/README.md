@@ -1,158 +1,29 @@
-# LoCoMo benchmark for SAGE
+# LoCoMo retrieval benchmark
 
-LoCoMo (Maharana et al., ACL 2024 - *Evaluating Very Long-Term Conversational Memory of LLM Agents*) measures retrieval over long-running multi-session dialogues. This harness measures SAGE's hybrid recall (`POST /v1/memory/hybrid`) on LoCoMo and reports R@5, R@10, and MRR overall, per conversation, and per category.
+The runner measures SAGE hybrid retrieval over long multi-session LoCoMo conversations and reports R@5, R@10 and MRR overall, per conversation and per category. It seeds **once per conversation per run**, then scores that conversation's questions against the same fresh owned domain. Each turn's exact stored content includes `[locomo-turn:<id>]` and the speaker; the server embeds that full content. Queries and expansion vectors come from the same server `/v1/embed` space.
 
-It's the cross-comparable axis to `bench/longmemeval/`. Same signing, same embedding model, same scoring discipline, different dataset.
+Read [reproducibility and historical limitations](../REPRODUCIBILITY.md) before running. A disposable deployment, approved ordinary identity with domain-claim permission, ready semantic embedder, voter, pinned dataset and server manifest are required. Runs create persistent chain records. CI covers offline protocol behavior, not model-backed quality.
 
-## Dataset shape (and why we flatten it)
-
-Each LoCoMo sample is one long conversation between two personas, broken into multiple sessions, with a `qa` list of probe questions. Each QA pair carries:
-
-- `question`, `answer`
-- `category` (1..5 - single-hop, multi-hop, temporal, open-domain, adversarial)
-- `evidence` - a list of turn-ids (e.g. `"D1:5"`) that contain the supporting context
-
-The harness flattens this nested structure into a per-question stream: one QA pair becomes one bench row, with the full conversation's turn list attached as its haystack. That means the loop structure matches `bench/longmemeval/run.py` exactly - one question per iteration, isolated domain, seed-then-recall-then-score.
-
-## What it does, per question
-
-1. Seed every conversation turn into the running SAGE node as a committed memory in its own isolated domain (`bench-locomo-<question_id>`).
-2. Each turn is stored with a bookkeeping prefix: `[locomo-turn:<turn_id>]\n<speaker>: <text>`. The embedding is computed on the turn text BEFORE the prefix is added, so the vector captures conversation content, not bookkeeping noise.
-3. Embed the probe question via OpenAI `text-embedding-3-small`.
-4. Call `/v1/memory/hybrid` with the question text + embedding.
-5. Parse the `[locomo-turn:...]` prefix off each returned memory's content to recover the turn-id, then score that list against the ground-truth `evidence` turn-ids.
-
-Per-question rows and aggregate summary land in `bench/results/locomo-<git_sha>.json`.
-
-## Requirements
-
-- A running SAGE node reachable at `SAGE_API_URL` (default `http://localhost:18080` - the Docker bench container; use `http://localhost:8080` for a host-mode `sage-gui serve`).
-- `OPENAI_API_KEY` exported.
-- Python 3.10+.
-- Optional: a local copy of the dataset to avoid HuggingFace download time (`LOCOMO_DATA_PATH=/path/to/locomo.json`).
-
-## Install
+The canonical upstream file is `snap-research/locomo/data/locomo10.json`. It remains gitignored. Select an immutable upstream revision explicitly:
 
 ```bash
-pip install -r bench/locomo/requirements.txt
+LOCOMO_DATA_REVISION=<full-40-character-upstream-commit-sha> make bench-locomo-fetch
 ```
 
-## Dataset acquisition
-
-The canonical drop is `data/locomo10.json` in the upstream `snap-research/locomo` GitHub repo (10 conversations, 272 sessions, 5882 turns, 1986 QA, ~2.8 MB). The Makefile fetches it for you:
+The fetch target records and verifies a source/hash receipt. A changed pin, changed cached bytes or an existing file without a receipt fails; choose a fresh path with `python3 bench/fetch_locomo.py --revision SHA --out PATH`, or invoke the runner with your existing pinned local copy explicitly.
 
 ```bash
-make bench-locomo-fetch   # idempotent; downloads once into bench/locomo/data/
+python3 -m pip install -r bench/locomo/requirements.txt
+LOCOMO_DATA_PATH=/path/to/pinned/locomo10.json \
+python3 bench/locomo/run.py --limit 5 \
+  --sage-url http://127.0.0.1:18080 --identity /path/to/approved-benchmark.key \
+  --server-manifest /path/to/server-manifest.json --expect-reranker off
 ```
 
-`make bench-locomo-smoke` and `make bench-locomo` both depend on this target, so the dataset is in place before the run begins. The file is gitignored (`data/` is excluded repo-wide; we don't redistribute LoCoMo).
+`--limit 0` runs all selected questions. `--per-conversation N` takes the first N questions from each conversation; `--category 2` filters a category. `--top-k` defaults to 10 and must be at least 10. `--commit-timeout` defaults to 120 seconds per seed. Output names include harness SHA plus a unique run ID, or use `--out PATH`. Category-5/no-evidence questions retain the historical scoring convention (zero recall and reciprocal rank); compare per-category rows as well as aggregate scores.
 
-If you want to point at a different mirror, set `LOCOMO_DATA_PATH` to your own copy. The loader accepts either a top-level list of samples or an object with a `data` / `samples` / `conversations` array. The harness's `normalise_questions()` is defensive about field aliases (`dia_id` vs `turn_id` vs `id`, `text` vs `content` vs `utterance`, `qa` vs `qas` vs `questions`).
+The loader accepts a sample array or a wrapper `data`/`samples`/`conversations` array and recognizes common turn/question field aliases. It records original-file and canonical-row digests. Without `LOCOMO_DATA_PATH`, the HF loader requires `LOCOMO_HF_REVISION` as a full immutable commit SHA; `LOCOMO_HF_DATASET` defaults to `snap-stanford/LoCoMo` and `LOCOMO_HF_SPLIT` to `train`. Mirror availability is not guaranteed. `SAGE_API_URL` and `SAGE_BENCH_IDENTITY` can supply the required URL/key.
 
-### Hugging Face fallback
+Expansion defaults to zero. `--expand 3 --expansion-cache PATH` generates/persists or replays exact variants. Only uncached generation requires `OPENAI_API_KEY`; `LOCOMO_EXPANSION_MODEL` selects the optional chat model (default `gpt-4o-mini`). The old `LOCOMO_EMBED_MODEL` client variable no longer controls vectors. Configure the disposable server's reranker independently, then require its observed state with `--expect-reranker on|off`.
 
-If `LOCOMO_DATA_PATH` is not set, the harness tries `datasets.load_dataset(LOCOMO_HF_DATASET, split=LOCOMO_HF_SPLIT)`. As of May 2026 the public `snap-stanford/LoCoMo` mirror returns HTTP 401, so the GitHub path above is the working route.
-
-## Run
-
-```bash
-# Smoke test on the first 5 questions (good for sanity-checking the wiring)
-make bench-locomo-smoke
-
-# Full benchmark (every write goes through consensus; budget accordingly)
-make bench-locomo
-```
-
-Or invoke the runner directly for finer control:
-
-```bash
-# Balanced cross-section: 20 questions from each conversation
-LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json python bench/locomo/run.py --per-conversation 20
-
-# Focused run on one category (LoCoMo categories are stringified ints "1".."5")
-LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json python bench/locomo/run.py --category 2 --limit 50
-```
-
-## Env vars
-
-| Var | Default | Purpose |
-|---|---|---|
-| `SAGE_API_URL` | `http://localhost:18080` | SAGE REST endpoint (Docker bench container default) |
-| `OPENAI_API_KEY` | *(required)* | OpenAI auth for embeddings |
-| `LOCOMO_EMBED_MODEL` | `text-embedding-3-small` | Embedding model |
-| `LOCOMO_DATA_PATH` | *(unset)* | Local JSON file to avoid HF download |
-| `LOCOMO_HF_DATASET` | `snap-stanford/LoCoMo` | HF dataset id when falling back |
-| `LOCOMO_HF_SPLIT` | `train` | HF split when falling back |
-
-## CLI flags
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--limit N` | `0` (all) | run only the first N questions |
-| `--per-conversation N` | `0` | take N questions from each conversation for a balanced sample |
-| `--top-k K` | `10` | top_k for recall scoring (R@5 derived from the same list) |
-| `--category C` | unset | restrict to one category for focused runs |
-| `--out PATH` | `bench/results/locomo-<sha>.json` | result JSON path |
-
-## What we measure, what we don't
-
-This benchmark measures **pure retrieval quality** - given a probe question and a multi-week conversation history, can SAGE pull the right turn(s) into the top-K. It does not measure:
-
-- Answer correctness (we score retrieval, not the QA-pair answer).
-- Cross-session reasoning quality post-retrieval (would need an LLM grader).
-- Confidence decay or governance behaviour over conversational time.
-- Multi-agent dynamics, federation, or BFT failure modes.
-
-Those are SAGE's actual value-add and need their own evaluations. This bench is the comparability axis - the number you can put next to other memory systems' published numbers on the same dataset.
-
-## Reading the results
-
-```json
-{
-  "git_sha": "...",
-  "sage_url": "http://localhost:18080",
-  "embed_model": "text-embedding-3-small",
-  "dataset": "locomo",
-  "rerank_enabled_env": false,
-  "rerank_url_env": "",
-  "top_k": 10,
-  "n_total": ...,
-  "duration_seconds": ...,
-  "summary": {
-    "overall":         { "n": ..., "r5": ..., "r10": ..., "mrr": ... },
-    "per_conversation":{ "<conv_id>": { "n": ..., "r5": ..., ... }, ... },
-    "per_category":    { "1": { "n": ..., "r5": ..., ... }, "2": ..., ... }
-  },
-  "per_question": [ ... ]
-}
-```
-
-Compare to previous runs by diffing `summary.overall` between two JSONs in `bench/results/`.
-
-## Tuning knobs that affect the score
-
-Hybrid recall exposes four env tunables, all read by the SAGE node, not by this script. Set them in the SAGE node's environment, then re-run:
-
-| Var | Default | Effect |
-|---|---|---|
-| `SAGE_HYBRID_RRF_K` | 60 | RRF smoothing constant |
-| `SAGE_HYBRID_BM25_WEIGHT` | 0.4 | weight on BM25 stream |
-| `SAGE_HYBRID_VECTOR_WEIGHT` | 0.6 | weight on vector stream |
-| `SAGE_HYBRID_OVERSAMPLE` | 2 | each stream samples `TopK * N` before merging |
-
-Run a baseline first, then bisect.
-
-## Cross-encoder reranker (optional)
-
-Current SAGE supports a post-RRF rerank pass. In v11, the dashboard-managed llama.cpp reranker is the recommended path. This TEI-compatible env-var path remains useful for older benchmark comparability and custom reranker deployments:
-
-| Var | Default | Effect |
-|---|---|---|
-| `SAGE_RERANK_ENABLED` | `0` | gate; must be `1`/`true`/`yes`/`on` to activate |
-| `SAGE_RERANK_URL` | *(unset)* | base URL of a TEI-compatible reranker (`/rerank` endpoint) |
-| `SAGE_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | informational; surfaces in logs |
-| `SAGE_RERANK_KIND` | `tei` | endpoint dialect: `tei` or `llamacpp` |
-| `SAGE_RERANK_TIMEOUT_MS` | `2000` | per-call timeout; reranker failure falls back to RRF ordering |
-| `SAGE_RERANK_OVERSAMPLE` | `2` | candidate pool size factor: RRF returns `TopK * N` for the reranker |
-
-The harness records the operator-side `SAGE_RERANK_ENABLED` / `SAGE_RERANK_URL` values into the result JSON (`rerank_enabled_env`, `rerank_url_env`) so baseline and reranker runs stay distinguishable.
+`make bench-locomo-smoke` and `make bench-locomo` depend on the pinned fetch target and pass `BENCH_ARGS` to the runner; supply the required deployment/identity/manifest/arm arguments there. The shared document describes the four-arm comparison and the historical expansion-3 result's post-run reranker metadata correction and missing immutable provenance.

@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.19.0. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
+<!-- Reconciled through SAGE v11.23.15. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
 
 # SAGE Reference — Environment Variables
 
@@ -48,11 +48,18 @@ partially privileged companion.
 | `SAGE_TLS_ADDR` | HTTPS/MCP REST listen address; overrides `quorum.tls_addr` even in personal mode. MCP and lifecycle-hook URL fallback honors the same port (wildcard bind hosts become `localhost`). Set this, `REST_ADDR`, both Comet addresses, and the federation listener to distinct ports when running another node on the same host. | `127.0.0.1:8443` (personal), `0.0.0.0:8443` (quorum) | sage-gui, MCP, hooks | `cmd/sage-gui/config.go` (`applyEnvOverrides`), `cmd/sage-gui/node.go` (TLS listener), `internal/mcp/server.go` (`defaultBaseURL`) |
 | `SAGE_CMT_RPC_ADDR` | CometBFT RPC listen address (also the tx-broadcast client target, the web health panel, `sage-cli status`, and the `sage-gui upgrade` RPC default). Move it to run a second node on one host. | `tcp://127.0.0.1:26657` | sage-gui, sage-cli | `cmd/sage-gui/node.go:842` |
 | `SAGE_CMT_P2P_ADDR` | CometBFT P2P listen address. Personal mode defaults to loopback; quorum mode defaults to `tcp://0.0.0.0:26656` when unset. Generated agent bundles leave `p2p_addr` blank so this env override applies. | `tcp://127.0.0.1:26656` | sage-gui | `cmd/sage-gui/node.go:860` |
+| `SAGE_ALLOWED_CEREBRUM_HOSTS` | Comma-separated extra hostnames the CEREBRUM loopback boundary accepts in `Host` and forwarded-host headers, in addition to `localhost` and loopback IPs. Lets a loopback TLS-terminating reverse proxy pass the original Host through instead of rewriting it to `localhost`. Exact hostnames only (ports stripped, no wildcards). The connected peer and every `X-Forwarded-For` hop must still be loopback, and unconfigured hostnames still return 404. When the proxy supplies `X-Forwarded-Proto`, every field-line and comma-joined hop must be `http` or `https` and all values must agree. | (unset — loopback only) | sage-gui (CEREBRUM dashboard) | `web/trusted_hosts.go` |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated allowlist of origins for REST CORS. | `*` | REST | `api/rest/server.go:258-262` |
 | `SAGE_COMET_RPC` | CometBFT RPC endpoint for `sage-gui upgrade`; takes precedence over `SAGE_CMT_RPC_ADDR` for that command. | (built-in) | sage-gui | `cmd/sage-gui/upgrade.go:44` |
-| `SAGE_TX_COMMIT_TIMEOUT_MS` | Timeout (ms) for `broadcast_tx_commit`. Raise it for unusually slow consensus; JOIN final-confirm peer and listener budgets derive from the same value. | `60000` (60s) | REST, federation | `api/rest/memory_handler.go`, `internal/federation/broadcast.go`, `cmd/sage-gui/node.go` |
+| `SAGE_TX_COMMIT_TIMEOUT_MS` | Timeout (ms) for `broadcast_tx_commit`. Raise it for unusually slow consensus; JOIN final-confirm peer and listener budgets derive from the same value. **This is the client-side wait, and it only decides the outcome if the node's own `timeout_broadcast_tx_commit` (`config.toml`, upstream default 10s, `deploy/init-testnet.sh` now writes 45s) is longer.** Keep the node's wait strictly below this value so the node — which knows whether it admitted the bytes — is the party that answers; a client that expires first reports a deadline instead of a verdict. | `60000` (60s) | REST, federation | `api/rest/memory_handler.go`, `internal/federation/broadcast.go`, `cmd/sage-gui/node.go` |
 | `SAGE_NO_BROWSER` | If set to any non-empty value, don't auto-open a browser when the node starts. | (unset → opens browser) | sage-gui | `cmd/sage-gui/node.go:724` |
 | `SAGE_FED_RECALL_TIMEOUT_MS` | Timeout (ms) for federated recall fanout. | `4000` (4s) | REST | `api/rest/memory_handler.go:786-791` |
+| `SAGE_FED_STATUS_TIMEOUT_MS` | Base budget (ms) for the CEREBRUM peer-status probe. Peers whose frozen candidates include a `/p2p-circuit` address use the relay budget below instead. | `6000` (6s) | web | `web/federation_join.go` (`fedStatusTimeout`, `fedRelayProbeTimeout`) |
+| `SAGE_FED_RELAY_STATUS_TIMEOUT_MS` | Probe budget (ms) for a relay-only peer. A relayed path adds two network legs plus the relay handshake before the federation TLS handshake, so a cross-region relay can legitimately need several round trips. Lowering it toward the base budget reintroduces "unreachable" reports for a healthy but slow relay. | `20000` (20s) | web | `web/federation_join.go` (`fedRelayProbeTimeout`) |
+| `SAGE_FED_ROUTE_TIMEOUT_MS` | Whole-operation budget (ms) for a direct federation route refresh. | `8000` (8s) | federation | `internal/federation/routes.go` (`routeRefreshBudget`) |
+| `SAGE_FED_RELAY_TIMEOUT_MS` | Whole-operation budget (ms) for a route refresh whose frozen candidates include a circuit relay. | `20000` (20s) | federation | `internal/federation/routes.go` (`routeRefreshBudget`) |
+| `SAGE_FED_DIRECT_CANDIDATE_TIMEOUT_MS` | Per-candidate dial budget (ms) for a direct address inside the route race. | `2000` (2s) | federation | `cmd/sage-gui/federation_routes.go` (`federationCandidateBudget`) |
+| `SAGE_FED_RELAY_CANDIDATE_TIMEOUT_MS` | Per-candidate dial budget (ms) for a `/p2p-circuit` address inside the same race. Separate from the direct budget because a relayed dial costs the dialer→relay leg, the relay→peer leg and the relay's handshake before the inner TLS handshake starts. | `8000` (8s) | federation | `cmd/sage-gui/federation_routes.go` (`federationCandidateBudget`) |
 | `SAGE_FED_RECEIPT_TIMEOUT_MS` | Timeout (ms) for federation receipt fetches. | `20000` (20s) | federation | `internal/federation/client.go:21-28` |
 | `SAGE_UI_DIR` | Filesystem directory for serving web UI assets instead of the embedded bundle. | embedded assets | web | `web/handler.go:522-526` |
 | `SAGE_GRAPH_MAX_NODES` | Maximum graph nodes returned by the web graph endpoint. | `2500` | web | `web/handler.go` (`graphMaxNodes`) |
@@ -75,6 +82,35 @@ disarming the flag. `sage-gui` also reads these from a `voter:` block in `config
 | `VOTER_REQUIRED` | `amid` equivalent of `SAGE_VOTER_REQUIRED` — sets the default for the `--require-voter` flag (fatal-exit when the validator key is missing/unreadable). | `false` | amid | `cmd/amid/main.go` |
 | `VALIDATOR_KEY_FILE` | `amid` socket mode: concrete `priv_validator_key.json` for both the auto-voter and REST governance gateway (in-process mode injects the key under `--home`). Without a usable live key, REST governance fails closed with 503; the random compatibility key is never accepted for governance. | (none) | amid, REST | `cmd/amid/main.go`, `api/rest/server.go` |
 | `SAGE_GOVERNANCE_OPERATOR_ID` | `amid` governance gateway allowlist: one hex Ed25519 identity permitted to authorize this validator's REST propose/vote/cancel calls. Equivalent flag: `--governance-operator-id`. Empty disables governance mutations. `sage-gui` wires its local operator identity without this env variable. | (none) | amid | `cmd/amid/main.go`, `api/rest/server.go` |
+
+### Optional memory-quality gate (v11.23.14)
+
+The gate is off when both `SAGE_HUNCH_URL` and `SAGE_LOCAL_JUDGE_MODEL` are
+unset. It runs in `sage-gui` with a SQLite store. A loopback Hunch service takes
+precedence over the managed local judge. Judge failure holds memories for
+operator review; it never falls back to automatic acceptance. See
+[`write-gate.md`](write-gate.md) for the evidence flow, review workflow,
+plaintext requirements, and qualification limits.
+
+The Hunch include/exempt settings below apply only to the Hunch adapter. The
+current managed local adapter judges every domain (`cmd/sage-gui/node.go`,
+`localJudgeFromEnv` in `cmd/sage-gui/local_judge.go`).
+
+| Variable | What it does | Default | Read by | Source |
+|----------|--------------|---------|---------|--------|
+| `SAGE_HUNCH_URL` | Loopback Hunch service base URL; enables the gate and takes precedence over `SAGE_LOCAL_JUDGE_MODEL`. Proxies and redirects are refused. | unset (gate off) | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:35` |
+| `SAGE_HUNCH_API_KEY` | Bearer key for a service that requires authentication. | unset | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:39` |
+| `SAGE_HUNCH_MODELS` | Comma-separated judge models; the first leads under the `lead` policy. | one judge using the service's default model | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:49` |
+| `SAGE_HUNCH_POLICY` | `lead` or `all`; unrecognized values use `lead`. | `lead` | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:61` |
+| `SAGE_HUNCH_INCLUDE_DOMAINS` | Comma-separated domain prefixes to judge; when set, excludes all other domains. | all domains, subject to exemptions | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:63` |
+| `SAGE_HUNCH_EXEMPT_DOMAINS` | Comma-separated domain prefixes never sent to the judge. | none | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:62` |
+| `SAGE_HUNCH_TIMEOUT` | Per-memory judge budget as a positive Go duration; invalid values use the default. | `60s` | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:41` |
+| `SAGE_HUNCH_JUDGE_REVISION` | Operator tag in the cache version; change it when the service's default model changes behind the same URL. | unset | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:68` |
+| `SAGE_HUNCH_EVIDENCE` | `off` disables support judging in the Hunch adapter. Otherwise supplied evidence is checked by every judge. | enabled when evidence is supplied | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go` |
+| `SAGE_LOCAL_JUDGE_MODEL` | Managed Ollama model name; `sage-memory-judge:v15` selects the pinned experimental judge. Used only when `SAGE_HUNCH_URL` is unset. Installation runs in the background; unavailable or unverified inference holds memories. | unset (gate off) | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go`; gate wiring in `cmd/sage-gui/node.go` |
+| `SAGE_LOCAL_JUDGE_DEBIAS` | Exactly `1` asks both answer orders and averages their probabilities; changes the cache version. | disabled | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go` |
+| `SAGE_LOCAL_JUDGE_TIMEOUT` | Per-memory judge budget as a positive Go duration; invalid values use the default. | `60s` | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go` |
+| `SAGE_LOCAL_JUDGE_REVISION` | Operator tag in the cache version; change it when weights change behind the configured model name. | unset | sage-gui | `localJudgeVersion` — `cmd/sage-gui/local_judge.go` |
 
 ### External Comet settings for app-v20
 
@@ -113,8 +149,8 @@ These override `config.yaml`'s embedding block. Provider values: `hash` (built-i
 | `SAGE_EMBEDDING_MODEL` | Embedding model name. | (provider-specific) | `cmd/sage-gui/config.go:173` |
 | `SAGE_EMBEDDING_API_KEY` | API key for the embedding endpoint. | (none) | `cmd/sage-gui/config.go:176` |
 | `SAGE_EMBEDDING_DIMENSION` | Embedding vector dimension (int > 0). | `768` | `cmd/sage-gui/config.go:179` |
-| `SAGE_EMBEDDING_TIMEOUT` | HTTP deadline for each Ollama or OpenAI-compatible embedding request. Accepts a positive Go duration such as `60s` or `2m`; invalid, zero, and negative values fall back to 30 seconds. This can be raised for CPU-only inference queues. The REST server adds 15 seconds of response headroom so its outer writer does not cut off the embed request; that outer deadline is capped at 10 minutes. | `30s` | `internal/embedding/http_config.go:13`; `api/rest/server.go:1120` |
-| `SAGE_EMBED_TIMEOUT` | Legacy alias for `SAGE_EMBEDDING_TIMEOUT`. The canonical variable wins when both are set, including when its value is invalid (which falls back safely rather than consulting the alias). | (none) | `internal/embedding/http_config.go:16` |
+| `SAGE_EMBEDDING_TIMEOUT` | HTTP deadline for each Ollama or OpenAI-compatible embedding attempt. Accepts a positive Go duration such as `60s` or `2m`; invalid, zero, and negative values fall back to 30 seconds. The REST response deadline budgets three attempts plus 750 ms retry backoff, 15 seconds for request reading, 90 seconds for the signing slot, the configured consensus wait, and 30 seconds for bookkeeping/response delivery: **285.75 seconds by default**, capped at 10 minutes. Settings whose combined budget exceeds that cap can still outlive the response deadline. | `30s` | `internal/embedding/http_config.go` (`resolveHTTPTimeout`, `HTTPCallBudget`); `api/rest/server.go` (`restWriteTimeout`) |
+| `SAGE_EMBED_TIMEOUT` | Legacy alias for `SAGE_EMBEDDING_TIMEOUT`. The canonical variable wins when both are set, including when its value is invalid (which falls back safely rather than consulting the alias). | (none) | `internal/embedding/http_config.go` (`resolveHTTPTimeout`) |
 | `OLLAMA_URL` | **Legacy** alias for the base URL. `SAGE_EMBEDDING_BASE_URL` wins when both are set. | (none) | `cmd/sage-gui/config.go:166` |
 | `OLLAMA_MODEL` | **Legacy** alias for the model. `SAGE_EMBEDDING_MODEL` wins when both are set. | (none) | `cmd/sage-gui/config.go:169` |
 | `OLLAMA_KEEP_ALIVE` | How long Ollama keeps the embed model resident, sent as `keep_alive` on every embed request so it isn't unloaded between turns (the fix for intermittent embed failures). Accepts a duration (`24h`) or integer seconds (`-1` pins in memory, `0` unloads); an integer is sent to Ollama as a JSON number, an unparseable value falls back to the default. | `30m` | `internal/embedding/ollama.go:81` |
@@ -154,8 +190,26 @@ legacy Ollama vector space over a requested custom one (`cmd/amid/main.go`).
 |----------|--------------|---------|---------|--------|
 | `SAGE_SNAPSHOT_KEEP` | Snapshots to retain (newest N + per-version anchors, which are never pruned). Integer ≥ 1. | `5` | sage-gui | `cmd/sage-gui/node.go:262`, `cmd/sage-gui/snapshot.go:56` |
 | `SAGE_BRANCH_TAG` | Set `0`/`false`/`no` to disable branch tagging of memories. | on | MCP | `internal/mcp/branch.go:27` |
-| `SAGE_CLAUDE_CHANNEL` | Controls the experimental custom Claude notification adapter. It defaults off. The shipped Claude Code host registers a handler for `notifications/claude/channel`, but delivery from a plain `.mcp.json` server through the host's plugin-scoped channel gate remains unverified; enable it only for a host whose end-to-end delivery has been confirmed. Codex is hard-disabled even under an explicit override because it cannot consume the method and must not occupy the one exact-agent wake lease. When enabled for a capable host, `sage-gui mcp` subscribes to this agent's signed `/v1/messages/wake` stream. A rejected competing adapter retries with bounded backoff and can acquire the lease after the holder disconnects. Payload-free: the host learns only a durable wake cursor, never message content or sender. An unrecognized value warns and stays off. | off | sage-gui MCP (stdio) | `claudeChannelEnabled` (`mcp.go:333`), `runClaudeChannel` (`internal/mcp/claude_channel.go:111`), `EnableRESTClaudeChannel` (`internal/mcp/claude_wake_source.go:85`) |
+| `SAGE_CLAUDE_CHANNEL` | Controls the experimental custom Claude notification adapter. It defaults off. The shipped Claude Code host registers a handler for `notifications/claude/channel`, but delivery from a plain `.mcp.json` server through the host's plugin-scoped channel gate remains unverified; enable it only for a host whose end-to-end delivery has been confirmed. Codex is hard-disabled even under an explicit override because it cannot consume the method and must not occupy the one exact-agent wake lease. When enabled for a capable host, `sage-gui mcp` subscribes to this agent's signed `/v1/messages/wake` stream. A rejected competing adapter retries with bounded backoff and can acquire the lease after the holder disconnects. Payload-free: the host learns only a durable wake cursor, never message content or sender. An unrecognized value warns and stays off. | off | sage-gui MCP (stdio) | `claudeChannelEnabled` (`mcp.go:407`), `runClaudeChannel` (`internal/mcp/claude_channel.go:111`), `EnableRESTClaudeChannel` (`internal/mcp/claude_wake_source.go:85`) |
 | `SAGE_STOP_NUDGE` | Controls the payload-free end-of-turn wake check. Claude Code and Codex project hooks enable it by default; legacy installed Stop hooks with no provider label also default on, closing the user-scope upgrade gap. Set `0`/`false`/`no` to opt out. Other named hosts remain off unless explicitly enabled. The generated Stop hook asks the signed, lease-free wake snapshot whether durable message work remains unfinished and, for a newer cursor, emits one top-level `decision:block` continuation so the agent handles it before becoming idle. It never acquires the SSE lease, never sees sender or content, never blocks `SubagentStop`, never blocks when `stop_hook_active` is set, nudges the same session again only for a newer sequence, surfaces unchanged stranded work to a fresh session, and fails open on every error—including failure to persist its one-shot cursor. It cannot resurrect a thread that is already fully idle. | on for `claude-code`, `codex`, and legacy unlabeled Stop hooks; off for other named hosts | sage-gui hook, Codex/Claude Stop | `cmd/sage-gui/hook.go` (`stopNudgeEnabled`, `runHookStopCheck`), `cmd/sage-gui/mcp.go` (`sageStopScript`) |
+
+---
+
+## Recall-backed compaction
+
+Capture of harness-evicted conversation turns as governed memories. Default-off;
+see [`recall-backed-compaction.md`](recall-backed-compaction.md). All knobs are
+clamped to safe bounds.
+
+| Variable | What it does | Default | Read by | Source |
+|----------|--------------|---------|---------|--------|
+| `SAGE_NEVERCOMPACT` | Headless / centrally-managed opt-in for capture (`1`/`true`/`yes`/`on`). Interactive hosts use `sage-gui nevercompact enable` instead. Default-off either way. | off | sage-gui hook | `cmd/sage-gui/nevercompact.go` (`neverCompactEnvOptIn`, `neverCompactCapturePermitted`) |
+| `SAGE_NEVERCOMPACT_CLASSIFICATION` | Clearance level for captured chunks, clamped to `1..4`; never Public. | `2` (Confidential) | sage-gui hook | `cmd/sage-gui/hook_precompact.go` (`neverCompactClassification`) |
+| `SAGE_NEVERCOMPACT_TRANSCRIPT_ROOT` | Host-specific trusted root that a transcript path must canonically resolve within. | `~/.claude/projects` | sage-gui hook | `cmd/sage-gui/hook_precompact.go` (`preCompactTranscriptRoot`) |
+| `SAGE_NEVERCOMPACT_CHUNK_BYTES` | Target chunk size in bytes, clamped to `1000..60000`. | `6000` | sage-gui hook | `cmd/sage-gui/hook_precompact.go` (`preCompactChunkBytes`) |
+| `SAGE_NEVERCOMPACT_MAX_UNITS` | Capture units submitted per compaction, clamped to `1..4000`; the rest defers to the next compaction (the cursor persists, so the tail is never lost). | `400` | sage-gui hook | `cmd/sage-gui/hook_precompact.go` (`preCompactMaxUnits`) |
+| `SAGE_NEVERCOMPACT_BUDGET_MS` | Wall-clock budget per capture in milliseconds, clamped to `500..4500`. | `3500` | sage-gui hook | `cmd/sage-gui/hook_precompact.go` (`preCompactBudget`) |
+| `SAGE_NEVERCOMPACT_RECALL_BUDGET_MS` | Wall-clock budget for the complete thread recall in milliseconds, clamped to `1000..20000`. | `8000` | sage-gui hook | `cmd/sage-gui/nevercompact_recall.go` (`recallBudget`) |
 
 ---
 

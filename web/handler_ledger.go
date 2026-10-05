@@ -12,9 +12,11 @@ import (
 
 const recoveryBackupConfirmedPreference = "ledger_recovery_backup_confirmed"
 
-// VaultStore is implemented by stores that support encryption.
+// VaultStore is implemented by stores that support encryption. Publication goes
+// through ActivateVault so attaching a vault and requiring encryption are never
+// observable separately.
 type VaultStore interface {
-	SetVault(v *vault.Vault)
+	ActivateVault(v *vault.Vault)
 }
 
 // handleGetLedgerStatus returns the current Synaptic Ledger (encryption vault) status.
@@ -108,7 +110,7 @@ func (h *DashboardHandler) handleEnableLedger(w http.ResponseWriter, r *http.Req
 
 	// Attach vault to the store if the store supports it.
 	if vs, ok := h.store.(VaultStore); ok {
-		vs.SetVault(v)
+		vs.ActivateVault(v)
 	}
 
 	h.Encrypted.Store(true)

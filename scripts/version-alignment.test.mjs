@@ -6,6 +6,10 @@ const root = new URL('../', import.meta.url);
 const read = (path) => readFileSync(new URL(path, root), 'utf8');
 const server = JSON.parse(read('server.json'));
 const version = server.version;
+const federationProjectVersion = version
+  .split('.')
+  .map((part, index) => index === 0 ? part : part.padStart(2, '0'))
+  .join('');
 
 test('release-facing version metadata stays aligned', () => {
   assert.match(
@@ -25,11 +29,12 @@ test('release-facing version metadata stays aligned', () => {
     ['sdk/python/pyproject.toml', `version = "${version}"`],
     ['sdk/python/src/sage_sdk/__init__.py', `__version__ = "${version}"`],
     ['api/openapi.yaml', `version: ${version}`],
+    ['api/openapi.yaml', 'required: [version, epoch, seq]'],
     ['desktop/sage-shell/Cargo.toml', `version = "${version}"`],
     ['desktop/sage-shell/Cargo.lock', `name = "sage-shell"\nversion = "${version}"`],
     ['desktop/sage-shell/tauri.conf.json', `"version": "${version}"`],
-    ['desktop/sage-shell/src/control.rs', 'matches!(minor, Some(10..=19))'],
-    ['scripts/stage-native-shell-daemon.sh', 'through v11.19.x semver'],
+    ['desktop/sage-shell/src/control.rs', 'matches!(minor, Some(10..=23))'],
+    ['scripts/stage-native-shell-daemon.sh', 'through v11.23.x semver'],
     ['web/static/js/app.js', `const SAGE_VERSION = 'v${version}';`],
     ['README.md', `## What's New in v${version}`],
     ['README.md', '## What\'s New in v11.18.10'],
@@ -46,32 +51,45 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/reference/mcp-tools.md', `internal/mcp for SAGE v${version}`],
     ['docs/reference/python-sdk.md', `Version:** ${version}`],
     ['docs/reference/rest-api.md', `Reconciled through SAGE v${version}`],
+    ['docs/reference/rest-api.md', 'returning exactly `{version,epoch,seq}`'],
     ['docs/reference/concepts/rbac-orgs-federation.md', `reconciled through SAGE v${version}`],
     ['docs/reference/app-v23-access-control-design.md', `SAGE v${version}`],
     ['docs/reference/upgrade-lineage-repair.md', `SAGE v${version}`],
     ['docs/ADMIN_BOOTSTRAP.md', `Reconciled through SAGE v${version}/app-v27`],
-    ['docs/GETTING_STARTED.md', 'From Source (Go 1.25.13+)'],
+    ['docs/GETTING_STARTED.md', 'From Source (Go 1.26.8+)'],
     ['docs/GETTING_STARTED.md', `# sage-gui v${version}`],
-    ['docs/GETTING_STARTED.md', `SAGE v${version} advertises 33 MCP tools`],
-    ['docs/ARCHITECTURE.md', 'Go 1.25.13+ ABCI application'],
-    ['docs/ARCHITECTURE.md', '| Go | 1.25.13+ |'],
+    ['docs/GETTING_STARTED.md', `SAGE v${version} advertises 35 MCP tools`],
+    ['docs/ARCHITECTURE.md', 'Go 1.26.8+ ABCI application'],
+    ['docs/ARCHITECTURE.md', '| Go | 1.26.8+ |'],
     ['docs/reference/concepts/signer-nonce-fence.md', `Status: v${version}.`],
-    ['docs/reference/concepts/signer-nonce-fence.md', `not in v${version}`],
+    ['docs/reference/concepts/signer-nonce-fence.md', 'POST /v1/dashboard/signer-fence/abandon'],
     ['deploy/federation-acceptance/README.md', `# v${version} federation Docker acceptance`],
     ['docs/FEDERATION.md', `Verified against SAGE v${version} federation behavior`],
     ['docs/reference/concepts/message-reply-lifecycle.md', `SAGE v${version} code`],
-    ['docs/UPGRADING.md', `| v${version} | app-v27:`],
+    ['docs/UPGRADING.md', '| v11.19.9 | Unpinned Codex MCP sessions reject filesystem-root workspace resolution'],
+    ['docs/UPGRADING.md', '| v11.19.10 | Returning-agent approval reclaims only the identity\'s exact Root-retired home'],
+    ['docs/UPGRADING.md', '| v11.19.11 | Exact operator-configured CEREBRUM hostnames for loopback TLS reverse proxies'],
+    ['docs/UPGRADING.md', '| v11.19.12 | Project-scoped MCP and Codex installs reject the user\'s home directory'],
+    ['docs/UPGRADING.md', '| v11.19.13 | Stdio MCP startup skips automatic Claude project-hook repair'],
+    ['docs/UPGRADING.md', '| v11.19.14 | gRPC-Go v1.83.1'],
+    ['docs/UPGRADING.md', '| v11.19.15 | Consensus-safe memory cleanup'],
+    ['docs/UPGRADING.md', '| v11.19.18 | Visible federation agent orbits'],
+    ['docs/UPGRADING.md', '| v11.19.19 | gRPC-Go v1.83.2'],
+    ['docs/UPGRADING.md', '| v11.19.20 | Voter dedup is sticky'],
+    ['docs/UPGRADING.md', '| v11.19.21 | Co-commit tombstones'],
+    ['docs/UPGRADING.md', '| v11.20.0 | Encrypted agent working state'],
+    ['docs/UPGRADING.md', `| v${version} | MCP stdio bridges exit`],
     ['docs/ROADMAP.md', `## v${version} release`],
     ['docs/UPGRADING.md', 'The recovery commands in this guide require SAGE v11.18.0 or later.'],
     ['docs/UPGRADING.md', '`backup --full`, `restore --from`,'],
     ['docs/UPGRADING.md', '`upgrade lineage status|doctor|verify`'],
     ['deploy/federation-acceptance/Dockerfile.node', `ARG VERSION=v${version}-acceptance`],
-    ['deploy/federation-acceptance/docker-compose.yml', 'name: sage-v111900-federation'],
+    ['deploy/federation-acceptance/docker-compose.yml', `name: sage-v${federationProjectVersion}-federation`],
     ['deploy/federation-acceptance/docker-compose.yml', `VERSION: v${version}-acceptance`],
     ['docs/reference/app-v23-access-control-design.md', '## App-v24 readiness and memory-write barrier'],
     ['docs/reference/mcp-tools.md', 'A level-2 grant is never a remedy for a hard'],
     ['docs/reference/mcp-tools.md', 'never be substituted for this caller-scoped projection'],
-    ['internal/abci/app.go', 'const maxSupportedAppVersion uint64 = 27'],
+    ['internal/abci/app.go', 'const maxSupportedAppVersion uint64 = 28'],
     [
       'docs/ROADMAP.md',
       version.includes('-')
@@ -142,7 +160,7 @@ test('v11.18 user, recovery, federation, and SDK guides stay aligned', () => {
   assert.match(read('docs/FEDERATION.md'), /15 minutes/);
   assert.match(read('docs/UPGRADING.md'), /sage-gui upgrade lineage verify --json --manifest repair\.json/);
   assert.match(roadmap, /helper outside the replaceable bundle/);
-  assert.match(gettingStarted, /advertises 33 MCP tools/);
+  assert.match(gettingStarted, /advertises 35 MCP tools/);
   assert.match(gettingStarted, /Deprecated `sage_pipe\*`\s+compatibility/);
   assert.match(sdkReadme, /Compatibility pipeline/);
 });
@@ -198,7 +216,8 @@ test('legacy pipe send documents canonical exact-local admission and replay', ()
   const wake = read('docs/reference/concepts/message-wake-bus.md');
   assert.match(rest, /HTTP 201 fresh; HTTP 200 exact keyed replay/);
   assert.match(rest, /HTTP 501 before insertion/);
-  assert.match(wake, /Provider-only and federated rows have no exact local recipient/);
+  assert.match(wake, /Provider-only and outbound federated rows do not allocate a local\s+recipient sequence/);
+  assert.match(wake, /Inbound federated sends do: `AdmitFederatedPipeline`/);
 });
 
 test('hybrid expansion authorization contract stays release-visible', () => {

@@ -26,6 +26,129 @@ func testPipelineTransportProof(t *testing.T) PipelineAgentProof {
 	}
 }
 
+func transportOutboxExpiry(t *testing.T, s *SQLiteStore, eventID string) string {
+	t.Helper()
+	var got string
+	require.NoError(t, s.conn.QueryRowContext(context.Background(),
+		`SELECT expires_at FROM pipeline_transport_outbox WHERE event_id=?`, eventID).Scan(&got))
+	return got
+}
+
+// The transport retention rescue exists for pending canonical SENDS that
+// v11.17.8 left with the old 24-hour pipeline TTL, but its predicate matched
+// every 'msg-%' row. An imported federated message gets a receiver-local id of
+// the form msg-fed-…, so its RESULT row was extended too — and a destination
+// re-derives a result event's lifetime from the signed proof as exactly 24h
+// (federation.PipeEventResultLifetime), rejecting anything else as an invalid
+// pipeline agent proof. Because expires_at is also the retry deadline, the
+// extension additionally removed the give-up path that would have surfaced the
+// loss to the local agent.
+func TestTransportRetentionMigrationExtendsSendsButNotForeignResults(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "transport-retention.db")
+	s, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	sendProof := testPipelineTransportProof(t)
+	send := &PipelineTransportOutbox{
+		EventID: "event-retention-send", PipeID: "msg-retention-send", RemoteChainID: "chain-peer",
+		EventKind: "send", PolicyEpoch: "epoch-1", AgreementID: strings.Repeat("a", 64),
+		ContactID: strings.Repeat("b", 64), ContactRevision: strings.Repeat("c", 64),
+		SourceAgentID: sendProof.AgentID, TargetAgentID: strings.Repeat("d", 64), Proof: sendProof,
+		CreatedAt: now, ExpiresAt: now.Add(24 * time.Hour),
+	}
+	require.NoError(t, s.insertPipelineTransport(ctx, send))
+
+	resultProof := testPipelineTransportProof(t)
+	result := &PipelineTransportOutbox{
+		EventID: "event-retention-result", PipeID: "msg-fed-retention", RemoteChainID: "chain-peer",
+		EventKind: "result", PolicyEpoch: "epoch-1", AgreementID: strings.Repeat("a", 64),
+		ContactID: strings.Repeat("b", 64), ContactRevision: strings.Repeat("c", 64),
+		SourceAgentID: resultProof.AgentID, TargetAgentID: strings.Repeat("d", 64), Proof: resultProof,
+		CreatedAt: now, ExpiresAt: now.Add(7 * 24 * time.Hour),
+	}
+	require.NoError(t, s.insertPipelineTransport(ctx, result))
+	require.NoError(t, s.Close())
+
+	// Reopening re-runs the migrations against live rows, exactly as a restart or
+	// an upgrade does.
+	reopened, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+
+	require.Equal(t, now.Add(CanonicalMessageLifetime).Unix(),
+		parseTime(transportOutboxExpiry(t, reopened, send.EventID)).Unix(),
+		"a pending canonical send must still be rescued onto the durable sentinel")
+	require.Equal(t, now.Add(7*24*time.Hour).Unix(),
+		parseTime(transportOutboxExpiry(t, reopened, result.EventID)).Unix(),
+		"a foreign result must keep the protocol lifetime its destination re-derives from the proof")
+}
+
+// A runtime that already ran the over-broad predicate is repaired on the next
+// open: the protocol lifetime comes back, so a still-fresh reply is deliverable
+// again and an aged one terminalizes through the ordinary expiry sweep instead
+// of retrying against a peer that can only answer 400.
+func TestTransportRetentionMigrationRepairsAlreadyExtendedForeignResult(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "transport-retention-repair.db")
+	s, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	resultProof := testPipelineTransportProof(t)
+	result := &PipelineTransportOutbox{
+		EventID: "event-repair-result", PipeID: "msg-fed-repair", RemoteChainID: "chain-peer",
+		EventKind: "result", PolicyEpoch: "epoch-1", AgreementID: strings.Repeat("a", 64),
+		ContactID: strings.Repeat("b", 64), ContactRevision: strings.Repeat("c", 64),
+		SourceAgentID: resultProof.AgentID, TargetAgentID: strings.Repeat("d", 64), Proof: resultProof,
+		CreatedAt: now, ExpiresAt: now.Add(CanonicalMessageLifetime),
+	}
+	require.NoError(t, s.insertPipelineTransport(ctx, result))
+	require.NoError(t, s.Close())
+
+	reopened, err := NewSQLiteStore(ctx, dbPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, reopened.Close()) })
+
+	require.Equal(t, now.Add(7*24*time.Hour).Unix(),
+		parseTime(transportOutboxExpiry(t, reopened, result.EventID)).Unix(),
+		"an already-extended result row must be restored to a supported reply window")
+}
+
+// A destination that predates the current reply window answers 400 once per
+// proof, and the delivery loop narrows the row to the legacy window so the next
+// attempt can still land. The downgrade is one-shot: once the row carries the
+// legacy value there is nothing left to narrow, so a second refusal terminalizes
+// through the ordinary failure path.
+func TestDowngradeFederatedResultLifetimeNarrowsOnceAndThenReportsDone(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewSQLiteStore(ctx, ":memory:")
+	require.NoError(t, err)
+	defer s.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	proof := testPipelineTransportProof(t)
+	event := &PipelineTransportOutbox{
+		EventID: "event-downgrade", PipeID: "msg-fed-downgrade", RemoteChainID: "chain-peer",
+		EventKind: "result", PolicyEpoch: "epoch-1", AgreementID: strings.Repeat("a", 64),
+		ContactID: strings.Repeat("b", 64), ContactRevision: strings.Repeat("c", 64),
+		SourceAgentID: proof.AgentID, TargetAgentID: strings.Repeat("d", 64), Proof: proof,
+		CreatedAt: now, ExpiresAt: now.Add(7 * 24 * time.Hour),
+	}
+	require.NoError(t, s.insertPipelineTransport(ctx, event))
+
+	downgraded, err := s.DowngradeFederatedResultLifetime(ctx, event.EventID)
+	require.NoError(t, err)
+	require.True(t, downgraded, "the first refusal narrows the row to the legacy window")
+	require.Equal(t, now.Add(24*time.Hour).Unix(),
+		parseTime(transportOutboxExpiry(t, s, event.EventID)).Unix())
+
+	downgraded, err = s.DowngradeFederatedResultLifetime(ctx, event.EventID)
+	require.NoError(t, err)
+	require.False(t, downgraded, "a second refusal must not narrow an already-legacy row")
+}
+
 func TestInsertPipelineWithTransportIsAtomicAndVaultEncryptsProof(t *testing.T) {
 	ctx := context.Background()
 	s, err := NewSQLiteStore(ctx, filepath.Join(t.TempDir(), "pipes.db"))

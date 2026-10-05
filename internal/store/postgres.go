@@ -466,9 +466,12 @@ var postgresTaskAssignmentSchema = []string{
 	// FindByContentHash became a live query in v11.11 (it previously returned a
 	// constant false), and voter.Run evaluates it per pending memory on a 2s
 	// poll. Without this index that is a sequential scan of a table carrying
-	// content TEXT plus a 768-dimension vector. Partial on status='committed'
-	// because that is exactly the predicate the dedup query uses.
-	`CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories (content_hash) WHERE status = 'committed'`,
+	// content TEXT plus a 768-dimension vector. The dedup predicate is no
+	// longer committed-only, so the legacy partial index must go: DROP IF
+	// EXISTS is a catalog no-op once migrated and nothing recreates that name;
+	// the replacement covers content_hash unconditionally.
+	`DROP INDEX IF EXISTS idx_memories_content_hash`,
+	`CREATE INDEX IF NOT EXISTS idx_memories_content_hash_dedup ON memories (content_hash)`,
 	`CREATE TABLE IF NOT EXISTS agent_notifications (
 		notification_id TEXT PRIMARY KEY,
 		agent_id TEXT NOT NULL,
@@ -484,6 +487,16 @@ var postgresTaskAssignmentSchema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_notifications_inbox ON agent_notifications(agent_id, state, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_agent_notifications_task ON agent_notifications(task_id, assignment_version, state)`,
+	`CREATE TABLE IF NOT EXISTS agent_inbox_activity (
+		agent_id TEXT PRIMARY KEY,
+		seq BIGINT NOT NULL CHECK(seq >= 0)
+	)`,
+	`CREATE TABLE IF NOT EXISTS inbox_activity_meta (
+		singleton SMALLINT PRIMARY KEY CHECK(singleton=1),
+		epoch TEXT NOT NULL CHECK(length(epoch)=32)
+	)`,
+	`INSERT INTO inbox_activity_meta(singleton,epoch)
+		VALUES(1,md5(random()::text || clock_timestamp()::text)) ON CONFLICT(singleton) DO NOTHING`,
 }
 
 // ensureMemoriesSchema backfills memory columns on legacy Postgres deployments
@@ -870,7 +883,7 @@ func (s *PostgresStore) GetMemory(ctx context.Context, memoryID string) (*memory
 		&st, &parentHash, &r.CreatedAt, &r.CommittedAt, &r.DeprecatedAt, &taskStatus, &r.Assignee)
 	if err != nil {
 		if err == pgx.ErrNoRows {
-			return nil, fmt.Errorf("memory not found: %s", memoryID)
+			return nil, fmt.Errorf("%w: %s", ErrMemoryNotFound, memoryID)
 		}
 		return nil, fmt.Errorf("get memory: %w", err)
 	}
@@ -1013,7 +1026,11 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 			if cErr != nil {
 				return nil, fmt.Errorf("query similar decay floor: %w", cErr)
 			}
-			page = applyDecayFloor(page, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
+			var dropped int
+			page, dropped = applyDecayFloor(page, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
+			if opts.DecayFloorDropped != nil {
+				*opts.DecayFloorDropped += dropped
+			}
 		}
 		return applyCandidateFilters(
 			page, opts.CandidateBatchFilter, opts.CandidateFilter,
@@ -2546,6 +2563,11 @@ func (s *PostgresStore) AssignTaskAndNotify(ctx context.Context, memoryID, assig
 		}
 		notificationCreated = result.RowsAffected() == 1
 	}
+	if notificationCreated {
+		if _, err := s.AdvanceInboxActivity(ctx, assignee); err != nil {
+			return nil, fmt.Errorf("advance task inbox activity: %w", err)
+		}
+	}
 	return &TaskAssignmentResult{
 		Changed: changed, Assignee: assignee, AssignmentVersion: version,
 		TaskStatus: taskStatus, NotificationCreated: notificationCreated,
@@ -2704,8 +2726,11 @@ var _ TaskAssignmentStore = (*PostgresStore)(nil)
 
 // LinkMemories creates a link between two memories.
 func (s *PostgresStore) LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error {
+	// Re-linking an existing pair UPDATES its type rather than silently dropping the
+	// new type (see SQLiteStore.LinkMemories). Idempotent, last-write-wins upsert.
 	_, err := s.db.Exec(ctx,
-		`INSERT INTO memory_links (source_id, target_id, link_type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+		`INSERT INTO memory_links (source_id, target_id, link_type) VALUES ($1, $2, $3)
+		 ON CONFLICT (source_id, target_id) DO UPDATE SET link_type = excluded.link_type`,
 		sourceID, targetID, linkType)
 	if err != nil {
 		return fmt.Errorf("link memories: %w", err)
@@ -2814,7 +2839,9 @@ func (s *PostgresStore) GetOpenTasks(ctx context.Context, domain string, provide
 		argN++
 	}
 	_ = argN
-	query += " ORDER BY created_at DESC LIMIT 500"
+	// Same tiebreaker as SQLite: created_at alone is not a stable order for a
+	// second-resolution timestamp, so paging over it could skip or repeat rows.
+	query += " ORDER BY created_at DESC, memory_id ASC LIMIT 500"
 
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
@@ -3110,20 +3137,25 @@ func (s *PostgresStore) ListMemoriesByTag(ctx context.Context, tag string, limit
 	return s.ListMemories(ctx, ListOptions{Tag: tag, Limit: limit, Offset: offset})
 }
 
-// FindByContentHash checks the same committed-only dedup predicate as SQLite.
-// The voter runs while its candidate is still proposed, so including proposed
-// rows would make every new memory look like a duplicate of itself.
-func (s *PostgresStore) FindByContentHash(ctx context.Context, contentHash string) (bool, error) {
+// FindByContentHash checks the same dedup predicate as SQLite: a DIFFERENT
+// memory that has left status='proposed' carries this content hash. The
+// candidate's own row is excluded (the voter runs while its candidate is still
+// proposed, so including that row would make every new memory look like a
+// duplicate of itself) and so are other proposed rows (two concurrent identical
+// submissions must not reject each other). Deprecated rows DO match, so
+// rejected bytes cannot re-enter through a fresh memory id.
+func (s *PostgresStore) FindByContentHash(ctx context.Context, contentHash, excludeMemoryID string) (bool, error) {
 	hashBytes, err := hex.DecodeString(contentHash)
 	if err != nil {
 		return false, fmt.Errorf("decode content hash: %w", err)
 	}
 	var exists bool
 	if err := s.db.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM memories WHERE content_hash = $1 AND status = 'committed')`,
-		hashBytes,
+		`SELECT EXISTS(SELECT 1 FROM memories
+			WHERE content_hash = $1 AND memory_id::text <> $2 AND status <> 'proposed')`,
+		hashBytes, excludeMemoryID,
 	).Scan(&exists); err != nil {
-		return false, fmt.Errorf("find committed content hash: %w", err)
+		return false, fmt.Errorf("find duplicate content hash: %w", err)
 	}
 	return exists, nil
 }

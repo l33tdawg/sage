@@ -376,6 +376,11 @@ type FederatedGuestAgentEligibilityResponse struct {
 // without transferring an unbounded roster in /fed/v1/status.
 const CapabilityFederatedPipelineContactLookup = "federated-pipeline-contact-lookup-v1"
 
+// Node messaging is independent of memory exports. Peers must negotiate this
+// capability before using its domain-free, generation-bound contact identities.
+const CapabilityNodeMessaging = "federated-node-messaging-v1"
+const NodeMessageAuthorizationMode = "node-messaging-v1"
+
 // CapabilityLinkedMessageDirectoryEnumeration advertises a caller-scoped
 // inventory of exact linked-message recipients. It never exposes a peer roster:
 // the serving peer returns only identities for which the authenticated source
@@ -395,6 +400,7 @@ const CapabilityFederatedPipelineReceiptsV2 = "federated-pipeline-receipts-v2"
 // snapshot. Individual deliveries derive a target-specific authorization
 // revision so an unrelated contact cannot invalidate exact-address queued work.
 type PipeContactGrant struct {
+	NextCursor  string        `json:"next_cursor,omitempty"`
 	Version     int           `json:"version"`
 	AgreementID string        `json:"agreement_id"`
 	Revision    string        `json:"revision"`
@@ -405,11 +411,14 @@ type PipeContactGrant struct {
 // PipeContactLookupRequest is an authenticated, peer-scoped contact query.
 // Target is used by the delivery resolver (normally a canonical
 // agent_id@chain_id address); Name is used by caller-authorized discovery.
-// Exactly one selector is required.
+// Exactly one selector, or List with an optional opaque After cursor, is required.
 type PipeContactLookupRequest struct {
-	Target string `json:"target,omitempty"`
-	Name   string `json:"name,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
+	List              bool   `json:"list,omitempty"`
+	After             string `json:"after,omitempty"`
+	AuthorizationMode string `json:"authorization_mode,omitempty"`
+	Target            string `json:"target,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Limit             int    `json:"limit,omitempty"`
 }
 
 // PipeContactLookupResponse is intentionally small even when the peer has a
@@ -421,11 +430,11 @@ type PipeContactLookupResponse struct {
 	Truncated bool              `json:"truncated,omitempty"`
 }
 
-// PipeContact is one local agent associated with a shared domain. It is
+// PipeContact is a local messaging recipient, optionally backed by legacy domains. It is
 // routable only while Available and Accepting. Handle is a copy-friendly alias
 // only; Address and AgentID preserve the exact machine identity. ContactID is
-// the authorization-bound identity of this exact domain-access projection; it
-// changes when the peer/policy/owner generation changes and must accompany
+// the authorization-bound identity of this exact recipient projection; it
+// changes when its trust/authorization basis changes and must accompany
 // every acceptance mutation.
 type PipeContact struct {
 	AgentID           string              `json:"agent_id"`

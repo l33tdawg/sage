@@ -23,7 +23,6 @@
   "docs/reference/concepts/content-validation-gate.md|provider.go": 2,
   "docs/reference/concepts/content-validation-gate.md|internal/abci/app.go": 2,
   "docs/reference/concepts/memory-lifecycle.md|internal/memory/model.go": 2,
-  "docs/reference/concepts/memory-lifecycle.md|internal/memory/lifecycle.go": 1,
   "docs/reference/concepts/memory-lifecycle.md|internal/validator/quorum.go": 1,
   "docs/reference/concepts/memory-lifecycle.md|app.go": 7,
   "docs/reference/concepts/memory-lifecycle.md|internal/tx/types.go": 1,

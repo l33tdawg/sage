@@ -1,0 +1,79 @@
+name: Pages Download Snapshot
+
+# The landing page reads downloads.json from its own origin. That file is refreshed here, with a
+# token, so a visit costs GitHub no unauthenticated API calls and the page never has to fall back
+# to a count that was baked into index.html by hand.
+#
+# The gh-pages branch is not protected; this bot commit is the only writer of downloads.json, and
+# it also refreshes the no-JS fallback (the number, its timestamp, and every marked version stamp)
+# in index.html.
+# The counter's own rules live in gh-pages/download-counter.mjs, which the script imports, so the
+# snapshot and the page cannot disagree about what counts as a package.
+
+on:
+  schedule:
+    # Four times a day, off the hour, because the number moves by tens per day.
+    - cron: '17 */6 * * *'
+  # A release is published only after PyPI and the immutable channels are live, so this is the
+  # moment the version stamps on the site are allowed to move.
+  release:
+    types: [published]
+  # GITHUB_TOKEN publication does not emit a downstream release event.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: sage-pages-download-snapshot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  snapshot:
+    name: Refresh downloads.json
+    # Run only after successful publication from this repository. Always check out main below;
+    # never execute code or consume artifacts from the triggering run.
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Always run the script from main, whatever ref triggered the run (a release event
+          # checks out the tag by default).
+          ref: main
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: gh-pages
+          path: pages
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Refresh the snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/pages-download-snapshot.mjs --pages pages
+      - name: Commit the refresh
+        id: commit
+        working-directory: pages
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Snapshot already current."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- downloads.json index.html
+          git commit -m 'chore(pages): refresh the download snapshot'
+          git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+      # Bot pushes are not guaranteed to trigger the legacy branch build. Request it explicitly.
+      - name: Build GitHub Pages
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds"

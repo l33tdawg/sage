@@ -7,8 +7,50 @@ import (
 
 type fakeDup struct{ dups map[string]bool }
 
-func (f fakeDup) FindByContentHash(_ context.Context, h string) (bool, error) {
+func (f fakeDup) FindByContentHash(_ context.Context, h, _ string) (bool, error) {
 	return f.dups[h], nil
+}
+
+type recordingDup struct {
+	gotHash    string
+	gotExclude string
+}
+
+func (r *recordingDup) FindByContentHash(_ context.Context, h, exclude string) (bool, error) {
+	r.gotHash, r.gotExclude = h, exclude
+	return false, nil
+}
+
+// TestDedupCheck_ExcludesCandidateOwnRow pins the voter half of the self-match
+// fix: dedupCheck must hand the candidate's own memory id to the store so a
+// proposed memory can never be a duplicate of itself. Pre-submit advisory calls
+// have no candidate row yet and pass an empty exclusion.
+func TestDedupCheck_ExcludesCandidateOwnRow(t *testing.T) {
+	ctx := context.Background()
+	const body = "this is a sufficiently long and substantive memory body"
+
+	rec := &recordingDup{}
+	decision := Decide(ctx, rec, MemoryInput{
+		MemoryID: "candidate-1", Content: body, ContentHash: "abc12345",
+		Domain: "d", MemType: "observation", Confidence: 0.8,
+	})
+	if !decision.Accept {
+		t.Fatalf("clean memory should accept, got reject: %s", decision.Reason)
+	}
+	if rec.gotExclude != "candidate-1" {
+		t.Fatalf("dedupCheck passed exclude=%q, want the candidate's own memory id", rec.gotExclude)
+	}
+	if rec.gotHash != "abc12345" {
+		t.Fatalf("dedupCheck passed hash=%q, want the candidate's content hash", rec.gotHash)
+	}
+
+	advisory := &recordingDup{}
+	Decide(ctx, advisory, MemoryInput{
+		Content: body, ContentHash: "abc12345", Domain: "d", MemType: "observation", Confidence: 0.8,
+	})
+	if advisory.gotExclude != "" {
+		t.Fatalf("pre-submit advisory passed exclude=%q, want empty (no candidate row exists yet)", advisory.gotExclude)
+	}
 }
 
 // TestDecide pins behavior parity with the legacy 4-archetype validators

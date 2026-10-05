@@ -275,7 +275,13 @@ export async function importConfirm(importId) {
 
 export async function fetchCleanupSettings() {
     const res = await fetch(`${API_BASE}/v1/dashboard/settings/cleanup`);
-    return res.json();
+    return cleanupResponse(res);
+}
+
+async function cleanupResponse(res) {
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Cleanup request failed (${res.status})`);
+    return data;
 }
 
 export async function saveCleanupSettings(config) {
@@ -284,16 +290,16 @@ export async function saveCleanupSettings(config) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config),
     });
-    return res.json();
+    return cleanupResponse(res);
 }
 
-export async function runCleanup(dryRun = true) {
+export async function runCleanup(dryRun = true, config = undefined) {
     const res = await fetch(`${API_BASE}/v1/dashboard/cleanup/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dry_run: dryRun }),
+        body: JSON.stringify({ dry_run: dryRun, config }),
     });
-    return res.json();
+    return cleanupResponse(res);
 }
 
 // ─── Synaptic Ledger (Encryption) API ───
@@ -816,6 +822,29 @@ export async function submitGovVote(proposalId, decision) {
     return res.json();
 }
 
+// fetchAppUpgradeStatus reports the chain's app version, its next rung, the
+// pending plan and the active ballot, plus the two ceilings: what this binary
+// can execute and how far its auto-voter goes on its own. A target above the
+// auto-vote ceiling is deliberately dormant and can only advance on explicit
+// votes.
+export async function fetchAppUpgradeStatus() {
+    const res = await fetch(`${API_BASE}/v1/dashboard/governance/upgrade-status`);
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+}
+
+// submitAppUpgradePropose sends the dedicated UpgradePropose transaction — the
+// generic governance-propose route refuses app-version upgrades by design.
+export async function submitAppUpgradePropose(targetAppVersion, reason) {
+    const res = await fetch(`${API_BASE}/v1/dashboard/governance/upgrade-propose`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_app_version: targetAppVersion, reason }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
+}
+
 export async function fetchMemoryReanchorPlan() {
     const res = await fetch(`${API_BASE}/v1/dashboard/memory-reanchor/plan`);
     if (!res.ok) {
@@ -1112,13 +1141,17 @@ export function fedPermissionsGet(chainId, live = true) {
 export function fedPermissionsSet(chainId, permissions) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/permissions`, { permissions }); }
 export function fedAgentExportsGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/agent-exports`); }
 export function fedAgentExportSet(chainId, exportPolicy) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/agent-exports`, exportPolicy); }
+export function fedAgentExposureGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/agent-exposure`); }
+export function fedAgentExposureSet(chainId, exposurePolicy) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/agent-exposure`, exposurePolicy); }
 export function fedReaderRestrictionsGet(chainId) { return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/reader-restrictions`); }
 export function fedReaderRestrictionSet(chainId, restriction) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/reader-restrictions`, restriction); }
 export function fedPause(chainId, paused) { return fedPut(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pause`, { paused }); }
-export function fedPipeContactsGet(chainId, live = true, agentId = '') {
+export function fedPipeContactsGet(chainId, live = true, agentId = '', cursors = {}) {
     const query = new URLSearchParams();
     if (!live) query.set('live', '0');
     if (agentId) query.set('agent_id', agentId);
+    if (cursors.local) query.set('local_cursor', cursors.local);
+    if (cursors.remote) query.set('remote_cursor', cursors.remote);
     const suffix = query.size ? `?${query.toString()}` : '';
     return fedFetch(`/v1/dashboard/federation/connections/${encodeURIComponent(chainId)}/pipe-contacts${suffix}`);
 }
@@ -1225,4 +1258,25 @@ export async function rerankerSetupStop() {
 }
 export function rerankerSetupInstallEngine() {
     return fetch(`${API_BASE}/v1/dashboard/reranker/setup/install-engine`, { method: 'POST' });
+}
+
+// Memory gate review queue (internal/voter.Gate).
+export async function fetchMemoryGateReviewQueue({ limit = 50, cursor = '' } = {}) {
+    const query = new URLSearchParams({ limit: String(limit) });
+    if (cursor) query.set('cursor', cursor);
+    const res = await fetch(`${API_BASE}/v1/dashboard/memory/review-queue?${query}`);
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || 'the memory review queue is temporarily unavailable');
+    return payload;
+}
+
+export async function decideMemoryGateReview(memoryId, decision, note = '') {
+    const res = await fetch(`${API_BASE}/v1/dashboard/memory/${encodeURIComponent(memoryId)}/review`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision, note }),
+    });
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(payload.error || 'the review decision could not be saved');
+    return payload;
 }

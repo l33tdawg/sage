@@ -50,10 +50,10 @@
   },
   "overlays": {
     "third_party/cometbft/blocksync/reactor.go": {
-      "sha256": "32bbcf2487ed03259c339b185af90c189257b5eb59fe7bf337b76fb92bceb03d",
-      "unchangedLineSha256": "0ba372720a53d774a4ab4265df9cbc055c548ce3edc88a7aa4ffff2b00fc80cb",
+      "sha256": "a3557e4b4a8f766af1ab81c99617225939437a6d3f367eef1bb1d64f61c4f2c4",
+      "unchangedLineSha256": "01e3012ba6502a5a7c52a08bfba98fb5ccc075a39e768a55ed2ffafbddf832e6",
       "lineCount": 635,
-      "modifiedLineRanges": [[4, 4], [19, 29], [575, 581]]
+      "modifiedLineRanges": [[4, 4], [19, 29], [325, 325], [575, 581]]
     },
     "third_party/cometbft/node/node.go": {
       "sha256": "248a617a020ab2ea5f801b26ed03b9cef2712a5ca9d453d65af6e4834ff4b77e",

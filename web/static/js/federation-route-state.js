@@ -3,7 +3,7 @@ const ROUTE_STATES = new Set([
   'disabled', 'locked', 'old_peer', 'route_failure', 'trust_failure',
   'security_blocked', 'legacy_repair_required', 'trust_generation_mismatch',
   'route_bundle_missing', 'route_bundle_expired', 'stale_direct',
-  'relay_unavailable', 'unknown',
+  'relay_unavailable', 'timeout', 'handshake_failed', 'unknown',
 ]);
 
 function text(value) {
@@ -101,6 +101,11 @@ export function classifyFederationFailure(error, fallback = 'route_failure') {
   if (/revoked|expired agreement|unknown agreement|trust.*fail|authentication/.test(message)) return 'trust_failure';
   if (/route snapshot.*expired/.test(message)) return 'route_bundle_expired';
   if (/no configured p2p route|no p2p dialer|route bundle.*missing/.test(message)) return 'route_bundle_missing';
+  // Transport verdicts sit above the relay verdict for the same reason the
+  // security cases sit above both: "there is a relay candidate" is not an
+  // explanation of why an attempt ended.
+  if (/deadline exceeded|context deadline|timed? out/.test(message)) return 'timeout';
+  if (/handshake|eof|connection reset|stream reset|broken pipe/.test(message)) return 'handshake_failed';
   if (/relay.*(unavailable|failed)/.test(message)) return 'relay_unavailable';
   if (/direct.*(stale|unavailable)/.test(message)) return 'stale_direct';
   if (/old peer|older peer|unsupported|not implemented/.test(message) || error && error.status === 501) return 'old_peer';
@@ -170,6 +175,15 @@ export function federationRoutePresentation(planOrStatus) {
   }
   if (state === 'relay_unavailable') {
     return { tone: 'warn', label: 'Secure relay unavailable', detail: plan.lastError || 'No configured Secure relay can currently reach the peer.' };
+  }
+  // Transport verdicts, deliberately distinct from the relay verdict above. A
+  // relayed path that is merely slow used to render as "Secure relay
+  // unavailable", which sent operators to inspect a relay that was working.
+  if (state === 'timeout') {
+    return { tone: 'warn', label: 'No answer in time', detail: plan.lastError || 'The peer did not finish answering before the deadline. A relayed route adds real latency — retry, and prefer a relay near both machines.' };
+  }
+  if (state === 'handshake_failed') {
+    return { tone: 'warn', label: 'Connection closed during handshake', detail: plan.lastError || 'The peer accepted the connection and then closed it mid-handshake. On a relayed route this is usually latency or a concurrent retry, not a trust failure.' };
   }
   if (state === 'trust_failure') {
     return { tone: 'danger', label: 'Trust check failed', detail: plan.lastError || 'The saved trust agreement is missing, expired, or revoked. Pair again before sharing.' };

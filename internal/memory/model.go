@@ -7,9 +7,25 @@ import (
 // MemoryStatus represents the lifecycle status of a memory.
 type MemoryStatus string
 
+// Lifecycle ladder.
+//
+// `proposed` is written by the submit path; `committed`, `challenged` and
+// `deprecated` are written from consensus. `validated` is written by nothing —
+// not consensus, not the voter, not REST, not the SDK. It survives because
+// IsValidStatus accepts it and the on-chain hash re-anchor
+// (internal/store/memory_hash_reanchor.go) treats it as a legal canonical
+// status, so a chain that already carries the value still decodes and replays.
+// Recall hard-codes `status IN ('committed','challenged')`, so a row that ever
+// landed in `validated` would be invisible to agents rather than ranked low —
+// if a writer is ever added, the read filters have to move in the same change.
+// See docs/reference/concepts/memory-lifecycle.md.
 const (
-	StatusProposed   MemoryStatus = "proposed"
-	StatusValidated  MemoryStatus = "validated"
+	StatusProposed MemoryStatus = "proposed"
+
+	// StatusValidated is declared for wire/replay compatibility only; no
+	// production path writes it. See the lifecycle ladder note above.
+	StatusValidated MemoryStatus = "validated"
+
 	StatusCommitted  MemoryStatus = "committed"
 	StatusChallenged MemoryStatus = "challenged"
 	StatusDeprecated MemoryStatus = "deprecated"

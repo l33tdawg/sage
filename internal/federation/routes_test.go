@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -766,4 +767,56 @@ func TestSecurityErrorsAreNotConnectivityFallbackEligible(t *testing.T) {
 
 func testAgreement(chain string) *store.CrossFedRecord {
 	return &store.CrossFedRecord{RemoteChainID: chain, Endpoint: "https://127.0.0.1:1"}
+}
+
+// TestRouteRecoveryVerdictsDoNotBlameTheRelay pins the distinction that cost an
+// operator an hour: a relayed candidate that is merely slow, or that the peer
+// closed mid-handshake, must be reported as a transport verdict rather than as a
+// relay-availability failure. The hint only knows that a relay address exists.
+func TestRouteRecoveryVerdictsDoNotBlameTheRelay(t *testing.T) {
+	relayHint := RouteRecoveryRelayUnavailable
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"deadline", fmt.Errorf("refresh route: %w", context.DeadlineExceeded), RouteRecoveryTimeout},
+		{"deadline text", errors.New("p2p dial: context deadline exceeded"), RouteRecoveryTimeout},
+		{"handshake closed", errors.New("tls handshake: EOF"), RouteRecoveryHandshakeFailed},
+		{"stream reset", errors.New("stream reset by peer"), RouteRecoveryHandshakeFailed},
+		{"unclassified still uses the hint", errors.New("relay reservation not found"), RouteRecoveryRelayUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			classified := classifyRouteRecoveryError(tc.err, relayHint)
+			require.Equal(t, tc.want, RouteRecoveryFailureCode(classified))
+		})
+	}
+}
+
+// TestRouteRefreshBudgetPrefersTheRelayBudgetForCircuitPeers proves the budget
+// is chosen from the frozen candidate set, and that both halves stay
+// operator-tunable for a pathological path.
+func TestRouteRefreshBudgetPrefersTheRelayBudgetForCircuitPeers(t *testing.T) {
+	m := &Manager{}
+	direct, relay := "chain-direct", "chain-relay"
+	snapshots := map[string]RouteSnapshot{
+		direct: {Addrs: []string{"/ip4/192.168.30.9/tcp/51458/p2p/12D3KooWdirect"}},
+		relay:  {Addrs: []string{"/ip4/65.108.81.134/tcp/4001/p2p/12D3KooWrelay/p2p-circuit/p2p/12D3KooWpeer"}},
+	}
+	m.SetJoinP2PHooks(JoinP2PHooks{
+		LoadSnapshot: func(chain string) (RouteSnapshot, bool) {
+			snapshot, ok := snapshots[chain]
+			return snapshot, ok
+		},
+	})
+	require.False(t, m.RouteRelayPreferred(direct))
+	require.True(t, m.RouteRelayPreferred(relay))
+	require.Equal(t, routeRefreshTimeoutDirect, m.routeRefreshBudget(direct))
+	require.Equal(t, routeRefreshTimeoutRelay, m.routeRefreshBudget(relay))
+
+	t.Setenv("SAGE_FED_RELAY_TIMEOUT_MS", "45000")
+	require.Equal(t, 45*time.Second, m.routeRefreshBudget(relay))
+	t.Setenv("SAGE_FED_ROUTE_TIMEOUT_MS", "12000")
+	require.Equal(t, 12*time.Second, m.routeRefreshBudget(direct))
 }

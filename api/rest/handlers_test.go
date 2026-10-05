@@ -73,6 +73,13 @@ type mockMemoryStore struct {
 	// task on a specific readback attempt without changing production timing.
 	getOpenTasksHook func()
 	getOpenTasksErr  error
+	// getLinksAmongHook lets link-read tests inject links and capture the ids the
+	// handler passed, proving unreadable ids were filtered before the store call.
+	getLinksAmongHook func([]string) ([]memory.MemoryLink, error)
+	// getMemoryErr, when set, makes GetMemory fail with an operational error for
+	// every id — used to prove the link-read path surfaces a backend outage
+	// instead of collapsing it into a false empty result.
+	getMemoryErr error
 }
 
 func newMockMemoryStore() *mockMemoryStore {
@@ -101,9 +108,12 @@ func (m *mockMemoryStore) MemorySpaceRevision(_ context.Context) (uint64, error)
 func (m *mockMemoryStore) VaultGeneration() uint64 { return m.vaultGeneration }
 
 func (m *mockMemoryStore) GetMemory(_ context.Context, memoryID string) (*memory.MemoryRecord, error) {
+	if m.getMemoryErr != nil {
+		return nil, m.getMemoryErr
+	}
 	rec, ok := m.memories[memoryID]
 	if !ok {
-		return nil, fmt.Errorf("memory not found: %s", memoryID)
+		return nil, fmt.Errorf("%w: %s", store.ErrMemoryNotFound, memoryID)
 	}
 	return rec, nil
 }
@@ -395,7 +405,10 @@ func (m *mockMemoryStore) GetCorroborationCounts(_ context.Context, ids []string
 	return out, nil
 }
 
-func (m *mockMemoryStore) GetLinksAmong(_ context.Context, _ []string) ([]memory.MemoryLink, error) {
+func (m *mockMemoryStore) GetLinksAmong(_ context.Context, ids []string) ([]memory.MemoryLink, error) {
+	if m.getLinksAmongHook != nil {
+		return m.getLinksAmongHook(ids)
+	}
 	return nil, nil
 }
 
@@ -474,7 +487,7 @@ func (m *mockMemoryStore) ListAllTags(_ context.Context) ([]store.TagCount, erro
 func (m *mockMemoryStore) ListMemoriesByTag(_ context.Context, _ string, _, _ int) ([]*memory.MemoryRecord, int, error) {
 	return nil, 0, nil
 }
-func (m *mockMemoryStore) FindByContentHash(_ context.Context, _ string) (bool, error) {
+func (m *mockMemoryStore) FindByContentHash(_ context.Context, _, _ string) (bool, error) {
 	return false, nil
 }
 func (m *mockMemoryStore) RepairSelfDupRejected(_ context.Context, _ string, _ func(memoryID string) error) (int, error) {
@@ -1675,6 +1688,10 @@ type mockAgentStore struct {
 	lookupCandidateCalls int
 	directoryCalls       int
 	directoryLimit       int
+	// getAgentErr, when set, makes GetAgent fail with an operational error — used
+	// to prove the link-read submitter-visibility resolver surfaces an agent
+	// directory outage instead of collapsing into self-only visibility.
+	getAgentErr error
 }
 
 func newMockAgentStore() *mockAgentStore {
@@ -1685,6 +1702,9 @@ func newMockAgentStore() *mockAgentStore {
 }
 
 func (m *mockAgentStore) GetAgent(_ context.Context, agentID string) (*store.AgentEntry, error) {
+	if m.getAgentErr != nil {
+		return nil, m.getAgentErr
+	}
 	a, ok := m.agents[agentID]
 	if !ok {
 		return nil, fmt.Errorf("agent not found: %s", agentID)

@@ -133,7 +133,7 @@ func TestHandleRestartNewVersionRequiresVerifiedSnapshot(t *testing.T) {
 	makeVersionBinary := func(t *testing.T, version string) string {
 		t.Helper()
 		path := filepath.Join(t.TempDir(), "sage-gui")
-		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\necho sage-gui "+version+"\n"), 0o755))
+		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\necho sage-gui "+version+" '(max-app-v27)'\n"), 0o755))
 		return path
 	}
 
@@ -150,9 +150,10 @@ func TestHandleRestartNewVersionRequiresVerifiedSnapshot(t *testing.T) {
 				return func() {}, func() {}, nil
 			},
 			RequestRestartPrepared: func(func(), func(), func()) error { return nil },
-			PrepareVersionTransition: func(_ context.Context, target string) (func(), error) {
+			PrepareVersionTransition: func(_ context.Context, target string, replacementMax uint64) (func(), error) {
 				snapshotCalls.Add(1)
 				require.Equal(t, "11.17.0", target)
+				require.Equal(t, uint64(27), replacementMax)
 				return nil, errors.New("verification failed")
 			},
 			RequestRestart: func() error {
@@ -184,8 +185,9 @@ func TestHandleRestartNewVersionRequiresVerifiedSnapshot(t *testing.T) {
 			PrepareRestartDrain: func(context.Context) (func(), func(), error) {
 				return func() {}, func() {}, nil
 			},
-			PrepareVersionTransition: func(_ context.Context, requested string) (func(), error) {
+			PrepareVersionTransition: func(_ context.Context, requested string, replacementMax uint64) (func(), error) {
 				target = requested
+				require.Equal(t, uint64(27), replacementMax)
 				return func() { releaseCalls.Add(1) }, nil
 			},
 			RequestRestartPrepared: func(release, commit, _ func()) error {
@@ -927,5 +929,35 @@ func TestDiskBinaryVersion(t *testing.T) {
 
 	t.Run("missing binary is graceful", func(t *testing.T) {
 		assert.Equal(t, "", diskBinaryVersion(ctx, filepath.Join(dir, "does-not-exist")))
+	})
+}
+
+func TestDiskBinaryMaxSupportedAppVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses shell scripts to fake the binary")
+	}
+	writeScript := func(body string) string {
+		path := filepath.Join(t.TempDir(), "sage-gui")
+		require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755))
+		return path
+	}
+
+	t.Run("reads exact replacement ceiling", func(t *testing.T) {
+		path := writeScript(`echo "sage-gui v11.19.4 (commit abc, built now, max-app-v27)"`)
+		got, err := diskBinaryMaxSupportedAppVersion(context.Background(), path)
+		require.NoError(t, err)
+		require.Equal(t, uint64(27), got)
+	})
+
+	t.Run("legacy replacement fails closed", func(t *testing.T) {
+		path := writeScript(`echo "sage-gui v11.19.3 (commit abc, built now)"`)
+		_, err := diskBinaryMaxSupportedAppVersion(context.Background(), path)
+		require.ErrorContains(t, err, "did not report")
+	})
+
+	t.Run("malformed ceiling fails closed", func(t *testing.T) {
+		path := writeScript(`echo "sage-gui v11.19.4 (max-app-vnope)"`)
+		_, err := diskBinaryMaxSupportedAppVersion(context.Background(), path)
+		require.ErrorContains(t, err, "invalid app-version ceiling")
 	})
 }

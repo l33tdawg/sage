@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -118,14 +120,15 @@ func TestStdioClaimantIdentitySurvivesProcessRestart(t *testing.T) {
 	first.SetProject("sage")
 	firstID, err := first.claimantSessionID(context.Background())
 	require.NoError(t, err)
-	require.NotNil(t, first.claimantLease)
-	require.NoError(t, first.claimantLease.Close())
+	firstState := first.conversation(context.Background())
+	require.NotNil(t, firstState.claimantLease)
+	require.NoError(t, firstState.claimantLease.Close())
 
 	restarted := NewServer("http://localhost:9999", key)
 	restarted.SetProject("sage")
 	restartedID, err := restarted.claimantSessionID(context.Background())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = restarted.claimantLease.Close() })
+	t.Cleanup(restarted.closeClaimantLease)
 	require.Equal(t, firstID, restartedID)
 }
 
@@ -139,21 +142,22 @@ func TestConcurrentStdioRuntimeCannotShareDurableClaimantIdentity(t *testing.T) 
 	primary.SetProject("sage")
 	primaryID, err := primary.claimantSessionID(context.Background())
 	require.NoError(t, err)
-	require.NotNil(t, primary.claimantLease)
+	primaryState := primary.conversation(context.Background())
+	require.NotNil(t, primaryState.claimantLease)
 
 	concurrent := NewServer("http://localhost:9999", key)
 	concurrent.SetProject("sage")
 	concurrentID, err := concurrent.claimantSessionID(context.Background())
 	require.NoError(t, err)
-	require.Nil(t, concurrent.claimantLease)
+	require.Nil(t, concurrent.conversation(context.Background()).claimantLease)
 	require.NotEqual(t, primaryID, concurrentID)
 
-	require.NoError(t, primary.claimantLease.Close())
+	require.NoError(t, primaryState.claimantLease.Close())
 	restarted := NewServer("http://localhost:9999", key)
 	restarted.SetProject("sage")
 	restartedID, err := restarted.claimantSessionID(context.Background())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = restarted.claimantLease.Close() })
+	t.Cleanup(restarted.closeClaimantLease)
 	require.Equal(t, primaryID, restartedID)
 }
 
@@ -167,7 +171,7 @@ func TestRuntimeHandoffRetainsClaimantIdentityWhileParentHoldsLease(t *testing.T
 	parent.SetProject("sage")
 	parentID, err := parent.claimantSessionID(context.Background())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = parent.claimantLease.Close() })
+	t.Cleanup(parent.closeClaimantLease)
 
 	t.Setenv(mcpRuntimeHandoffEnv, "1")
 	t.Setenv(mcpRuntimeHandoffParentEnv, strconv.Itoa(os.Getppid()))
@@ -177,7 +181,7 @@ func TestRuntimeHandoffRetainsClaimantIdentityWhileParentHoldsLease(t *testing.T
 	childID, err := child.claimantSessionID(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, parentID, childID)
-	require.Nil(t, child.claimantLease)
+	require.Nil(t, child.conversation(context.Background()).claimantLease)
 }
 
 func TestRuntimeHandoffRejectsMalformedClaimantIdentity(t *testing.T) {
@@ -196,7 +200,179 @@ func TestRuntimeHandoffRejectsMalformedClaimantIdentity(t *testing.T) {
 	t.Cleanup(server.closeClaimantLease)
 	require.Regexp(t, `^mcp-[0-9a-f]{32}$`, id)
 	require.NotEqual(t, "mcp-not-an-opaque-id", id)
-	require.NotNil(t, server.claimantLease)
+	require.NotNil(t, server.conversation(context.Background()).claimantLease)
+}
+
+func TestHTTPClaimantIdentitySurvivesRestartForStableBearerScope(t *testing.T) {
+	t.Setenv("SAGE_HOME", t.TempDir())
+	_, key, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	ctx := withClaimantDurableScope(WithConversationID(context.Background(), "stream:a"), "http-stream:a")
+	first := NewServer("http://localhost:9999", key)
+	firstID, err := first.claimantSessionID(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "durable", first.conversation(ctx).claimantIdentityMode)
+	first.closeClaimantLease()
+
+	restarted := NewServer("http://localhost:9999", key)
+	t.Cleanup(restarted.closeClaimantLease)
+	restartedID, err := restarted.claimantSessionID(ctx)
+	require.NoError(t, err)
+	require.Equal(t, firstID, restartedID)
+}
+
+func TestIdleStreamConversationEvictionReleasesAndReacquiresDurableLease(t *testing.T) {
+	t.Setenv("SAGE_HOME", t.TempDir())
+	_, key, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	server := NewServer("http://localhost:9999", key)
+	server.streamConversationLimit = 1
+	server.streamConversationTTL = time.Minute
+	t.Cleanup(server.closeClaimantLease)
+
+	ctxA := withClaimantDurableScope(WithConversationID(context.Background(), "stream:a"), "http-stream:a")
+	releaseA, admitted := server.beginStreamConversationUse(ctxA)
+	require.True(t, admitted)
+	firstState := server.conversation(ctxA)
+	firstID, err := server.claimantSessionID(ctxA)
+	require.NoError(t, err)
+	require.Equal(t, "durable", firstState.claimantIdentityMode)
+	require.NotNil(t, firstState.claimantLease)
+	releaseA()
+
+	server.conversationMu.Lock()
+	firstState.lastUsed = time.Now().Add(-2 * time.Minute)
+	server.conversationMu.Unlock()
+
+	ctxB := withClaimantDurableScope(WithConversationID(context.Background(), "stream:b"), "http-stream:b")
+	releaseB, admitted := server.beginStreamConversationUse(ctxB)
+	require.True(t, admitted)
+	require.NotContains(t, server.conversations, "stream:a")
+	require.Nil(t, firstState.claimantLease, "eviction must release the durable claimant lease")
+	releaseB()
+
+	server.conversationMu.Lock()
+	server.conversations["stream:b"].lastUsed = time.Now().Add(-2 * time.Minute)
+	server.conversationMu.Unlock()
+
+	releaseA2, admitted := server.beginStreamConversationUse(ctxA)
+	require.True(t, admitted)
+	defer releaseA2()
+	replacement := server.conversation(ctxA)
+	require.NotSame(t, firstState, replacement)
+	require.Equal(t, "durable", replacement.claimantIdentityMode)
+	reacquiredID, err := server.claimantSessionID(ctxA)
+	require.NoError(t, err)
+	require.Equal(t, firstID, reacquiredID, "eviction releases liveness, not the persisted claimant identity")
+}
+
+func TestStreamConversationCapNeverEvictsInFlightState(t *testing.T) {
+	t.Setenv("SAGE_HOME", t.TempDir())
+	_, key, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	server := NewServer("http://localhost:9999", key)
+	server.streamConversationLimit = 1
+	server.streamConversationTTL = time.Nanosecond
+	t.Cleanup(server.closeClaimantLease)
+
+	ctxA := withClaimantDurableScope(WithConversationID(context.Background(), "stream:a"), "http-stream:a")
+	releaseA, admitted := server.beginStreamConversationUse(ctxA)
+	require.True(t, admitted)
+	stateA := server.conversation(ctxA)
+	require.Equal(t, 1, stateA.activeUses)
+
+	ctxB := withClaimantDurableScope(WithConversationID(context.Background(), "stream:b"), "http-stream:b")
+	releaseB, admitted := server.beginStreamConversationUse(ctxB)
+	require.False(t, admitted)
+	require.Nil(t, releaseB)
+	require.Same(t, stateA, server.conversations["stream:a"])
+	require.NotNil(t, stateA.claimantLease)
+
+	releaseA()
+	releaseB, admitted = server.beginStreamConversationUse(ctxB)
+	require.True(t, admitted)
+	defer releaseB()
+	require.NotContains(t, server.conversations, "stream:a")
+	require.Contains(t, server.conversations, "stream:b")
+}
+
+func TestStreamConversationPruningNeverTouchesSSEOrStdio(t *testing.T) {
+	t.Setenv("SAGE_HOME", t.TempDir())
+	server, _ := testServer(t)
+	server.streamConversationLimit = 1
+	server.streamConversationTTL = time.Nanosecond
+	t.Cleanup(server.closeClaimantLease)
+
+	stdio := server.conversation(context.Background())
+	sseCtx := WithConversationID(context.Background(), "sse:keep")
+	sse := server.conversation(sseCtx)
+	server.conversationMu.Lock()
+	stdio.lastUsed = time.Time{}
+	sse.lastUsed = time.Time{}
+	server.conversationMu.Unlock()
+
+	streamCtx := withClaimantDurableScope(WithConversationID(context.Background(), "stream:one"), "http-stream:one")
+	release, admitted := server.beginStreamConversationUse(streamCtx)
+	require.True(t, admitted)
+	release()
+
+	nextCtx := withClaimantDurableScope(WithConversationID(context.Background(), "stream:two"), "http-stream:two")
+	releaseNext, admitted := server.beginStreamConversationUse(nextCtx)
+	require.True(t, admitted)
+	defer releaseNext()
+	require.Same(t, stdio, server.conversations["stdio"])
+	require.Same(t, sse, server.conversations["sse:keep"])
+}
+
+func TestConcurrentHTTPConversationsSharingBearerKeepDistinctClaimants(t *testing.T) {
+	t.Setenv("SAGE_HOME", t.TempDir())
+	_, key, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	server := NewServer("http://localhost:9999", key)
+	ctxA := withClaimantDurableScope(WithConversationID(context.Background(), "sse:a"), "http-sse:a")
+	ctxB := withClaimantDurableScope(WithConversationID(context.Background(), "sse:b"), "http-sse:a")
+	a, err := server.claimantSessionID(ctxA)
+	require.NoError(t, err)
+	b, err := server.claimantSessionID(ctxB)
+	require.NoError(t, err)
+	require.NotEqual(t, a, b)
+	require.Equal(t, "durable", server.conversation(ctxA).claimantIdentityMode)
+	require.Equal(t, "concurrent_ephemeral", server.conversation(ctxB).claimantIdentityMode)
+
+	server.ForgetConversation("sse:a")
+	restarted := NewServer("http://localhost:9999", key)
+	t.Cleanup(restarted.closeClaimantLease)
+	ctxRestarted := withClaimantDurableScope(WithConversationID(context.Background(), "sse:c"), "http-sse:a")
+	restartedID, err := restarted.claimantSessionID(ctxRestarted)
+	require.NoError(t, err)
+	require.Equal(t, a, restartedID)
+}
+
+func TestCorruptDurableClaimantIdentityFailsClosed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("SAGE_HOME", home)
+	_, key, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	server := NewServer("http://localhost:9999", key)
+	server.SetProject("sage")
+	scope := sha256.Sum256([]byte(server.agentID + "\x00" + server.provider + "\x00" + server.project))
+	dir := filepath.Join(home, "runtime", "mcp-claimants")
+	require.NoError(t, os.MkdirAll(dir, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, hex.EncodeToString(scope[:])+".json"), []byte("not-json"), 0600))
+
+	_, err = server.claimantSessionID(context.Background())
+	require.ErrorContains(t, err, "corrupt")
+	require.Equal(t, "unavailable", server.conversation(context.Background()).claimantIdentityMode)
+}
+
+func TestInboxClaimantIdentityStatusIsMachineReadable(t *testing.T) {
+	t.Setenv("SAGE_HOME", t.TempDir())
+	server, _ := testServer(t)
+	t.Cleanup(server.closeClaimantLease)
+	response := map[string]any{}
+	server.attachClaimantIdentityStatus(context.Background(), response)
+	require.Equal(t, "durable", response["claimant_identity_mode"])
+	require.NotContains(t, response, "claimant_identity_error")
 }
 
 func TestHandleInitialize(t *testing.T) {
@@ -401,7 +577,7 @@ func TestHandleToolsList(t *testing.T) {
 
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]map[string]any)
-	assert.Len(t, tools, 33)
+	assert.Len(t, tools, 35)
 
 	// Collect tool names
 	names := make(map[string]bool)
@@ -442,11 +618,12 @@ func TestHandleToolsList(t *testing.T) {
 	}
 	expected := []string{
 		"sage_backlog", "sage_corroborate", "sage_directory", "sage_domains",
-		"sage_federation", "sage_find_agent", "sage_forget", "sage_gov_propose",
+		"sage_federation", "sage_find_agent", "sage_forget", "sage_get_links", "sage_gov_propose",
 		"sage_gov_status", "sage_gov_vote", "sage_inbox", "sage_inception",
 		"sage_link", "sage_list", "sage_message_handoff", "sage_message_reply", "sage_message_send",
 		"sage_message_history", "sage_message_replies", "sage_message_status",
 		"sage_messages_receive",
+		"sage_node_health",
 		"sage_recall", "sage_reflect", "sage_register", "sage_reinstate",
 		"sage_remember", "sage_rename", "sage_scope_get", "sage_scope_list",
 		"sage_status", "sage_task", "sage_timeline", "sage_turn",
@@ -484,6 +661,7 @@ func TestHandleToolsList(t *testing.T) {
 	assert.True(t, names["sage_scope_get"])
 	assert.True(t, names["sage_corroborate"])
 	assert.True(t, names["sage_link"])
+	assert.True(t, names["sage_get_links"])
 	assert.True(t, names["sage_rename"])
 
 	for name, tool := range map[string]map[string]any{
@@ -592,7 +770,7 @@ func TestAdvertisedToolsExactlyMatchReferenceHeadings(t *testing.T) {
 	doc, err := os.ReadFile(docPath)
 	require.NoError(t, err)
 	docText := string(doc)
-	assert.Contains(t, docText, "SAGE advertises exactly 33 MCP tools",
+	assert.Contains(t, docText, "SAGE advertises exactly 35 MCP tools",
 		"the human-readable inventory count must match tools/list")
 	assert.Contains(t, docText, "One call consumes at most one bounded peer page",
 		"sage_find_agent must document its advertised peer_cursor contract")

@@ -457,7 +457,7 @@ func (h *DashboardHandler) appV23SignedRequestActorID(r *http.Request) string {
 
 func (h *DashboardHandler) appV23SessionHasRootAuthority(r *http.Request) bool {
 	if !isLoopbackRemote(r.RemoteAddr) ||
-		!hostIsLoopback(r.Host) ||
+		!hostIsTrustedCEREBRUMHost(r.Host) ||
 		!isLocalRequest(r) {
 		return false
 	}
@@ -1135,6 +1135,23 @@ func (h *DashboardHandler) handleAppV23AgentPolicy() http.HandlerFunc {
 				Capabilities:     req.Capabilities,
 				Scope:            root.Scope,
 				ExpectedRevision: 0,
+			}
+			// App-v26 removal retires every owned domain to the stable Root
+			// principal. A later registration by the same key restores the
+			// inactive enrollment (including its old home-domain name) to the
+			// review queue. Reapproving that exact stale home without the
+			// consensus-supported Root -> agent transfer fields looks like an
+			// ownership steal and is rejected. Reclaim only the target's own
+			// recorded inactive home, and bind the transfer to the live Root owner;
+			// fresh approvals and operator-entered domains never get an implicit
+			// ownership transfer.
+			if enrollment != nil && !enrollment.Active &&
+				enrollment.HomeDomain != "" && enrollment.HomeDomain == req.HomeDomain {
+				if owner, ownerErr := h.BadgerStore.GetDomainOwner(req.HomeDomain); ownerErr == nil &&
+					owner == root.PrincipalID {
+					approval.ExpectedHomeDomainOwner = owner
+					approval.TransferHomeDomain = true
+				}
 			}
 			if enrollment != nil {
 				approval.ExpectedRevision = enrollment.Revision

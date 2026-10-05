@@ -131,7 +131,8 @@ func (s *authorizationMutationHookState) acquire() (
 
 // BadgerStore manages on-chain state in BadgerDB.
 type BadgerStore struct {
-	db *badger.DB
+	db                  *badger.DB
+	publicMemoryChanged map[string]struct{}
 
 	// domainOwnershipGate (historical name) linearizes publication of every
 	// HasAccessMultiOrg input — ownership, direct grants, org membership and
@@ -283,6 +284,9 @@ func (s *BadgerStore) txnSetPrimitive(txn *badger.Txn, key, value []byte) error 
 		}
 	}
 	err := txn.Set(key, value)
+	if err == nil {
+		s.trackPublicMemoryChange(key)
+	}
 	if err == nil && isCanonicalMemoryProjectionKey(key) {
 		s.canonicalMemoryProjectionMutated = true
 	}
@@ -328,6 +332,15 @@ func (s *BadgerStore) txnSet(txn *badger.Txn, key, value []byte) error {
 	if err := s.txnSetPrimitive(txn, key, value); err != nil {
 		return err
 	}
+	// app-v28: keep the co-commit tombstone reverse index in step with every
+	// memory:<id> write once the fork's promotion marker is in this
+	// transaction's view. Inert before promotion — see
+	// maintainCoCommitTombstoneTxn.
+	if bytes.HasPrefix(key, []byte("memory:")) {
+		if tombErr := s.maintainCoCommitTombstoneTxn(txn, key, value); tombErr != nil {
+			return tombErr
+		}
+	}
 	if !indexActive {
 		return nil
 	}
@@ -349,7 +362,15 @@ func (s *BadgerStore) txnDelete(txn *badger.Txn, key []byte) error {
 			}
 		}
 	}
+	if bytes.HasPrefix(key, []byte("memory:")) {
+		if retractErr := s.retractCoCommitTombstoneTxn(txn, key); retractErr != nil {
+			return retractErr
+		}
+	}
 	err := txn.Delete(key)
+	if err == nil {
+		s.trackPublicMemoryChange(key)
+	}
 	if err == nil && isCanonicalMemoryProjectionKey(key) {
 		s.canonicalMemoryProjectionMutated = true
 	}
@@ -1326,7 +1347,9 @@ func (s *BadgerStore) GetState(key string) ([]byte, error) {
 // keys, but exact exclusion remains defence in depth for verification/recovery
 // paths that inspect bytes before an ordinary writable constructor runs.
 func isIndexBackfillProgressKey(key []byte) bool {
-	return consensuskeys.IsAppHashExcludedLocalKey(key)
+	return consensuskeys.IsAppHashExcludedLocalKey(key) ||
+		bytes.HasPrefix(key, publicStagePrefix) ||
+		bytes.HasPrefix(key, coCommitTombstoneStagePrefix)
 }
 
 func (s *BadgerStore) visitPromotedAppV23Stage(

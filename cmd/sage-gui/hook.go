@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,6 +50,11 @@ func runHook() error {
 		if err != nil {
 			return err
 		}
+		// Thread-scoped complete recall of any captured, since-compacted turns for
+		// this resumed thread, printed before the recency prefetch. Silent when
+		// nothing was captured; never gated (it reads already-governed data).
+		payload, _ := io.ReadAll(io.LimitReader(os.Stdin, preCompactStdinCap))
+		emitThreadScopedRecall(payload)
 		return runHookSessionStartForDomain(domain)
 	case "session-end":
 		if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") {
@@ -56,6 +62,12 @@ func runHook() error {
 			return nil
 		}
 		return runHookSessionEnd()
+	case "pre-compact":
+		if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") {
+			printHookUsage()
+			return nil
+		}
+		return runHookPreCompact()
 	case "inbox-status":
 		if len(args) > 1 {
 			return fmt.Errorf("hook inbox-status: unexpected arguments")
@@ -99,9 +111,21 @@ func hookSessionStartDomain(args []string) (string, error) {
 }
 
 const (
-	hookHTTPTimeout = 3 * time.Second
-	hookRecentLimit = 10
+	hookHTTPTimeout             = 3 * time.Second
+	hookRecentLimit             = 10
+	hookInboxActivityStateDir   = "inbox-activity-state"
+	hookInboxActivityVersion    = 1
+	maxHookInboxActivityMarkers = 128
 )
+
+type hookHTTPStatusError struct {
+	status int
+	body   string
+}
+
+func (e *hookHTTPStatusError) Error() string {
+	return fmt.Sprintf("SAGE returned %d: %s", e.status, e.body)
+}
 
 // runHookInboxStatus emits a payload-free coordination pointer for the exact
 // ordinary-agent identity used by this hook. It never claims work. Silence
@@ -129,23 +153,220 @@ func runHookInboxStatus() error {
 	if wake.Version != stopNudgeWakeVersion || (wake.Pending && wake.Seq == 0) {
 		return fmt.Errorf("inbox status unavailable: invalid wake-state response")
 	}
-	if *inbox.Count == 0 && !wake.Pending {
-		return nil
-	}
 	seed, err := loadHookSeed()
 	if err != nil {
 		return fmt.Errorf("resolve hook identity: %w", err)
 	}
 	priv := ed25519.NewKeyFromSeed(seed)
 	pub, _ := priv.Public().(ed25519.PublicKey) //nolint:errcheck
-	if *inbox.Count > 0 {
-		fmt.Printf("SAGE inbox: %d unclaimed item(s) for exact agent %s (runtime %s). Call sage_inbox with a fresh poll before reporting no new messages.\n",
-			*inbox.Count, hex.EncodeToString(pub), version)
+	agentID := hex.EncodeToString(pub)
+	activityErr := pollHookInboxActivity(agentID, os.Stdout)
+	if *inbox.Count == 0 && !wake.Pending {
+		if activityErr != nil {
+			return fmt.Errorf("inbox activity check unavailable: %w", activityErr)
+		}
 		return nil
 	}
-	fmt.Printf("SAGE inbox: unfinished durable work exists for exact agent %s (runtime %s), although no unclaimed item is waiting. Call sage_inbox to inspect same-session claims and claimed-elsewhere state.\n",
-		hex.EncodeToString(pub), version)
+	if *inbox.Count > 0 {
+		fmt.Printf("SAGE inbox: %d unclaimed item(s) for exact agent %s (runtime %s). Call sage_inbox with a fresh poll before reporting no new messages.\n",
+			*inbox.Count, agentID, version)
+	} else {
+		fmt.Printf("SAGE inbox: unfinished durable work exists for exact agent %s (runtime %s), although no unclaimed item is waiting. Call sage_inbox to inspect same-session claims and claimed-elsewhere state.\n",
+			agentID, version)
+	}
+	if activityErr != nil {
+		return fmt.Errorf("inbox activity check unavailable: %w", activityErr)
+	}
 	return nil
+}
+
+// pollHookInboxActivity emits a payload-free cue once for each newer activity
+// generation. Activity is presentation-only and never changes Stop semantics.
+func pollHookInboxActivity(agentID string, out io.Writer) error {
+	var activity struct {
+		Version *int    `json:"version"`
+		Epoch   *string `json:"epoch"`
+		Seq     *uint64 `json:"seq"`
+	}
+	if err := hookSignedJSON(http.MethodGet, "/v1/inbox/activity-state", nil, &activity); err != nil {
+		if statusErr, ok := err.(*hookHTTPStatusError); ok &&
+			(statusErr.status == http.StatusNotFound || statusErr.status == http.StatusNotImplemented) {
+			return nil
+		}
+		return err
+	}
+	if activity.Version == nil || *activity.Version != hookInboxActivityVersion || activity.Epoch == nil ||
+		!validHookInboxActivityEpoch(strings.TrimSpace(*activity.Epoch)) || activity.Seq == nil {
+		return errors.New("invalid inbox activity response")
+	}
+	if *activity.Seq == 0 {
+		return nil
+	}
+	markerPath, err := hookInboxActivityMarkerPath(agentID)
+	if err != nil {
+		return err
+	}
+	return emitHookInboxActivityForEpoch(markerPath, strings.TrimSpace(*activity.Epoch), *activity.Seq, out)
+}
+
+func validHookInboxActivityEpoch(epoch string) bool {
+	if len(epoch) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(epoch)
+	return err == nil
+}
+
+// hookInboxActivityMarkerPath binds the cursor to the exact principal and
+// stable host/workspace scope, never an ephemeral hook session ID.
+func hookInboxActivityMarkerPath(agentID string) (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve activity workspace: %w", err)
+	}
+	canonical, err := canonicalWorkspaceRoot(cwd)
+	if err != nil {
+		return "", fmt.Errorf("resolve canonical activity workspace: %w", err)
+	}
+	provider := strings.TrimSpace(os.Getenv("SAGE_PROVIDER"))
+	project := strings.TrimSpace(os.Getenv("SAGE_PROJECT"))
+	material := strings.Join([]string{agentID, provider, canonical, project}, "\x00")
+	sum := sha256.Sum256([]byte(material))
+	return filepath.Join(SageHome(), hookInboxActivityStateDir, hex.EncodeToString(sum[:])), nil
+}
+
+// emitHookInboxActivity holds the cross-process lock through both output and
+// persistence. Output comes first: duplicates after a failure are safer than
+// advancing the cursor without ever surfacing the cue.
+func emitHookInboxActivity(markerPath string, seq uint64, out io.Writer) error {
+	return emitHookInboxActivityForEpoch(markerPath, strings.Repeat("a", 32), seq, out)
+}
+
+type hookInboxActivityCursor struct {
+	Epoch string `json:"epoch"`
+	Seq   uint64 `json:"seq"`
+}
+
+func emitHookInboxActivityForEpoch(markerPath, epoch string, seq uint64, out io.Writer) error {
+	dir := filepath.Dir(markerPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create activity marker directory: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("secure activity marker directory: %w", err)
+	}
+	release, err := acquireHookInboxActivityLock(markerPath)
+	if err != nil {
+		return err
+	}
+	defer release()
+	cursor := loadHookInboxActivityState(markerPath)
+	if cursor.Epoch == epoch && cursor.Seq >= seq {
+		return nil
+	}
+	if _, err := fmt.Fprintln(out, "SAGE inbox activity changed. Call sage_inbox with a fresh poll to review task assignments and passive replies; verify task ownership before acting."); err != nil {
+		return fmt.Errorf("emit inbox activity cue: %w", err)
+	}
+	if err := storeHookInboxActivityCursor(markerPath, hookInboxActivityCursor{Epoch: epoch, Seq: seq}); err != nil {
+		return err
+	}
+	pruneHookInboxActivityMarkers(dir)
+	return nil
+}
+
+func loadHookInboxActivityCursor(markerPath string) uint64 {
+	return loadHookInboxActivityState(markerPath).Seq
+}
+
+func loadHookInboxActivityState(markerPath string) hookInboxActivityCursor {
+	raw, err := os.ReadFile(markerPath) //nolint:gosec // hashed name under private SAGE_HOME namespace
+	if err != nil {
+		return hookInboxActivityCursor{}
+	}
+	var cursor hookInboxActivityCursor
+	if err := json.Unmarshal(raw, &cursor); err != nil || len(cursor.Epoch) != 32 {
+		return hookInboxActivityCursor{}
+	}
+	return cursor
+}
+
+func storeHookInboxActivityCursor(markerPath string, cursor hookInboxActivityCursor) error {
+	dir := filepath.Dir(markerPath)
+	tmp, err := os.CreateTemp(dir, filepath.Base(markerPath)+".tmp-") //nolint:gosec // private directory
+	if err != nil {
+		return fmt.Errorf("create activity marker: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	raw, err := json.Marshal(cursor)
+	if err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("encode activity marker: %w", err)
+	}
+	if _, err := tmp.Write(append(raw, '\n')); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write activity marker: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close activity marker: %w", err)
+	}
+	if err := os.Rename(tmpPath, markerPath); err != nil {
+		if removeErr := os.Remove(markerPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("replace activity marker: %w", removeErr)
+		}
+		if err := os.Rename(tmpPath, markerPath); err != nil {
+			return fmt.Errorf("replace activity marker: %w", err)
+		}
+	}
+	return nil
+}
+
+func acquireHookInboxActivityLock(markerPath string) (func(), error) {
+	lockPath := markerPath + ".lock"
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		if err := os.Mkdir(lockPath, 0o700); err == nil {
+			return func() { _ = os.Remove(lockPath) }, nil
+		} else if !os.IsExist(err) {
+			return nil, fmt.Errorf("acquire activity marker lock: %w", err)
+		}
+		if info, err := os.Stat(lockPath); err == nil && time.Since(info.ModTime()) > 5*time.Second {
+			_ = os.Remove(lockPath)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("acquire activity marker lock: timed out")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func pruneHookInboxActivityMarkers(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type aged struct {
+		name string
+		mod  time.Time
+	}
+	markers := make([]aged, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !isStopNudgeMarkerName(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil {
+			markers = append(markers, aged{name: entry.Name(), mod: info.ModTime()})
+		}
+	}
+	if len(markers) <= maxHookInboxActivityMarkers {
+		return
+	}
+	sort.Slice(markers, func(i, j int) bool { return markers[i].mod.Before(markers[j].mod) })
+	for i := 0; i < len(markers)-maxHookInboxActivityMarkers; i++ {
+		_ = os.Remove(filepath.Join(dir, markers[i].name))
+	}
 }
 
 // runHookSessionStart fetches recent committed memories and prints a context
@@ -256,6 +477,21 @@ func hookSignedJSON(method, path string, body []byte, out any) error {
 	return nil
 }
 
+// hookSignedJSONCtx is hookSignedJSON bound to a caller-supplied context.
+func hookSignedJSONCtx(ctx context.Context, method, path string, body []byte, out any) error {
+	resp, err := hookSignedRequestCtx(ctx, method, path, body)
+	if err != nil {
+		return err
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(resp, out); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+	return nil
+}
+
 // runHookSessionEnd posts a lifecycle observation. Reads the hook payload
 // (session_id, reason) from stdin if present.
 func runHookSessionEnd() error {
@@ -298,6 +534,16 @@ func runHookSessionEnd() error {
 // SAGE node, mirroring the protocol used by internal/mcp.Server.signedRequest.
 // Returns the response body on 2xx, error otherwise.
 func hookSignedRequest(method, path string, body []byte) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), hookHTTPTimeout)
+	defer cancel()
+	return hookSignedRequestCtx(ctx, method, path, body)
+}
+
+// hookSignedRequestCtx is hookSignedRequest bound to a caller-supplied context, so
+// a single command-level deadline can be propagated through every network call
+// (the recall-backed-compaction capture path relies on this). Each call is still
+// individually capped at hookHTTPTimeout via a sub-context.
+func hookSignedRequestCtx(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	seed, err := loadHookSeed()
 	if err != nil {
 		return nil, err
@@ -314,9 +560,9 @@ func hookSignedRequest(method, path string, body []byte) ([]byte, error) {
 	}
 	sig := auth.SignRequestWithNonce(priv, method, path, body, ts, nonce)
 
-	ctx, cancel := context.WithTimeout(context.Background(), hookHTTPTimeout)
+	callCtx, cancel := context.WithTimeout(ctx, hookHTTPTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(callCtx, method, baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -336,7 +582,7 @@ func hookSignedRequest(method, path string, body []byte) ([]byte, error) {
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("SAGE returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, &hookHTTPStatusError{status: resp.StatusCode, body: string(respBody)}
 	}
 	return respBody, nil
 }

@@ -11,23 +11,31 @@ import (
 
 // This file is the node's side of the signer fence's restart guard.
 //
-// WHY A COORDINATED RESTART IS THE DANGEROUS ONE. The fence in internal/tx is
-// IN-PROCESS ONLY: it remembers that some transaction carrying nonce N went out
-// and was never accounted for, and it refuses to let that key allocate anything
-// higher until N's fate is proven. Nothing about that record survives an exec.
-// A restart taken while a fence is held therefore does this:
+// WHY A COORDINATED RESTART CAN BE THE DANGEROUS ONE. The fence in internal/tx
+// remembers that some transaction carrying nonce N went out and was never
+// accounted for, and it refuses to let that key allocate anything higher until
+// N's fate is proven. Since durable intent landed, the RECORD is written to disk
+// before the bytes reach the transport (RegisterSubmittedTx → the
+// signer_fence_intent table) and re-raised at startup, so a restart no longer
+// loses it. What a restart still loses is the signed BYTES: they live only in
+// this process, and with them goes the cheapest proof, because reconciliation
+// can no longer re-submit them. So the veto asks the narrow question — is this
+// fence's record on disk? — and refuses only when it cannot confirm that:
 //
 //	the fence is discarded  ->  the allocator re-seeds from the highest
 //	COMMITTED on-chain nonce, which is still BELOW N (that is exactly what
 //	"unresolved" means)  ->  it issues some M in the gap  ->  M commits  ->  the
 //	late N finally arrives and app-v9 rejects it Code 4.
 //
-// That loss is untraceable after the fact: the operator sees an unrelated later
-// action fail as a replay. A crash or a SIGKILL can still do it to us — closing
-// that needs durable pre-broadcast intent, which is deliberately not in this
-// release. But the DOMINANT path into it is not a crash; it is this node
-// deciding, on its own schedule, to restart for an update. That one we control,
-// so we refuse it.
+// That sequence needs the RECORD to be gone: with the intent row intact the
+// next start re-raises the fence and nothing is allocated past N. That is the
+// case the veto is for, and it fails closed — no store wired, a read that fails
+// or a row that is missing all mean "unprotected". Refusing blanket-wide was
+// itself a bug: a node holding a fence could not take the restart that installs
+// the release carrying the fence's own proof reader and recovery routes, so it
+// could never be fixed. A restart over a CONFIRMED durable fence is allowed, and
+// says so (fence_restart_allowed_durable); the key still refuses to sign until a
+// fate is proven, and the restored fence re-reads the proof on its own.
 //
 // NOTHING HERE MAY SUGGEST RESTARTING ANYWAY. There is no flag, no override and
 // no operator advice to "restart to clear it", because restarting is the action
@@ -160,4 +168,45 @@ func commitRestartAfterSigningDrain(prepared *preparedRestartRequest, veto func(
 		prepared.commit()
 	}
 	return nil
+}
+
+// ordinaryShutdownSigningIdleBudget bounds how long an ordinary exit — a
+// signal, or a serve error that is not a scheduled restart — waits for the
+// in-flight signing population to reach zero before the listeners are
+// force-closed under it.
+//
+// Deliberately well below signingIdleDrainBudget (node.go): that budget exists
+// so a restart can still be ABANDONED when the wait fails, while this one is
+// only a courtesy to work already in flight, and the operator who pressed
+// Ctrl-C or quit from the tray is waiting on the exit. Whatever does not make
+// it is covered by the durable intent and the restored fence.
+const ordinaryShutdownSigningIdleBudget = 5 * time.Second
+
+// drainSigningForOrdinaryShutdown applies step 2's guarantee to the exit that
+// has no veto and no ordered re-check: stop new nonce allocations, then give
+// the in-flight and queued submissions a small bounded window to finish before
+// the HTTP force-close can sever them.
+//
+// WHY THIS EXISTS AT ALL. Every coordinated restart drains signing before it
+// commits, so its teardown cannot manufacture a fence. A plain signal or serve
+// error had no such drain: it drained HTTP for its budget and then
+// force-closed, and a broadcast caught in that window raised an indeterminate
+// outcome, wrote a durable intent, and came back at the next start as a fence
+// that costs its payload. The fix is not to teach the exit to resolve fences;
+// it is to stop making them.
+//
+// SIGNING IS DELIBERATELY LEFT QUIESCED, exactly as the committed-restart path
+// leaves it, and this function never resumes. The process is going away, and a
+// transaction signed into a teardown is the likeliest one in its life to end
+// with an unobserved fate — the one thing the in-process fence cannot carry
+// across an exec. A caller refused with ErrSigningQuiesced here is being told
+// the truth about the node it is talking to.
+//
+// The returned error is not a veto. An exit the operator ordered has to win,
+// so the caller logs it and proceeds.
+func drainSigningForOrdinaryShutdown(budget time.Duration) error {
+	tx.QuiesceSigningForRestart()
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	return tx.WaitForSigningIdle(ctx)
 }

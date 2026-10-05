@@ -13,6 +13,17 @@ native macOS CEREBRUM builds and must not alter stable publication.
 [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md) — the
 macOS product surface is SwiftUI/AppKit/Metal with no WebView renderer.
 
+## Backend convergence candidate — 2026-10-05
+
+The [stable backend integration](v12-stable-convergence.md) carries the complete
+published v11.23.15/app-v28 state into an isolated beta review branch. Backend,
+API, browser, SDK and reference sources match the stable parent; beta's Swift
+source and daemon guard are unchanged. The native product baseline above
+remains v11.19.0/app-v27 until separate app/daemon compatibility qualification.
+This candidate is not a merged integration, an installed native release, or
+permission to start an app-v28 daemon against stable data. PR #417 remains a
+separate native command/focus review unit.
+
 ## Direction reset: fully native
 
 The earlier bounded-WebView decision is superseded. The Tauri build remains

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,8 +20,10 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
 
 	sageabci "github.com/l33tdawg/sage/internal/abci"
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -370,11 +373,22 @@ func TestUpgradeStatus_AdminCaveatPastAppV8(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			appVersion, err := strconv.ParseUint(tc.appVersion, 10, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
 			mux := http.NewServeMux()
-			mux.HandleFunc("/abci_info", func(w http.ResponseWriter, _ *http.Request) {
+			mux.HandleFunc("/abci_query", func(w http.ResponseWriter, _ *http.Request) {
+				value, marshalErr := json.Marshal(map[string]any{
+					"schema": "sage-upgrade-governance-status/v1", "current_app_version": appVersion,
+					"pending_plan": nil, "active_proposal": nil,
+				})
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"result": map[string]any{
-						"response": map[string]any{"app_version": tc.appVersion},
+						"response": map[string]any{"code": 0, "value": base64.StdEncoding.EncodeToString(value)},
 					},
 				})
 			})
@@ -397,6 +411,175 @@ func TestUpgradeStatus_AdminCaveatPastAppV8(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpgradeStatusReportsAuthoritativePlanAndBallot(t *testing.T) {
+	target := uint64(27)
+	value, err := json.Marshal(upgradeGovernanceRPCStatus{
+		Schema:            "sage-upgrade-governance-status/v1",
+		CurrentAppVersion: 26,
+		PendingPlan: &upgradeGovernanceRPCPendingPlan{
+			Name: "app-v27", TargetAppVersion: 27, ActivationHeight: 1200,
+		},
+		ActiveProposal: &upgradeGovernanceRPCActiveProposal{
+			ProposalID: "proposal-27", Operation: "upgrade", TargetID: "app-v27",
+			Status: "voting", TargetAppVersion: &target,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/abci_query", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("path"); got != `"/upgrade/governance-status"` {
+			t.Errorf("query path = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": map[string]any{"response": map[string]any{
+				"code": 0, "value": base64.StdEncoding.EncodeToString(value),
+			}},
+		})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	output := captureStdout(t, func() {
+		if err := runUpgradeStatus([]string{"--rpc", server.URL}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, want := range []string{
+		"Chain app version : 26 (app-v26)",
+		"Pending plan      : app-v27 (target app-v27, activation height 1200)",
+		"Active ballot     : proposal-27 (upgrade, target app-v27, status voting, target app-v27)",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("output missing %q:\n%s", want, output)
+		}
+	}
+}
+
+// TestUpgradeVoteCarriesBallotsAtAndAboveTheCeiling pins the deliberate-vote
+// path. A target above the readiness ceiling is a compiled-but-dormant gate:
+// the auto-voter abstains, so only a validator vote here (or CEREBRUM's
+// governance surface) can carry it, and the command must say so. A ballot at
+// the converged ceiling is an ordinary ballot and must not claim dormancy. This
+// drives the real command against a fake CometBFT RPC and asserts the
+// transaction that reaches the wire.
+func TestUpgradeVoteCarriesBallotsAtAndAboveTheCeiling(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		current     uint64
+		target      uint64
+		proposalID  string
+		wantDormant bool
+	}{
+		{name: "ballot at the converged ceiling", current: 27, target: 28, proposalID: "proposal-28"},
+		{name: "ballot above the ceiling", current: 28, target: 29, proposalID: "proposal-29", wantDormant: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			target := tc.target
+			statusValue, err := json.Marshal(upgradeGovernanceRPCStatus{
+				Schema:            "sage-upgrade-governance-status/v1",
+				CurrentAppVersion: tc.current,
+				ActiveProposal: &upgradeGovernanceRPCActiveProposal{
+					ProposalID: tc.proposalID, Operation: "upgrade", TargetID: fmt.Sprintf("app-v%d", tc.target),
+					Status: "voting", TargetAppVersion: &target,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, priv, err := auth.GenerateKeypair()
+			if err != nil {
+				t.Fatalf("generate voting key: %v", err)
+			}
+			keyPath := filepath.Join(t.TempDir(), "validator.key")
+			if writeErr := os.WriteFile(keyPath, priv, 0o600); writeErr != nil {
+				t.Fatalf("write voting key: %v", writeErr)
+			}
+
+			var votedProposal string
+			var votedDecision tx.VoteDecision
+			var handlerErr error
+			mux := http.NewServeMux()
+			mux.HandleFunc("/abci_query", func(w http.ResponseWriter, _ *http.Request) {
+				_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{"response": map[string]any{
+					"code": 0, "value": base64.StdEncoding.EncodeToString(statusValue),
+				}}})
+			})
+			mux.HandleFunc("/broadcast_tx_commit", func(w http.ResponseWriter, r *http.Request) {
+				encoded, decodeErr := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("tx"), "0x"))
+				if decodeErr != nil {
+					handlerErr = decodeErr
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				parsed, parseErr := tx.DecodeTx(encoded)
+				if parseErr != nil {
+					handlerErr = parseErr
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if parsed.GovVote == nil {
+					handlerErr = fmt.Errorf("broadcast tx type %v carries no governance vote", parsed.Type)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				votedProposal = parsed.GovVote.ProposalID
+				votedDecision = parsed.GovVote.Decision
+				// CometBFT's commit response is checked against the submitted bytes: a
+				// reply about a different transaction is treated as no proof of this
+				// one's fate, so the fake must answer with the real hash.
+				sum := tx.CometTxHash(encoded)
+				_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{
+					"hash": strings.ToUpper(hex.EncodeToString(sum[:])), "height": "77",
+					"check_tx":  map[string]any{"code": 0},
+					"tx_result": map[string]any{"code": 0},
+				}})
+			})
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			output := captureStdout(t, func() {
+				if runErr := runUpgradeVote([]string{"--rpc", server.URL, "--yes", "--agent-key", keyPath}); runErr != nil {
+					t.Fatalf("runUpgradeVote: %v", runErr)
+				}
+			})
+			require.NoError(t, handlerErr)
+			require.Equal(t, tc.proposalID, votedProposal, "the vote must name the active upgrade ballot")
+			require.Equal(t, tx.VoteDecisionAccept, votedDecision, "the default decision is accept")
+			require.Contains(t, output, "Vote accept recorded on "+tc.proposalID)
+			if tc.wantDormant {
+				require.Contains(t, output, "dormant in this binary")
+			} else {
+				require.NotContains(t, output, "dormant in this binary",
+					"a ballot at the converged ceiling is carried by the auto-voter")
+			}
+		})
+	}
+}
+
+// TestParseUpgradeVoteDecision keeps the operator-facing words and the tx
+// decisions in lockstep.
+func TestParseUpgradeVoteDecision(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want tx.VoteDecision
+	}{
+		{"accept", tx.VoteDecisionAccept},
+		{"ACCEPT", tx.VoteDecisionAccept},
+		{" yes ", tx.VoteDecisionAccept},
+		{"reject", tx.VoteDecisionReject},
+		{"abstain", tx.VoteDecisionAbstain},
+	} {
+		got, err := parseUpgradeVoteDecision(tc.in)
+		require.NoError(t, err, "decision %q", tc.in)
+		require.Equal(t, tc.want, got, "decision %q", tc.in)
+	}
+	_, err := parseUpgradeVoteDecision("maybe")
+	require.ErrorContains(t, err, "not accept, reject, or abstain")
 }
 
 // TestBuildUpgradeProposeTx_Parameterized proves the builder now honors an
@@ -451,10 +634,12 @@ func TestValidateUpgradeTarget_RespectsBinaryCeiling(t *testing.T) {
 
 // TestPrintUpgradeUsage_CurrentLadder pins the help text to the binary's real
 // fork ladder: it once said the forks end at app-v10 long after v11+ shipped.
-// The top rung must be derived from MaxSupportedAppVersion (so it can never go
-// stale again) and the one-at-a-time sequential rule must be stated.
+// The top rung must be derived from the binary's COMPILED ladder (so it can
+// never go stale again) and the one-at-a-time sequential rule must be stated.
+// The usage text describes what can be proposed; the auto-vote ceiling that
+// decides whether validators vote on their own is reported by `status`.
 func TestPrintUpgradeUsage_CurrentLadder(t *testing.T) {
-	maxV := sageabci.MaxSupportedAppVersion()
+	maxV := sageabci.MaxCompiledAppVersion()
 	out := captureStdout(t, printUpgradeUsage)
 
 	top := "app-v" + strconv.FormatUint(maxV, 10)
