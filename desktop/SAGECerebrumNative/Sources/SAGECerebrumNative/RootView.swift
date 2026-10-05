@@ -28,6 +28,7 @@ struct RootView: View {
                 if let api = session.api { nativeApplication(api: api) }
             }
         }
+        .environment(\.cerebrumSession, session)
         .tint(CerebrumTheme.cyan)
         .preferredColorScheme(designPreviewColorScheme)
         .sheet(isPresented: $session.showsKeyboardShortcuts) {

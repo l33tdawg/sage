@@ -7,9 +7,24 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
     private static let inspectorIdentifier = NSUserInterfaceItemIdentifier(CerebrumCommandID.searchToggleInspector.rawValue)
     private weak var session: AppSession?
     private weak var navigationMenu: NSMenu?
+    private var observingMenuChanges = false
+    private var refreshing = false
+    private var refreshScheduled = false
+
+    init(session: AppSession? = nil) {
+        self.session = session
+        super.init()
+    }
 
     func install(session: AppSession) {
         self.session = session
+        if !observingMenuChanges {
+            observingMenuChanges = true
+            for name in [NSMenu.didAddItemNotification, NSMenu.didRemoveItemNotification] {
+                NotificationCenter.default.addObserver(self, selector: #selector(menuContentsChanged(_:)), name: name, object: nil)
+            }
+            NotificationCenter.default.addObserver(self, selector: #selector(viewMenuWillTrack(_:)), name: NSMenu.didBeginTrackingNotification, object: nil)
+        }
         Task { @MainActor [weak self] in
             for _ in 0..<100 {
                 if self?.refresh() == true { return }
@@ -24,6 +39,9 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(performBrainCommand(_:)) {
+            return validateBrainMenuItem(menuItem)
+        }
         guard menuItem.action == #selector(toggleSearchInspector(_:)), let session else { return false }
         menuItem.title = session.searchInspectorIsPresented ? "Hide Inspector" : "Show Inspector"
         return session.searchHasInspector && !session.searchInspectorCommandsBlocked &&
@@ -33,6 +51,9 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
 
     @discardableResult
     func refresh() -> Bool {
+        guard !refreshing else { return true }
+        refreshing = true
+        defer { refreshing = false }
         guard let session else { return false }
         guard let mainMenu = NSApp.mainMenu else { return false }
         if let menu = mainMenu.items.first(where: { $0.title == "Navigate" })?.submenu {
@@ -40,6 +61,7 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
             updateNavigationItems(in: menu, session: session)
         }
         guard let viewMenu = mainMenu.items.first(where: { $0.title == "View" })?.submenu else { return false }
+        refreshBrainMenu(in: viewMenu)
         let existing = viewMenu.items.first { $0.identifier == Self.inspectorIdentifier }
         guard session.route == .search else {
             if let existing { viewMenu.removeItem(existing) }
@@ -61,6 +83,119 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
         item.title = session.searchInspectorIsPresented ? "Hide Inspector" : "Show Inspector"
         item.isEnabled = validateMenuItem(item)
         return true
+    }
+
+    private struct BrainMenuTarget {
+        let command: CerebrumCommandID
+        let owner: UUID
+    }
+
+    // AppKit owns these concrete route items. SwiftUI's focused Commands can
+    // remain absent even after the destination is mounted and publishes state.
+    func refreshBrainMenu(in menu: NSMenu) {
+        guard let session, session.acceptsRouteCommands(for: .brain),
+              let owner = session.brainCommandOwner, session.brainCommandState != nil else {
+            for item in menu.items where item.identifier?.rawValue.hasPrefix("brain.") == true {
+                menu.removeItem(item)
+            }
+            return
+        }
+        let refresh = brainMenuItem(.brainRefresh, owner: owner, in: menu)
+        let mode = brainSubmenu("Brain Mode", identifier: "brain.menu.mode", in: menu)
+        for command in [CerebrumCommandID.brainModeMemory, .brainModeAgent] {
+            _ = brainMenuItem(command, owner: owner, in: mode)
+        }
+        let presentation = brainSubmenu("Brain Presentation", identifier: "brain.menu.presentation", in: menu)
+        for command in [CerebrumCommandID.brainPresentationInteractive, .brainPresentationList] {
+            _ = brainMenuItem(command, owner: owner, in: presentation)
+        }
+        for command in [CerebrumCommandID.brainToggleInspector, .brainViewOptions, .brainClearSelection] {
+            _ = brainMenuItem(command, owner: owner, in: menu)
+        }
+        // Keep Refresh beside Focus Search without giving Command-R another owner.
+        if let focus = menu.items.firstIndex(where: { $0.title == CerebrumCommandID.focusSearch.specification.label }),
+           menu.index(of: refresh) != focus + 1 {
+            menu.removeItem(refresh)
+            menu.insertItem(refresh, at: min(focus + 1, menu.items.count))
+        }
+    }
+
+    private func brainSubmenu(_ title: String, identifier: String, in menu: NSMenu) -> NSMenu {
+        let id = NSUserInterfaceItemIdentifier(identifier)
+        if let existing = menu.items.first(where: { $0.identifier == id })?.submenu { return existing }
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.identifier = id
+        let submenu = NSMenu(title: title)
+        item.submenu = submenu
+        menu.addItem(item)
+        return submenu
+    }
+
+    private func brainMenuItem(_ command: CerebrumCommandID, owner: UUID, in menu: NSMenu) -> NSMenuItem {
+        let identifier = NSUserInterfaceItemIdentifier(command.rawValue)
+        var existing = menu.items.first(where: { $0.identifier == identifier })
+        if let previous = existing, (previous.representedObject as? BrainMenuTarget)?.owner != owner {
+            // Never retarget a retained menu item from an earlier mount. An
+            // already-captured target/action must keep its revoked owner.
+            menu.removeItem(previous)
+            existing = nil
+        }
+        let item = existing ?? NSMenuItem(
+            title: command.specification.label,
+            action: #selector(performBrainCommand(_:)),
+            keyEquivalent: command.specification.key.map(String.init) ?? ""
+        )
+        item.identifier = identifier
+        item.target = self
+        item.action = #selector(performBrainCommand(_:))
+        item.representedObject = BrainMenuTarget(command: command, owner: owner)
+        item.keyEquivalentModifierMask = command == .brainRefresh ? [.command] :
+            (command.specification.key == nil ? [] : [.control, .command])
+        if item.menu == nil { menu.addItem(item) }
+        item.isEnabled = validateBrainMenuItem(item)
+        return item
+    }
+
+    private func validateBrainMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let target = item.representedObject as? BrainMenuTarget,
+              let session, let state = session.brainCommandState,
+              session.brainCommandOwner == target.owner else { return false }
+        switch target.command {
+        case .brainModeMemory: item.state = state.mode == .memory ? .on : .off
+        case .brainModeAgent: item.state = state.mode == .connectome ? .on : .off
+        case .brainPresentationInteractive: item.state = state.presentation == .mri ? .on : .off
+        case .brainPresentationList: item.state = state.presentation == .table ? .on : .off
+        case .brainToggleInspector: item.title = state.inspectorIsPresented ? "Hide Inspector" : "Show Inspector"
+        case .brainViewOptions: item.title = state.viewOptionsArePresented ? "Hide View Options" : "Show View Options"
+        default: break
+        }
+        return session.acceptsRouteCommands(for: .brain) && !session.showsKeyboardShortcuts &&
+            session.brainCommandRequest == nil && state.allows(target.command)
+    }
+
+    @objc private func performBrainCommand(_ sender: NSMenuItem) {
+        guard validateBrainMenuItem(sender), let target = sender.representedObject as? BrainMenuTarget else { return }
+        session?.requestBrainCommand(target.command, owner: target.owner)
+    }
+
+    @objc private func menuContentsChanged(_ notification: Notification) {
+        guard !refreshing, !refreshScheduled, let menu = notification.object as? NSMenu,
+              let mainMenu = NSApp.mainMenu,
+              menu === mainMenu || menu === mainMenu.items.first(where: { $0.title == "View" })?.submenu else { return }
+        // SwiftUI can replace its menu contents after a route update. Restore
+        // the owned items once that update finishes, including before a shortcut.
+        refreshScheduled = true
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            self?.refreshScheduled = false
+            self?.refresh()
+        }
+    }
+
+    @objc private func viewMenuWillTrack(_ notification: Notification) {
+        guard let menu = notification.object as? NSMenu,
+              menu === NSApp.mainMenu?.items.first(where: { $0.title == "View" })?.submenu else { return }
+        refresh()
     }
 
     private func installNavigationTracking(for menu: NSMenu) {
@@ -105,7 +240,6 @@ struct CerebrumRouteCommandActions {
     let refresh: () -> Void
     var blocksGlobalCommands = false
     var search: SearchCommandActions?
-    var brain: BrainCommandActions?
 }
 
 struct SearchCommandActions {
@@ -160,19 +294,47 @@ struct CerebrumCommandSpecification {
     let section: String
 }
 
-struct BrainCommandActions {
-    let mode: BrainMode
-    let presentation: BrainPresentation
-    let inspectorIsPresented: Bool
-    let hasInspector: Bool
-    let hasSelection: Bool
-    let viewOptionsArePresented: Bool
-    let interactiveMapIsEnabled: Bool
-    let setMode: (BrainMode) -> Void
-    let setPresentation: (BrainPresentation) -> Void
-    let toggleInspector: () -> Void
-    let clearSelection: () -> Void
-    let toggleViewOptions: () -> Void
+// A mounted Brain publishes values, not closures that retain its view or session.
+// Requests are delivered back to that exact mount and revalidated before use.
+struct BrainCommandState: Equatable {
+    var mode: BrainMode = .memory
+    var presentation: BrainPresentation = .mri
+    var isRefreshing = false
+    var inspectorIsPresented = false
+    var hasInspector = false
+    var hasSelection = false
+    var viewOptionsArePresented = false
+    var interactiveMapIsEnabled = true
+    var blocksGlobalCommands = false
+
+    func allows(_ command: CerebrumCommandID) -> Bool {
+        guard !blocksGlobalCommands else { return false }
+        switch command {
+        case .brainRefresh: return !isRefreshing
+        case .brainToggleInspector: return hasInspector
+        case .brainClearSelection: return hasSelection
+        case .brainPresentationInteractive: return interactiveMapIsEnabled
+        case .brainModeMemory, .brainModeAgent, .brainPresentationList, .brainViewOptions: return true
+        default: return false
+        }
+    }
+}
+
+struct BrainCommandRequest: Equatable {
+    let id: UInt64
+    let owner: UUID
+    let command: CerebrumCommandID
+}
+
+private struct CerebrumSessionKey: EnvironmentKey {
+    static let defaultValue: AppSession? = nil
+}
+
+extension EnvironmentValues {
+    var cerebrumSession: AppSession? {
+        get { self[CerebrumSessionKey.self] }
+        set { self[CerebrumSessionKey.self] = newValue }
+    }
 }
 
 private struct CerebrumRouteCommandActionsKey: FocusedValueKey {
@@ -198,7 +360,7 @@ struct CerebrumViewCommands: Commands {
                         route.title,
                         isOn: commandToggle(
                             selected: session.route == route,
-                            select: { session.route = route }
+                            select: { session.navigate(to: route) }
                         )
                     )
                         .keyboardShortcut(KeyEquivalent(shortcut), modifiers: .command)
@@ -214,7 +376,10 @@ struct CerebrumViewCommands: Commands {
                 .disabled(!focusSearchIsEnabled)
                 .accessibilityIdentifier(CerebrumCommandID.focusSearch.rawValue)
             if let routeActions = activeRouteActions {
-                Button("Refresh \(routeActions.route.title)", action: routeActions.refresh)
+                Button("Refresh \(routeActions.route.title)") {
+                    guard session.acceptsRouteCommands(for: routeActions.route), routeCommandsAreEnabled else { return }
+                    routeActions.refresh()
+                }
                     .cerebrumShortcut(refreshCommandID(for: routeActions.route))
                     .disabled(routeActions.isRefreshing)
                     .accessibilityIdentifier(refreshCommandID(for: routeActions.route).rawValue)
@@ -226,74 +391,13 @@ struct CerebrumViewCommands: Commands {
                     .accessibilityIdentifier(CerebrumCommandID.searchClearSelection.rawValue)
             }
 
-            if let brain = activeRouteActions?.brain {
-                Divider()
-                Menu("Brain Mode") {
-                    Toggle(
-                        CerebrumCommandID.brainModeMemory.specification.label,
-                        isOn: commandToggle(
-                            selected: brain.mode == .memory,
-                            select: { brain.setMode(.memory) }
-                        )
-                    )
-                    .cerebrumShortcut(CerebrumCommandID.brainModeMemory)
-                    .accessibilityIdentifier(CerebrumCommandID.brainModeMemory.rawValue)
-
-                    Toggle(
-                        CerebrumCommandID.brainModeAgent.specification.label,
-                        isOn: commandToggle(
-                            selected: brain.mode == .connectome,
-                            select: { brain.setMode(.connectome) }
-                        )
-                    )
-                    .cerebrumShortcut(CerebrumCommandID.brainModeAgent)
-                    .accessibilityIdentifier(CerebrumCommandID.brainModeAgent.rawValue)
-                }
-
-                Menu("Brain Presentation") {
-                    Toggle(
-                        CerebrumCommandID.brainPresentationInteractive.specification.label,
-                        isOn: commandToggle(
-                            selected: brain.presentation == .mri,
-                            select: { brain.setPresentation(.mri) }
-                        )
-                    )
-                    .cerebrumShortcut(CerebrumCommandID.brainPresentationInteractive)
-                    .disabled(!brain.interactiveMapIsEnabled)
-                    .accessibilityIdentifier(CerebrumCommandID.brainPresentationInteractive.rawValue)
-
-                    Toggle(
-                        CerebrumCommandID.brainPresentationList.specification.label,
-                        isOn: commandToggle(
-                            selected: brain.presentation == .table,
-                            select: { brain.setPresentation(.table) }
-                        )
-                    )
-                    .cerebrumShortcut(CerebrumCommandID.brainPresentationList)
-                    .accessibilityIdentifier(CerebrumCommandID.brainPresentationList.rawValue)
-                }
-
-                Button(brain.inspectorIsPresented ? "Hide Inspector" : "Show Inspector") {
-                    brain.toggleInspector()
-                }
-                .cerebrumShortcut(CerebrumCommandID.brainToggleInspector)
-                .disabled(!brain.hasInspector)
-                .accessibilityIdentifier(CerebrumCommandID.brainToggleInspector.rawValue)
-
-                Button(brain.viewOptionsArePresented ? "Hide View Options" : "Show View Options") {
-                    brain.toggleViewOptions()
-                }
-                .cerebrumShortcut(CerebrumCommandID.brainViewOptions)
-                .accessibilityIdentifier(CerebrumCommandID.brainViewOptions.rawValue)
-
-                Button("Clear Brain Selection") { brain.clearSelection() }
-                    .disabled(!brain.hasSelection)
-                    .accessibilityIdentifier(CerebrumCommandID.brainClearSelection.rawValue)
-            }
         }
 
         CommandGroup(before: .help) {
-            Button(CerebrumCommandID.keyboardShortcuts.specification.label) { session.showsKeyboardShortcuts = true }
+            Button(CerebrumCommandID.keyboardShortcuts.specification.label) {
+                guard !session.showsKeyboardShortcuts, !activeRouteBlocksGlobalCommands else { return }
+                session.showsKeyboardShortcuts = true
+            }
                 .cerebrumShortcut(CerebrumCommandID.keyboardShortcuts)
                 .disabled(session.showsKeyboardShortcuts || activeRouteBlocksGlobalCommands)
                 .accessibilityIdentifier(CerebrumCommandID.keyboardShortcuts.rawValue)
@@ -307,7 +411,7 @@ struct CerebrumViewCommands: Commands {
     }
 
     private var activeRouteActions: CerebrumRouteCommandActions? {
-        guard let routeActions,
+        guard session.route != .brain, let routeActions,
               session.acceptsRouteCommands(for: routeActions.route),
               !session.showsKeyboardShortcuts,
               !routeActions.blocksGlobalCommands else { return nil }
@@ -315,6 +419,11 @@ struct CerebrumViewCommands: Commands {
     }
 
     private var activeRouteBlocksGlobalCommands: Bool {
+        if session.route == .brain {
+            // Navigation must not wait for a focused descendant to appear. Until
+            // the destination registers, route actions remain unavailable.
+            return session.brainCommandState?.blocksGlobalCommands ?? false
+        }
         guard let routeActions else { return false }
         return routeActions.route != session.route || routeActions.blocksGlobalCommands
     }
@@ -324,8 +433,7 @@ struct CerebrumViewCommands: Commands {
     }
 
     private var routeCommandsAreEnabled: Bool {
-        session.acceptsReadyCommands && session.api != nil &&
-            !session.showsKeyboardShortcuts && !activeRouteBlocksGlobalCommands
+        session.acceptsGlobalCommands && !activeRouteBlocksGlobalCommands
     }
 
     private func refreshCommandID(for route: AppRoute) -> CerebrumCommandID {
@@ -337,10 +445,13 @@ struct CerebrumViewCommands: Commands {
         }
     }
 
-    private func commandToggle(selected: Bool, select: @escaping () -> Void) -> Binding<Bool> {
+    func commandToggle(selected: Bool, select: @escaping () -> Void) -> Binding<Bool> {
         Binding(
             get: { selected },
-            set: { if $0 { select() } }
+            // These are mutually exclusive choices, not switches. AppKit can
+            // still carry the previous checkmark during a SwiftUI update; an
+            // activation must select its destination even if it proposes false.
+            set: { _ in select() }
         )
     }
 }
@@ -397,6 +508,7 @@ struct CerebrumKeyboardShortcutsView: View {
                 }
                 Spacer()
                 Button("Done") { dismiss() }
+                    .accessibilityIdentifier("keyboard-shortcuts-done")
                     .keyboardShortcut(.cancelAction)
                     .focused($doneFocused)
             }

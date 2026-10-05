@@ -13,11 +13,16 @@ final class AppSession {
 
     var route: AppRoute = .overview {
         didSet {
+            if oldValue != route { clearBrainCommandRegistration() }
             if oldValue == .search, route != .search { clearSearchInspectorCommandState() }
             CerebrumNativeMenuCoordinator.shared.refresh()
         }
     }
-    var phase: Phase = .connecting
+    var phase: Phase = .connecting {
+        didSet {
+            if phase != .ready { clearBrainCommandRegistration() }
+        }
+    }
     var passphrase = ""
     var loginError: String?
     var isLoggingIn = false
@@ -31,6 +36,55 @@ final class AppSession {
     var searchInspectorCommandsBlocked = false
     var showsKeyboardShortcuts = false
     var api: (any SAGEAPI)?
+    private(set) var brainCommandOwner: UUID?
+    private(set) var brainCommandState: BrainCommandState?
+    private(set) var brainCommandRequest: BrainCommandRequest?
+    private var nextBrainCommandRequestID: UInt64 = 0
+
+    func registerBrainCommands(owner: UUID, state: BrainCommandState) {
+        defer { CerebrumNativeMenuCoordinator.shared.refresh() }
+        guard acceptsRouteCommands(for: .brain) else { return }
+        brainCommandOwner = owner
+        brainCommandState = state
+        brainCommandRequest = nil
+    }
+
+    func updateBrainCommands(owner: UUID, state: BrainCommandState) {
+        defer { CerebrumNativeMenuCoordinator.shared.refresh() }
+        guard brainCommandOwner == owner, acceptsRouteCommands(for: .brain) else { return }
+        brainCommandState = state
+    }
+
+    func unregisterBrainCommands(owner: UUID) {
+        guard brainCommandOwner == owner else { return }
+        clearBrainCommandRegistration()
+    }
+
+    private func clearBrainCommandRegistration() {
+        defer { CerebrumNativeMenuCoordinator.shared.refresh() }
+        brainCommandOwner = nil
+        brainCommandState = nil
+        brainCommandRequest = nil
+    }
+
+    func requestBrainCommand(_ command: CerebrumCommandID, owner: UUID) {
+        defer { CerebrumNativeMenuCoordinator.shared.refresh() }
+        guard acceptsRouteCommands(for: .brain), !showsKeyboardShortcuts,
+              brainCommandOwner == owner, brainCommandState?.allows(command) == true,
+              brainCommandRequest == nil else { return }
+        nextBrainCommandRequestID &+= 1
+        brainCommandRequest = .init(id: nextBrainCommandRequestID, owner: owner, command: command)
+    }
+
+    func takeBrainCommand(owner: UUID, state: BrainCommandState) -> CerebrumCommandID? {
+        defer { CerebrumNativeMenuCoordinator.shared.refresh() }
+        guard let request = brainCommandRequest, request.owner == owner,
+              brainCommandOwner == owner else { return nil }
+        brainCommandRequest = nil
+        guard acceptsRouteCommands(for: .brain), !showsKeyboardShortcuts,
+              state.allows(request.command) else { return nil }
+        return request.command
+    }
 
     var acceptsReadyCommands: Bool { phase == .ready }
 
@@ -97,8 +151,19 @@ final class AppSession {
         }
     }
 
+    var acceptsGlobalCommands: Bool {
+        acceptsReadyCommands && api != nil && !showsKeyboardShortcuts &&
+            !(route == .brain && brainCommandState?.blocksGlobalCommands == true) &&
+            !(route == .search && searchInspectorCommandsBlocked)
+    }
+
+    func navigate(to destination: AppRoute) {
+        guard acceptsGlobalCommands, destination.isImplemented else { return }
+        route = destination
+    }
+
     func focusSearch() {
-        guard acceptsReadyCommands, api != nil, !showsKeyboardShortcuts else { return }
+        guard acceptsGlobalCommands else { return }
         route = .search
         searchFocusRequestID &+= 1
     }

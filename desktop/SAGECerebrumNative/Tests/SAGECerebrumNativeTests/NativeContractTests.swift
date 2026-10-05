@@ -174,7 +174,11 @@ import Testing
     for file in routeFiles {
         let source = try String(contentsOf: sourceRoot.appendingPathComponent(file), encoding: .utf8)
         #expect(!source.contains(".keyboardShortcut(\"r\""))
-        #expect(source.contains(".focusedSceneValue(\\.cerebrumRouteCommandActions"))
+        if file == "BrainView.swift" {
+            #expect(source.contains("session?.registerBrainCommands"))
+        } else {
+            #expect(source.contains(".focusedSceneValue(\\.cerebrumRouteCommandActions"))
+        }
     }
     let commands = try String(
         contentsOf: sourceRoot.appendingPathComponent("CerebrumCommands.swift"),
@@ -197,7 +201,7 @@ import Testing
     #expect(commands.contains("CommandGroup(after: .sidebar)"))
     #expect(commands.contains("CommandGroup(before: .help)"))
     #expect(commands.contains("selected: session.route == route"))
-    #expect(commands.contains("select: { session.route = route }"))
+    #expect(commands.contains("select: { session.navigate(to: route) }"))
     #expect(commands.contains("NSMenu.didBeginTrackingNotification"))
     #expect(!commands.contains("menu.delegate = self"))
     #expect(commands.contains("keyboardShortcut(KeyEquivalent(key), modifiers: command.specification.modifiers)"))
@@ -2231,4 +2235,256 @@ private actor MutationTestAPI: SAGEAPI {
             else { continuation.finish() }
         }
     }
+}
+
+
+@MainActor
+@Test func brainCommandsMaterializeWithoutFocusedValuesAndDeliverOnceToTheirMount() throws {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    session.route = .brain
+    let owner = UUID()
+    let state = BrainCommandState(hasInspector: true, hasSelection: true)
+    session.registerBrainCommands(owner: owner, state: state)
+    let coordinator = CerebrumNativeMenuCoordinator(session: session)
+    let menu = NSMenu(title: "View")
+    coordinator.refreshBrainMenu(in: menu)
+    let items = nativeBrainMenuItems(menu)
+    #expect(items.count == 8)
+    #expect(items[.brainModeMemory]?.state == .on)
+    #expect(items[.brainModeAgent]?.state == .off)
+    #expect(items.values.filter { $0.keyEquivalent == "r" }.count == 1)
+    let list = try #require(items[.brainPresentationList])
+    #expect(list.keyEquivalentModifierMask == [.control, .command])
+    #expect(NSApplication.shared.sendAction(try #require(list.action), to: list.target, from: list))
+    let request = try #require(session.brainCommandRequest)
+    #expect(request.owner == owner)
+    #expect(request.command == .brainPresentationList)
+    let inspector = try #require(items[.brainToggleInspector])
+    #expect(NSApplication.shared.sendAction(try #require(inspector.action), to: inspector.target, from: inspector))
+    #expect(session.brainCommandRequest == request)
+    #expect(session.takeBrainCommand(owner: UUID(), state: state) == nil)
+    #expect(session.brainCommandRequest == request)
+    #expect(session.takeBrainCommand(owner: owner, state: state) == .brainPresentationList)
+    #expect(session.takeBrainCommand(owner: owner, state: state) == nil)
+    #expect(NSApplication.shared.sendAction(try #require(inspector.action), to: inspector.target, from: inspector))
+    #expect(session.brainCommandRequest?.command == .brainToggleInspector)
+    #expect(try #require(session.brainCommandRequest).id > request.id)
+}
+
+@MainActor
+@Test func brainCommandRegistrationRejectsStaleOwnersRoutesAndNonReadyPhases() throws {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    let first = UUID()
+    let state = BrainCommandState(hasInspector: true, hasSelection: true)
+    session.registerBrainCommands(owner: first, state: state)
+    #expect(!session.acceptsRouteCommands(for: .brain) || session.brainCommandOwner == nil)
+    session.route = .brain
+    session.registerBrainCommands(owner: first, state: state)
+    let coordinator = CerebrumNativeMenuCoordinator(session: session)
+    let menu = NSMenu(title: "View")
+    coordinator.refreshBrainMenu(in: menu)
+    let staleItem = try #require(nativeBrainMenuItems(menu)[.brainToggleInspector])
+    session.requestBrainCommand(.brainPresentationList, owner: first)
+    session.route = .search
+    coordinator.refreshBrainMenu(in: menu)
+    #expect(nativeBrainMenuItems(menu).isEmpty)
+    #expect(session.brainCommandOwner == nil)
+    #expect(session.brainCommandRequest == nil)
+    #expect(NSApplication.shared.sendAction(try #require(staleItem.action), to: staleItem.target, from: staleItem))
+    #expect(session.brainCommandRequest == nil)
+    session.route = .brain
+    let second = UUID()
+    session.registerBrainCommands(owner: second, state: state)
+    session.updateBrainCommands(owner: first, state: .init(blocksGlobalCommands: true))
+    session.unregisterBrainCommands(owner: first)
+    #expect(NSApplication.shared.sendAction(try #require(staleItem.action), to: staleItem.target, from: staleItem))
+    #expect(session.brainCommandOwner == second)
+    #expect(session.brainCommandState == state)
+    #expect(session.brainCommandRequest == nil)
+    for phase in [AppSession.Phase.locked, .connecting, .failed("offline")] {
+        session.phase = phase
+        #expect(session.brainCommandOwner == nil)
+        #expect(!session.acceptsRouteCommands(for: .brain) || session.brainCommandOwner == nil)
+        session.registerBrainCommands(owner: second, state: state)
+        #expect(session.brainCommandOwner == nil)
+        session.phase = .ready
+        session.registerBrainCommands(owner: second, state: state)
+    }
+    session.api = nil
+    #expect(!session.acceptsRouteCommands(for: .brain) || session.brainCommandOwner == nil)
+    session.requestBrainCommand(.brainPresentationList, owner: second)
+    #expect(session.brainCommandRequest == nil)
+}
+
+@MainActor
+@Test func brainCommandAdmissionAndDeliveryBothRespectModalAndCapabilityGates() throws {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    session.route = .brain
+    let owner = UUID()
+    let enabled = BrainCommandState(hasInspector: true, hasSelection: true)
+    session.registerBrainCommands(owner: owner, state: enabled)
+    for command in [CerebrumCommandID.brainRefresh, .brainToggleInspector, .brainClearSelection,
+                    .brainPresentationInteractive, .brainModeMemory, .brainModeAgent,
+                    .brainPresentationList, .brainViewOptions] {
+        session.updateBrainCommands(owner: owner, state: .init(blocksGlobalCommands: true))
+        session.requestBrainCommand(command, owner: owner)
+        #expect(session.brainCommandRequest == nil)
+        session.updateBrainCommands(owner: owner, state: enabled)
+        session.showsKeyboardShortcuts = true
+        session.requestBrainCommand(command, owner: owner)
+        #expect(session.brainCommandRequest == nil)
+        session.showsKeyboardShortcuts = false
+        session.requestBrainCommand(command, owner: owner)
+        #expect(session.brainCommandRequest?.command == command)
+        // A modal can open between the rendered menu action and delivery.
+        #expect(session.takeBrainCommand(owner: owner, state: .init(blocksGlobalCommands: true)) == nil)
+        #expect(session.brainCommandRequest == nil)
+    }
+    for (state, command) in [
+        (BrainCommandState(isRefreshing: true), CerebrumCommandID.brainRefresh),
+        (.init(hasInspector: false), .brainToggleInspector),
+        (.init(hasSelection: false), .brainClearSelection),
+        (.init(interactiveMapIsEnabled: false), .brainPresentationInteractive),
+        (enabled, .searchToggleInspector),
+    ] {
+        session.updateBrainCommands(owner: owner, state: state)
+        session.requestBrainCommand(command, owner: owner)
+        #expect(session.brainCommandRequest == nil)
+    }
+    session.updateBrainCommands(owner: owner, state: .init(blocksGlobalCommands: true))
+    session.focusSearch()
+    #expect(session.route == .brain)
+}
+
+@MainActor
+@Test func brainNativeMenuDoesNotRetainItsSession() {
+    var session: AppSession? = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    weak let weakSession = session
+    session?.route = .brain
+    session?.registerBrainCommands(owner: UUID(), state: .init(hasInspector: true))
+    let coordinator = CerebrumNativeMenuCoordinator(session: session)
+    let menu = NSMenu(title: "View")
+    coordinator.refreshBrainMenu(in: menu)
+    session = nil
+    #expect(weakSession == nil)
+    for item in nativeBrainMenuItems(menu).values { #expect(!coordinator.validateMenuItem(item)) }
+}
+
+@MainActor
+private func nativeBrainMenuItems(_ menu: NSMenu) -> [CerebrumCommandID: NSMenuItem] {
+    var result: [CerebrumCommandID: NSMenuItem] = [:]
+    for item in menu.items {
+        if let id = item.identifier.flatMap({ CerebrumCommandID(rawValue: $0.rawValue) }) { result[id] = item }
+        if let submenu = item.submenu { result.merge(nativeBrainMenuItems(submenu)) { first, _ in first } }
+    }
+    return result
+}
+
+@MainActor
+@Test func brainNativeMenuValidatesCurrentStateAndRejectsStaleModalTargets() throws {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    session.route = .brain
+    let owner = UUID()
+    session.registerBrainCommands(owner: owner, state: .init(hasInspector: true, hasSelection: true))
+    let coordinator = CerebrumNativeMenuCoordinator(session: session)
+    let menu = NSMenu(title: "View")
+    coordinator.refreshBrainMenu(in: menu)
+    coordinator.refreshBrainMenu(in: menu)
+    let items = nativeBrainMenuItems(menu)
+    #expect(items.count == 8)
+    #expect(menu.items.count == 6)
+    let inspector = try #require(items[.brainToggleInspector])
+    session.updateBrainCommands(owner: owner, state: .init(
+        mode: .connectome, presentation: .table, inspectorIsPresented: true,
+        hasInspector: true, hasSelection: true, interactiveMapIsEnabled: false
+    ))
+    coordinator.refreshBrainMenu(in: menu)
+    #expect(items[.brainModeMemory]?.state == .off)
+    #expect(items[.brainModeAgent]?.state == .on)
+    #expect(items[.brainPresentationList]?.state == .on)
+    #expect(items[.brainPresentationInteractive]?.isEnabled == false)
+    #expect(inspector.title == "Hide Inspector")
+    session.showsKeyboardShortcuts = true
+    for item in items.values { #expect(!coordinator.validateMenuItem(item)) }
+    #expect(NSApplication.shared.sendAction(try #require(inspector.action), to: inspector.target, from: inspector))
+    #expect(session.brainCommandRequest == nil)
+    session.showsKeyboardShortcuts = false
+    session.updateBrainCommands(owner: owner, state: .init(blocksGlobalCommands: true))
+    for item in items.values { #expect(!coordinator.validateMenuItem(item)) }
+    #expect(NSApplication.shared.sendAction(try #require(inspector.action), to: inspector.target, from: inspector))
+    #expect(session.brainCommandRequest == nil)
+    session.phase = .locked
+    coordinator.refreshBrainMenu(in: menu)
+    #expect(nativeBrainMenuItems(menu).isEmpty)
+}
+
+@MainActor
+@Test func brainModalNavigationIsRevalidatedAtActionDispatch() {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    session.route = .brain
+    let owner = UUID()
+    session.registerBrainCommands(owner: owner, state: .init(blocksGlobalCommands: true))
+    session.navigate(to: .search)
+    session.focusSearch()
+    #expect(session.route == .brain)
+    #expect(session.searchFocusRequestID == 0)
+    session.updateBrainCommands(owner: owner, state: .init())
+    session.showsKeyboardShortcuts = true
+    session.navigate(to: .overview)
+    #expect(session.route == .brain)
+    session.showsKeyboardShortcuts = false
+    session.navigate(to: .settings)
+    #expect(session.route == .brain)
+    session.phase = .locked
+    session.navigate(to: .overview)
+    #expect(session.route == .brain)
+    session.phase = .ready
+    session.navigate(to: .search)
+    #expect(session.route == .search)
+    #expect(session.brainCommandOwner == nil)
+}
+
+
+@MainActor
+@Test func nativeRadioMenuActivationDoesNotLoseIntentToAStaleCheckmark() {
+    let commands = CerebrumViewCommands(session: AppSession())
+    var mode = BrainMode.connectome
+    var activations = 0
+    // AppKit can still show Memory Map checked while the mounted view has
+    // already switched to Agent Network. Its activation then writes false.
+    let staleMemoryItem = commands.commandToggle(selected: true) {
+        mode = .memory
+        activations += 1
+    }
+    staleMemoryItem.wrappedValue = false
+    #expect(mode == .memory)
+    #expect(activations == 1)
+    // Selecting an already-current radio item never unsets the destination.
+    staleMemoryItem.wrappedValue = false
+    #expect(mode == .memory)
+    #expect(activations == 2)
+}
+
+
+@MainActor
+@Test func brainNativeMenuReplacesRevokedMountItemsInsteadOfRetargetingThem() throws {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    session.route = .brain
+    let coordinator = CerebrumNativeMenuCoordinator(session: session)
+    let menu = NSMenu(title: "View")
+    session.registerBrainCommands(owner: UUID(), state: .init(hasInspector: true))
+    coordinator.refreshBrainMenu(in: menu)
+    let stale = try #require(nativeBrainMenuItems(menu)[.brainToggleInspector])
+    let newOwner = UUID()
+    session.registerBrainCommands(owner: newOwner, state: .init(hasInspector: true))
+    coordinator.refreshBrainMenu(in: menu)
+    let current = try #require(nativeBrainMenuItems(menu)[.brainToggleInspector])
+    #expect(stale !== current)
+    #expect(stale.menu == nil)
+    #expect(!coordinator.validateMenuItem(stale))
+    #expect(NSApplication.shared.sendAction(try #require(stale.action), to: stale.target, from: stale))
+    #expect(session.brainCommandRequest == nil)
+    #expect(NSApplication.shared.sendAction(try #require(current.action), to: current.target, from: current))
+    #expect(session.brainCommandRequest?.owner == newOwner)
+    #expect(session.brainCommandRequest?.command == .brainToggleInspector)
 }
