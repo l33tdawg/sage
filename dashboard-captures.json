@@ -1,0 +1,202 @@
+{
+  "synthetic": true,
+  "captured_at_utc": "2026-10-05T07:21:34.785Z",
+  "fixture_version": "2026-10-05-v1",
+  "fixed_time": "2026-10-05T09:00:00.000Z",
+  "version_from_source": "v11.23.14",
+  "source_commit": "eeaf5fec335be1dae3e332df582cdb730c5ac2d5",
+  "source_tracked_changes": [],
+  "source_ui_assets_sha256": {
+    "assets/brain.obj": "4fb06fc203c21086fd4767a29ab9565d2ae933a80c2796e0955b00f3a7c95f78",
+    "css/sage.css": "b616c63c885827670abece937928fd5e8a089ddfea2cae0eced61b0c2cd349a1",
+    "index.html": "edfc2ca7554ae753ef72b137ef14861c0b2ea1b3ac7a25a6f079b4bcf85972c7",
+    "js/access-controls-ui.js": "47de9757a7c9568964680ea092b64df31eb566f0473c40797f3d4731c2816c27",
+    "js/api.js": "f0ffe8ef877f68f8e0a4fd842b9067b0756f4e1a9d9d0d25a0a3caacfacd80b9",
+    "js/app.js": "46f09ce5e88b735fd61a13297cc732a6198b68263de41308b1874cb9c36a8b12",
+    "js/appv23-linked-messages.js": "31abb564f89f9c8f4d2351e340fbbccdd77d037b8b02ae8bfd1dbbf529b44782",
+    "js/appv23-policy.js": "bf9aef0c740e0cbe8f795404d7a7a5d93b4a3d1151900d2c8efd18000b42a82c",
+    "js/bulk-sequence.js": "c43c4293c891db5be110c5f998bfbdfb55f435e180c446912c6c625584050ade",
+    "js/connectome-map.js": "5da3bfdf7fdd36717eed016fb2477e3112900ee92df29031ea48256bf820bc07",
+    "js/domain-inventory.js": "03b92acdad105a487327f83f1616bd569f7ddc58f552b45feb844eaea78e06bf",
+    "js/federation-connectome.js": "9a928c046f2f0b7a1fbba814bfe358ace04369be86b93e793ee87b99cf4d6945",
+    "js/federation-directory.js": "03928d3a0bf1f9e171a43902d57658312758f05f7b3df16a99f042027736a01c",
+    "js/federation-flow.js": "659dec748d3447bd717cd8b9410b5d237b0ed89371f32e6625667c8e4391cb46",
+    "js/federation-peer-capabilities.js": "1abccdaa26674a2ce522fa8774dcab96cbee316568ef1b9f3c102775fc37b18c",
+    "js/federation-route-state.js": "e23c46bb16cff2fed4c67e4349077aecb7d3953cb3d9f2e505cf13c7cb238a7a",
+    "js/governance-retry.js": "cb9adc12fff48ab84fa1ddab3e622ac17f698187dcb67016c4889fd82c23ffc1",
+    "js/graph-availability.js": "254604b57e18074efc7e6218191b5e9d0c9ce6f5f9834aaef61ad7b52ffc370b",
+    "js/memory-gate.js": "ae6faf19df1aa9c26e9dfee57a0563fe0353777a40a80a56e9fa3028629c873c",
+    "js/mode-hull.js": "686e24ff6abad031ff0388a34705326738cb1895d1787ded0e22aad582b66ed5",
+    "js/mri-brain.js": "2b46161385665ddaa03b9da7eb9959eb416a329d9c3093c42992313a399e3821",
+    "js/mri-layout.js": "27ff9315fc19b4b15217af2485c4bfda742fc72ccf70fa7ce99f4ac3df954449",
+    "js/restart-proof.js": "5621dd4064e8934542c1aae89c9cf6cc01d6ed3746c52649c75356a31252b1fa",
+    "js/signer-fences.js": "bbac8f30e05ce502dd25361d5bc437404651d962142802d4b59a0cdbfe1ce5b2",
+    "js/sse.js": "95b9bf0d5399173d7578da92054122159fab1a492da30e5b3b25b82f6d001d93",
+    "js/task-refresh.js": "926f7eb6bcec055e74286b46d45e7b6882bd1fda9c804810b422abe4ed4f80b9",
+    "js/task-reorder.js": "442b4603951ea10eb7913360daebb6dd8663529a57eab96904d0a98f28d99243",
+    "js/update-banner.js": "e311e100874c20615adde267d7807ddae13a1d609962b1f4070d6126f8ed70d8",
+    "js/vendor/htm.umd.js": "7a31776e04bd4afde0d4308177d26f377716fcf7e4bd70be590746d6aa594f08",
+    "js/vendor/jsQR.min.js": "bc40c8a15196236b2314db0856f72ca0b49980cd5413b8c852a7349f5fee0859",
+    "js/vendor/preact.hooks.umd.js": "269644b2eb663fb74a92d5bb3b8eb5fac6828bb6a1f8dbe3d483c4952b31f678",
+    "js/vendor/preact.umd.js": "91c14e75b9ac7c0317cd8ebbde735e12c0a3120d09d8a9f9704a0bb0f92b011b",
+    "js/vendor/qrcode.min.js": "c541ef06327885a8415bca8df6071e14189b4855336def4f36db54bde8484f36",
+    "js/vendor/sage-graph.bundle.js": "cf7bd3a2927f09d57721a9c4f863ce52984496ccbd7e192bcc6bf562cf3dfe7d"
+  },
+  "fixture_sha256": "00f4b8c206d282712b2cf2f97570ec32e2266997892df773da767d904f8870ee",
+  "capture_script_sha256": "99c7a508b61a3e46b924ba8d0e8d62faea6f59d9172d545bc9b30cd25a6cb4ca",
+  "playwright_version": "1.58.2",
+  "browser_version": "145.0.7632.6",
+  "capture_runtime": {
+    "node": "v22.22.0",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "viewports": {
+    "brain": {
+      "width": 1440,
+      "height": 1040
+    },
+    "network": {
+      "width": 1440,
+      "height": 1040
+    },
+    "config": {
+      "width": 1440,
+      "height": 1444
+    },
+    "overview": {
+      "width": 1440,
+      "height": 1548
+    }
+  },
+  "deviceScaleFactor": 1,
+  "random_seed": 42,
+  "reduced_motion": true,
+  "renderer": "Chromium software WebGL/SwiftShader",
+  "sse": "synthetic idle EventSource",
+  "requests": [
+    "GET https://cerebrum-sample.test/ui/",
+    "GET https://cerebrum-sample.test/ui/assets/brain.obj",
+    "GET https://cerebrum-sample.test/ui/css/sage.css",
+    "GET https://cerebrum-sample.test/ui/js/access-controls-ui.js",
+    "GET https://cerebrum-sample.test/ui/js/api.js",
+    "GET https://cerebrum-sample.test/ui/js/app.js",
+    "GET https://cerebrum-sample.test/ui/js/appv23-linked-messages.js",
+    "GET https://cerebrum-sample.test/ui/js/appv23-policy.js",
+    "GET https://cerebrum-sample.test/ui/js/bulk-sequence.js",
+    "GET https://cerebrum-sample.test/ui/js/connectome-map.js",
+    "GET https://cerebrum-sample.test/ui/js/domain-inventory.js",
+    "GET https://cerebrum-sample.test/ui/js/federation-connectome.js",
+    "GET https://cerebrum-sample.test/ui/js/federation-directory.js",
+    "GET https://cerebrum-sample.test/ui/js/federation-flow.js",
+    "GET https://cerebrum-sample.test/ui/js/federation-peer-capabilities.js",
+    "GET https://cerebrum-sample.test/ui/js/federation-route-state.js",
+    "GET https://cerebrum-sample.test/ui/js/governance-retry.js",
+    "GET https://cerebrum-sample.test/ui/js/graph-availability.js",
+    "GET https://cerebrum-sample.test/ui/js/memory-gate.js",
+    "GET https://cerebrum-sample.test/ui/js/mode-hull.js",
+    "GET https://cerebrum-sample.test/ui/js/mri-brain.js",
+    "GET https://cerebrum-sample.test/ui/js/mri-layout.js",
+    "GET https://cerebrum-sample.test/ui/js/restart-proof.js",
+    "GET https://cerebrum-sample.test/ui/js/signer-fences.js",
+    "GET https://cerebrum-sample.test/ui/js/sse.js",
+    "GET https://cerebrum-sample.test/ui/js/task-refresh.js",
+    "GET https://cerebrum-sample.test/ui/js/task-reorder.js",
+    "GET https://cerebrum-sample.test/ui/js/update-banner.js",
+    "GET https://cerebrum-sample.test/ui/js/vendor/htm.umd.js",
+    "GET https://cerebrum-sample.test/ui/js/vendor/jsQR.min.js",
+    "GET https://cerebrum-sample.test/ui/js/vendor/preact.hooks.umd.js",
+    "GET https://cerebrum-sample.test/ui/js/vendor/preact.umd.js",
+    "GET https://cerebrum-sample.test/ui/js/vendor/qrcode.min.js",
+    "GET https://cerebrum-sample.test/ui/js/vendor/sage-graph.bundle.js",
+    "GET https://cerebrum-sample.test/v1/dashboard/auth/check",
+    "GET https://cerebrum-sample.test/v1/dashboard/chain/validators",
+    "GET https://cerebrum-sample.test/v1/dashboard/embeddings/reembed/progress",
+    "GET https://cerebrum-sample.test/v1/dashboard/embeddings/status",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-research-chain/agent-exposure",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-research-chain/permissions",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-research-chain/pipe-contacts",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-research-chain/status",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-research-chain/sync",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-studio-chain/agent-exposure",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-studio-chain/permissions",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-studio-chain/pipe-contacts",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-studio-chain/status",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/connections/sample-studio-chain/sync",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/groups",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/network-name",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/readiness",
+    "GET https://cerebrum-sample.test/v1/dashboard/federation/shareable-domains",
+    "GET https://cerebrum-sample.test/v1/dashboard/health",
+    "GET https://cerebrum-sample.test/v1/dashboard/memory/adoption-progress",
+    "GET https://cerebrum-sample.test/v1/dashboard/memory/graph",
+    "GET https://cerebrum-sample.test/v1/dashboard/network/agents",
+    "GET https://cerebrum-sample.test/v1/dashboard/reranker/setup/status",
+    "GET https://cerebrum-sample.test/v1/dashboard/settings/boot-instructions",
+    "GET https://cerebrum-sample.test/v1/dashboard/settings/federation",
+    "GET https://cerebrum-sample.test/v1/dashboard/settings/memory-mode",
+    "GET https://cerebrum-sample.test/v1/dashboard/settings/onboarding",
+    "GET https://cerebrum-sample.test/v1/dashboard/settings/recall",
+    "GET https://cerebrum-sample.test/v1/dashboard/settings/reranker",
+    "GET https://cerebrum-sample.test/v1/dashboard/settings/reranker/detect",
+    "GET https://cerebrum-sample.test/v1/dashboard/settings/update/check",
+    "GET https://cerebrum-sample.test/v1/dashboard/settings/update/status",
+    "GET https://cerebrum-sample.test/v1/dashboard/stats",
+    "GET https://cerebrum-sample.test/v1/mcp-config"
+  ],
+  "errors": [],
+  "warnings": [
+    {
+      "page": "brain",
+      "warning": "[.WebGL-0x1240019de00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "page": "brain",
+      "warning": "[.WebGL-0x1240019de00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "page": "brain",
+      "warning": "[.WebGL-0x1240019de00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels"
+    },
+    {
+      "page": "brain",
+      "warning": "[.WebGL-0x1240019de00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+    }
+  ],
+  "unexpected_requests": [],
+  "images": [
+    {
+      "file": "screen-brain.png",
+      "width": 1440,
+      "height": 1040,
+      "sha256": "b4bd8af9bf8601273de366b5bdb251255a179cf8d780e358e2ae31d7998586d8",
+      "page": "/",
+      "title": "CEREBRUM — Your SAGE Brain"
+    },
+    {
+      "file": "screen-network.png",
+      "width": 1440,
+      "height": 1040,
+      "sha256": "1a4c2a84174fdc3fcbb1c2701638d25f645229e5fb03336ab5a64ec3c644af44",
+      "page": "/federation",
+      "title": "CEREBRUM — Your SAGE Brain"
+    },
+    {
+      "file": "screen-config.png",
+      "width": 1440,
+      "height": 1444,
+      "sha256": "fa3ff4a93ca65cd08165fbd7fb71a797f17ce9732e3548e4e5debe60f1192e24",
+      "page": "/settings",
+      "title": "CEREBRUM — Your SAGE Brain"
+    },
+    {
+      "file": "screen-overview.png",
+      "width": 1440,
+      "height": 1548,
+      "sha256": "2a73fc6e1acb600c4ea35280087122910c0b5067edc29efbea023c0e2313652b",
+      "page": "/overview",
+      "title": "CEREBRUM — Your SAGE Brain"
+    }
+  ]
+}
