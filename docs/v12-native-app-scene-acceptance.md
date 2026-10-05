@@ -1,8 +1,19 @@
 # v12 native app-scene acceptance
 
-**Status:** v5 implementation and contract checks are complete. Packaged
-qualification of the current source awaits an unlocked macOS graphical session;
-no v5 runtime pass is claimed yet. Installed-release acceptance remains open.
+**Status, 2026-10-05:** the packaged v5 gate passed on the GitHub-hosted
+macOS runner in [run 37300998981](https://github.com/l33tdawg/sage/actions/runs/37300998981)
+for PR head `8c6f5ef0e7a470ea865282972e01d155105360a0`. The tested PR merge
+checkout was `11d9c92ae218aef2825d2f82e427a75c9fc55c4d`; both commits have tree
+`a0cf8418db94054ec0a1b709d91475fd8eb616b0`. Result
+`20261005T111034Z-app-scene-3372` passed all 21 assertions in 12.416 seconds
+on arm64 macOS 15.7.9. The same CI run passed the Swift suite, required hardware
+Metal checks, release build, and release-binary fixture/linkage scan.
+
+This is packaged app-scene and synthetic in-process keyboard evidence.
+The result explicitly records `physical_keyboard_event_routing=false`,
+`system_ax_server=false`, and `voiceover_spoken_evidence=false`. Final external
+system-AX qualification still awaits an unlocked session on the named Mac;
+physical keyboard, VoiceOver, and installed-release acceptance remain open.
 
 This gate launches the packaged SwiftUI/AppKit executable rather than hosting a
 view in the test runner. It therefore exercises the application's actual scene,

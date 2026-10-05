@@ -1,11 +1,12 @@
 # v12 native product status
 
-**Status date:** 2026-08-24
+**Baseline status date:** 2026-08-24 · **Latest native evidence:** 2026-10-05
 
 **Code baseline:** SAGE v11.19.0 / app-v27
 
-**Release lines:** `11.19.x` remains stable; `v12-beta` carries experimental
-native macOS CEREBRUM builds and must not alter stable publication.
+**Release lines at the August baseline:** `11.19.x` was stable; `v12-beta`
+carries experimental native macOS CEREBRUM builds and must not alter stable
+publication. The October stable parity audit below tracks the later stable line.
 
 **Product target:** production native application on macOS; browser CEREBRUM on Linux and Windows
 
@@ -21,15 +22,41 @@ consensus, and reliability changes still to carry across. The native code
 baseline remains **v11.19.0 / app-v27**; this audit does not advance it.
 Stable release preparation is tracked separately in merged
 [PR #416](https://github.com/l33tdawg/sage/pull/416). The v11.23.15 tag points to
-`bf037ff5`; publication is in progress, with public availability still requiring
-release-asset verification. The August status and evidence below describe their
-original baseline.
+`bf037ff5`; its build and publication evidence is recorded in
+[release run 37296704569](https://github.com/l33tdawg/sage/actions/runs/37296704569).
+The August evidence below retains its original baseline; the dated October
+section records the newer native command qualification.
 
 The first focused Brain menu, keyboard, and focus slice can use deterministic
 preview data independently of backend convergence. Attaching to current stable
 requires a separate native app/daemon compatibility qualification before the
 version guard changes. Rendered app-scene, system accessibility, physical
 keyboard, and VoiceOver evidence remain distinct acceptance gates.
+
+## Brain command and focus evidence — 2026-10-05
+
+The packaged v5 app-scene gate passed all 21 assertions in
+[CI run 37300998981](https://github.com/l33tdawg/sage/actions/runs/37300998981)
+for PR head `8c6f5ef0e7a470ea865282972e01d155105360a0`. The fixture ran from
+PR merge checkout `11d9c92ae218aef2825d2f82e427a75c9fc55c4d`, which has the
+same source tree as that head. The full Swift suite, hardware Metal checks,
+release build, and release-binary fixture/linkage scan also passed.
+
+Production Brain View items now use an AppKit coordinator and mounted command
+state. They are fenced by the current route, readiness, modal state, and mount
+owner. Each navigation destination and Focus Search retain a single shortcut
+item, with current session validation at menu display and action dispatch. The v5 run proves
+rendered Brain mode/presentation/inspector commands, synthetic application
+keyboard routing, exact current table/close-button first responders, preserved
+selection, and the real Keyboard Shortcuts sheet's command guards before the
+existing Search lifecycle. See the [source-pinned app-scene evidence](v12-native-app-scene-acceptance.md).
+
+This closes the bounded rendered Brain command and in-process focus gap left
+by v4. It does not establish external system AX, physical HID, or spoken
+VoiceOver: all three result flags remain false. The named Mac's external AX
+probe is trusted, but final system-AX runtime qualification is still blocked by
+the locked desktop. Physical keyboard, VoiceOver, installed-release acceptance,
+and command/focus paths outside this bounded scenario remain open.
 
 ## Direction reset: fully native
 
@@ -128,8 +155,9 @@ than VoiceOver's Control-Option modifier space. The source is wired so the
 standard macOS View menu owns one routed Refresh command and a ready-gated Focus
 Search command that navigates to Search and requests presentation of its native
 search field. Brain contributes route-scoped mode, presentation, inspector,
-clear-selection, and View Options commands through a focused scene value, while
-Help owns the accessible keyboard-shortcut reference.
+clear-selection, and View Options commands through mounted session state and
+the AppKit menu coordinator, while Help owns the accessible keyboard-shortcut
+reference.
 The separate Navigate menu now checkmarks the active Overview, Brain, or Search
 route. The typed source catalog, ready/exact-route/modal routing, one-shot search
 request policy, and duplicate Command-R guard are covered. The green v2
@@ -152,7 +180,8 @@ dismissal with zero remaining close controls and truthful bridge state, and rest
 to the exact currently mounted table in the same window without losing class,
 rows, identifier, or selection before the Search sequence. Backing-object
 reuse/replacement is recorded. The packaged local and CI v4 gates are green;
-focused Brain View command routing remains open. This is synthetic in-process evidence, not physical
+v4 did not qualify rendered Brain View command routing. The October v5 evidence
+above adds that bounded proof. These gates provide synthetic in-process evidence, not physical
 keyboard/HID, WindowServer, system AX, VoiceOver spoken output, installed-RC, localization, or
 non-US-layout proof. Brain phase three is implemented with separate agent,
 engram, and directed-connection focus, collision-safe scene identities, reserved
@@ -225,9 +254,10 @@ performs one external retry press, and requires exact application/system focus
 equality for the retry or Metal surface. The fixture is fail-closed outside
 design preview and release CI rejects all fixture markers. See
 [`v12-native-system-ax-acceptance.md`](v12-native-system-ax-acceptance.md).
-Execution evidence is still open because the probe does not yet have macOS
-Accessibility trust on this named Mac; audible VoiceOver remains a separate
-operator gate.
+The probe now has macOS Accessibility trust on the named Mac. Its final
+system-AX runtime qualification remains open because the desktop is locked;
+the hosted v5 app-scene pass does not satisfy this external gate. Audible
+VoiceOver and physical keyboard input remain separate operator gates.
 
 The first arm64 application bundle was built and launch-tested on 2026-08-23 at
 `dist/v12-native/12.0.0-beta.1/SAGE CEREBRUM Native.app`. Launch Services
@@ -321,7 +351,7 @@ acceptance gaps are not counted as another route slice.
 | Primary product area | Current surface | Current classification | Acceptance status |
 |---|---|---|---|
 | Overview and node health | SwiftUI dashboard backed by five typed feeds | `native-control` | First vertical slice implemented; lifecycle/auth hardening and visual parity open |
-| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, responsive route-width policy and native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector presentation, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, native AppKit retry/Metal focus return, synchronized native tables, accessibility-pressable native retry with held-progress state, cancellation/fencing and mount-gated restoration, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity, hosted narrow-window transition, immediate retry failure, held stale-success cancellation, successful restoration, and retry/Metal first-responder delivery implemented; real VoiceOver/system-AX plus table/inspector/related focus proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
+| Brain, Connectome, and memory detail | SwiftUI/AppKit surface with separate Memory/Connectome modes, responsive route-width policy and native compact navigator/toolbar, fit-driven headers/notices, selection-preserving inspector presentation, shared anatomical CEREBRUM hull, custom Metal MRI with time-invariant multi-pass bloom, luminous native cells, plastic weighted curved ribbons, self-loops, topology-aware bounded LOD, trimmed direction arrowheads, direct edge picking, shared-path GPU flow particles, coalesced selection announcements, native AppKit retry/Metal focus return, synchronized native tables, accessibility-pressable native retry with held-progress state, cancellation/fencing and mount-gated restoration, memory/agent inspectors, selected-agent engram bloom, directed-connection focus, independently typed related-memory Train of Thought, and hardware offscreen GPU/bloom raster evidence | `native-control` | Brain interaction/parity, hosted narrow-window transition, immediate retry failure, held stale-success cancellation, successful restoration, and retry/Metal first-responder delivery implemented; source-pinned v5 CI proves bounded rendered Brain commands, modal guards, and exact current table/inspector focus return; real VoiceOver/system-AX, related-card focus proof, cross-GPU/offline behavior, daemon lifecycle, large-store tuning, and deeper behavioral/accessibility/performance evidence remain open |
 | Search, filtering, tags, transfer, and forget | SwiftUI table, native filters, memory inspector, tag mutation and governed Forget flows backed by typed dashboard APIs | `native-control` | Search/filter/select/inspect/load-more, tag editing, bulk tagging and safe single/bulk Forget implemented; real app-scene Focus Search and Search inspector Show/Hide dispatch, identity preservation, and exact table/close focus return proven; whole-domain transfer, physical keyboard, system AX/VoiceOver, and release acceptance remain open |
 | Tasks and agent Messages | Native destination reserved | `native-control` target | Implementation open |
 | Imports and backup restoration | Native destination reserved | `native-control` target | Implementation open |
@@ -341,9 +371,9 @@ disabled outside a ready session, and `Command-,` no longer opens placeholder
 Settings. Navigate now checkmarks exactly the active implemented route. Brain
 mode and View Options use Control-Command rather than the VoiceOver
 Control-Option modifier chord, Brain popovers gate global commands, and native
-Brain inspector dismissal requests route focus. These are locally implemented
-product-honesty and keyboard-safety improvements, not route completion or
-completed acceptance.
+Brain inspector dismissal requests route focus. The bounded v5 Brain/Search
+menu, keyboard, modal, and first-responder sequence is CI-qualified at the source
+above; this does not complete route or product acceptance.
 
 Overview, Search/Inspector, and the Brain Memory/Connectome workflow are real native controls;
 they do not load the browser SPA or a WebView. The parity ledger remains open
@@ -354,7 +384,7 @@ daemon lifecycle, recovery, updates, and rollback.
 
 | Platform | Evidence already present | Production blockers |
 |---|---|---|
-| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; previous v2 packaged/CI app-scene gate green; v3 checkmarked navigation, Brain command chords that avoid VoiceOver's default Control-Option chord, popover/focus cleanup, and synthetic `NSApplication.sendEvent` routing packaged and CI green; v4 exact current Brain/Search backing-table and inspector responder lifecycle packaged and CI green across SwiftUI backing replacement; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Physical keyboard/HID and WindowServer routing, localization/non-US-layout evidence, focused Brain View and remaining rendered commands, named-Mac system AX/VoiceOver spoken and focus evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, installed release acceptance, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
+| macOS | Launch-tested unsigned Apple Silicon Swift application shell with native unlock and daemon attachment; source-built native Overview, Search/Inspector, and Brain Memory/Connectome slices; previous v2 packaged/CI app-scene gate green; v3 checkmarked navigation, Brain command chords that avoid VoiceOver's default Control-Option chord, popover/focus cleanup, and synthetic `NSApplication.sendEvent` routing packaged and CI green; v4 exact current Brain/Search backing-table and inspector responder lifecycle packaged and CI green across SwiftUI backing replacement; source-pinned October v5 packaged CI proves rendered Brain commands, modal guards, and synthetic application keyboard/focus routing; hosted native responder and hardware Metal evidence; builder identity `com.sage.cerebrum.beta`; no WebKit or JavaScriptCore linkage | Physical keyboard/HID and WindowServer routing, localization/non-US-layout evidence, commands and focus paths outside the bounded v5 scenario, named-Mac system AX/VoiceOver spoken and focus evidence, bundled-daemon lifecycle, native recovery/update/rollback, remaining Brain polish/evidence, complete route parity, installed release acceptance, Developer ID/notarization, Gatekeeper clean-machine launch, architecture matrix, offline/accessibility and three-run evidence |
 | Windows | x64 NSIS preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported |
 | Linux | x64 `.deb` and AppImage preview construction and lifecycle smoke | Not a v12 native product target; browser CEREBRUM is supported; optional native R&D remains blocked by `RUSTSEC-2024-0429` |
 
@@ -421,7 +451,7 @@ with one current native execution child:
 3. `b945c6bb-8d06-45c7-91d1-ad1e15e6b84d` — completed native child that delivered
    packaged-and-CI-green v4 exact current Brain/Search table and inspector focus restoration; and
 4. `03aebcf3-18e9-4d60-bddc-71c1b6e5ffdc` — current consolidated native execution child for
-   focused Brain command routing, Connectome focus, remaining rendered commands,
+   Brain/Connectome focus and rendered commands beyond the bounded v5 gate,
    physical-keyboard routing, system-AX/VoiceOver,
    reflow/localization/contrast, transport timing, performance, cross-GPU,
    offline, daemon lifecycle, route parity, and release acceptance;
