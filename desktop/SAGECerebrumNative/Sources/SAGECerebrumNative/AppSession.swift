@@ -21,6 +21,7 @@ final class AppSession {
     var phase: Phase = .connecting {
         didSet {
             if phase != .ready { clearBrainCommandRegistration() }
+            CerebrumNativeMenuCoordinator.shared.refresh()
         }
     }
     var passphrase = ""
@@ -34,8 +35,12 @@ final class AppSession {
     var searchHasInspector = false
     var searchInspectorIsPresented = false
     var searchInspectorCommandsBlocked = false
-    var showsKeyboardShortcuts = false
-    var api: (any SAGEAPI)?
+    var showsKeyboardShortcuts = false {
+        didSet { CerebrumNativeMenuCoordinator.shared.refresh() }
+    }
+    var api: (any SAGEAPI)? {
+        didSet { CerebrumNativeMenuCoordinator.shared.refresh() }
+    }
     private(set) var brainCommandOwner: UUID?
     private(set) var brainCommandState: BrainCommandState?
     private(set) var brainCommandRequest: BrainCommandRequest?

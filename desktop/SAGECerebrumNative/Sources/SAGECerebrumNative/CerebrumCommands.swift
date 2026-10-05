@@ -39,6 +39,9 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(performGlobalCommand(_:)) {
+            return validateGlobalMenuItem(menuItem)
+        }
         if menuItem.action == #selector(performBrainCommand(_:)) {
             return validateBrainMenuItem(menuItem)
         }
@@ -58,9 +61,10 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
         guard let mainMenu = NSApp.mainMenu else { return false }
         if let menu = mainMenu.items.first(where: { $0.title == "Navigate" })?.submenu {
             installNavigationTracking(for: menu)
-            updateNavigationItems(in: menu, session: session)
+            refreshNavigationMenu(in: menu)
         }
         guard let viewMenu = mainMenu.items.first(where: { $0.title == "View" })?.submenu else { return false }
+        refreshFocusSearchMenuItem(in: viewMenu)
         refreshBrainMenu(in: viewMenu)
         let existing = viewMenu.items.first { $0.identifier == Self.inspectorIdentifier }
         guard session.route == .search else {
@@ -181,7 +185,8 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
     @objc private func menuContentsChanged(_ notification: Notification) {
         guard !refreshing, !refreshScheduled, let menu = notification.object as? NSMenu,
               let mainMenu = NSApp.mainMenu,
-              menu === mainMenu || menu === mainMenu.items.first(where: { $0.title == "View" })?.submenu else { return }
+              menu === mainMenu || menu === navigationMenu ||
+                menu === mainMenu.items.first(where: { $0.title == "View" })?.submenu else { return }
         // SwiftUI can replace its menu contents after a route update. Restore
         // the owned items once that update finishes, including before a shortcut.
         refreshScheduled = true
@@ -217,19 +222,59 @@ final class CerebrumNativeMenuCoordinator: NSObject, NSMenuItemValidation {
     }
 
     @objc private func navigationMenuDidBeginTracking(_ notification: Notification) {
-        guard let menu = notification.object as? NSMenu, menu === navigationMenu, let session else { return }
-        updateNavigationItems(in: menu, session: session)
+        guard let menu = notification.object as? NSMenu, menu === navigationMenu else { return }
+        refreshNavigationMenu(in: menu)
     }
 
-    private func updateNavigationItems(in menu: NSMenu, session: AppSession) {
+    private enum GlobalMenuTarget {
+        case navigate(AppRoute)
+        case focusSearch
+    }
+
+    // Keep SwiftUI's single shortcut item, but validate and dispatch against the
+    // current session. Its cached enabled state can outlive an attached sheet.
+    func refreshNavigationMenu(in menu: NSMenu) {
         for route in AppRoute.implemented {
             guard let shortcut = route.navigationShortcut else { continue }
             let matches = menu.items.filter {
-                $0.keyEquivalent == String(shortcut) &&
+                $0.title == route.title && $0.keyEquivalent == String(shortcut) &&
                     $0.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask) == [.command]
             }
             guard matches.count == 1, let item = matches.first else { continue }
+            configureGlobalMenuItem(item, target: .navigate(route))
+        }
+    }
+
+    func refreshFocusSearchMenuItem(in menu: NSMenu) {
+        let matches = menu.items.filter {
+            $0.title == CerebrumCommandID.focusSearch.specification.label && $0.keyEquivalent == "f" &&
+                $0.keyEquivalentModifierMask.intersection(.deviceIndependentFlagsMask) == [.command]
+        }
+        guard matches.count == 1, let item = matches.first else { return }
+        configureGlobalMenuItem(item, target: .focusSearch)
+    }
+
+    private func configureGlobalMenuItem(_ item: NSMenuItem, target: GlobalMenuTarget) {
+        item.target = self
+        item.action = #selector(performGlobalCommand(_:))
+        item.representedObject = target
+        item.isEnabled = validateGlobalMenuItem(item)
+    }
+
+    private func validateGlobalMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let target = item.representedObject as? GlobalMenuTarget, let session else { return false }
+        if case let .navigate(route) = target {
             item.state = session.route == route ? .on : .off
+            guard route.isImplemented else { return false }
+        }
+        return session.acceptsGlobalCommands
+    }
+
+    @objc private func performGlobalCommand(_ sender: NSMenuItem) {
+        guard validateGlobalMenuItem(sender), let target = sender.representedObject as? GlobalMenuTarget else { return }
+        switch target {
+        case let .navigate(route): session?.navigate(to: route)
+        case .focusSearch: session?.focusSearch()
         }
     }
 }

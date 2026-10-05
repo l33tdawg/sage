@@ -2488,3 +2488,83 @@ private func nativeBrainMenuItems(_ menu: NSMenu) -> [CerebrumCommandID: NSMenuI
     #expect(session.brainCommandRequest?.owner == newOwner)
     #expect(session.brainCommandRequest?.command == .brainToggleInspector)
 }
+
+
+@MainActor
+@Test func globalNativeMenuValidationTracksModalRouteAndReadyState() throws {
+    let session = AppSession(previewAPI: MutationTestAPI(forgetResults: []))
+    let coordinator = CerebrumNativeMenuCoordinator(session: session)
+    let navigation = NSMenu(title: "Navigate")
+    for route in AppRoute.implemented {
+        let item = NSMenuItem(title: route.title, action: nil, keyEquivalent: String(try #require(route.navigationShortcut)))
+        item.keyEquivalentModifierMask = [.command]
+        navigation.addItem(item)
+    }
+    let view = NSMenu(title: "View")
+    let focusSearch = NSMenuItem(title: "Focus Search", action: nil, keyEquivalent: "f")
+    focusSearch.keyEquivalentModifierMask = [.command]
+    view.addItem(focusSearch)
+    coordinator.refreshNavigationMenu(in: navigation)
+    coordinator.refreshFocusSearchMenuItem(in: view)
+    let items = navigation.items + [focusSearch]
+    #expect(navigation.items.count == 3)
+    #expect(view.items.count == 1)
+    #expect(items.allSatisfy { $0.isEnabled })
+    #expect(navigation.items.map(\.state) == [.on, .off, .off])
+
+    // AppKit validation must observe the sheet even when SwiftUI has not
+    // rebuilt its Commands. Retained actions must independently reject it.
+    session.showsKeyboardShortcuts = true
+    navigation.update()
+    view.update()
+    #expect(items.allSatisfy { !$0.isEnabled })
+    for item in items {
+        #expect(NSApplication.shared.sendAction(try #require(item.action), to: item.target, from: item))
+    }
+    #expect(session.route == .overview)
+    #expect(session.searchFocusRequestID == 0)
+
+    session.showsKeyboardShortcuts = false
+    navigation.update()
+    view.update()
+    #expect(items.allSatisfy { $0.isEnabled })
+    let brain = navigation.items[1]
+    #expect(NSApplication.shared.sendAction(try #require(brain.action), to: brain.target, from: brain))
+    navigation.update()
+    #expect(session.route == .brain)
+    #expect(navigation.items.map(\.state) == [.off, .on, .off])
+
+    let owner = UUID()
+    session.registerBrainCommands(owner: owner, state: .init(blocksGlobalCommands: true))
+    navigation.update()
+    view.update()
+    #expect(items.allSatisfy { !$0.isEnabled })
+    #expect(NSApplication.shared.sendAction(try #require(focusSearch.action), to: focusSearch.target, from: focusSearch))
+    #expect(session.route == .brain)
+    #expect(session.searchFocusRequestID == 0)
+    session.updateBrainCommands(owner: owner, state: .init())
+    #expect(NSApplication.shared.sendAction(try #require(focusSearch.action), to: focusSearch.target, from: focusSearch))
+    #expect(session.route == .search)
+    #expect(session.searchFocusRequestID == 1)
+    navigation.update()
+    #expect(navigation.items.map(\.state) == [.off, .off, .on])
+
+    session.updateSearchInspectorCommandState(hasInspector: false, isPresented: false, commandsBlocked: true)
+    navigation.update()
+    view.update()
+    #expect(items.allSatisfy { !$0.isEnabled })
+    session.clearSearchInspectorCommandState()
+    for phase in [AppSession.Phase.connecting, .locked, .failed("Unavailable")] {
+        session.phase = phase
+        navigation.update()
+        view.update()
+        #expect(items.allSatisfy { !$0.isEnabled })
+        #expect(NSApplication.shared.sendAction(try #require(brain.action), to: brain.target, from: brain))
+        #expect(session.route == .search)
+    }
+    session.phase = .ready
+    session.api = nil
+    navigation.update()
+    view.update()
+    #expect(items.allSatisfy { !$0.isEnabled })
+}
