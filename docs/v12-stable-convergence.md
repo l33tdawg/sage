@@ -70,6 +70,15 @@ native Swift beta and named-Mac AX workflows are preserved. Stable release and
 MCP publication workflows are unchanged; no tag or publication is created by
 this integration.
 
+The first integration CI run reported a green legacy Byzantine job while all
+three cases skipped: production Compose intentionally hides Comet RPC and its
+project name differed from the tests' hard-coded container names. The follow-up
+uses a CI-only loopback RPC overlay and an explicit Compose project, waits for
+all four validators to commit blocks, and requires infrastructure and container
+operations to succeed. The cases now assert one-validator progress, a sustained
+two-validator halt, and recovery; missing RPC cannot silently pass in CI. The
+production Compose topology and stable backend implementation remain unchanged.
+
 Local qualification uses the worktree sources, an isolated test home, and
 retained logs. The combined Node suite passed 555 tests, Python SDK passed 569,
 and offline benchmark protocol suite passed 12. The complete Go suite, nested

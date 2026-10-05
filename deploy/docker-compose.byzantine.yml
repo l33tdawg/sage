@@ -1,0 +1,15 @@
+# CI-only RPC access for the explicitly selected sage-ci-byzantine project.
+# Production compose intentionally keeps Comet RPC private.
+services:
+  cometbft0:
+    ports:
+      - "127.0.0.1:26657:26657"
+  cometbft1:
+    ports:
+      - "127.0.0.1:26757:26657"
+  cometbft2:
+    ports:
+      - "127.0.0.1:26857:26657"
+  cometbft3:
+    ports:
+      - "127.0.0.1:26957:26657"

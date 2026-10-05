@@ -260,7 +260,7 @@ test('superseded checks stop spending runner minutes without weakening the newes
 
 test('CI builds Docker once and keeps CometBFT hardening in the mandatory fault gate', () => {
   assert.doesNotMatch(ciWorkflow, /^  docker:\n/m);
-  assert.match(ciJob('byzantine'), /docker compose -f deploy\/docker-compose\.yml up -d --build/);
+  assert.match(ciJob('byzantine'), /docker compose -f deploy\/docker-compose\.yml -f deploy\/docker-compose\.byzantine\.yml up -d --build/);
   assert.doesNotMatch(ciJob('test'), /make test-cometbft-patch/);
   assert.doesNotMatch(job('test'), /make test-cometbft-patch/);
   assert.match(faultWorkflow, /make test-cometbft-patch/);
