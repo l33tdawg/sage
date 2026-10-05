@@ -5,7 +5,7 @@
 App-v28 is a governed consensus upgrade from app-v27. It carries two changes that
 are both consensus-visible, and it was scoped as one fork deliberately rather
 than as two: the sparse public-memory Merkle index over committed `PUBLIC=0`
-records becomes AppHash-covered at the activation height, and the co-commit
+records is committed by the composite AppHash rule from H+1, and the co-commit
 tombstone rule stops being a submission-boundary check and becomes a rule the
 consensus path enforces.
 
@@ -31,9 +31,12 @@ changes how every later AppHash is computed. Two nodes that disagree about
 whether v28 is active disagree about every block after H. That is why the
 ceiling, not the code, is the activation switch.
 
-## What is already built, and inert
+## Staging and promotion
 
-The store side is complete and pinned by tests, with no production caller.
+The store lifecycle is wired into consensus execution in
+`internal/abci/appv28_lifecycle.go`: preparation at line 126, promotion at line
+153, per-block synchronization at line 177, and boot validation at line 86.
+It shipped dormant in v11.22.0 and became active with the v11.23.0 ceiling bump.
 `PreparePublicMemoryStage` (`internal/store/public_memory_stage.go:23`) builds the
 index into a staging namespace that is excluded from all three AppHash modes, so
 staging cannot move a hash — the stage test asserts that directly.
@@ -50,22 +53,27 @@ promoted root does not match its state. The promotion marker is literally
 
 1. stage the index before the activation block, at the recorded activation height
 2. promote at H with the AppHash of H-1, inside the consensus transaction
-3. sync changed public paths per block from H+1
+3. sync changed public paths per block from H
 4. select the composite AppHash rule from H+1, following the app-v13 pattern
 5. validate the promoted stage at boot
 
-Steps 1, 2, 3 and 5 are inert while no applied v28 record exists.
+Preparation runs only for a scheduled app-v28 activation. Promotion runs at H;
+synchronization starts in the activation block so its writes join the committed
+set. The composite hash and new transaction rule apply from H+1. Boot validation
+requires intact promoted indexes once an applied v28 record exists
+(`prepareAppV28StagesForActivation`, `internal/abci/appv28_lifecycle.go:111`;
+`promoteAppV28Indexes`, `internal/abci/appv28_lifecycle.go:142`;
+`syncAppV28IndexesForBlock`, `internal/abci/appv28_lifecycle.go:173`).
 
 ## The co-commit tombstone rule rides in this fork
 
-A co-commit is the one write path that never consults the voter: block inclusion
-is decisive for it, so the content-hash dedup that keeps a rejected record's
-exact bytes out of the store does not run. What exists today is a guard at the
-local REST submission boundary, which is why the gap is only closed for
-envelopes that go through that handler — the check lives in `api/rest`, not in
-consensus, and a directly broadcast transaction never meets it.
+A co-commit does not consult the voter: block inclusion is decisive for it.
+Before app-v28, its tombstone check existed only at the local REST submission
+boundary, so a directly broadcast transaction bypassed that guard. From H+1,
+consensus checks the content hash against the promoted reverse index before
+applying a co-commit (`processCoCommitSubmit`, `internal/abci/app.go:6043`).
 
-Closing it in consensus needs data that consensus state does not have. State
+Closing that gap required an index over consensus state. State
 carries `memory:<id>` as a content hash plus status, so the predicate "these
 exact bytes already left `proposed` under a different id" has no reverse lookup:
 answering it by scanning every memory is not a rule that can run per
@@ -133,12 +141,12 @@ public-memory commitment now and the tombstone rule in a later fork — was
 rejected by the owner on 2026-09-15 because it would cost a second activation
 ceremony for a chain that must upgrade in place.
 
-One point is left open here rather than assumed: whether the tombstone index
-keys are hashed directly by the KV rule like ordinary state, or excluded from it
-and committed through a root the way the public-memory index is. Hashing them
-directly is less code and needs no composite rule; committing a root keeps
-per-write churn out of the hash and matches the public-memory half. This is
-settled in the implementation, not in this contract.
+The implementation commits the promoted tombstone keys through the ordinary
+state hash. The app-v28 composite hash excludes the public-memory index nodes
+and local/staging keys; it retains the promoted `cocommit-tombstone:v1:` entries
+and promotion marker in the legacy component. The public-memory half is then
+committed through its sparse-tree root (`ComputePublicMemoryAppHash`,
+`internal/store/public_memory_stage.go:239`).
 
 ## What consumes the commitment
 
