@@ -2099,7 +2099,7 @@ vault-backed. A foreign request or result is never automatically journaled,
 embedded, indexed as memory, written to Badger/AppHash, or treated as trusted
 instructions (`internal/store/sqlite.go:4764-4837`,
 `internal/store/pipeline_transport.go:92-176`,
-	`shouldAutoJournalPipeline`, `api/rest/pipe_handler.go:2253-2262`).
+	`shouldAutoJournalPipeline`, `api/rest/pipe_handler.go:2259-2268`).
 
 ### `POST /v1/pipe/resolve`
 
@@ -2695,7 +2695,7 @@ transaction. Keyed sends use `SendLocalMessage` (`internal/store/messages.go:324
 unkeyed sends use `AdmitLocalMessage` (`internal/store/messages.go:403-439`). The route publishes
 the returned non-zero generation only after commit. A backend without that
 atomic canonical capability returns HTTP 501 before insertion
-(`handlePipeSend`, `api/rest/pipe_handler.go:648-1062`). Provider-only and
+(`handlePipeSend`, `api/rest/pipe_handler.go:652-1066`). Provider-only and
 federated rows do not allocate an exact-local wake sequence.
 
 **Response** (HTTP 201 fresh; HTTP 200 exact keyed replay):
@@ -2709,7 +2709,7 @@ address resolved from a bounded legacy-status offline cache can be accepted
 locally while the peer is down. Delivery waits for that peer to return and pass
 the fresh live authorization preflight above.
 
-**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:771-777`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6617` declaration, `:6619` payload, `:6622` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:792-794`) to 413.
+**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:771-777`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6620` declaration, `:6619` payload, `:6622` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:792-794`) to 413.
 
 **Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`). An index-backed COUNT and its INSERT run under the same write critical section, so parallel sends cannot race past either cap. Over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
 
@@ -2935,7 +2935,7 @@ HTTP 409 if already claimed.
 Submit a result for a claimed message. Purely local completion keeps the
 existing auto-journal summary. Federated completion does not journal and queues
 the result over the original agreement-bound return route
-(`handlePipeResult`, `api/rest/pipe_handler.go:1609-1911`).
+(`handlePipeResult`, `api/rest/pipe_handler.go:1615-1924`).
 
 **Request body:**
 
@@ -2946,7 +2946,7 @@ the result over the original agreement-bound return route
 | `source_chain_id` | string | for foreign work | Exact local reply-source chain returned as `reply_source_chain_id` by the pipe status preflight; prevents another node relabeling the signed result |
 | `claimant_session_id` | string | for foreign work; recommended for provider-addressed compatibility work | Opaque 1–128-byte session currently holding the claim. A provider-addressed row claimed by an older sessionless caller is fenced as `legacy`, and an omitted result session selects only that exact fence; it cannot bypass a named sibling session. |
 
-`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6883`, mapping `ErrPipeResultTooLarge` at `:6885-6886`).
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6886`, mapping `ErrPipeResultTooLarge` at `:6885-6886`).
 
 **Response** (HTTP 200):
 `{"status":"completed","journal_id":"<memory_id or empty>","journaled":true|false}`.

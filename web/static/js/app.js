@@ -12487,6 +12487,7 @@ function NetworkPage({ sse, accessMode = false }) {
                                                         onChange=${e => { setEditCapabilities(e.target.checked ? (editCapabilities | 16) : (editCapabilities & ~16)); setAccessDirty(true); }} />
                                                     <span>Block federated agent inbox messages (local notes remain available)</span>
                                                 </label>
+                                                <div class="muted">Blocking messages does not hide this agent from connected SAGEs. To hide it, turn off Visible in a connection’s Agent discovery settings.</div>
                                             </div>
 
                                             <div class="access-section-title">Domain Access <${HelpTip} text="Control which knowledge domains this agent can read, write, or modify. Modify is level 3 and includes permission to challenge/deprecate or reinstate memories. The domain owner normally authorizes the change. For an agent installed on this computer, the genesis admin can explicitly override access without changing the original owner or memory authorship." /></div>
@@ -17792,7 +17793,7 @@ function FedPermissionsPanel({ conn, connectionStatus, onRevoke, revokeBusy, loc
 			<div class="fed-perm-section-head">
 				<div>
 					<h4 id=${`fed-discovery-heading-${chain}`}>Agent discovery on ${peerName}</h4>
-					<p>Who ${peerName} can find when it lists or searches for an agent on this SAGE. Flip the Visible switch on any agent in the directory above, or use these two buttons to move all of them at once. This is listing and search only: it never grants memory access, and a discovered agent still has to accept before anything is delivered.</p>
+					<p>Who ${peerName} can find when it lists or searches for an agent on this SAGE. Flip the Visible switch on any agent in the directory above, or use these two buttons to move all of them at once. This is listing and search only: it never grants memory access, and a discovered agent still has to accept before anything is delivered. Agents with messaging blocked can remain visible as Not accepting.</p>
 				</div>
 				<span class="fed-discovery-summary" role="status" aria-live="polite">${agentExposure === null
 					? 'Loading…'

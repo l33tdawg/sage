@@ -327,7 +327,7 @@ The whole inner proof plus intent/payload/result use the local vault-backed
 storage path. Foreign completion creates no memory journal, and the result is
 atomically paired with its durable return outbox event before the peer is
 acknowledged (`internal/store/pipeline_transport.go:126-189`, `:256-326`;
-`handlePipeResult`, `api/rest/pipe_handler.go:1609-1911`).
+`handlePipeResult`, `api/rest/pipe_handler.go:1615-1924`).
 
 ### `POST /fed/v1/query/available`
 
@@ -842,11 +842,11 @@ binding application listeners and refuses startup if cleanup cannot be confirmed
 
 ## 4. The brain as a tool - `GET /v1/dashboard/memory/{id}/related`
 
-Powers the MRI click-to-explore "train of thought" board. Cookie-authed dashboard route (`web/handler.go:328`), handler `handleMemoryRelated` (`web/memory_related.go:97-262`).
+Powers the MRI click-to-explore "train of thought" board. Cookie-authed dashboard route (`web/handler.go:328`), handler `handleMemoryRelated` (`web/memory_related.go:98-325`).
 
-**Query params:** `k` (default 50, capped at 120; `memory_related.go:31-32`, `103-109`).
+**Query params:** `k` (default 50, capped at 120; `memory_related.go:31-32`, `105-111`).
 
-**Auth / RBAC:** an MCP-agent request (carrying `X-Agent-ID`) is restricted to its visible agents; the operator dashboard (cookie session, no `X-Agent-ID`) sees all (`resolveAgentRBAC`, `memory_related.go:118-123`). `404` if the memory is not found.
+**Auth / RBAC:** an MCP-agent request (carrying `X-Agent-ID`) is restricted to its visible agents; the operator dashboard (cookie session, no `X-Agent-ID`) sees all (`resolveAgentRBAC`, `memory_related.go:120-125`). `404` if the memory is not found.
 
 **How related memories are ranked** (no embeddings required, `memory_related.go:17-28`): chain lineage via `parent_hash` (weight 6.0, `chain`), shared tags (2.0, `same-topic`), full-text content overlap (FTS when available, else in-process word overlap on an encrypted vault; `similar`), and same-domain high-confidence filler (0.25, `same-lobe`) so the panel is never empty. Ties break on memory id for stability.
 

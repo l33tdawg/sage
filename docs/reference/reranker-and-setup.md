@@ -131,7 +131,7 @@ tools read: `recall_top_k` and `recall_min_confidence`. Routes at
 
 ### `GET /v1/dashboard/settings/recall`
 
-Returns the current values (`handleGetRecallSettings`, `web/handler.go:5298-5330`).
+Returns the current values (`handleGetRecallSettings`, `web/handler.go:5315-5361`).
 
 **Response** (HTTP 200): `{"top_k": 5, "min_confidence": 70}`
 
@@ -147,7 +147,7 @@ to inspect lower-confidence results within the same authorization scope
 
 ### `POST /v1/dashboard/settings/recall`
 
-Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:5366-5419`).
+Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:5383-5436`).
 
 **Request:** `{"top_k": 10, "min_confidence": 75}`
 **Response** (HTTP 200): `{"ok": true, "top_k": 10, "min_confidence": 75}`
