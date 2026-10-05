@@ -127,6 +127,9 @@ func (m *Manager) doPeerRequest(ctx context.Context, agreement *store.CrossFedRe
 }
 
 func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store.CrossFedRecord, method, path string, payload any, headers http.Header) ([]byte, int, error) {
+	if _, traced := ctx.Value(peerRouteTraceKey{}).(*peerRouteTrace); !traced {
+		ctx, _ = WithPeerRouteAttemptTrace(ctx)
+	}
 	if !m.transportIsEnabled() {
 		err := errors.New("federation transport is disabled")
 		m.recordRouteFailure(agreement.RemoteChainID, err, false)
@@ -296,12 +299,15 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 			if !p2pOnly {
 				attempts = append(attempts, routeDialAttempt{
 					dial: func(attemptCtx context.Context) (PeerRouteDialResult, error) {
+						complete := BeginPeerRouteAttempt(attemptCtx, RouteKindDirect, address)
 						start := time.Now()
 						conn, dialErr := directDialer.DialContext(attemptCtx, network, address)
-						return authenticate(attemptCtx, PeerRouteDialResult{
+						result, dialErr := authenticate(attemptCtx, PeerRouteDialResult{
 							Conn: conn, Kind: RouteKindDirect, Target: address,
 							Latency: time.Since(start),
 						}, dialErr)
+						complete(dialErr)
+						return result, dialErr
 					},
 				})
 			}
@@ -313,6 +319,7 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 				attempts = append(attempts, routeDialAttempt{
 					delay: delay,
 					dial: func(attemptCtx context.Context) (PeerRouteDialResult, error) {
+						noteP2PSelectorStarted(attemptCtx)
 						result, handled, dialErr := routeDial(attemptCtx, agreement.RemoteChainID, frozenRouteTargets, authenticate)
 						if !handled {
 							return PeerRouteDialResult{}, errors.New("peer has no configured p2p route")
@@ -362,7 +369,9 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 	resp, err := client.Do(req)
 	if err != nil {
 		securityFailure := isSecurityTransportError(err)
-		m.recordRouteFailure(agreement.RemoteChainID, err, securityFailure)
+		verdict := peerTransportVerdict(err)
+		failure := newPeerRequestFailure(ctx, agreement.Endpoint, method, path, verdict, 0, err)
+		m.recordRouteFailure(agreement.RemoteChainID, failure, securityFailure)
 		if !securityFailure && path != p2pRoutesExchangePath {
 			// UI/status polling must not create a refresh storm while a peer is
 			// offline. One bounded refresh per minute is enough; the lifecycle
@@ -377,12 +386,15 @@ func (m *Manager) doPeerRequestWithHeaders(ctx context.Context, agreement *store
 			// branch on. ErrPeerOffline stays in the chain either way, so retry
 			// classification is unchanged.
 			if code := RouteRecoveryFailureCode(err); code != "" {
-				return nil, 0, routeRecoveryError(code,
+				cause := routeRecoveryError(code,
 					fmt.Errorf("%w: peer %s: %v", ErrPeerOffline, agreement.RemoteChainID, err))
+				return nil, 0, newPeerRequestFailure(ctx, agreement.Endpoint, method, path, verdict, 0, cause)
 			}
-			return nil, 0, fmt.Errorf("%w: peer %s: %v", ErrPeerOffline, agreement.RemoteChainID, err)
+			cause := fmt.Errorf("%w: peer %s: %v", ErrPeerOffline, agreement.RemoteChainID, err)
+			return nil, 0, newPeerRequestFailure(ctx, agreement.Endpoint, method, path, verdict, 0, cause)
 		}
-		return nil, 0, fmt.Errorf("peer %s unreachable: %w", agreement.RemoteChainID, err)
+		cause := fmt.Errorf("peer %s unreachable: %w", agreement.RemoteChainID, err)
+		return nil, 0, newPeerRequestFailure(ctx, agreement.Endpoint, method, path, verdict, 0, cause)
 	}
 	selectedMu.Lock()
 	chosen := selected
@@ -1014,19 +1026,34 @@ func (m *Manager) fetchPeerStatusWithHeaders(ctx context.Context, agreement *sto
 	if agreement == nil {
 		return nil, fmt.Errorf("peer status agreement is unavailable")
 	}
+	ctx, _ = WithPeerRouteAttemptTrace(ctx)
 	body, status, err := m.doPeerRequestWithHeaders(ctx, agreement, http.MethodGet, "/fed/v1/status", nil, headers)
 	if err != nil {
+		if PeerRequestFailureDiagnostic(err) == nil {
+			err = newPeerRequestFailure(ctx, agreement.Endpoint, http.MethodGet, "/fed/v1/status", peerTransportVerdict(err), status, err)
+		}
+		m.recordPeerRequestFailure(agreement.RemoteChainID, err)
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("peer %s returned %d: %s", agreement.RemoteChainID, status, truncate(body, 200))
+		// Never retain the peer's response body in an operator failure string.
+		err = newPeerRequestFailure(ctx, agreement.Endpoint, http.MethodGet, "/fed/v1/status", "http_failure", status,
+			fmt.Errorf("peer %s returned %d", agreement.RemoteChainID, status))
+		m.recordPeerRequestFailure(agreement.RemoteChainID, err)
+		return nil, err
 	}
 	var out StatusResponse
 	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("decode peer response: %w", err)
+		failure := newPeerRequestFailure(ctx, agreement.Endpoint, http.MethodGet, "/fed/v1/status", "invalid_response", status,
+			fmt.Errorf("decode peer response: %w", err))
+		m.recordPeerRequestFailure(agreement.RemoteChainID, failure)
+		return nil, failure
 	}
 	if out.ChainID != agreement.RemoteChainID {
-		return nil, fmt.Errorf("peer identifies as %q, agreement expects %q", out.ChainID, agreement.RemoteChainID)
+		failure := newPeerRequestFailure(ctx, agreement.Endpoint, http.MethodGet, "/fed/v1/status", "peer_identity_mismatch", status,
+			fmt.Errorf("peer identifies as %q, agreement expects %q", out.ChainID, agreement.RemoteChainID))
+		m.recordPeerRequestFailure(agreement.RemoteChainID, failure)
+		return nil, failure
 	}
 	return &out, nil
 }

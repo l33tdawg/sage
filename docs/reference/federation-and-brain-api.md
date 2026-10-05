@@ -516,6 +516,30 @@ with the runtime allowlist. Older peers return 404 and remain Direct-only; the
 agreement itself stays valid. Revocation removes the stored route and inbound
 admission.
 
+Route repair already runs at startup, every five minutes, and after local
+address changes. A non-security request failure, or a Direct winner when a P2P
+selector is available, also admits an asynchronous refresh, deduplicated for the
+exact agreement/control generation and limited to once per minute. Refresh
+exchanges the current bundle under pinned peer authentication; it cannot fix an
+unreachable listener or replace JOIN trust (`internal/federation/routes.go`,
+`runScheduledRouteRefresh`, `StartRouteRefresher`; `internal/federation/client.go`,
+`doPeerRequestWithHeaders`; `cmd/sage-gui/federation_routes.go`,
+`watchFederationRouteChanges`).
+
+For a known peer, use the connection's **Retry** action to share one bounded
+route exchange and one authenticated `/fed/v1/status` re-probe of the frozen
+agreement/control generation. A retained old-generation address may bootstrap
+only `/fed/v1/p2p/routes` under the current pinned credentials; protected data
+requests still refuse its stale route binding. Authentication failures stop
+recovery. Pair again only when the recovery verdict reports an unprovable legacy
+binding or the operator has verified that JOIN trust needs replacement; a
+timeout alone does not establish that. These checks use recorded candidates,
+without inferring a route from an old IP address (`internal/federation/client.go`,
+`RetryPeerStatus`, `runPeerStatusRetry`, `doPeerRequestWithHeaders`;
+`internal/federation/routes.go`, `routeRefreshAgreementBinding`;
+`internal/federation/concrete_endpoint_generation_recovery_test.go`;
+`internal/federation/p2p_only_generation_recovery_test.go`).
+
 ### `POST /fed/v1/connection/revoke-notice` (established peers)
 
 Permanent revoke first commits the initiating operator's local tx-34. Only
@@ -764,6 +788,32 @@ failed probes so a row does not disappear during recovery. A failure includes
 must render `failure_state` first; a previous Direct/Relay success cannot
 override a current trust or reachability failure
 (`web/federation_route_status.go`; `web/static/js/federation-route-state.js`).
+
+Failed authenticated status probes retain `route.request_failure` operational
+metadata: the sanitized status `endpoint`, `transport_verdict`, optional
+`http_status`, bounded `candidates`, and an operator `remedy`. Each candidate
+contains `kind`, `target`, and `verdict` and is recorded only when its dial
+actually starts, after any race delay; at most eight are retained. A
+`p2p_selector_started` flag reports entry into a selector even when a custom
+selector does not provide candidate hooks. An absent relay attempt therefore
+does not prove relay unavailability. Connected transport can coexist with an
+HTTP, response-decoding, or peer-identity failure. Candidate snapshots cannot
+be rewritten by a late losing worker (`internal/federation/request_diagnostics.go`;
+`internal/federation/client.go`, `fetchPeerStatusWithHeaders`;
+`internal/federation/routes.go`, `RouteDiagnostics`;
+`cmd/sage-gui/federation_routes.go`, `dialFederationP2PRouteTargets`).
+
+Reply delivery preflight checks the exact originating chain and its current
+policy epoch before probing that recorded peer's `/fed/v1/status`. A failed
+probe keeps the completed reply and return event for the existing retry path;
+its persisted outbox `last_error` now names the failing endpoint, verdict,
+actual candidate attempts, and the same remedy. URL credentials, queries,
+fragments, raw transport messages, and peer response bodies are excluded.
+Recipient-resolution HTTP problems keep their generic responses, so this
+operational evidence does not become a directory or authorization proof
+(`internal/federation/pipe_outbox.go`, `preflightPipelineResultPeer`,
+`recordPipelineDeliveryError`; `internal/federation/request_diagnostics.go`;
+`api/rest/pipe_handler.go`, `writeRemotePipeTargetError`).
 
 CEREBRUM treats this as an admin-management surface: active connection rows
 open their Read/Copy details and expose the everyday Pause/Resume action;

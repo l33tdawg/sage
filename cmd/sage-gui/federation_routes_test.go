@@ -208,6 +208,34 @@ func TestDialFederationP2PRouteTargetsReportsReusedLiveRelay(t *testing.T) {
 	require.NoError(t, winner.Conn.Close())
 }
 
+func TestFederationRouteTraceReportsOnlyActualCandidateStarts(t *testing.T) {
+	direct := "/ip4/192.0.2.10/tcp/4001/p2p/peer"
+	relay := "/ip4/192.0.2.20/tcp/4001/p2p/relay/p2p-circuit/p2p/peer"
+	ctx, snapshot := federation.WithPeerRouteAttemptTrace(context.Background())
+	_, handled, err := dialFederationP2PRouteTargets(ctx, []string{direct, relay},
+		func(context.Context, string) (net.Conn, error) { return nil, context.DeadlineExceeded }, nil)
+	require.True(t, handled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	attempts := snapshot()
+	require.Len(t, attempts, 2)
+	assert.Contains(t, attempts, federation.PeerRouteAttempt{Kind: federation.RouteKindP2PDirect, Target: direct, Verdict: federation.RouteRecoveryTimeout})
+	assert.Contains(t, attempts, federation.PeerRouteAttempt{Kind: federation.RouteKindRelay, Target: relay, Verdict: federation.RouteRecoveryTimeout})
+
+	// The relay head-start timer must not be reported as an attempted dial
+	// when the caller's deadline ends before that candidate starts.
+	shortCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	shortCtx, snapshot = federation.WithPeerRouteAttemptTrace(shortCtx)
+	_, handled, err = dialFederationP2PRouteTargets(shortCtx, []string{relay},
+		func(context.Context, string) (net.Conn, error) {
+			t.Error("relay must not start before its delayed candidate is admitted")
+			return nil, context.DeadlineExceeded
+		}, nil)
+	require.True(t, handled)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Empty(t, snapshot())
+}
+
 func TestExpiredPersistedFederationRouteRemainsRecoveryHintAndSynthesizesRelay(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("SAGE_HOME", tmp)
