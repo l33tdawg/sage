@@ -589,7 +589,7 @@ h1 em {
 .new-feature p { font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
 
 /* ─── Screenshot Grid + Lightbox ─── */
-.screenshot-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; max-width: 100%; margin-top: 40px; }
+.screenshot-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; max-width: 100%; margin-top: 40px; }
 .screenshot-thumb {
   position: relative; border-radius: 10px; overflow: hidden;
   border: 1px solid var(--border); cursor: pointer;
@@ -1048,8 +1048,8 @@ footer a:hover { text-decoration: underline; }
         <div><div class="section-tag">Inside the product</div><h2 id="dashboard-heading">See what your agents remember.</h2></div>
         <p class="section-desc">CEREBRUM is SAGE's local dashboard. Explore project memories, inspect records and manage agent access.</p>
       </div>
-      <button class="dashboard-shot" onclick="openLightbox(0)" aria-label="Enlarge the CEREBRUM dashboard screenshot"><img src="screen-brain.png" width="1440" height="939" alt="CEREBRUM dashboard showing memories grouped inside its 3D brain view" loading="lazy" decoding="async"></button>
-      <p class="dashboard-caption">CEREBRUM dashboard screenshot. Appearance varies by release and configuration.</p>
+      <button class="dashboard-shot" onclick="openLightbox(0)" aria-label="Enlarge the CEREBRUM dashboard screenshot"><img src="screen-brain.png" width="1440" height="1040" alt="CEREBRUM v11.23.14 brain view showing synthetic sample memories and domains" loading="lazy" decoding="async"></button>
+      <p class="dashboard-caption">CEREBRUM v11.23.14 with synthetic sample data. Appearance varies by release and configuration.</p>
       <a class="brand-source" href="#features" onclick="switchTab('features');return false;">Explore SAGE's capabilities &rarr;</a>
     </div>
   </section>
@@ -1158,12 +1158,14 @@ footer a:hover { text-decoration: underline; }
         <div class="reveal" style="text-align:center;margin-bottom:40px;">
           <div class="section-tag">Dashboard</div>
           <h2>See it in action</h2>
+          <p class="section-desc" style="margin:12px auto 0;">Current CEREBRUM UI, captured with synthetic sample data.</p>
         </div>
         <div class="reveal">
           <div class="screenshot-grid">
-            <div class="screenshot-thumb" onclick="openLightbox(0)"><img src="screen-brain.png" alt="CEREBRUM MRI brain" loading="lazy"><div class="screenshot-label">MRI Brain</div></div>
-            <div class="screenshot-thumb" onclick="openLightbox(1)"><img src="screen-network.png" alt="Federation" loading="lazy"><div class="screenshot-label">Federation</div></div>
-            <div class="screenshot-thumb" onclick="openLightbox(2)"><img src="screen-config.png" alt="Recall Engine" loading="lazy"><div class="screenshot-label">Recall Engine</div></div>
+            <div class="screenshot-thumb" onclick="openLightbox(0)"><img src="screen-brain.png" alt="CEREBRUM brain view with synthetic sample memories" loading="lazy"><div class="screenshot-label">Brain · sample data</div></div>
+            <div class="screenshot-thumb" onclick="openLightbox(1)"><img src="screen-network.png" alt="CEREBRUM Federation with synthetic sample connections" loading="lazy"><div class="screenshot-label">Federation · sample data</div></div>
+            <div class="screenshot-thumb" onclick="openLightbox(2)"><img src="screen-config.png" alt="CEREBRUM Recall settings with synthetic sample configuration" loading="lazy"><div class="screenshot-label">Recall settings · sample data</div></div>
+            <div class="screenshot-thumb" onclick="openLightbox(3)"><img src="screen-overview.png" alt="CEREBRUM Overview with synthetic sample node health and agents" loading="lazy"><div class="screenshot-label">Overview · sample data</div></div>
           </div>
         </div>
       </div>
@@ -1747,15 +1749,16 @@ function copyPrompt(box) {
 
 // ─── Screenshot Lightbox ───
 const lbImages = [
-  { src: 'screen-brain.png', caption: 'CEREBRUM MRI brain, showing memory focus, related notes, and the train-of-thought view' },
-  { src: 'screen-network.png', caption: 'Federation, with LAN and internet SAGE-to-SAGE links with a consent-gated join ceremony' },
-  { src: 'screen-config.png', caption: 'Recall Engine: semantic setup, managed reranker, and recall tuning' },
-  { src: 'screen-overview.png', caption: 'Overview showing chain health, agents, federation, embeddings, and update status' },
+  { src: 'screen-brain.png', caption: 'CEREBRUM v11.23.14 brain and domain sources — synthetic sample data' },
+  { src: 'screen-network.png', caption: 'CEREBRUM v11.23.14 Federation and direct connections — synthetic sample data' },
+  { src: 'screen-config.png', caption: 'CEREBRUM v11.23.14 Recall settings: embeddings, memory mode and recall tuning — synthetic sample data' },
+  { src: 'screen-overview.png', caption: 'CEREBRUM v11.23.14 Overview: chain health, agents, federation and embeddings — synthetic sample data' },
 ];
 let lbIdx = 0;
 function openLightbox(idx) {
   lbIdx = idx;
   document.getElementById('lightboxImg').src = lbImages[idx].src;
+  document.getElementById('lightboxImg').alt = lbImages[idx].caption;
   document.getElementById('lightboxCaption').textContent = lbImages[idx].caption;
   document.getElementById('lightbox').classList.add('open');
   document.body.style.overflow = 'hidden';
@@ -1769,6 +1772,7 @@ function lightboxNav(e, dir) {
   e.stopPropagation();
   lbIdx = (lbIdx + dir + lbImages.length) % lbImages.length;
   document.getElementById('lightboxImg').src = lbImages[lbIdx].src;
+  document.getElementById('lightboxImg').alt = lbImages[lbIdx].caption;
   document.getElementById('lightboxCaption').textContent = lbImages[lbIdx].caption;
 }
 document.addEventListener('keydown', (e) => {
