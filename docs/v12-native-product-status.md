@@ -19,9 +19,11 @@ The [stable-to-beta audit](v12-stable-parity-audit.md) compares stable
 `019327c0` with beta `25b03045` and records the messaging, lifecycle, storage,
 consensus, and reliability changes still to carry across. The native code
 baseline remains **v11.19.0 / app-v27**; this audit does not advance it.
-Stable release preparation is tracked separately in
-[PR #416](https://github.com/l33tdawg/sage/pull/416), pending at the time of this
-entry. The August status and evidence below describe their original baseline.
+Stable release preparation is tracked separately in merged
+[PR #416](https://github.com/l33tdawg/sage/pull/416). The v11.23.15 tag points to
+`bf037ff5`; publication is in progress, with public availability still requiring
+release-asset verification. The August status and evidence below describe their
+original baseline.
 
 The first focused Brain menu, keyboard, and focus slice can use deterministic
 preview data independently of backend convergence. Attaching to current stable

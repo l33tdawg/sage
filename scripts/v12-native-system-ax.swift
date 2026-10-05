@@ -59,7 +59,7 @@ private struct Arguments {
 private let usage = """
 usage:
   v12-native-system-ax --preflight [--prompt]
-  v12-native-system-ax --pid <pid> --scenario <retry-fail|retry-restore> [--timeout <seconds>]
+  v12-native-system-ax --pid <pid> --scenario <retry-fail|retry-restore|brain-menu-focus> [--timeout <seconds>]
 """
 
 private let clock = ContinuousClock()
@@ -178,6 +178,15 @@ private func focusedIdentifier() -> String? {
     return stringAttribute(focused, kAXIdentifierAttribute as CFString)
 }
 
+private func ownsExactFocus(_ expected: AXUIElement, application: AXUIElement, pid: pid_t) -> Bool {
+    guard let applicationFocused = focusedElement(application),
+          let systemFocused = focusedElement(AXUIElementCreateSystemWide()) else { return false }
+    var focusedPID: pid_t = 0
+    return AXUIElementGetPid(systemFocused, &focusedPID) == .success && focusedPID == pid &&
+        CFEqual(applicationFocused, expected) && CFEqual(systemFocused, expected) &&
+        boolAttribute(expected, kAXFocusedAttribute as CFString) == true
+}
+
 private func waitForFocus(
     element expected: AXUIElement,
     application: AXUIElement,
@@ -200,6 +209,18 @@ private func waitForFocus(
         }
         usleep(20_000)
     }
+    var details: [String: Any] = ["expected": snapshot(expected),
+        "expected_focused": boolAttribute(expected, kAXFocusedAttribute as CFString) as Any? ?? NSNull()]
+    if let appFocus = focusedElement(application) {
+        details["application_focused"] = snapshot(appFocus)
+        details["application_equal"] = CFEqual(appFocus, expected)
+    }
+    if let systemFocus = focusedElement(system) {
+        details["system_focused"] = snapshot(systemFocus)
+        details["system_equal"] = CFEqual(systemFocus, expected)
+    }
+    let data = try JSONSerialization.data(withJSONObject: ["focus_diagnostic": details], options: [.sortedKeys])
+    FileHandle.standardError.write(data + Data("\n".utf8))
     throw ProbeFailure.timeout("system and application AX focus did not reach the exact expected element")
 }
 
@@ -235,11 +256,227 @@ private func assertRetryReady(_ element: AXUIElement) throws {
     }
 }
 
+private func attributeCount(_ element: AXUIElement, _ name: CFString) -> Int {
+    var count: CFIndex = 0
+    guard AXUIElementGetAttributeValueCount(element, name, &count) == .success else { return 0 }
+    return count
+}
+
+private func elementArrayAttribute(_ element: AXUIElement, _ name: CFString) -> [AXUIElement] {
+    guard let values = attribute(element, name) as? [AnyObject] else { return [] }
+    return values.compactMap {
+        guard CFGetTypeID($0) == AXUIElementGetTypeID() else { return nil }
+        return unsafeDowncast($0, to: AXUIElement.self)
+    }
+}
+
+private func press(_ element: AXUIElement, operation: String) throws -> AXError {
+    let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+    // cannotComplete can mean the app entered menu tracking before replying.
+    // Never repeat the action: the following observed state must prove its effect.
+    guard result == .success || result == .cannotComplete else {
+        throw ProbeFailure.ax(operation, result)
+    }
+    return result
+}
+
+private func waitForMatch(
+    in root: AXUIElement,
+    deadline: ContinuousClock.Instant,
+    description: String,
+    predicate: (AXUIElement) -> Bool
+) throws -> AXUIElement {
+    while clock.now < deadline {
+        if let match = findElement(in: root, predicate: predicate) { return match }
+        usleep(20_000)
+    }
+    throw ProbeFailure.timeout("timed out waiting for \(description)")
+}
+
+private func pressMenuPath(
+    _ path: [String], application: AXUIElement, deadline: ContinuousClock.Instant
+) throws -> [String: Any] {
+    guard let first = path.first, path.count >= 2,
+          let menuBar = elementAttribute(application, kAXMenuBarAttribute as CFString)
+    else { throw ProbeFailure.assertion("application has no AX menu bar") }
+    FileHandle.standardError.write(Data("AX menu: \(path.joined(separator: " > "))\n".utf8))
+    var parent = try waitForMatch(in: menuBar, deadline: deadline, description: "menu \(first)") {
+        stringAttribute($0, kAXRoleAttribute as CFString) == (kAXMenuBarItemRole as String) &&
+            stringAttribute($0, kAXTitleAttribute as CFString) == first
+    }
+    var results: [Int32] = []
+    results.append(try press(parent, operation: "AXPress menu \(first)").rawValue)
+    for title in path.dropFirst() {
+        let item = try waitForMatch(in: parent, deadline: deadline, description: "menu item \(title)") {
+            stringAttribute($0, kAXRoleAttribute as CFString) == (kAXMenuItemRole as String) &&
+                stringAttribute($0, kAXTitleAttribute as CFString) == title &&
+                boolAttribute($0, kAXEnabledAttribute as CFString) == true
+        }
+        results.append(try press(item, operation: "AXPress \(title)").rawValue)
+        parent = item
+    }
+    return ["path": path, "ax_press_results": results]
+}
+
+private func waitForAbsence(identifier: String, application: AXUIElement, deadline: ContinuousClock.Instant) throws {
+    while clock.now < deadline {
+        if findElement(identifier: identifier, in: application) == nil { return }
+        usleep(20_000)
+    }
+    throw ProbeFailure.timeout("system AX element remained mounted: \(identifier)")
+}
+
+private func waitForTable(
+    _ identifier: String, application: AXUIElement, pid: pid_t,
+    deadline: ContinuousClock.Instant
+) throws -> AXUIElement {
+    let table: AXUIElement
+    do {
+        table = try waitForMatch(in: application, deadline: deadline, description: "row-bearing AX table \(identifier)") {
+            stringAttribute($0, kAXIdentifierAttribute as CFString) == identifier &&
+                [kAXTableRole as String, kAXOutlineRole as String].contains(stringAttribute($0, kAXRoleAttribute as CFString) ?? "") &&
+                attributeCount($0, kAXRowsAttribute as CFString) > 0 &&
+                ownsExactFocus($0, application: application, pid: pid)
+        }
+    } catch {
+        var matches: [[String: Any]] = []
+        _ = findElement(in: application) { element in
+            if stringAttribute(element, kAXIdentifierAttribute as CFString) == identifier, matches.count < 8 {
+                var details = snapshot(element)
+                details["row_count"] = attributeCount(element, kAXRowsAttribute as CFString)
+                matches.append(details)
+            }
+            return false
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["table_diagnostic": matches, "focused_identifier": focusedIdentifier() ?? ""], options: [.sortedKeys])
+        FileHandle.standardError.write(data + Data("\n".utf8))
+        throw error
+    }
+    try waitForFocus(element: table, application: application, pid: pid, deadline: deadline)
+    return table
+}
+
+private func selectedRowContains(_ table: AXUIElement, text: String) -> Bool {
+    let selected = elementArrayAttribute(table, kAXSelectedRowsAttribute as CFString)
+    guard selected.count == 1 else { return false }
+    return findElement(in: selected[0]) {
+        stringAttribute($0, kAXValueAttribute as CFString) == text ||
+            stringAttribute($0, kAXTitleAttribute as CFString) == text ||
+            stringAttribute($0, kAXDescriptionAttribute as CFString) == text
+    } != nil
+}
+
+private func waitForSelectedRow(
+    _ text: String, tableIdentifier: String, application: AXUIElement,
+    deadline: ContinuousClock.Instant
+) throws -> AXUIElement {
+    while clock.now < deadline {
+        if let table = findElement(in: application, predicate: {
+            stringAttribute($0, kAXIdentifierAttribute as CFString) == tableIdentifier &&
+                [kAXTableRole as String, kAXOutlineRole as String].contains(stringAttribute($0, kAXRoleAttribute as CFString) ?? "")
+        }), selectedRowContains(table, text: text) { return table }
+        usleep(20_000)
+    }
+    throw ProbeFailure.timeout("the expected synthetic fixture row was not selected")
+}
+
+private func postSyntheticKey(_ keyCode: CGKeyCode, flags: CGEventFlags, pid: pid_t) throws {
+    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+          let focus = focusedElement(AXUIElementCreateSystemWide()) else {
+        throw ProbeFailure.assertion("refusing keyboard injection outside the target foreground app")
+    }
+    var focusPID: pid_t = 0
+    guard AXUIElementGetPid(focus, &focusPID) == .success, focusPID == pid,
+          CGPreflightPostEventAccess(),
+          let source = CGEventSource(stateID: .combinedSessionState),
+          let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+          let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
+    else { throw ProbeFailure.assertion("synthetic keyboard event posting is unavailable or focus left the target") }
+    down.flags = flags
+    up.flags = flags
+    down.post(tap: .cgSessionEventTap)
+    up.post(tap: .cgSessionEventTap)
+}
+
+private func runBrainMenuFocus(
+    application: AXUIElement, pid: pid_t, deadline: ContinuousClock.Instant
+) throws -> [String: Any] {
+    var actions: [[String: Any]] = []
+    actions.append(try pressMenuPath(["Navigate", "Brain"], application: application, deadline: deadline))
+    actions.append(try pressMenuPath(["View", "Brain Presentation", "List View"], application: application, deadline: deadline))
+    let initialTable = try waitForTable("brain-memory-table", application: application, pid: pid, deadline: deadline)
+    var initialTableSnapshot = snapshot(initialTable)
+    initialTableSnapshot["row_count"] = attributeCount(initialTable, kAXRowsAttribute as CFString)
+    guard attributeCount(initialTable, kAXRowsAttribute as CFString) > 0 else {
+        throw ProbeFailure.assertion("memory table exposes no AX rows")
+    }
+    try postSyntheticKey(125, flags: [], pid: pid) // Down arrow; external WindowServer injection, never physical HID.
+    _ = try waitForSelectedRow("Native CEREBRUM architecture", tableIdentifier: "brain-memory-table", application: application, deadline: deadline)
+    _ = try waitForElement(identifier: "brain-inspector-close", in: application, deadline: deadline)
+    actions.append(try pressMenuPath(["View", "Hide Inspector"], application: application, deadline: deadline))
+    try waitForAbsence(identifier: "brain-inspector-close", application: application, deadline: deadline)
+    let hiddenTable = try waitForTable("brain-memory-table", application: application, pid: pid, deadline: deadline)
+    guard selectedRowContains(hiddenTable, text: "Native CEREBRUM architecture"),
+          findElement(identifier: "brain-inspector-close", in: application) == nil else {
+        throw ProbeFailure.assertion("hiding the inspector lost selection or left its close control mounted")
+    }
+    actions.append(try pressMenuPath(["View", "Show Inspector"], application: application, deadline: deadline))
+    let close = try waitForElement(identifier: "brain-inspector-close", in: application, deadline: deadline) {
+        stringAttribute($0, kAXRoleAttribute as CFString) == (kAXButtonRole as String)
+    }
+    try waitForFocus(element: close, application: application, pid: pid, deadline: deadline)
+    let closeSnapshot = snapshot(close)
+    _ = try press(close, operation: "AXPress Brain inspector close")
+    try waitForAbsence(identifier: "brain-inspector-close", application: application, deadline: deadline)
+    let restoredTable = try waitForTable("brain-memory-table", application: application, pid: pid, deadline: deadline)
+    guard selectedRowContains(restoredTable, text: "Native CEREBRUM architecture") else {
+        throw ProbeFailure.assertion("closing the inspector lost the selected memory")
+    }
+    try postSyntheticKey(34, flags: [.maskControl, .maskCommand], pid: pid) // Control-Command-I.
+    let keyboardClose = try waitForElement(identifier: "brain-inspector-close", in: application, deadline: deadline)
+    try waitForFocus(element: keyboardClose, application: application, pid: pid, deadline: deadline)
+    actions.append(try pressMenuPath(["View", "Hide Inspector"], application: application, deadline: deadline))
+    try waitForAbsence(identifier: "brain-inspector-close", application: application, deadline: deadline)
+    _ = try waitForTable("brain-memory-table", application: application, pid: pid, deadline: deadline)
+    actions.append(try pressMenuPath(["View", "Brain Mode", "Agent Network"], application: application, deadline: deadline))
+    let agentTable = try waitForTable("brain-connectome-table", application: application, pid: pid, deadline: deadline)
+    guard attributeCount(agentTable, kAXRowsAttribute as CFString) == 3 else {
+        throw ProbeFailure.assertion("agent table is not the three-row synthetic fixture")
+    }
+    try postSyntheticKey(125, flags: [], pid: pid)
+    _ = try waitForSelectedRow("Codex", tableIdentifier: "brain-connectome-table", application: application, deadline: deadline)
+    actions.append(try pressMenuPath(["View", "Show Inspector"], application: application, deadline: deadline))
+    let agentClose = try waitForElement(identifier: "brain-inspector-close", in: application, deadline: deadline)
+    try waitForFocus(element: agentClose, application: application, pid: pid, deadline: deadline)
+    _ = try press(agentClose, operation: "AXPress agent inspector close")
+    try waitForAbsence(identifier: "brain-inspector-close", application: application, deadline: deadline)
+    let finalTable = try waitForTable("brain-connectome-table", application: application, pid: pid, deadline: deadline)
+    guard selectedRowContains(finalTable, text: "Codex") else {
+        throw ProbeFailure.assertion("closing the agent inspector lost selection")
+    }
+    var finalSnapshot = snapshot(finalTable)
+    finalSnapshot["row_count"] = attributeCount(finalTable, kAXRowsAttribute as CFString)
+    return [
+        "menu_actions": actions,
+        "initial_table": initialTableSnapshot,
+        "inspector_close": closeSnapshot,
+        "final": finalSnapshot,
+        "memory_selection_preserved": true,
+        "agent_selection_preserved": true,
+        "exact_application_and_system_focus": true,
+        "synthetic_windowserver_keyboard_events": true,
+        "physical_keyboard_event_routing": false,
+        "keyboard_sequence": ["Down", "Control-Command-I", "Down"],
+        "fixture_focus_injection": false,
+        "focused_identifier": focusedIdentifier() ?? "",
+    ]
+}
+
 private func runScenario(arguments: Arguments) throws -> [String: Any] {
     let startedAt = Date()
     let startedInstant = clock.now
     guard let pid = arguments.pid, let scenario = arguments.scenario,
-          ["retry-fail", "retry-restore"].contains(scenario)
+          ["retry-fail", "retry-restore", "brain-menu-focus"].contains(scenario)
     else { throw ProbeFailure.usage(usage) }
 
     let application = AXUIElementCreateApplication(pid)
@@ -248,26 +485,53 @@ private func runScenario(arguments: Arguments) throws -> [String: Any] {
     guard AXUIElementGetPid(application, &reportedPID) == .success, reportedPID == pid else {
         throw ProbeFailure.assertion("AX application PID does not match the requested process")
     }
-    guard let runningApplication = NSRunningApplication(processIdentifier: pid),
+    let deadline = clock.now + .milliseconds(Int(arguments.timeoutSeconds * 1_000))
+    var candidate = NSRunningApplication(processIdentifier: pid)
+    while clock.now < deadline, candidate?.bundleIdentifier == nil {
+        guard kill(pid, 0) == 0 else { throw ProbeFailure.assertion("target process exited before application registration") }
+        usleep(20_000)
+        candidate = NSRunningApplication(processIdentifier: pid)
+    }
+    guard let runningApplication = candidate,
           runningApplication.bundleIdentifier == "com.sage.cerebrum.beta"
     else { throw ProbeFailure.assertion("target process is not com.sage.cerebrum.beta") }
     let targetBundle = runningApplication.bundleURL.flatMap(Bundle.init(url:))
     _ = runningApplication.activate(options: [.activateAllWindows])
-    guard stringAttribute(application, kAXRoleAttribute as CFString) == (kAXApplicationRole as String) else {
-        throw ProbeFailure.assertion("target is not exposed as AXApplication")
-    }
-    let deadline = clock.now + .milliseconds(Int(arguments.timeoutSeconds * 1_000))
-    while clock.now < deadline {
-        if findElement(in: application, predicate: {
-            stringAttribute($0, kAXRoleAttribute as CFString) == (kAXWindowRole as String) &&
-                stringAttribute($0, kAXTitleAttribute as CFString) == "SAGE CEREBRUM"
-        }) != nil { break }
+    while clock.now < deadline,
+          stringAttribute(application, kAXRoleAttribute as CFString) != (kAXApplicationRole as String) {
         usleep(20_000)
     }
-    guard findElement(in: application, predicate: {
+    guard stringAttribute(application, kAXRoleAttribute as CFString) == (kAXApplicationRole as String) else {
+        throw ProbeFailure.timeout("target was not exposed as AXApplication before the deadline")
+    }
+    let expectedWindowTitles: Set<String> = scenario == "brain-menu-focus"
+        ? ["SAGE CEREBRUM", "Overview"] : ["SAGE CEREBRUM", "Brain"]
+    let window = try waitForMatch(in: application, deadline: deadline, description: "main native AX window") {
         stringAttribute($0, kAXRoleAttribute as CFString) == (kAXWindowRole as String) &&
-            stringAttribute($0, kAXTitleAttribute as CFString) == "SAGE CEREBRUM"
-    }) != nil else { throw ProbeFailure.timeout("SAGE CEREBRUM AX window did not appear") }
+            expectedWindowTitles.contains(stringAttribute($0, kAXTitleAttribute as CFString) ?? "")
+    }
+    let initialWindowTitle = stringAttribute(window, kAXTitleAttribute as CFString) ?? ""
+    _ = runningApplication.activate(options: [.activateAllWindows])
+    if scenario == "brain-menu-focus" {
+        var result = try runBrainMenuFocus(application: application, pid: pid, deadline: deadline)
+        result.merge([
+            "schema": "sage.v12.native-system-ax.brain.v1",
+            "scenario": scenario,
+            "pid": Int(pid),
+            "bundle_id": runningApplication.bundleIdentifier ?? "",
+            "bundle_version": targetBundle?.object(forInfoDictionaryKey: "SAGEBetaVersion") as? String ?? "",
+            "window_title": initialWindowTitle,
+            "started_at": ISO8601DateFormatter().string(from: startedAt),
+            "completed_at": ISO8601DateFormatter().string(from: Date()),
+            "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
+            "trusted": true,
+            "system_ax_server": true,
+            "voiceover_spoken_evidence": false,
+            "traversal_limits": traversalLimits,
+            "passed": true,
+        ]) { _, new in new }
+        return result
+    }
     let retry = try waitForElement(identifier: "brain-metal-retry", in: application, deadline: deadline)
     _ = try waitForElement(identifier: "brain-metal-fallback-notice", in: application, deadline: deadline)
     try assertRetryReady(retry)
@@ -305,7 +569,7 @@ private func runScenario(arguments: Arguments) throws -> [String: Any] {
         "pid": Int(pid),
         "bundle_id": runningApplication.bundleIdentifier ?? "",
         "bundle_version": targetBundle?.object(forInfoDictionaryKey: "SAGEBetaVersion") as? String ?? "",
-        "window_title": "SAGE CEREBRUM",
+        "window_title": initialWindowTitle,
         "started_at": ISO8601DateFormatter().string(from: startedAt),
         "completed_at": ISO8601DateFormatter().string(from: Date()),
         "duration_ms": durationMilliseconds,

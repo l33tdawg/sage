@@ -1,8 +1,19 @@
 # v12 native macOS system accessibility acceptance
 
-**Status:** executable harness implemented; this Mac still requires an explicit
-Accessibility grant before system-AX scenarios can run. Spoken VoiceOver
-acceptance remains a separate operator gate.
+**Status, 2026-10-05:** the external probe reports Accessibility trust on the
+current named Mac, and the compiler/preflight and result-validator mutation
+checks pass. The **final AppKit implementation has no completed system-AX
+runtime pass yet**: the Mac was locked during qualification, preventing native
+window activation. A source-bound runtime result after manual unlock is
+required. Spoken VoiceOver and physical keyboard acceptance remain separate
+operator gates.
+
+An earlier intermediate implementation reached external Navigate and List View
+menu actions, exact application/system focus on the row-bearing Memory
+`AXOutline`, and selection of the known preview row through an injected Down
+arrow. That partial observation is neither a complete scenario pass nor
+qualification of the final implementation. No focus, active-window, or
+accessibility gate is waived because the desktop is locked.
 
 This gate targets the SwiftUI/AppKit/Metal application with bundle identifier
 `com.sage.cerebrum.beta`. It does not target the historical Tauri shell and it
@@ -71,10 +82,68 @@ runner with a logged-in Aqua session. It serializes runs without cancellation
 and writes evidence to the protected runner-local `SAGE_AX_EVIDENCE_ROOT`; it
 does not upload operator or screen evidence to this public repository.
 
+## Brain menu, keyboard, and focus scenario
+
+```bash
+scripts/v12-native-system-ax.sh \
+  --scenario brain-menu-focus \
+  --evidence dist/v12-native/ax-evidence
+```
+
+This scenario launches only `DesignPreviewAPI` data on Overview. It uses the
+system AX menu bar to navigate to Brain and select **View > Brain Presentation
+> List View**. It requires the actual row-bearing `AXTable` or `AXOutline` with
+the Brain table identifier; an identifier-bearing wrapper cannot satisfy the
+check. Both the application's and the system's focused elements must equal that
+exact object, and its focused attribute must be true.
+
+From that observed focus, the external probe injects a Down-arrow event through
+the WindowServer session event tap, selects the known preview memory, and uses
+rendered AX menu actions to hide and reopen the inspector. It checks that
+selection survives, that hiding removes the close control, that showing focuses
+the actual inspector-close `AXButton`, and that pressing that button returns
+focus to the currently mounted row-bearing table. It also injects
+Control-Command-I and requires the same inspector focus effect. Finally it
+switches to Agent Network through the rendered menu, selects the known preview
+agent, and repeats inspector focus/return checks against the Connectome table.
+
+A logged-in, unlocked graphical session is required; Accessibility trust alone
+does not establish that the desktop can activate a window. Unlocking is a manual
+operator action. The harness does not attempt to unlock the Mac.
+
+Keyboard injection requires the target PID to own both foreground application
+and system focus immediately before each event. The probe never sets AX focus,
+changes the application's first responder, or calls an in-process acceptance
+bridge. Menu actions are issued once; bounded observation waits establish their
+effects before the next assertion. An `AXError.cannotComplete` response is not
+retried because a menu may already have entered tracking.
+
+The result uses `sage.v12.native-system-ax.brain.v1`. It records the exact menu
+paths, synthetic keyboard sequence, row-bearing table roles/counts, preserved
+selection, and application/system focus equality. The launcher validates that
+result, records probe diagnostics, hashes the executable and evidence, and
+rejects source changes during build or execution. An isolated Swift scratch
+directory prevents another build from replacing its executable. All app runs
+must still be serialized because they share foreground system focus.
+
+Run `bash scripts/v12-native-system-ax.test.sh` for compiler/preflight and
+contract checks. The result validator rejects mutated evidence claiming wrapper
+focus, missing rows, the wrong menu path, unproven physical keyboard or VoiceOver
+results, or fixture-injected focus. It can also validate an existing result
+without launching an app:
+
+```bash
+scripts/v12-native-system-ax.sh --scenario brain-menu-focus \
+  --validate-result /path/to/system-ax.json
+```
+
 ## Evidence boundary
 
-A passing JSON document proves discovery, activation, state transition, and
-keyboard-focus delivery through the macOS system accessibility server. It does
+A passing retry JSON document proves discovery, activation, state transition,
+and keyboard-focus delivery through the macOS system accessibility server.
+A passing Brain result adds the bounded rendered-menu lifecycle, retained
+selection, and externally injected WindowServer keyboard effects described
+above. These are synthetic events, not physical HID input. It does
 not prove the VoiceOver cursor moved or that speech was audible. Real VoiceOver
 acceptance must therefore run the same flow with VoiceOver enabled and retain
 the operator, OS/build identity, spoken announcement result, and audiovisual

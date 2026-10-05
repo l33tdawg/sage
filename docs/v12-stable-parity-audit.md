@@ -1,6 +1,6 @@
 # Stable → v12-beta audit
 
-Audit date: 2026-10-05. Read-only source comparison; no cherry-pick, merge, build, live-node query, or runtime compatibility claim was made by this audit. Stable release preparation is tracked separately in [PR #416](https://github.com/l33tdawg/sage/pull/416), pending at the time of this audit.
+Audit date: 2026-10-05. Read-only source comparison; no cherry-pick, merge, build, live-node query, or runtime compatibility claim was made by this audit. Stable release preparation is tracked separately in [PR #416](https://github.com/l33tdawg/sage/pull/416), now merged. The v11.23.15 tag points to `bf037ff5`; publication is in progress and is not counted as publicly available until its release assets are verified.
 
 ## Exact source boundary
 
@@ -59,7 +59,7 @@ Immutable source links: [beta ShellControlClient](https://github.com/l33tdawg/sa
 2. Keep the first native Brain PR focused: menu materialization and routing, application keyboard delivery, selection-preserving inspector/table/Metal focus. Use preview fixtures while backend compatibility remains unqualified. No consensus/storage work is needed to fix that UI path.
 3. Prepare a distinct stable-convergence integration/review unit. Prefer integrating the approved stable final state with deliberate resolution of the 25 overlapping paths over repeatedly replaying release commits and recreating historical intermediate states. If split, sequence message/store foundations and durability first; auth/governance/retirement next; complete fence chain next; app-v28 foundation + activation + recovery gates as one coherent boundary; remaining SDK/MCP/optional gate/UI/docs/CI last. Do not leave a partially activated fork.
 4. Qualify native wire compatibility and version allowance separately against the integrated daemon. Update the native product baseline from v11.19.0/app-v27 only when the integrated head and evidence support it.
-5. Human reviews each PR before merge. The audit does not authorize a merge, stable app replacement, chain migration, or accessibility evidence claim.
+5. Human reviews v12 implementation and convergence PRs before merge. The audit does not authorize a merge, stable app replacement, chain migration, or accessibility evidence claim.
 
 ## First-slice acceptance gaps already documented by beta
 
