@@ -437,9 +437,22 @@ func (s *Server) requireBoundFederatedCaller(ctx context.Context) error {
 
 // Run starts the stdio MCP server loop.
 func (s *Server) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	stdin, stdout, stderr := os.Stdin, os.Stdout, os.Stderr
+	parentPID := os.Getppid()
+	parent, err := newMCPParentProcess(parentPID)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("SAGE MCP: establish launching parent watch: %w", err)
+	}
+	stopParentWatch := startMCPParentWatch(parent, cancel, func() { _ = stdin.Close() }, os.Exit, mcpParentPollInterval, mcpParentExitGrace)
+	// Registered first so this remains armed through every potentially blocking
+	// cleanup, including the stdio writer, host channel and claimant lease.
+	defer stopParentWatch()
+	defer cancel()
 	defer s.closeClaimantLease()
-	reader := bufio.NewReaderSize(os.Stdin, 64<<10)
-	out := newStdioOutbound(ctx, os.Stdout)
+	reader := bufio.NewReaderSize(stdin, 64<<10)
+	out := newStdioOutbound(ctx, stdout)
 	var channelCancel context.CancelFunc
 	var channelDone chan struct{}
 	stopChannel := func() {
@@ -476,7 +489,7 @@ func (s *Server) Run(ctx context.Context) error {
 		os.Getenv(mcpRuntimeHandoffEnv),
 		os.Getenv(mcpRuntimeHandoffParentEnv),
 		os.Getenv(mcpRuntimeHandoffInitializedEnv),
-		os.Getppid(),
+		parentPID,
 	)
 	if lifecycle.takeToolsChangedNotification() {
 		if err := out.WriteJSON(ctx, mcpToolsChangedNotification()); err != nil {
@@ -484,7 +497,15 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		line, readErr := readMCPFrame(reader, maxMCPFrameBytes)
+		// A disconnected client's descendant may still write buffered frames.
+		// Cancellation must win before admitting any work or starting a handoff.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if errors.Is(readErr, io.EOF) {
 			return calls.Wait()
 		}
@@ -512,20 +533,23 @@ func (s *Server) Run(ctx context.Context) error {
 				// designed to expose.
 				return fmt.Errorf("SAGE MCP: installed executable became unavailable during runtime handoff")
 			}
-			fmt.Fprintf(os.Stderr, "SAGE MCP: installed executable changed; handing the pending request to the upgraded runtime\n")
+			fmt.Fprintf(stderr, "SAGE MCP: installed executable changed; handing the pending request to the upgraded runtime\n")
 			// No old-runtime goroutine may retain stdout after the replacement owns
 			// it. Stop the optional channel first, then drain/stop the sole writer.
 			if err := calls.Wait(); err != nil {
 				return err
 			}
 			shutdown()
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			// Pass the buffered reader, not raw os.Stdin: ReadSlice may already
 			// have pulled bytes from following frames into reader's buffer.
 			handoffEnv := os.Environ()
 			if claimantSessionID := s.currentStdioClaimantSessionID(); claimantSessionID != "" {
 				handoffEnv = withMCPEnvironment(handoffEnv, mcpRuntimeHandoffClaimantEnv, claimantSessionID)
 			}
-			started, err := handoffMCPProcess(ctx, executable.path, os.Args[1:], line, reader, os.Stdout, os.Stderr, handoffEnv, lifecycle.initialized)
+			started, err := handoffMCPProcess(ctx, executable.path, os.Args[1:], line, reader, stdout, stderr, handoffEnv, lifecycle.initialized)
 			if started {
 				// Once the replacement owns stdin the current runtime must never
 				// execute the replayed frame, even if the child later exits with an
