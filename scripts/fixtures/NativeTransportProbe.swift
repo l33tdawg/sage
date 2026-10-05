@@ -35,10 +35,15 @@ actor ProbeTranscript {
     }
 
     static func main() async {
+        var operation = "arguments"
         do {
             let args = Array(CommandLine.arguments.dropFirst())
             guard let command = args.first else { throw SAGEAPIError.invalidResponse }
+            operation = command
             switch command {
+            case "decode-health":
+                let health = try JSONDecoder.sageDashboard().decode(DashboardHealth.self, from: FileHandle.standardInput.readDataToEndOfFile())
+                try emit(["ok": true, "block_time_decoded": health.chain?.blockTime != nil])
             case "validate":
                 let status = try JSONDecoder().decode(ShellControlStatus.self, from: FileHandle.standardInput.readDataToEndOfFile())
                 try ShellControlClient.validate(status)
@@ -91,15 +96,25 @@ actor ProbeTranscript {
                               "after": after.authenticated, "other_session": other.authenticated,
                               "locked": locked.authenticated])
                 case "overview":
+                    operation = "overview/auth"
                     let auth = try await client.authStatus()
+                    operation = "overview/health"
                     let health = try await client.health()
+                    operation = "overview/stats"
                     let stats = try await client.stats()
+                    operation = "overview/agents"
                     let agents = try await client.agents()
+                    operation = "overview/validators"
                     let validators = try await client.validators()
+                    operation = "overview/federation"
                     let federation = try await client.federation()
+                    operation = "overview/memories"
                     let memories = try await client.memories(.init())
+                    operation = "overview/tags"
                     let tags = try await client.tags()
+                    operation = "overview/graph"
                     let graph = try await client.brainGraph(.init())
+                    operation = "overview/synapses"
                     let synapses = try await client.connectome()
                     try emit(["ok": true, "version": health.version, "app_version": health.chain?.appVersion ?? "",
                               "auth_required": auth.authRequired, "memories": memories.total,
@@ -130,7 +145,8 @@ actor ProbeTranscript {
             }
         } catch {
             // Expected transport failures must return normally, never crash.
-            try? emit(["ok": false, "error": error.localizedDescription])
+            try? emit(["ok": false, "operation": operation, "error": error.localizedDescription,
+                       "detail": String(describing: error)])
         }
     }
 }

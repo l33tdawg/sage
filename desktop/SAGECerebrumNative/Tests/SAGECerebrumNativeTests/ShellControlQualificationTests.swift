@@ -59,4 +59,22 @@ import Testing
         for _ in 0 ..< 1_048_576 { _ = try lines.consume(65) }
         #expect(throws: DashboardEventError.self) { try lines.consume(65) }
     }
+
+    @Test(arguments: ["2026-10-05T18:43:08Z", "2026-10-05T18:43:08.1Z", "2026-10-05T18:43:08.123Z",
+                      "2026-10-05T18:43:08.123456Z", "2026-10-05T18:43:08.123456789Z",
+                      "2026-10-06T02:43:08.123456789+08:00", "2026-10-05T13:43:08.123-05:00"])
+    func dashboardDatesAcceptRFC3339NanoAcrossFoundationVersions(_ timestamp: String) throws {
+        struct Timestamp: Decodable { let date: Date }
+        let payload = try JSONSerialization.data(withJSONObject: ["date": timestamp])
+        let decoded = try JSONDecoder.sageDashboard().decode(Timestamp.self, from: payload)
+        let reference = try #require(RFC3339Timestamp.parse("2026-10-05T18:43:08Z"))
+        #expect(abs(decoded.date.timeIntervalSince(reference)) < 1)
+    }
+
+    @Test(arguments: ["", "not-a-date", "2026-99-05T18:43:08Z"])
+    func malformedDashboardDatesFailNormally(_ timestamp: String) throws {
+        struct Timestamp: Decodable { let date: Date }
+        let payload = try JSONSerialization.data(withJSONObject: ["date": timestamp])
+        #expect(throws: DecodingError.self) { try JSONDecoder.sageDashboard().decode(Timestamp.self, from: payload) }
+    }
 }

@@ -96,6 +96,12 @@ class Qualification:
             assert self.run("validate", payload=value)["ok"]
             assert not self.run("validate", payload=status(state=state, ui_origin=""))["ok"]
         self.record("closed protocol, generation, startup proof and lifecycle validation")
+        for timestamp in ["2026-10-05T18:43:08Z", "2026-10-05T18:43:08.123456789Z", "2026-10-06T02:43:08.123456789+08:00"]:
+            value = dict(sage="running", version="12.0.0-beta.1", encrypted=False, vault_locked=False,
+                         uptime="1s", chain=dict(block_time=timestamp, app_version="28"))
+            result = self.run("decode-health", payload=value)
+            assert result["ok"] and result["block_time_decoded"], result
+        self.record("shipping dashboard decoder accepts RFC3339Nano with fractions and offsets")
 
     @contextlib.contextmanager
     def control(self, response, mode=None, run_mode=0o700, socket_mode=0o600):
@@ -448,7 +454,8 @@ class HTTPFixture:
                         self.reply(302, {}, {"Location": fixture.redirect})
                     elif fixture.behavior in ("healthy", "redirect"):
                         self.reply(200, dict(sage="running", version="12.0.0-beta.1", encrypted=False,
-                                             vault_locked=False, uptime="1s"))
+                                             vault_locked=False, uptime="1s",
+                                             chain=dict(block_time="2026-10-05T18:43:08.123456789Z", app_version="28")))
                     elif fixture.behavior == "errors" and len(fixture.requests) <= 2:
                         self.reply(503, dict(error="fixture unavailable"))
                     else:

@@ -48,7 +48,7 @@ jobs:
       - name: Exercise shipping transport over real sockets and URLSession
         run: bash scripts/v12-native-transport-qualification.sh
       - name: Verify native contract unit tests
-        run: swift test --package-path desktop/SAGECerebrumNative --disable-sandbox --filter ShellControlQualification
+        run: swift test --package-path desktop/SAGECerebrumNative --disable-sandbox --filter 'ShellControlQualification|APIBaseURLRejects|shellControlRequires|SSEFrames|overviewPayloads'
       - name: Build the release native application
         run: bash scripts/build-native-cerebrum-macos.sh
       - name: Verify release transport and linkage

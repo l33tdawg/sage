@@ -39,6 +39,15 @@ Local Swift 6.4 also emits a standard macOS resource bundle rather than the
 flat bundle used by the pinned Swift 6.2 build. Packaging preserves either
 layout intact and verifies the included `brain.obj` in its actual location.
 
+The first pinned Swift 6.2.3/macOS CI run passed the real socket and URLSession
+fault checks but rejected a live app-v28 dashboard response. The older
+Foundation `.iso8601` decoder does not accept the fractional seconds in
+Go/CometBFT RFC3339Nano timestamps, which the local Swift 6.4 decoder accepted.
+All native dashboard dates now use the explicit fractional/plain RFC3339
+parser already used for Connectome, with regressions for nanosecond fractions
+and UTC offsets. Probe failures retain their feed and decoding path so an
+unrelated wire drift cannot be mistaken for the same issue.
+
 ## Reproducible gate
 
 Run on macOS:
