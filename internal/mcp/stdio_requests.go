@@ -33,6 +33,10 @@ func stdioRequestKey(id any) string {
 func (calls *stdioRequests) Start(req jsonRPCRequest, server *Server) *jsonRPCResponse {
 	key := stdioRequestKey(req.ID)
 	calls.mu.Lock()
+	if calls.ctx.Err() != nil {
+		calls.mu.Unlock()
+		return nil
+	}
 	refusal := ""
 	if _, exists := calls.active[key]; exists {
 		refusal = "Request ID is already active"
