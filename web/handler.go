@@ -3444,9 +3444,10 @@ func (h *DashboardHandler) computeGraphJSON(ctx context.Context, statusParam, dr
 	// Build domain groups for edge generation
 	domainMemories := make(map[string][]string)
 	rootAuthors := make(map[string]bool)
-	renderedIDs := make(map[string]struct{}, len(records))
+	renderedRecords := make(map[string]*memory.MemoryRecord, len(records))
+	parents := make(map[string]*store.MemoryParent)
 	for _, record := range records {
-		renderedIDs[record.MemoryID] = struct{}{}
+		renderedRecords[record.MemoryID] = record
 	}
 	for _, rec := range records {
 		agentLabel := ""
@@ -3481,9 +3482,25 @@ func (h *DashboardHandler) computeGraphJSON(ctx context.Context, statusParam, dr
 
 		// Parent edge
 		if rec.ParentHash != "" {
-			if _, ok := renderedIDs[rec.ParentHash]; ok {
+			parent, resolved := parents[rec.ParentHash]
+			if !resolved {
+				var parentErr error
+				parent, parentErr = h.findMemoryParent(ctx, rec.ParentHash)
+				if parentErr != nil && !errors.Is(parentErr, store.ErrMemoryNotFound) {
+					return nil, parentErr
+				}
+				parents[rec.ParentHash] = parent
+			}
+			if parent == nil || parent.MemoryID == rec.MemoryID {
+				continue
+			}
+			if rendered := renderedRecords[parent.MemoryID]; rendered != nil &&
+				(parent.ContentHash == nil || bytes.Equal(parent.ContentHash, rendered.ContentHash)) {
+				if err := h.validateAppV23DashboardRecord(rendered); err != nil {
+					return nil, err
+				}
 				edges = append(edges, graphEdge{
-					Source: rec.MemoryID, Target: rec.ParentHash, Type: "parent",
+					Source: rec.MemoryID, Target: parent.MemoryID, Type: "parent",
 				})
 			}
 		}

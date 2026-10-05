@@ -27,11 +27,11 @@ proposed
    └── deprecated  (quorum failed, or challenge upheld)
 ```
 
-Valid transitions (`internal/memory/lifecycle.go:9-14`):
+Documentation transition map (`internal/memory/lifecycle.go`, `validTransitions`):
 
 | From        | Allowed targets              |
 |-------------|------------------------------|
-| proposed    | validated, deprecated        |
+| proposed    | validated, challenged, deprecated |
 | validated   | committed, deprecated        |
 | committed   | challenged, deprecated       |
 | challenged  | committed, deprecated        |
@@ -47,10 +47,14 @@ a row in that state is invisible to agents rather than ranked low. Treat it as
 reserved wire surface rather than a lifecycle step; adding a writer means moving
 the read filters in the same change.
 
-The transition map above is documentation and SQLite hygiene, as its own comment
-says (`internal/memory/lifecycle.go`): consensus writes statuses imperatively and
-runs no transition check, so the table describes the states the chain can reach
-rather than a gate it passes through.
+The transition map above has no production callers, as its own comment says
+(`internal/memory/lifecycle.go`, `validTransitions`, `Transition`). Consensus
+writes statuses imperatively and does not consult it; for example, quorum can
+commit a proposed record directly. Keep this map as a reference model, not an
+authority for admitting transactions or rewriting historical statuses. The old
+unused `ValidateMemoryRecord` helper has been removed; submission validation
+remains in `api/rest/memory_handler.go`, `handleSubmitMemory`, and consensus
+independently validates its transaction payload.
 
 ---
 
@@ -181,11 +185,57 @@ Two sinks in this table are write-only today. **Knowledge triples** are accepted
 by `POST /v1/memory/submit` and by the Python SDK, and stored in the serving
 projection — and nothing reads them back: there is no route, no `SELECT` and no
 SDK method for retrieval (`memory_links`, by contrast, has both writers and the
-`POST /v1/memory/links` reader). **`access_logs`** is written on
-`memory_reinstate` and on the `TxTypeAccessQuery` path, and likewise has no
-reader and no pruning. Both persist so the history survives a projection replay;
+`POST /v1/memory/links` reader). **`access_logs`** remains an audit sink for
+app-v23+ `memory_reinstate` and historical `TxTypeAccessQuery` execution, with no
+application reader or pruning (`internal/abci/app.go`, `processMemoryReinstate`,
+`processAccessQuery`; `internal/store/sqlite.go` and `postgres.go`,
+`InsertAccessLog`). Both persist so the history survives a projection replay;
 retrieving them today means reading the SQLite/PostgreSQL table directly, and
-neither is covered by the app hash.
+neither is covered by the app hash. Ordinary REST/MCP recall does not write an
+access log.
+
+### Retained compatibility and serving fields
+
+`TxTypeAccessQuery` (wire type 8) and its codec remain for historical decoding
+and byte-identical replay, not as a current recall mechanism
+(`internal/tx/types.go`, `AccessQuery`; `internal/tx/codec.go`). After app-v15
+activation, `CheckTx` rejects it and `processAccessQuery` deterministically
+returns Code 10 before any offchain query or audit write. This prevents
+node-local vector ranking from affecting consensus results. REST, MCP, CLI,
+and the Python SDK do not construct this transaction; use the REST similarity
+endpoints for recall (`internal/abci/app.go`, `CheckTx`, `processAccessQuery`).
+Removing its wire type, legacy handler, or stored audit history would break
+compatibility rather than remove unused application wiring.
+
+`MemoryRecord.CorroborationCount` is a live display augmentation, not a column
+persisted from that struct (`internal/memory/model.go`, `MemoryRecord`). List,
+detail, related-memory, and graph responses derive the distinct-agent count
+from SQL corroboration evidence; the CEREBRUM detail pane and graph consume it
+(`web/handler.go`, `handleListMemories`, `computeGraphJSON`;
+`api/rest/memory_handler.go`, `handleGetMemory`;
+`web/memory_related.go`, `handleMemoryRelated`; `web/static/js/app.js`,
+`Corroborations`). Keep the augmentation and its underlying audit records;
+their display count does not replace canonical consensus corroboration markers.
+
+`ParentHash` remains the stored/wire lineage pointer. MCP corrections submit
+the original record's SHA-256 content hash as hexadecimal, while legacy
+callers may have supplied an exact memory ID (`internal/mcp/tools.go`,
+`toolRemember`). SQLite and PostgreSQL serving readers resolve an exact legacy
+ID first, then use the indexed content hash with `LIMIT 2`. The lookup reads
+only ID, author, domain, and hash metadata, without loading parent content.
+Exactly one hash
+match is required; duplicate hashes leave lineage unresolved, including a
+duplicate outside the caller's graph sample (`internal/store/memory_lineage.go`,
+`MemoryLineageStore`, `FindMemoryParent`). Related-memory parents still pass
+visibility before content loading and canonical-projection checks before
+disclosure. Lookup/load failures omit the optional chain signal; a visible
+parent's canonical-projection mismatch still fails the related response closed.
+Graph parent edges use the resolved
+memory ID only when both records are validated rendered nodes; an unresolved,
+hidden, quarantined, or unsampled parent produces no edge
+(`web/memory_lineage.go`, `findMemoryParent`; `web/memory_related.go`,
+`handleMemoryRelated`; `web/handler.go`, `computeGraphJSON`). This serving fix
+does not rewrite persisted pointers or change consensus/replay semantics.
 
 ---
 

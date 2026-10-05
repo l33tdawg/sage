@@ -841,6 +841,24 @@ Powers the MRI click-to-explore "train of thought" board. Cookie-authed dashboar
 
 **How related memories are ranked** (no embeddings required, `memory_related.go:17-28`): chain lineage via `parent_hash` (weight 6.0, `chain`), shared tags (2.0, `same-topic`), full-text content overlap (FTS when available, else in-process word overlap on an encrypted vault; `similar`), and same-domain high-confidence filler (0.25, `same-lobe`) so the panel is never empty. Ties break on memory id for stability.
 
+**Parent resolution:** a correction's `parent_hash` is the original record's
+SHA-256 content hash, not its UUID (`internal/mcp/tools.go`, `toolRemember`).
+SQLite and PostgreSQL first accept an exact legacy memory-ID pointer, then
+resolve the indexed hash with at most two matching metadata rows, without
+loading parent content. Zero or multiple hash
+matches yield no chain relation; visibility filtering does not turn an
+ambiguous hash into a unique parent. The selected record must still pass the
+handler's visibility check before content loading and canonical-projection
+check before disclosure. Ordinary lookup/load failures omit the chain signal;
+a visible parent's canonical mismatch still fails the response closed
+(`internal/store/memory_lineage.go`, `FindMemoryParent`;
+`web/memory_related.go`, `handleMemoryRelated`). The MRI graph follows the same
+resolution and only draws a parent edge to a validated node already rendered
+in that response (`web/handler.go`, `computeGraphJSON`). Persisted pointers
+and consensus semantics remain unchanged. Third-party stores without the
+optional `MemoryLineageStore` retain exact-ID lookup only
+(`web/memory_lineage.go`, `findMemoryParent`).
+
 **Response** (`memory_related.go:256-261`):
 
 | Field | Type | Notes |
