@@ -16,6 +16,7 @@ From this gh-pages checkout, run:
 ```sh
 node tools/capture-dashboard.mjs --source /absolute/path/to/main-checkout --runtime /absolute/path/to/main-checkout --output /absolute/path/to/gh-pages-checkout
 node --test tests/*.mjs
+node tools/verify-captures.mjs
 ```
 
 `--runtime` may point to a separate checkout with the same pinned Playwright dependency installed. No SAGE server is started. The script reads only UI assets and Git provenance from `--source`; it does not read identities, configuration, memory databases, private state, or localhost services.
@@ -27,3 +28,5 @@ Each page gets an isolated browser context with a seeded PRNG, reduced-motion pr
 The script requires no tracked source changes and fails if its source checkout changes during the run. Images are captured to a temporary directory. They replace the four website PNGs only after all pages finish without page/console errors or unexpected requests. `dashboard-captures.json` records the source version/commit, any tracked source changes, exact loaded UI asset hashes, fixture/script hashes, Playwright/Chromium/runtime versions, capture time, viewport sizes, requested routes, warnings, errors and output PNG hashes. Review all four images after regeneration, and update the version in website captions and this README if the source version changes. Chromium can report software WebGL ReadPixels performance warnings; those are retained separately from errors.
 
 The October 5 refresh removed the unreferenced old `screen-security.png` and `screen-update.png` after checking all site text references. The existing October 3 Open Graph cards are retained and checked by `tests/social-preview.test.mjs`.
+
+The Website Checks workflow runs both commands for pull requests targeting `gh-pages` and pushes to that branch. The integrity check needs only Node and committed files; it does not regenerate images, download dependencies, deploy, or contact any service. It verifies the exact four PNG filenames, SHA256s and IHDR dimensions, synthetic disclosure, clean-source metadata, empty errors/unexpected requests and matching fixture/capture-script hashes. Source UI hashes are validated for format here; their bytes were independently checked against the recorded main-based source commit before commit.
