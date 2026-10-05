@@ -9,6 +9,7 @@ enum APIEndpoint: String, Sendable {
     case agents = "/v1/dashboard/network/agents"
     case validators = "/v1/dashboard/chain/validators"
     case federation = "/v1/dashboard/federation/connections"
+    case federationSetting = "/v1/dashboard/settings/federation"
     case events = "/v1/dashboard/events"
     case memories = "/v1/dashboard/memory/list"
     case tags = "/v1/dashboard/tags"
@@ -125,6 +126,10 @@ actor SAGEAPIClient: SAGEAPI {
 
     func federation() async throws -> FederationOverview {
         do {
+            // Connections remain readable while networking is off. Only the
+            // settings endpoint reports the transport's actual enabled state.
+            let setting: FederationSetting = try await send(.federationSetting)
+            guard setting.enabled else { return .disabled }
             return try await send(.federation)
         } catch let SAGEAPIError.server(status, _) where status == 501 {
             return .disabled
@@ -197,9 +202,11 @@ actor SAGEAPIClient: SAGEAPI {
                         }
                         continuation.yield(.state(.connected))
                         var accumulator = SSEEventAccumulator()
+                        var lines = SSELineAccumulator()
                         var observedActivity = false
-                        for try await line in bytes.lines {
+                        for try await byte in bytes {
                             if Task.isCancelled { break }
+                            guard let line = try lines.consume(byte) else { continue }
                             if !observedActivity, !line.isEmpty {
                                 observedActivity = true
                                 reconnectDelay = .seconds(1)
@@ -351,4 +358,8 @@ private final class LoopbackRedirectDelegate: NSObject, URLSessionTaskDelegate, 
 
 private struct ErrorPayload: Decodable {
     let error: String?
+}
+
+private struct FederationSetting: Decodable {
+    let enabled: Bool
 }
