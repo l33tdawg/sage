@@ -1,6 +1,6 @@
 # Stable → v12-beta audit
 
-Audit date: 2026-10-05. Read-only source comparison; no cherry-pick, merge, build, live-node query, or runtime compatibility claim was made by this audit. Stable release preparation is tracked separately in [PR #416](https://github.com/l33tdawg/sage/pull/416), now merged. The v11.23.15 tag points to `bf037ff5`; publication is in progress and is not counted as publicly available until its release assets are verified.
+Audit date: 2026-10-05. Read-only source comparison; no cherry-pick, merge, build, live-node query, or runtime compatibility claim was made by this audit. Stable release preparation is tracked separately in merged [PR #416](https://github.com/l33tdawg/sage/pull/416). The v11.23.15 tag points to `bf037ff5`; its [release workflow](https://github.com/l33tdawg/sage/actions/runs/37296704569) tracks publication and asset verification. This source audit does not certify published release assets.
 
 ## Exact source boundary
 
