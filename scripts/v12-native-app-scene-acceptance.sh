@@ -19,9 +19,9 @@ compute_source_state() {
       git -C "${ROOT}" diff --binary HEAD
       git -C "${ROOT}" ls-files --others --exclude-standard | while IFS= read -r candidate; do
         printf 'untracked=%s\n' "${candidate}"
-        shasum -a 256 "${ROOT}/${candidate}"
+        /usr/bin/shasum -a 256 "${ROOT}/${candidate}"
       done
-    } | shasum -a 256 | awk '{print $1}'
+    } | /usr/bin/shasum -a 256 | awk '{print $1}'
   )
   cleanliness=clean
   if [ -n "$(git -C "${ROOT}" status --porcelain=v1 --untracked-files=all)" ]; then
@@ -97,12 +97,12 @@ SAGE_NATIVE_APP_SCENE_RUN_ID="${RUN_ID}" \
 APP_PID=$!
 LAUNCHED_PID="${APP_PID}"
 
-deadline=$((SECONDS + 40))
+deadline=$((SECONDS + 60))
 while kill -0 "${APP_PID}" 2>/dev/null && [ "${SECONDS}" -lt "${deadline}" ]; do
   sleep 0.1
 done
 if kill -0 "${APP_PID}" 2>/dev/null; then
-  echo "native app-scene fixture exceeded its 40-second outer deadline" >&2
+  echo "native app-scene fixture exceeded its 60-second outer deadline" >&2
   exit 1
 fi
 set +e
@@ -118,7 +118,7 @@ APP_PID=""
 node "${ROOT}/scripts/v12-native-app-scene-validate.mjs" "${RESULT}" "${COMMIT}" "${SOURCE_STATE}" "${RUN_ID}" "${LAUNCHED_PID}"
 
 {
-  printf 'schema=sage.v12.native-app-scene.manifest.v4\n'
+  printf 'schema=sage.v12.native-app-scene.manifest.v5\n'
   printf 'run_id=%s\n' "${RUN_ID}"
   printf 'scenario=rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle\n'
   printf 'commit=%s\n' "${COMMIT}"
@@ -127,9 +127,9 @@ node "${ROOT}/scripts/v12-native-app-scene-validate.mjs" "${RESULT}" "${COMMIT}"
   printf 'bundle_version=%s\n' "$(plutil -extract SAGEBetaVersion raw "${APP_PATH}/Contents/Info.plist")"
   printf 'architecture=%s\n' "$(uname -m)"
   sw_vers
-  shasum -a 256 "${EXECUTABLE}" "${RESULT}" "${APP_LOG}"
+  /usr/bin/shasum -a 256 "${EXECUTABLE}" "${RESULT}" "${APP_LOG}"
 } >"${MANIFEST}"
-shasum -a 256 "${RESULT}" "${APP_LOG}" "${MANIFEST}" >"${RUN_DIR}/SHA256SUMS"
+/usr/bin/shasum -a 256 "${RESULT}" "${APP_LOG}" "${MANIFEST}" >"${RUN_DIR}/SHA256SUMS"
 STATUS_TMP="${EVIDENCE_DIR}/.STATUS.txt.$$"
 printf '%s\n' 'app-scene acceptance passed' >"${STATUS_TMP}"
 mv "${STATUS_TMP}" "${EVIDENCE_DIR}/STATUS.txt"

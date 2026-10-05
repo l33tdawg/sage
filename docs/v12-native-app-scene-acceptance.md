@@ -1,9 +1,8 @@
 # v12 native app-scene acceptance
 
-**Status:** v3 and v4 packaged DEBUG fixtures and CI green. Installed-release
-acceptance remains open.
-
-**Current durable task:** `03aebcf3-18e9-4d60-bddc-71c1b6e5ffdc`
+**Status:** v5 implementation and contract checks are complete. Packaged
+qualification of the current source awaits an unlocked macOS graphical session;
+no v5 runtime pass is claimed yet. Installed-release acceptance remains open.
 
 This gate launches the packaged SwiftUI/AppKit executable rather than hosting a
 view in the test runner. It therefore exercises the application's actual scene,
@@ -47,52 +46,62 @@ through an in-scene `NSViewRepresentable`, and then:
    requires one locally monitored keyDown, one inspector request/consumption,
    preserved memory identity, and exact native close-button focus.
 
-The in-progress successor uses schema `sage.v12.native-app-scene.v4` and
-scenario
+The current schema is `sage.v12.native-app-scene.v5`, using scenario
 `rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle`.
-It retains every v3 Search assertion and adds a fail-closed Brain lifecycle:
+It retains the Search assertions and adds a fail-closed Brain lifecycle:
 
-1. identify the exact backing `NSTableView` for both native Brain table
-   surfaces (`brain-memory-table` and `brain-connectome-table`), rejecting an
-   identifier-bearing SwiftUI wrapper as responder evidence;
-2. navigate to Brain, prepare deterministic memory `g1` without manufacturing
-   focus, and invoke the production **List View** presentation reducer through a
-   DEBUG-only action bridge that cannot set native focus directly;
-3. require the mounted Memory `NSTableView` to own the captured key window's
-   exact first responder while `g1` remains selected;
-4. invoke the production Brain inspector action through the same focus-incapable
-   DEBUG bridge, mount the app-owned resizable `HSplitView` inspector, and require
-   its real AppKit inspector-close `NSButton` to become the exact first responder;
-5. dismiss through that rendered control using `NSButton.performClick`; and
-6. require production bridge state to report the inspector dismissed and table
-   focus, require zero remaining close controls, and require the exact currently
-   mounted table in the same window to regain
-   responder ownership with the same class, rows, identifier, `g1`, and row-0
-   selection. The evidence records whether SwiftUI reused or replaced the
-   backing object during inspector layout.
+1. after **Navigate > Brain**, require eight rendered View commands, their
+   exact shortcuts, enabled states and checkmarks;
+2. dispatch **Brain Mode > Agent Network** through its rendered target/action,
+   then send Control-Command-1 through `NSApplication.sendEvent` to return to
+   Memory Map, checking the mounted command state after each action;
+3. prepare deterministic memory `g1` through a DEBUG selection-only bridge that
+   cannot invoke presentation, inspector or native-focus actions;
+4. dispatch **Brain Presentation > List View** through its rendered menu item
+   and require the uniquely identified backing `NSTableView` to own the
+   captured window's first responder with `g1` selected. Then dispatch
+   **Interactive Map** and return to List View with Control-Command-L,
+   verifying the presentation change and exact selected-table focus;
+5. dispatch **Show Inspector** through its rendered menu item and require the
+   exact app-owned inspector-close `NSButton` to become first responder;
+6. dismiss through that button and verify selection preservation, zero mounted
+   close controls, and exact current table focus. SwiftUI may reuse or replace
+   its backing table; both cases remain bound to the observed object identity;
+7. reopen and hide the Brain inspector with Control-Command-I keyboard events,
+   requiring one locally observed keyDown per command and exact close/table
+   focus with selection preserved; and
+8. open the real **Help > Keyboard Shortcuts** sheet. Require all three Navigate
+   commands and all eight Brain commands to be disabled, attempt a Brain shortcut through the
+   sheet's key window and a retained menu target/action, and verify unchanged
+   Brain state and owner with no queued request. Escape dismisses the sheet and
+   the commands must return.
 
-The v4 producer, validator, mutation tests, and packaged local run are green.
-Focused Brain View menu materialization/routing after programmatic navigation
-is a separately tracked gap and is not claimed by this result.
+The producer records actual mounted Brain mode and presentation values. It
+never substitutes constant state for an observation. The strict validator and
+mutation tests reject absent, duplicate or reordered commands; changed shortcuts;
+DEBUG action bypasses; wrong responders; unconsumed requests; and weakened modal
+or evidence boundaries. v4 remains historical evidence of the prior lifecycle,
+which reached presentation and inspector actions through a DEBUG bridge and
+could not establish rendered Brain menu routing.
 
 The app writes one bounded JSON result to standard output and exits nonzero on
-any assertion or timeout. The shell applies a separate 40-second deadline,
+any assertion or timeout. The shell applies a separate 60-second deadline,
 binds the result to the exact commit and a clean/dirty source-snapshot hash,
 validates the result and evidence boundary, cleans up only the captured PID after
 checking its executable path, and records the result, app log, manifest, and
 SHA-256 hashes. CI uploads these diagnostics even when a later validation step
 fails. Release scanning rejects the DEBUG app-scene fixture, Search bridge, and
-acceptance-environment markers if they leak into the release executable. The
+acceptance-environment and v4/v5 schema markers if they leak into the release executable. The
 AppKit menu coordinator is production code and remains in release builds.
 
 ## Evidence boundary
 
-This is real app-scene and in-process AppKit evidence. The green packaged/CI v3
-run proves concrete menu materialization, direct rendered
-target/action dispatch, synthetic application keyboard-event routing through
-`NSApplication.sendEvent`, exact route/request effects, mounted
-toolbar/table/control identity, semantic inspector preservation, and local
-first-responder ownership. The v3 result distinguishes
+This is real app-scene and in-process AppKit evidence. The v5 gate verifies
+concrete menu materialization, direct rendered target/action dispatch,
+synthetic application keyboard-event routing through `NSApplication.sendEvent`,
+exact route/request effects, mounted toolbar/table/control identity, semantic
+inspector preservation, modal guards, and local first-responder ownership.
+The result distinguishes
 `application_keyboard_event_routing=true` and `synthetic_keyboard_events=true`
 from `physical_keyboard_event_routing=false`; it also records
 `system_ax_server=false` and `voiceover_spoken_evidence=false`. Those fields are
@@ -102,11 +111,16 @@ It does **not** prove physical keyboard or HID delivery, WindowServer event
 routing, system-wide AX discovery or focus, TCC behavior, VoiceOver
 navigation/reading/announcements, an installed release candidate, localization,
 or non-US keyboard-layout behavior. Commands and environments outside the
-bounded Navigate-to-Brain, Command-3 Search, Command-F Focus Search, rendered
-Search lifecycle, and Control-Command-I Show Inspector scenario stay in the
-named-Mac and RC acceptance backlog.
+bounded Brain and Search scenarios above stay in the named-Mac and release
+candidate acceptance backlog.
 
-The v4 pass adds exact in-process AppKit identity and
-first-responder evidence for the bounded Brain lifecycle above. It still will
+The v5 gate adds rendered Brain menu, mode, inspector, modal-guard and exact
+in-process AppKit first-responder evidence for the bounded lifecycle above. It still will
 not prove physical HID or WindowServer delivery, system AX focus, VoiceOver
 spoken output, localization, or non-US keyboard layouts; all remain open.
+
+The macOS workflow runs this gate for pull requests targeting `v12-beta`, before
+merge, as well as pushes to that branch. Permissions remain read-only and only
+diagnostic evidence is uploaded; the unsigned application is not distributed.
+The package resource check accepts both macOS `Contents/Resources/brain.obj`
+and the flat SwiftPM bundle layout used by earlier supported toolchains.

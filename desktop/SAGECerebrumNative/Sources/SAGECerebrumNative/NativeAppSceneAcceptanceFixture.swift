@@ -58,21 +58,15 @@ final class NativeAppSceneBrainBridge {
     private var registrationID: UUID?
     private var snapshotProvider: (() -> Snapshot)?
     private var prepareFirstMemorySelectionAction: (() -> String?)?
-    private var selectListPresentationAction: (() -> Void)?
-    private var showInspectorAction: (() -> Void)?
 
     func register(
         id: UUID,
         snapshot: @escaping () -> Snapshot,
-        prepareFirstMemorySelection: @escaping () -> String?,
-        selectListPresentation: @escaping () -> Void,
-        showInspector: @escaping () -> Void
+        prepareFirstMemorySelection: @escaping () -> String?
     ) {
         registrationID = id
         snapshotProvider = snapshot
         prepareFirstMemorySelectionAction = prepareFirstMemorySelection
-        selectListPresentationAction = selectListPresentation
-        showInspectorAction = showInspector
     }
 
     func unregister(id: UUID) {
@@ -84,14 +78,10 @@ final class NativeAppSceneBrainBridge {
         registrationID = nil
         snapshotProvider = nil
         prepareFirstMemorySelectionAction = nil
-        selectListPresentationAction = nil
-        showInspectorAction = nil
     }
 
     func snapshot() -> Snapshot? { snapshotProvider?() }
     func prepareFirstMemorySelection() -> String? { prepareFirstMemorySelectionAction?() }
-    func selectListPresentation() { selectListPresentationAction?() }
-    func showInspector() { showInspectorAction?() }
 }
 
 struct NativeAppSceneAcceptanceFixture: Equatable {
@@ -117,6 +107,7 @@ struct NativeAppSceneAcceptanceFixture: Equatable {
 
     @MainActor
     func run(window: NSWindow, focusSink: NSView, session: AppSession) async -> Never {
+        FileHandle.standardError.write(Data("app-scene fixture started\n".utf8))
         let runner = NativeAppSceneAcceptanceRunner(
             window: window,
             focusSink: focusSink,
@@ -211,6 +202,8 @@ private final class NativeAppSceneAcceptanceRunner {
     private var responderSnapshots: [[String: Any]] = []
     private var brainLifecycleSnapshots: [[String: Any]] = []
     private var brainMenuLifecycleSnapshots: [[String: Any]] = []
+    private var brainCommandSnapshots: [[String: Any]] = []
+    private var brainModalGuardSnapshot: [String: Any] = [:]
     private var brainInspectorDismissalSnapshot: [String: Any] = [:]
     private var searchLifecycleSnapshots: [[String: Any]] = []
     private var menuLifecycleSnapshots: [[String: Any]] = []
@@ -224,7 +217,7 @@ private final class NativeAppSceneAcceptanceRunner {
         self.commit = commit
         self.sourceState = sourceState
         self.runID = runID
-        deadline = startedInstant + .seconds(25)
+        deadline = startedInstant + .seconds(45)
     }
 
     func run() async throws -> [String: Any] {
@@ -281,6 +274,31 @@ private final class NativeAppSceneAcceptanceRunner {
         try await wait("deterministic preview Brain bridge readiness") {
             NativeAppSceneBrainBridge.shared.snapshot()?.isReady == true
         }
+        try await wait("rendered Brain commands after navigation") {
+            self.restoreCapturedKeyWindow()
+            self.update(menu: mainMenu)
+            return self.session.brainCommandState?.isRefreshing == false && self.brainMenusReflectState(mainMenu: mainMenu)
+        }
+        brainMenuLifecycleSnapshots.append(try brainMenuSnapshot(stage: "after-navigation", mainMenu: mainMenu))
+        let agentModeItem = try uniqueMenuItem(in: mainMenu, path: ["View", "Brain Mode", "Agent Network"], key: "2", modifiers: [.control, .command])
+        try dispatch(agentModeItem)
+        try await wait("rendered Agent Network mode action and checked menu state") {
+            self.restoreCapturedKeyWindow()
+            self.update(menu: mainMenu)
+            return self.session.brainCommandState?.mode == .connectome && self.session.brainCommandState?.isRefreshing == false &&
+                self.session.brainCommandRequest == nil && self.brainMenusReflectState(mainMenu: mainMenu)
+        }
+        brainCommandSnapshots.append(try brainCommandSnapshot(stage: "agent-mode-menu", surface: "NSApplication.sendAction", path: "View > Brain Mode > Agent Network"))
+        let memoryModeObservation = try sendKeyStroke(key: "1", keyCode: 18, modifiers: [.control, .command])
+        try await wait("application keyboard Memory Map mode and checked menu state") {
+            self.restoreCapturedKeyWindow()
+            self.update(menu: mainMenu)
+            return self.session.brainCommandState?.mode == .memory && self.session.brainCommandState?.isRefreshing == false &&
+                self.session.brainCommandRequest == nil && self.brainMenusReflectState(mainMenu: mainMenu)
+        }
+        brainCommandSnapshots.append(try brainCommandSnapshot(stage: "memory-mode-keyboard", surface: "NSApplication.sendEvent", path: "View > Brain Mode > Memory Map", observation: memoryModeObservation, key: "1", keyCode: 18))
+        record("rendered-brain-mode-menu-and-keyboard", expected: "rendered Agent Network action and application control-command-1 change the mounted Brain mode", actual: "connectome to memory")
+
         guard let selectedMemoryID = NativeAppSceneBrainBridge.shared.prepareFirstMemorySelection(),
               selectedMemoryID == "g1"
         else { throw FixtureError.assertion("DEBUG Brain bridge could not prepare deterministic g1 selection") }
@@ -299,7 +317,9 @@ private final class NativeAppSceneAcceptanceRunner {
             actual: selectedMemoryID
         )
 
-        NativeAppSceneBrainBridge.shared.selectListPresentation()
+        update(menu: mainMenu)
+        let listItem = try uniqueMenuItem(in: mainMenu, path: ["View", "Brain Presentation", "List View"], key: "l", modifiers: [.control, .command])
+        try dispatch(listItem)
         try await wait("production List View action and exact Brain table first responder") {
             self.restoreCapturedKeyWindow()
             guard let snapshot = NativeAppSceneBrainBridge.shared.snapshot(),
@@ -313,6 +333,26 @@ private final class NativeAppSceneAcceptanceRunner {
             return table.window === self.window && self.window.firstResponder === table &&
                 table.numberOfRows > 0 && table.numberOfSelectedRows == 1 && table.selectedRow == 0
         }
+        brainCommandSnapshots.append(try brainCommandSnapshot(stage: "list-menu", surface: "NSApplication.sendAction", path: "View > Brain Presentation > List View"))
+        update(menu: mainMenu)
+        let interactiveItem = try uniqueMenuItem(in: mainMenu, path: ["View", "Brain Presentation", "Interactive Map"], key: "m", modifiers: [.control, .command])
+        try dispatch(interactiveItem)
+        try await wait("rendered Interactive Map presentation action") {
+            self.restoreCapturedKeyWindow()
+            self.update(menu: mainMenu)
+            return self.session.brainCommandState?.presentation == .mri && self.session.brainCommandRequest == nil && self.brainMenusReflectState(mainMenu: mainMenu)
+        }
+        brainCommandSnapshots.append(try brainCommandSnapshot(stage: "interactive-menu", surface: "NSApplication.sendAction", path: "View > Brain Presentation > Interactive Map"))
+        let listObservation = try sendKeyStroke(key: "l", keyCode: 37, modifiers: [.control, .command])
+        try await wait("application keyboard List View and exact table focus") {
+            self.restoreCapturedKeyWindow()
+            self.update(menu: mainMenu)
+            guard self.session.brainCommandState?.presentation == .table, self.session.brainCommandRequest == nil,
+                  let table = self.uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self) else { return false }
+            return self.window.firstResponder === table && table.selectedRow == 0 && table.numberOfSelectedRows == 1 && self.brainMenusReflectState(mainMenu: mainMenu)
+        }
+        brainCommandSnapshots.append(try brainCommandSnapshot(stage: "list-keyboard", surface: "NSApplication.sendEvent", path: "View > Brain Presentation > List View", observation: listObservation, key: "l", keyCode: 37))
+        record("rendered-brain-presentation-menu-and-keyboard", expected: "rendered Interactive Map action and application control-command-l change presentation and restore exact g1 table focus", actual: "mri to table")
         guard let brainTable = uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self),
               let tableFocusedSnapshot = NativeAppSceneBrainBridge.shared.snapshot()
         else { throw FixtureError.assertion("Brain List View did not mount one exact identified NSTableView") }
@@ -332,7 +372,9 @@ private final class NativeAppSceneAcceptanceRunner {
             actual: "\(brainTableIdentity), rows=\(brainTable.numberOfRows), selected=\(brainTable.selectedRow)"
         )
 
-        NativeAppSceneBrainBridge.shared.showInspector()
+        brainMenuLifecycleSnapshots.append(try brainMenuSnapshot(stage: "list-focused", mainMenu: mainMenu))
+        let brainInspectorItem = try uniqueMenuItem(in: mainMenu, parent: "View", title: "Show Inspector", key: "i", modifiers: [.control, .command])
+        try dispatch(brainInspectorItem)
         try await wait("production Brain inspector action and exact close-button first responder") {
             self.restoreCapturedKeyWindow()
             guard let snapshot = NativeAppSceneBrainBridge.shared.snapshot(),
@@ -354,6 +396,8 @@ private final class NativeAppSceneAcceptanceRunner {
             control: brainInspectorClose,
             matchCount: identifiedControls(identifier: "brain-inspector-close", type: NSButton.self).count
         ))
+        brainCommandSnapshots.append(try brainCommandSnapshot(stage: "inspector-menu", surface: "NSApplication.sendAction", path: "View > Show Inspector"))
+        brainMenuLifecycleSnapshots.append(try brainMenuSnapshot(stage: "inspector-open", mainMenu: mainMenu))
         let selectedMemoryIDBeforeDismissal = brainInspectorSnapshot.selectedMemoryID ?? ""
         brainInspectorClose.performClick(nil)
         try await wait("Brain inspector button dismissal and exact mounted table focus restoration") {
@@ -416,6 +460,24 @@ private final class NativeAppSceneAcceptanceRunner {
             return NSApp.isActive && self.window.isKeyWindow
         }
         update(menu: mainMenu)
+        brainMenuLifecycleSnapshots.append(try brainMenuSnapshot(stage: "inspector-dismissed", mainMenu: mainMenu))
+        let reopenObservation = try sendKeyStroke(key: "i", keyCode: 34, modifiers: [.control, .command])
+        try await wait("Brain inspector keyboard reopen focuses exact close button") {
+            guard self.session.brainCommandState?.inspectorIsPresented == true,
+                  let close = self.uniqueIdentifiedControl(identifier: "brain-inspector-close", type: NSButton.self) else { return false }
+            return self.window.firstResponder === close && self.session.brainCommandRequest == nil
+        }
+        brainCommandSnapshots.append(try brainCommandSnapshot(stage: "inspector-show-keyboard", surface: "NSApplication.sendEvent", path: "View > Show Inspector", observation: reopenObservation, key: "i", keyCode: 34))
+        let hideObservation = try sendKeyStroke(key: "i", keyCode: 34, modifiers: [.control, .command])
+        try await wait("Brain inspector keyboard dismissal restores exact selected table") {
+            guard self.session.brainCommandState?.inspectorIsPresented == false,
+                  let table = self.uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self) else { return false }
+            return self.window.firstResponder === table && table.numberOfSelectedRows == 1 && table.selectedRow == 0 && self.session.brainCommandRequest == nil
+        }
+        brainCommandSnapshots.append(try brainCommandSnapshot(stage: "inspector-hide-keyboard", surface: "NSApplication.sendEvent", path: "View > Hide Inspector", observation: hideObservation, key: "i", keyCode: 34))
+        record("rendered-brain-inspector-menu-and-keyboard", expected: "rendered Inspector action and application control-command-i preserve g1 with exact close/table focus", actual: "shown and hidden")
+        try await verifyBrainModalGuard(mainMenu: mainMenu, staleModeItem: agentModeItem)
+
         let searchItem = try uniqueMenuItem(
             in: mainMenu,
             parent: "Navigate",
@@ -683,7 +745,7 @@ private final class NativeAppSceneAcceptanceRunner {
                 "inspector-open",
                 "table-focused-after-dismissal",
             ] &&
-            brainMenuLifecycleSnapshots.isEmpty &&
+            brainMenuLifecycleSnapshots.count == 4 &&
             responderSnapshots.prefix(3).compactMap { $0["stage"] as? String } == expectedBrainResponderStages &&
             responderSnapshots.prefix(3).allSatisfy {
                 $0["match_count"] as? Int == 1 &&
@@ -698,7 +760,7 @@ private final class NativeAppSceneAcceptanceRunner {
                 (brainInspectorDismissalSnapshot["table_object_identity_before"] as? String ==
                     brainInspectorDismissalSnapshot["table_object_identity_after"] as? String)
         var value: [String: Any] = [
-            "schema": "sage.v12.native-app-scene.v4",
+            "schema": "sage.v12.native-app-scene.v5",
             "scenario": NativeAppSceneAcceptanceFixture.scenario,
             "run_id": runID,
             "commit": commit,
@@ -717,6 +779,8 @@ private final class NativeAppSceneAcceptanceRunner {
             "responder_snapshot": responderSnapshots,
             "brain_lifecycle_snapshot": brainLifecycleSnapshots,
             "brain_menu_lifecycle_snapshot": brainMenuLifecycleSnapshots,
+            "brain_command_snapshot": brainCommandSnapshots,
+            "brain_modal_guard_snapshot": brainModalGuardSnapshot,
             "brain_inspector_dismissal_snapshot": brainInspectorDismissalSnapshot,
             "search_lifecycle_snapshot": searchLifecycleSnapshots,
             "menu_lifecycle_snapshot": menuLifecycleSnapshots,
@@ -747,7 +811,31 @@ private final class NativeAppSceneAcceptanceRunner {
             })
         }
         if let failure { value["failure"] = failure }
-        if !passed { value["view_debug_snapshot"] = viewDebugSnapshot() }
+        if !passed {
+            value["view_debug_snapshot"] = viewDebugSnapshot()
+            value["failure_brain_state"] = [
+                "route": session.route.rawValue,
+                "application_active": NSApp.isActive,
+                "window_is_key": window.isKeyWindow,
+                "owner": session.brainCommandOwner?.uuidString ?? "",
+                "mode": session.brainCommandState?.mode.rawValue ?? "unregistered",
+                "presentation": session.brainCommandState?.presentation.rawValue ?? "unregistered",
+                "refreshing": session.brainCommandState?.isRefreshing ?? false,
+                "blocks_global_commands": session.brainCommandState?.blocksGlobalCommands ?? false,
+                "inspector_is_presented": session.brainCommandState?.inspectorIsPresented ?? false,
+                "request_id": session.brainCommandRequest.map { Int($0.id) } ?? -1,
+                "request_owner": session.brainCommandRequest?.owner.uuidString ?? "",
+                "request_command": session.brainCommandRequest?.command.rawValue ?? "",
+                "focus_target": NativeAppSceneBrainBridge.shared.snapshot()?.focusTarget ?? "",
+            ]
+            if let mainMenu = NSApp.mainMenu {
+                value["failure_brain_menu_snapshot"] = menuEntries(in: mainMenu).filter { $0.path.first == "View" }.map {
+                    ["path": $0.path.joined(separator: " > "), "key": $0.item.keyEquivalent,
+                     "modifiers": modifierNames($0.item.keyEquivalentModifierMask),
+                     "enabled": $0.item.isEnabled, "checked": $0.item.state == .on] as [String: Any]
+                }
+            }
+        }
         return value
     }
 
@@ -774,10 +862,12 @@ private final class NativeAppSceneAcceptanceRunner {
     }
 
     private func record(_ id: String, expected: String, actual: String) {
+        FileHandle.standardError.write(Data("app-scene assertion: \(id)\n".utf8))
         assertions.append(["id": id, "expected": expected, "actual": actual, "passed": true])
     }
 
     private func dispatch(_ item: NSMenuItem) throws {
+        FileHandle.standardError.write(Data("app-scene menu action: \(item.title)\n".utf8))
         guard item.isEnabled, let action = item.action else {
             throw FixtureError.assertion("rendered menu item \(item.title) cannot dispatch")
         }
@@ -786,13 +876,15 @@ private final class NativeAppSceneAcceptanceRunner {
         }
     }
 
-    private func sendKeyStroke(key: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags) throws -> KeyboardObservation {
+    private func sendKeyStroke(key: String, keyCode: UInt16, modifiers: NSEvent.ModifierFlags, targetWindow: NSWindow? = nil) throws -> KeyboardObservation {
+        let window = targetWindow ?? self.window
+        FileHandle.standardError.write(Data("app-scene keyboard: code=\(keyCode), modifiers=\(modifierNames(modifiers)), window=\(window.windowNumber)\n".utf8))
         guard window.isKeyWindow else {
             throw FixtureError.assertion("cannot route application keyboard event through a non-key window")
         }
         var observedKeyDownCount = 0
         let monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            if event.windowNumber == self.window.windowNumber,
+            if event.windowNumber == window.windowNumber,
                event.keyCode == keyCode,
                event.modifierFlags.intersection(.deviceIndependentFlagsMask) == modifiers {
                 observedKeyDownCount += 1
@@ -955,12 +1047,105 @@ private final class NativeAppSceneAcceptanceRunner {
         return snapshot
     }
 
+    private func brainMenusReflectState(mainMenu: NSMenu) -> Bool {
+        guard let state = session.brainCommandState else { return false }
+        let entries = menuEntries(in: mainMenu)
+        for (path, checked) in [
+            (["View", "Brain Mode", "Memory Map"], state.mode == .memory),
+            (["View", "Brain Mode", "Agent Network"], state.mode == .connectome),
+            (["View", "Brain Presentation", "Interactive Map"], state.presentation == .mri),
+            (["View", "Brain Presentation", "List View"], state.presentation == .table),
+        ] {
+            let matches = entries.filter { $0.path == path }
+            guard matches.count == 1, (matches[0].item.state == .on) == checked else { return false }
+        }
+        let refresh = entries.filter { $0.path == ["View", "Refresh Brain"] }
+        return refresh.count == 1 && refresh[0].item.isEnabled && !state.isRefreshing
+    }
+
+    private func brainMenuSnapshot(stage: String, mainMenu: NSMenu) throws -> [String: Any] {
+        update(menu: mainMenu)
+        guard let state = session.brainCommandState else { throw FixtureError.assertion("Brain menu has no mounted command state") }
+        let titles: Set<String> = ["Memory Map", "Agent Network", "Interactive Map", "List View", "Show Inspector", "Hide Inspector", "Show View Options", "Hide View Options", "Clear Brain Selection", "Refresh Brain"]
+        let items = menuEntries(in: mainMenu).filter { $0.path.first == "View" && titles.contains($0.item.title) }.map { entry -> [String: Any] in
+            ["path": entry.path.joined(separator: " > "), "key": entry.item.keyEquivalent,
+             "modifiers": modifierNames(entry.item.keyEquivalentModifierMask), "enabled": entry.item.isEnabled,
+             "checked": entry.item.state == .on]
+        }
+        guard items.count == 8 else { throw FixtureError.assertion("expected eight rendered Brain commands, found \(items.count)") }
+        return ["stage": stage, "mode": state.mode.rawValue, "presentation": state.presentation.rawValue, "items": items]
+    }
+
+    private func brainCommandSnapshot(stage: String, surface: String, path: String, observation: KeyboardObservation? = nil, key: String = "", keyCode: UInt16 = 0) throws -> [String: Any] {
+        guard let state = session.brainCommandState,
+              let brain = NativeAppSceneBrainBridge.shared.snapshot() else { throw FixtureError.assertion("Brain command has no mounted state") }
+        let responder = window.firstResponder as? NSView
+        let responderID = responder?.identifier?.rawValue ?? responder?.accessibilityIdentifier() ?? ""
+        var result: [String: Any] = [
+            "stage": stage, "dispatch_surface": surface, "menu_path": path, "route": session.route.rawValue,
+            "mode": state.mode.rawValue, "presentation": state.presentation.rawValue,
+            "selected_memory_id": brain.selectedMemoryID ?? "", "inspector_is_presented": state.inspectorIsPresented,
+            "pending_request": session.brainCommandRequest != nil, "window_number": window.windowNumber,
+            "first_responder_identifier": responderID,
+        ]
+        if let observation {
+            result["keyboard_event"] = keyboardEventSnapshot(stage: stage, key: key, keyCode: keyCode, modifiers: [.control, .command], menuPath: path, routeBefore: .brain, routeAfter: session.route, observation: observation)
+        }
+        return result
+    }
+
+    private func verifyBrainModalGuard(mainMenu: NSMenu, staleModeItem: NSMenuItem) async throws {
+        update(menu: mainMenu)
+        let shortcuts = try uniqueMenuItem(in: mainMenu, parent: "Help", title: "Keyboard Shortcuts…", key: "/", modifiers: [.command])
+        let stateBefore = session.brainCommandState
+        let ownerBefore = session.brainCommandOwner
+        try dispatch(shortcuts)
+        try await wait("real Keyboard Shortcuts sheet") { self.session.showsKeyboardShortcuts && self.window.attachedSheet?.isKeyWindow == true }
+        guard let sheet = window.attachedSheet else { throw FixtureError.assertion("shortcuts has no attached sheet") }
+        update(menu: mainMenu)
+        let disabledNavigation = menuEntries(in: mainMenu).filter { $0.path.first == "Navigate" && $0.path.count == 2 && AppRoute.implemented.map(\.title).contains($0.item.title) }
+        guard disabledNavigation.count == 3, disabledNavigation.allSatisfy({ !$0.item.isEnabled }) else { throw FixtureError.assertion("navigation remains enabled under shortcuts sheet") }
+        let modalMenu = try brainMenuSnapshot(stage: "shortcuts-modal", mainMenu: mainMenu)
+        guard let disabledBrain = modalMenu["items"] as? [[String: Any]], disabledBrain.count == 8,
+              disabledBrain.allSatisfy({ $0["enabled"] as? Bool == false }) else {
+            throw FixtureError.assertion("a rendered Brain command remains enabled under shortcuts sheet")
+        }
+        let observation = try sendKeyStroke(key: "2", keyCode: 19, modifiers: [.control, .command], targetWindow: sheet)
+        var staleActionDispatched = false
+        if let action = staleModeItem.action { staleActionDispatched = NSApp.sendAction(action, to: staleModeItem.target, from: staleModeItem) }
+        try await Task.sleep(for: .milliseconds(120))
+        guard session.route == .brain, session.brainCommandState == stateBefore, session.brainCommandOwner == ownerBefore,
+              session.brainCommandRequest == nil, session.showsKeyboardShortcuts, window.attachedSheet === sheet else {
+            throw FixtureError.assertion("modal keyboard or stale rendered action changed Brain state")
+        }
+        brainModalGuardSnapshot = [
+            "modal_surface": "Keyboard Shortcuts", "sheet_window_number": sheet.windowNumber,
+            "captured_window_number": window.windowNumber, "disabled_navigation_items": disabledNavigation.count,
+            "disabled_brain_items": disabledBrain.count, "keyboard_dispatch_surface": "NSApplication.sendEvent",
+            "key": "2", "key_code": 19, "modifiers": "control+command", "local_monitor_key_down_count": observation.keyDownCount,
+            "keyboard_window_number": observation.windowNumber, "app_is_active": observation.appIsActive,
+            "sheet_is_key_window": observation.windowIsKey,
+            "stale_action_attempted": staleModeItem.action != nil, "stale_action_dispatched": staleActionDispatched,
+            "state_unchanged": session.brainCommandState == stateBefore, "owner_unchanged": session.brainCommandOwner == ownerBefore,
+            "pending_request": session.brainCommandRequest != nil, "route": session.route.rawValue,
+        ]
+        _ = try sendKeyStroke(key: "\u{1b}", keyCode: 53, modifiers: [], targetWindow: sheet)
+        try await wait("Keyboard Shortcuts dismissal") { !self.session.showsKeyboardShortcuts && self.window.attachedSheet == nil }
+        restoreCapturedKeyWindow()
+        try await wait("Brain commands return after sheet dismissal") {
+            self.update(menu: mainMenu)
+            return self.menuEntries(in: mainMenu).contains { $0.path == ["View", "Brain Mode", "Agent Network"] && $0.item.isEnabled }
+        }
+        brainModalGuardSnapshot["commands_restored_after_dismissal"] = true
+        record("brain-modal-command-guards", expected: "real shortcuts sheet blocks navigation, Brain keyboard and stale menu action; commands return after Escape", actual: "state and owner preserved, no queued request")
+    }
+
     private func brainSnapshot(stage: String, snapshot: NativeAppSceneBrainBridge.Snapshot) -> [String: Any] {
         [
             "stage": stage,
             "route": session.route.rawValue,
-            "mode": "memory",
-            "effective_presentation": "table",
+            "mode": session.brainCommandState?.mode.rawValue ?? "unregistered",
+            "effective_presentation": session.brainCommandState?.presentation.rawValue ?? "unregistered",
             "is_ready": snapshot.isReady,
             "selected_memory_id": snapshot.selectedMemoryID ?? "",
             "inspector_is_presented": snapshot.inspectorIsPresented,

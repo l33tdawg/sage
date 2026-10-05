@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
 
@@ -40,7 +42,7 @@ test('v12 macOS CI pins a runner and Xcode compatible with the Swift package', a
     assert.match(workflow, /SAGE_NATIVE_DESIGN_PREVIEW/);
     assert.match(workflow, /SAGE_NATIVE_PREVIEW_ROUTE/);
     assert.match(workflow, /release Mach-O contains DEBUG-only acceptance markers/);
-    assert.match(workflow, /sage\\\.v12\\\.native-app-scene\\\.v4/);
+    assert.match(workflow, /sage\\\.v12\\\.native-app-scene\\\.v\[45\]/);
     assert.match(workflow, /rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle/);
     assert.match(workflow, /done < <\(find "\$\{APP_PATH\}\/Contents" -type f -print\)/);
     assert.match(workflow, /if: always\(\)/);
@@ -83,4 +85,40 @@ test('app-scene acceptance guide and validator remain release-visible', async ()
     assert.match(validatorTest, /Brain menu evidence overclaim/);
     assert.match(validatorTest, /Brain table not exact first responder/);
     assert.match(validatorTest, /field_editor_matches_first_responder/);
+});
+
+
+test('native beta pull requests run read-only validation before merge', async () => {
+    const workflow = await readFile(resolve(REPO_ROOT, '.github/workflows/v12-beta-macos.yml'), 'utf8');
+    const eventPaths = (event) => workflow.split(`  ${event}:\n`)[1].split(/^  [a-z_]+:/m)[0];
+    assert.match(eventPaths('pull_request'), /branches: \[v12-beta\]/);
+    assert.equal(eventPaths('pull_request').trim(), eventPaths('push').trim());
+    assert.match(workflow, /github\.event_name == 'pull_request' && github\.base_ref == 'v12-beta'/);
+    assert.match(workflow, /^permissions:\n  contents: read$/m);
+    assert.doesNotMatch(workflow, /pull_request_target|contents: write|secrets\.|gh release|git push/);
+    assert.match(workflow, /THE APP IS DELIBERATELY NOT UPLOADED/);
+});
+
+
+test('native packaging accepts real macOS and legacy flat SwiftPM resource bundles', async () => {
+    const script = await readFile(resolve(REPO_ROOT, 'scripts/build-native-cerebrum-macos.sh'), 'utf8');
+    const resourceCheck = script.slice(script.indexOf('PACKAGED_BUNDLE='), script.indexOf('\nPLIST='));
+    assert.ok(resourceCheck.includes('Contents/Resources/brain.obj'));
+    const root = await mkdtemp(resolve(tmpdir(), 'sage-native-resources-'));
+    try {
+        for (const [name, resource, bytes, succeeds] of [
+            ['macos', 'Contents/Resources/brain.obj', 'mesh', true],
+            ['flat', 'brain.obj', 'mesh', true],
+            ['empty', 'Contents/Resources/brain.obj', '', false],
+            ['missing', 'unrelated.obj', 'mesh', false],
+        ]) {
+            const contents = resolve(root, name);
+            const path = resolve(contents, 'Resources/SAGECerebrumNative_SAGECerebrumNative.bundle', resource);
+            await mkdir(resolve(path, '..'), { recursive: true });
+            await writeFile(path, bytes);
+            const verify = () => execFileSync('/bin/bash', ['-euc', resourceCheck], {env: {...process.env, CONTENTS: contents}, stdio: 'pipe'});
+            if (succeeds) assert.doesNotThrow(verify, name);
+            else assert.throws(verify, name);
+        }
+    } finally { await rm(root, {recursive: true, force: true}); }
 });
