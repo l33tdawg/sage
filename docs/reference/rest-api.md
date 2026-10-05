@@ -2108,14 +2108,14 @@ pipeline row. The MCP client calls this immediately before `send`, then signs
 the exact returned destination (`api/rest/pipe_handler.go:47-126`,
 `internal/mcp/tools.go:2108-2167`).
 
-**Request:** `{"to":"provider, display/registered name, #node/agent-prefix, or agent@chain"}`
+**Request:** `{"to":"exact local agent ID, display/registered name, provider field, #node/agent-prefix, or agent_id@chain"}`
 
 **Response** (HTTP 200):
 
 ```json
 {
-  "to_agent": "<exact 64-hex agent id, or empty for a local provider>",
-  "to_provider": "<local provider, or empty>",
+  "to_agent": "<exact 64-hex agent id>",
+  "to_provider": "",
   "source_chain_id": "<exact local chain for a federated target, otherwise empty>",
   "destination_chain_id": "<exact remote chain id, or empty for local>",
   "address": "<agent@chain for a federated contact>",
@@ -2127,8 +2127,13 @@ the exact returned destination (`api/rest/pipe_handler.go:47-126`,
 Canonical agent IDs remain exact and never invoke friendly-name discovery.
 Friendly labels match local display/registered/provider fields and federated
 display or registered names exactly (case-insensitive); substring matches are
-discovery-only. A friendly label must identify one caller-authorized target
-across local and federated scope. Local/local, federated/federated, and
+discovery-only. Arbitrary provider aliases are not inferred: a label must
+match the saved metadata. Use `sage_find_agent` for named discovery or
+`sage_directory(scope="local")` for exact local agent IDs. `to_provider` is a
+retained compatibility field; the current resolver returns a concrete
+`to_agent`, rather than a provider-addressed queue. A friendly label must
+identify one caller-authorized target across local and federated scope.
+Local/local, federated/federated, and
 local/federated collisions return HTTP 409 with a bounded set of immutable
 choices instead of selecting the first match. Consequently a display-name
 rename changes that alias immediately while the immutable registered name and
@@ -2147,6 +2152,14 @@ identity, malformed response, and binding failures never use the cache
 (`internal/federation/client.go:47-67,154-160`;
 `internal/federation/pipe_targets.go:87-167,169-295`;
 `internal/store/federated_pipe_contacts.go:49-195`).
+
+A peer that explicitly lacks federated pipeline capability returns HTTP 501
+`Peer update required`. Missing local SQLite federation storage returns
+HTTP 503 `Local federated pipeline unavailable`; an incomplete peer scan
+returns HTTP 503 `Federated agent lookup incomplete`. A local storage fault
+is not evidence that the receiving peer needs an update
+(`internal/federation/pipe_targets.go`, `resolveRemotePipeTarget`;
+`api/rest/pipe_handler.go`, `writeRemotePipeTargetError`).
 
 Any legacy cached result is only a local queue-routing hint. Immediately before every
 delivery attempt, the durable outbox performs a fresh authenticated live
@@ -2431,6 +2444,15 @@ encrypted `pipeline_messages` rows. They do not create a second inbox. Every
 route is inside the active-ordinary-agent boundary; Root is not a messaging
 principal.
 
+The advertised MCP messaging tools use `sage_message_send`,
+`sage_messages_receive`, `sage_message_reply`, and `sage_message_status`.
+Retained `sage_pipe` and `sage_pipe_result` calls are compatibility aliases;
+they are not additional inboxes or a reason to bypass canonical errors.
+`sage_find_agent` and `sage_directory` return caller-authorized addressing
+metadata. Their results establish neither online presence nor delivery, claim,
+or read state (`internal/mcp/tools.go`, `registerTools`, `toolFindAgent`,
+`toolDirectory`).
+
 | Route | Contract |
 |---|---|
 | `GET /v1/messages/storage` | Exact signed active ordinary agent; no-store, payload-free storage observation. See the strict response and security boundary below. |
@@ -2607,9 +2629,18 @@ share generic non-enumerating behavior. Peers negotiate
 `federated-pipeline-receipts-v2`; v1 peers and historical rows without the
 generation-bound v2 binding remain explicitly `unsupported`/`unconfirmed`.
 Upgrade migration never invents delivery, claim, or read evidence.
-Legacy `sage_pipe`, `sage_inbox`, and `sage_pipe_result` use the canonical local
-service when available and fall back only on a definitive route-not-found from
-an older node. Passive pipe history remains unchanged.
+The retained `sage_pipe` alias delegates exact local sends to the canonical
+Messages service with a fresh internal idempotency key per invocation; callers
+that need lost-response replay use `sage_message_send` with their own key.
+Local send fallback requires a definitive route-not-found from an older node.
+`sage_inbox` claims through canonical receive when available and also exposes
+compatibility work. Local completion through `sage_pipe_result` uses canonical
+reply first; the exact typed provider-compatibility signal also permits its
+retained completion path. Generic conflicts, transport errors, and canonical
+typed 404 denials do not permit that fallback. Federated completion has its own
+signed pipe result path. Passive pipe history remains unchanged
+(`internal/mcp/tools.go`, `toolPipe`, `toolInbox`, `toolPipeResult`,
+`isLegacyMessagesRouteNotFound`, `isLegacyProviderCompatibilityScope`).
 
 ---
 
@@ -2622,7 +2653,7 @@ Send a pipeline message to another agent or provider.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `to_agent` | string | no* | Exact agent_id (* one of to_agent or to_provider required) |
-| `to_provider` | string | no* | Provider name or agent name; resolves to agent_id if unambiguous |
+| `to_provider` | string | no* | Legacy local routing: an exact provider field addresses its shared inbox; a local agent-name fallback can resolve to `to_agent`. Use `/v1/pipe/resolve` first to address one exact recipient. |
 | `source_chain_id` | string | for federation | Exact local chain returned by `/v1/pipe/resolve`; source-node binding inside the signed agent proof |
 | `destination_chain_id` | string | no | For a federated send, the exact chain returned by `/v1/pipe/resolve`; requires exact `to_agent` and empty `to_provider` |
 | `intent` | string | no | Human description of the work |
@@ -2632,6 +2663,16 @@ Send a pipeline message to another agent or provider.
 
 Python sync/async `pipe_send(..., idempotency_key=...)` exposes this existing
 field without automatic retries; omitted/`None` leaves the legacy body unchanged.
+Direct legacy `to_provider` routing differs from the MCP resolver: when the
+field matches a local provider, it remains a shared provider inbox, claimable
+by any matching active agent. It does not select one agent or require that the
+provider be unique. Arbitrary provider aliases are not inferred. To address
+one recipient, call `POST /v1/pipe/resolve`, then sign its returned exact
+`to_agent` and, for federation, `source_chain_id` and `destination_chain_id`.
+MCP clients can discover those exact addresses with `sage_find_agent` or
+`sage_directory` (`api/rest/pipe_handler.go`, `handlePipeSend`,
+`handlePipeInbox`; `internal/mcp/tools.go`, `toolPipe`).
+
 For federated exact-agent sends, `handlePipeSend` uses
 `SQLiteStore.SendFederatedMessage` to atomically persist the original message,
 transport event, and sender-scoped idempotency binding. This is not a radio

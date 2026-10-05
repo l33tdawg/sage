@@ -296,6 +296,15 @@ table, but it runs before revocation-sensitive leases and is deadline-limited.
 Callers must provide at least two characters from a known agent name,
 registered name, or provider name.
 
+Discovery returns authorized routing metadata, not online presence or delivery
+evidence. Friendly send resolution uses exact display/registered names or a
+returned qualified handle/address; substring discovery matches do not become
+send aliases. Local provider labels must exactly match saved agent metadata,
+and arbitrary provider aliases are not inferred. Use `sage_find_agent` or
+`sage_directory` and pass the returned exact `to` value to
+`sage_message_send` (`internal/mcp/tools.go`, `toolFindAgent`, `toolDirectory`;
+`api/rest/pipe_handler.go`, `handlePipeResolve`).
+
 Target capabilities are cached only for that bounded live projection:
 `ReadAllDomains` substitutes for the ordinary level-1 domain grant, while
 `DenyFederatedPipe` wins over ReadAll and domain ownership.
