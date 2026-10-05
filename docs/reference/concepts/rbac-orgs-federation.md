@@ -1,8 +1,8 @@
-<!-- Core document reconciled through SAGE v11.23.14/app-v27, including consensus-backed Access Group authority, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
+<!-- Core document reconciled through SAGE v11.23.15/app-v27, including consensus-backed Access Group authority, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
 
 # RBAC, Organizations, and Federation
 
-Verified against SAGE v11.23.14. Legacy organization/federation sections retain
+Verified against SAGE v11.23.15. Legacy organization/federation sections retain
 their historical context; app-v23 roles, Root, Access Groups, and app-v25
 historical writer continuity are the current local-control model.
 
