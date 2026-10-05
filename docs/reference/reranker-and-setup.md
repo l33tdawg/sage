@@ -13,6 +13,13 @@ onboarding is a per-node UI flag, recall tuning is a per-node preference, and th
 touches chain state. Normal memory submission (which does reach consensus) is
 documented in [`rest-api.md`](rest-api.md) and [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md).
 
+The reranker ships off by default (`internal/embedding/reranker_test.go`,
+`TestResolveRerankerConfig_DefaultsOff`). Its relevance and latency depend on
+the model, query and candidate set. The committed historical benchmark changed
+query expansion and reranking together and does not establish the reranker's
+isolated effect. See [benchmark evidence and the comparison plan](../../bench/REPRODUCIBILITY.md)
+before drawing quality or performance conclusions.
+
 All endpoints below live on the **dashboard listener** and normally use the
 dashboard's cookie/session auth (`authMiddleware`), not the Ed25519 signed-request
 scheme the `/v1/*` public API uses. The forgotten-passphrase recovery exception is
