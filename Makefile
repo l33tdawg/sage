@@ -100,28 +100,21 @@ benchmark-k6: ## Run k6 load test (requires pre-configured auth bypass or k6 Ed2
 	k6 run test/benchmark/load.js
 
 bench-longmemeval-smoke: ## Smoke-test the LongMemEval-S harness against a running SAGE node (5 questions)
-	pip install -q -r bench/longmemeval/requirements.txt && PYTHONUNBUFFERED=1 python3 bench/longmemeval/run.py --limit 5
+	pip install -q -r bench/longmemeval/requirements.txt && PYTHONUNBUFFERED=1 python3 bench/longmemeval/run.py --limit 5 $(BENCH_ARGS)
 
-bench-longmemeval: ## Run full LongMemEval-S benchmark - slow (hours); writes bench/results/longmemeval-<sha>.json
-	pip install -q -r bench/longmemeval/requirements.txt && PYTHONUNBUFFERED=1 python3 bench/longmemeval/run.py
+bench-longmemeval: ## Run full LongMemEval-S benchmark - slow (hours); writes bench/results/longmemeval-<sha>-<run>.json
+	pip install -q -r bench/longmemeval/requirements.txt && PYTHONUNBUFFERED=1 python3 bench/longmemeval/run.py $(BENCH_ARGS)
 
-bench-locomo-fetch: ## Download the LoCoMo dataset from snap-research/locomo if not already present
-	@mkdir -p bench/locomo/data && \
-	if [ ! -s bench/locomo/data/locomo10.json ]; then \
-		echo "fetching locomo10.json from snap-research/locomo..."; \
-		curl -fsSL -o bench/locomo/data/locomo10.json \
-			https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json; \
-	else \
-		echo "bench/locomo/data/locomo10.json already present, skipping fetch"; \
-	fi
+bench-locomo-fetch: ## Fetch LoCoMo at explicit LOCOMO_DATA_REVISION; validate cached source/hash receipt
+	python3 bench/fetch_locomo.py
 
 bench-locomo-smoke: bench-locomo-fetch ## Smoke-test the LoCoMo harness against a running SAGE node (5 questions)
 	pip install -q -r bench/locomo/requirements.txt && \
-		LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json PYTHONUNBUFFERED=1 python3 bench/locomo/run.py --limit 5
+		LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json PYTHONUNBUFFERED=1 python3 bench/locomo/run.py --limit 5 $(BENCH_ARGS)
 
-bench-locomo: bench-locomo-fetch ## Run full LoCoMo benchmark; writes bench/results/locomo-<sha>.json
+bench-locomo: bench-locomo-fetch ## Run full LoCoMo benchmark; writes bench/results/locomo-<sha>-<run>.json
 	pip install -q -r bench/locomo/requirements.txt && \
-		LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json PYTHONUNBUFFERED=1 python3 bench/locomo/run.py
+		LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json PYTHONUNBUFFERED=1 python3 bench/locomo/run.py $(BENCH_ARGS)
 
 sdk-test: ## Run Python SDK tests
 	cd sdk/python && pip install -e ".[dev]" && pytest -v

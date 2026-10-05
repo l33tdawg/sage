@@ -150,6 +150,7 @@ scratchpad/
 # Node.js (Playwright e2e tests)
 node_modules/
 package-lock.json
+!/package-lock.json
 test-results/
 playwright-report/
 
