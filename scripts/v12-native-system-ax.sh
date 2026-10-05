@@ -12,21 +12,28 @@ TOOL_DIR="${SAGE_AX_TOOL_DIR:-${ROOT}/dist/v12-native/ax-tools}"
 TOOL="${TOOL_DIR}/v12-native-system-ax"
 
 compute_source_state() {
-  local snapshot_sha cleanliness
+  local snapshot_sha cleanliness source_commit source_tree final_commit worktree_status
+  source_commit=$(git -C "${ROOT}" rev-parse --verify HEAD) || return 1
+  source_tree=$(git -C "${ROOT}" rev-parse --verify "${source_commit}^{tree}") || return 1
   snapshot_sha=$(
+    set -euo pipefail
     {
-      git -C "${ROOT}" diff --binary HEAD
+      printf 'commit=%s\ntree=%s\n' "${source_commit}" "${source_tree}"
+      git -C "${ROOT}" diff --binary "${source_commit}" || exit 1
       git -C "${ROOT}" ls-files --others --exclude-standard | while IFS= read -r candidate; do
         printf 'untracked=%s\n' "${candidate}"
-        /usr/bin/shasum -a 256 "${ROOT}/${candidate}"
+        /usr/bin/shasum -a 256 "${ROOT}/${candidate}" || exit 1
       done
     } | /usr/bin/shasum -a 256 | awk '{print $1}'
   ) || return 1
+  worktree_status=$(git -C "${ROOT}" status --porcelain=v1 --untracked-files=all) || return 1
+  final_commit=$(git -C "${ROOT}" rev-parse --verify HEAD) || return 1
+  [ "${final_commit}" = "${source_commit}" ] || return 1
   cleanliness=clean
-  if [ -n "$(git -C "${ROOT}" status --porcelain=v1 --untracked-files=all)" ]; then
+  if [ -n "${worktree_status}" ]; then
     cleanliness=dirty
   fi
-  printf '%s:%s\n' "${cleanliness}" "${snapshot_sha}"
+  printf '%s:%s:%s:%s\n' "${cleanliness}" "${source_commit}" "${source_tree}" "${snapshot_sha}"
 }
 
 build_probe() {
@@ -40,11 +47,15 @@ build_probe() {
 }
 
 validate_result() {
-  node - "$1" "$2" <<'JS'
+  node - "$1" "$2" "$3" "$4" <<'JS'
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const result = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
 const scenario = process.argv[3];
+const expectedPID = Number(process.argv[4]);
+const expectedVersion = process.argv[5];
+assert.ok(Number.isInteger(expectedPID) && expectedPID > 1);
+assert.ok(typeof expectedVersion === 'string' && expectedVersion.length > 0);
 assert.ok(['retry-fail', 'retry-restore', 'brain-menu-focus'].includes(scenario));
 assert.equal(result.scenario, scenario);
 assert.equal(result.passed, true);
@@ -52,7 +63,8 @@ assert.equal(result.trusted, true);
 assert.equal(result.system_ax_server, true);
 assert.equal(result.voiceover_spoken_evidence, false);
 assert.equal(result.bundle_id, 'com.sage.cerebrum.beta');
-assert.ok(Number.isInteger(result.pid) && result.pid > 1);
+assert.equal(result.pid, expectedPID);
+assert.equal(result.bundle_version, expectedVersion);
 assert.equal(result.traversal_limits.maximum_nodes, 8192);
 if (scenario === 'brain-menu-focus') {
   assert.equal(result.schema, 'sage.v12.native-system-ax.brain.v1');
@@ -94,6 +106,8 @@ usage() {
   cat >&2 <<'EOF'
 usage:
   scripts/v12-native-system-ax.sh --preflight [--prompt]
+  scripts/v12-native-system-ax.sh --source-state
+  scripts/v12-native-system-ax.sh --scenario <scenario> --validate-result <file> --expected-pid <pid> --expected-version <version>
   scripts/v12-native-system-ax.sh --scenario <retry-fail|retry-restore|brain-menu-focus> --evidence <directory>
 EOF
   exit 64
@@ -104,15 +118,28 @@ PROMPT=0
 SCENARIO=""
 EVIDENCE_DIR=""
 VALIDATE_RESULT=""
+EXPECTED_PID=""
+EXPECTED_VERSION=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --preflight) MODE=preflight ;;
+    --source-state) MODE=source-state ;;
     --prompt) PROMPT=1 ;;
     --scenario)
       shift
       [ "$#" -gt 0 ] || usage
       MODE=scenario
       SCENARIO=$1
+      ;;
+    --expected-pid)
+      shift
+      [ "$#" -gt 0 ] || usage
+      EXPECTED_PID=$1
+      ;;
+    --expected-version)
+      shift
+      [ "$#" -gt 0 ] || usage
+      EXPECTED_VERSION=$1
       ;;
     --validate-result)
       shift
@@ -130,13 +157,18 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -n "${VALIDATE_RESULT}" ]; then
-  validate_result "${VALIDATE_RESULT}" "${SCENARIO}"
+  [ -n "${EXPECTED_PID}" ] && [ -n "${EXPECTED_VERSION}" ] || usage
+  validate_result "${VALIDATE_RESULT}" "${SCENARIO}" "${EXPECTED_PID}" "${EXPECTED_VERSION}"
   exit 0
 fi
 
-build_probe
+if [ "${MODE}" = source-state ]; then
+  compute_source_state
+  exit 0
+fi
 
 if [ "${MODE}" = preflight ]; then
+  build_probe
   if [ "${PROMPT}" -eq 1 ]; then
     exec "${TOOL}" --preflight --prompt
   fi
@@ -146,6 +178,16 @@ fi
 [ "${MODE}" = scenario ] || usage
 case "${SCENARIO}" in retry-fail|retry-restore|brain-menu-focus) ;; *) usage ;; esac
 [ -n "${EVIDENCE_DIR}" ] || usage
+
+VERSION=${SAGE_NATIVE_VERSION:-12.0.0-beta.1}
+COMMIT=$(git -C "${ROOT}" rev-parse HEAD)
+SOURCE_STATE=$(compute_source_state)
+case "${SOURCE_STATE}" in clean:"${COMMIT}":*|dirty:"${COMMIT}":*) ;; *) echo "source commit changed before probe build" >&2; exit 1 ;; esac
+build_probe
+if [ "$(compute_source_state)" != "${SOURCE_STATE}" ]; then
+  echo "source state changed during system AX probe build" >&2
+  exit 1
+fi
 
 set +e
 "${TOOL}" --preflight
@@ -158,9 +200,6 @@ if [ "${status}" -ne 0 ]; then
   exit "${status}"
 fi
 
-VERSION=${SAGE_NATIVE_VERSION:-12.0.0-beta.1}
-COMMIT=$(git -C "${ROOT}" rev-parse HEAD)
-SOURCE_STATE=$(compute_source_state)
 BUILD_DIR="${ROOT}/dist/v12-native/ax-debug/${VERSION}-$$"
 SAGE_NATIVE_VERSION="${VERSION}" \
 SAGE_NATIVE_CONFIGURATION=debug \
@@ -236,7 +275,7 @@ probe_status=$?
 set -e
 cat "${PROBE_LOG}" >&2
 [ "${probe_status}" -eq 0 ] || exit "${probe_status}"
-validate_result "${RESULT}" "${SCENARIO}"
+validate_result "${RESULT}" "${SCENARIO}" "${APP_PID}" "${VERSION}"
 if [ "$(compute_source_state)" != "${SOURCE_STATE}" ]; then
   echo "source state changed during system AX app execution" >&2
   exit 1
@@ -245,6 +284,8 @@ fi
   printf 'schema=sage.v12.native-system-ax.manifest.v1\n'
   printf 'run_id=%s\n' "${RUN_ID}"
   printf 'scenario=%s\n' "${SCENARIO}"
+  printf 'launched_pid=%s\n' "${APP_PID}"
+  printf 'requested_bundle_version=%s\n' "${VERSION}"
   printf 'commit=%s\n' "${COMMIT}"
   printf 'source_state=%s\n' "${SOURCE_STATE}"
   printf 'bundle_id=%s\n' "$(plutil -extract CFBundleIdentifier raw "${APP_PATH}/Contents/Info.plist")"

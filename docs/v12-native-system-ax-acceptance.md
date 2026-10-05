@@ -122,7 +122,9 @@ The result uses `sage.v12.native-system-ax.brain.v1`. It records the exact menu
 paths, synthetic keyboard sequence, row-bearing table roles/counts, preserved
 selection, and application/system focus equality. The launcher validates that
 result, records probe diagnostics, hashes the executable and evidence, and
-rejects source changes during build or execution. An isolated Swift scratch
+binds the result to the launched PID/version and rejects source changes during
+probe compilation, app build, or execution. Its fingerprint includes the exact
+Git commit and tree, so a clean checkout moving to another commit also fails. An isolated Swift scratch
 directory prevents another build from replacing its executable. All app runs
 must still be serialized because they share foreground system focus.
 
@@ -130,11 +132,13 @@ Run `bash scripts/v12-native-system-ax.test.sh` for compiler/preflight and
 contract checks. The result validator rejects mutated evidence claiming wrapper
 focus, missing rows, the wrong menu path, unproven physical keyboard or VoiceOver
 results, or fixture-injected focus. It can also validate an existing result
-without launching an app:
+without launching an app. Supply the captured `launched_pid` and
+`requested_bundle_version` from that run's manifest:
 
 ```bash
 scripts/v12-native-system-ax.sh --scenario brain-menu-focus \
-  --validate-result /path/to/system-ax.json
+  --validate-result /path/to/system-ax.json \
+  --expected-pid 12345 --expected-version 12.0.0-beta.1
 ```
 
 ## Evidence boundary
