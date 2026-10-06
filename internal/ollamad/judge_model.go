@@ -20,13 +20,13 @@ import (
 // (install.go), and deliberately STRICTER than the by-name embedding-model pull (which trusts a registry tag).
 // A new judge version is a new URL + tag + digest here; an existing tag is never re-pointed.
 const (
-	JudgeModelTag   = "sage-memory-judge:v15"
-	judgeGGUFURL    = "https://huggingface.co/Infosec-Consult/sage-memory-judge/resolve/v15/sage-judge-v15-q8_0.gguf"
-	JudgeGGUFSHA256 = "714ff9324133ba3b7166fe82fa362226fae5574c4f9cfbc53c054248b16f2cfd"
+	JudgeModelTag   = "sage-memory-judge:v16"
+	judgeGGUFURL    = "https://huggingface.co/Infosec-Consult/sage-memory-judge/resolve/848cbe9c80f7b5e5dbfdb7b20fee7e63b4ab906e/sage-judge-v16-q8_0.gguf"
+	JudgeGGUFSHA256 = "8fd5c44ce34dace51fe187acdca267f29a0c35a4e46eb12a52fdbc6a5ed9a501"
 	// Ollama v0.31.1 rewrites the GGUF when importing it. Bind inference to
 	// the separately verified registered blob, rather than the download hash.
-	JudgeModelBlobSHA256 = "86bc739212ea59719839a59a1b994d720f2c9ec4010c32c8d92800db7b465169"
-	judgeGGUFName        = "sage-judge-v15-q8_0.gguf"
+	JudgeModelBlobSHA256 = "bdd0aa854915e2567daaac24b554fb5d030881bd48f6b4b7ce96e67e27653d00"
+	judgeGGUFName        = "sage-judge-v16-q8_0.gguf"
 	// Thinking is OFF by serving requirement; the judge reads the first token as the label.
 	judgeModelfile = "FROM %s\nTEMPLATE {{ .Prompt }}\nRENDERER qwen3.5\nPARSER qwen3.5\n"
 )
