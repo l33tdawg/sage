@@ -1,0 +1,333 @@
+{
+  "model": "sage-memory-judge:v16",
+  "measured_at": "2026-10-06",
+  "verified_by": "l33tdawg (independent acceptance run)",
+  "platform": "linux/arm64, Docker (4 CPU, 8 GiB), external networking disabled during scoring",
+  "runtime": "Ollama v0.31.1",
+  "reader": "SAGE internal/hunch.LocalClient (stock Go LocalClient + voter gate + SQLite); debias off; thresholds unchanged",
+  "sage_source": "v11.23.15 / bf037ff5471bc425825c49a66b4cdbe1117735f7 (plus an added test fixture)",
+  "artifact": {
+    "immutable_hf_revision": "848cbe9c80f7b5e5dbfdb7b20fee7e63b4ab906e",
+    "download_url": "https://huggingface.co/Infosec-Consult/sage-memory-judge/resolve/848cbe9c80f7b5e5dbfdb7b20fee7e63b4ab906e/sage-judge-v16-q8_0.gguf",
+    "download_gguf_sha256": "8fd5c44ce34dace51fe187acdca267f29a0c35a4e46eb12a52fdbc6a5ed9a501",
+    "download_bytes": 833591840,
+    "registered_gguf_sha256": "bdd0aa854915e2567daaac24b554fb5d030881bd48f6b4b7ce96e67e27653d00",
+    "note": "Ollama v0.31.1 rewrites the GGUF on import, so download and registered-blob hashes differ; inference binds to the registered blob.",
+    "base_model": "Qwen3.5-0.8B (Apache-2.0)"
+  },
+  "dataset": {
+    "name": "frozen-40 synthetic regression set (disclosed)",
+    "n": 40,
+    "input_sha256": "779e33502b4a49f0cec15e81247ba4cb1702e14d04fd6881486e4a5f66b25bb6"
+  },
+  "summary": {
+    "attributed_tank_warning_s07": {
+      "lasting": 0.7074449863757113,
+      "support": 0.6401236687742275,
+      "verdict": "hold (was reject on v15)"
+    },
+    "negatives": {
+      "n": 22,
+      "rejected": 22,
+      "note": "all reject, including all 10 session remarks (l11-l20)"
+    },
+    "genuine": {
+      "n": 18,
+      "pass": 16,
+      "hold": 2,
+      "reject": 0,
+      "note": "all 15 prior v15 genuine passes survived; s03 (attributed parcel report) moved hold->pass"
+    },
+    "support_axis_unchanged": "no support-axis classification changed; s15 lasting moved reject->hold but support still rejects (0.0031)",
+    "judge_errors": 0,
+    "latency_s": {
+      "median": 1.44,
+      "p95": 1.92,
+      "cold_start": 1.93
+    },
+    "focused_tests": "58 reader/gate/runtime/store tests passed (no failures or skips); cached verdicts, baseline rejection, operator overrides across versions, stopped-runtime hold all passed"
+  },
+  "scope": "Verifies the disclosed synthetic regression set on this runtime/platform. Does NOT establish fresh-holdout accuracy or qualify production installation on every platform.",
+  "scores": [
+    {
+      "id": "l01",
+      "lasting": 0.9938189863932545,
+      "support": null,
+      "verdict": "pass",
+      "reason": "lasting p=0.99"
+    },
+    {
+      "id": "l02",
+      "lasting": 0.9918541019119094,
+      "support": null,
+      "verdict": "pass",
+      "reason": "lasting p=0.99"
+    },
+    {
+      "id": "l03",
+      "lasting": 0.9911614755636893,
+      "support": null,
+      "verdict": "pass",
+      "reason": "lasting p=0.99"
+    },
+    {
+      "id": "l04",
+      "lasting": 0.9942397931015915,
+      "support": null,
+      "verdict": "pass",
+      "reason": "lasting p=0.99"
+    },
+    {
+      "id": "l05",
+      "lasting": 0.9866322841472539,
+      "support": null,
+      "verdict": "pass",
+      "reason": "lasting p=0.99"
+    },
+    {
+      "id": "l06",
+      "lasting": 0.7872758351463859,
+      "support": null,
+      "verdict": "abstain",
+      "reason": "held for review: lasting-memory uncertain (p=0.79)"
+    },
+    {
+      "id": "l07",
+      "lasting": 0.984894808229162,
+      "support": null,
+      "verdict": "pass",
+      "reason": "lasting p=0.98"
+    },
+    {
+      "id": "l08",
+      "lasting": 0.9958522286779127,
+      "support": null,
+      "verdict": "pass",
+      "reason": "lasting p=1.00"
+    },
+    {
+      "id": "l09",
+      "lasting": 0.9955496520797631,
+      "support": null,
+      "verdict": "pass",
+      "reason": "lasting p=1.00"
+    },
+    {
+      "id": "l10",
+      "lasting": 0.9917597126196922,
+      "support": null,
+      "verdict": "pass",
+      "reason": "lasting p=0.99"
+    },
+    {
+      "id": "l11",
+      "lasting": 0.00016179021615507068,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.00)"
+    },
+    {
+      "id": "l12",
+      "lasting": 0.0009630908593187007,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.00)"
+    },
+    {
+      "id": "l13",
+      "lasting": 0.0006127187114368331,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.00)"
+    },
+    {
+      "id": "l14",
+      "lasting": 0.0006541931580732415,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.00)"
+    },
+    {
+      "id": "l15",
+      "lasting": 0.019603982681356283,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.02)"
+    },
+    {
+      "id": "l16",
+      "lasting": 0.001450522351381155,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.00)"
+    },
+    {
+      "id": "l17",
+      "lasting": 0.039287897090022735,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.04)"
+    },
+    {
+      "id": "l18",
+      "lasting": 0.015340085117104968,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.02)"
+    },
+    {
+      "id": "l19",
+      "lasting": 0.0017111198879054838,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.00)"
+    },
+    {
+      "id": "l20",
+      "lasting": 0.0063746791419484455,
+      "support": null,
+      "verdict": "reject",
+      "reason": "a remark about its own session, not lasting memory (p=0.01)"
+    },
+    {
+      "id": "s01",
+      "lasting": 0.9937133652075137,
+      "support": 0.9634816076019586,
+      "verdict": "pass",
+      "reason": "lasting p=0.99; supported by its evidence p=0.96"
+    },
+    {
+      "id": "s02",
+      "lasting": 0.9881804172123375,
+      "support": 0.9703706193089384,
+      "verdict": "pass",
+      "reason": "lasting p=0.99; supported by its evidence p=0.97"
+    },
+    {
+      "id": "s03",
+      "lasting": 0.934265028083104,
+      "support": 0.9144053051540474,
+      "verdict": "pass",
+      "reason": "lasting p=0.93; supported by its evidence p=0.91"
+    },
+    {
+      "id": "s04",
+      "lasting": 0.983488110057884,
+      "support": 0.9396460267163719,
+      "verdict": "pass",
+      "reason": "lasting p=0.98; supported by its evidence p=0.94"
+    },
+    {
+      "id": "s05",
+      "lasting": 0.9934110297393663,
+      "support": 0.9892029215551269,
+      "verdict": "pass",
+      "reason": "lasting p=0.99; supported by its evidence p=0.99"
+    },
+    {
+      "id": "s06",
+      "lasting": 0.991046618765384,
+      "support": 0.9813914213781075,
+      "verdict": "pass",
+      "reason": "lasting p=0.99; supported by its evidence p=0.98"
+    },
+    {
+      "id": "s07",
+      "lasting": 0.7074449863757113,
+      "support": 0.6401236687742275,
+      "verdict": "abstain",
+      "reason": "held for review: lasting-memory uncertain (p=0.71)"
+    },
+    {
+      "id": "s08",
+      "lasting": 0.9945996455656786,
+      "support": 0.9908715669899394,
+      "verdict": "pass",
+      "reason": "lasting p=0.99; supported by its evidence p=0.99"
+    },
+    {
+      "id": "s09",
+      "lasting": 0.9933096339467735,
+      "support": 0.00020104251378068368,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s10",
+      "lasting": 0.9903152789721464,
+      "support": 0.0007226497978652806,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s11",
+      "lasting": 0.7599387574779076,
+      "support": 0.001752535693311049,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s12",
+      "lasting": 0.989543643476657,
+      "support": 0.0037280652184211384,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s13",
+      "lasting": 0.9923184697850322,
+      "support": 0.00027485709161392526,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s14",
+      "lasting": 0.9877287107812329,
+      "support": 0.0006263877532016931,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s15",
+      "lasting": 0.6364082969810952,
+      "support": 0.003142792246138019,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s16",
+      "lasting": 0.9942123430591213,
+      "support": 0.007426915609042644,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.01)"
+    },
+    {
+      "id": "s17",
+      "lasting": 0.6511105322257479,
+      "support": 0.0009369226858901844,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s18",
+      "lasting": 0.9951744852040829,
+      "support": 0.0004794783985397367,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s19",
+      "lasting": 0.9893197741470737,
+      "support": 0.0026672655664336017,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.00)"
+    },
+    {
+      "id": "s20",
+      "lasting": 0.993131525925888,
+      "support": 0.016821597989570856,
+      "verdict": "reject",
+      "reason": "not supported by the evidence submitted with it (p=0.02)"
+    }
+  ]
+}
