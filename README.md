@@ -97,7 +97,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.15`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.16`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -314,7 +314,17 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.23.15 and earlier)</summary>
+<summary>Recent release notes (v11.23.16 and earlier)</summary>
+
+## What's New in v11.23.16
+
+**Task creation starts at 0.90 across MCP.** When confidence is omitted, `sage_remember(type="task")` now matches `sage_task`; other memory types keep their 0.80 default. Corrections resolve the inherited memory type before choosing the default. Explicit scores, including 0 and 0.80, are preserved; malformed, non-finite and out-of-range scores are rejected. The tool schema describes the conditional defaults without inserting a fixed value that could override correction inheritance.
+
+**Submission receipts report the score that was signed.** `submitted_confidence` appears on submitted `sage_remember` writes, including corrections and indeterminate outcomes, and on `sage_task` creation, replay and committed-but-unconfirmed receipts. It describes the request, not a later stored or query-time score. Skipped or rejected pre-validation and task-status updates do not report a submitted score.
+
+Existing memory scores and task idempotency checks remain intact. There is no consensus execution change, app-version change or chain migration; app-v28 stays active and the qualified v15 local judge pin is unchanged.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.16`. SDK 11.23.16.
 
 ## What's New in v11.23.15
 
