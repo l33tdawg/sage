@@ -78,7 +78,7 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/UPGRADING.md', '| v11.19.20 | Voter dedup is sticky'],
     ['docs/UPGRADING.md', '| v11.19.21 | Co-commit tombstones'],
     ['docs/UPGRADING.md', '| v11.20.0 | Encrypted agent working state'],
-    ['docs/UPGRADING.md', `| v${version} | MCP task creation defaults to 0.90`],
+    ['docs/UPGRADING.md', `| v${version} | Optional local judge pinned to v16`],
     ['docs/ROADMAP.md', `## v${version} release`],
     ['docs/UPGRADING.md', 'The recovery commands in this guide require SAGE v11.18.0 or later.'],
     ['docs/UPGRADING.md', '`backup --full`, `restore --from`,'],

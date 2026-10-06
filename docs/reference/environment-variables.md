@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.23.16. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
+<!-- Reconciled through SAGE v11.23.17. Every variable below was located at the cited file:line via `os.Getenv` or the local env helper. When the code changes, re-verify and bump this header. -->
 
 # SAGE Reference — Environment Variables
 
@@ -107,7 +107,7 @@ current managed local adapter judges every domain (`cmd/sage-gui/node.go`,
 | `SAGE_HUNCH_TIMEOUT` | Per-memory judge budget as a positive Go duration; invalid values use the default. | `60s` | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:41` |
 | `SAGE_HUNCH_JUDGE_REVISION` | Operator tag in the cache version; change it when the service's default model changes behind the same URL. | unset | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go:68` |
 | `SAGE_HUNCH_EVIDENCE` | `off` disables support judging in the Hunch adapter. Otherwise supplied evidence is checked by every judge. | enabled when evidence is supplied | sage-gui | `writeGateFromEnv` — `cmd/sage-gui/write_gate.go` |
-| `SAGE_LOCAL_JUDGE_MODEL` | Managed Ollama model name; `sage-memory-judge:v15` selects the pinned experimental judge. Used only when `SAGE_HUNCH_URL` is unset. Installation runs in the background; unavailable or unverified inference holds memories. | unset (gate off) | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go`; gate wiring in `cmd/sage-gui/node.go` |
+| `SAGE_LOCAL_JUDGE_MODEL` | Managed Ollama model name; `sage-memory-judge:v16` selects the pinned experimental judge. Used only when `SAGE_HUNCH_URL` is unset. Installation runs in the background; unavailable or unverified inference holds memories. | unset (gate off) | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go`; gate wiring in `cmd/sage-gui/node.go` |
 | `SAGE_LOCAL_JUDGE_DEBIAS` | Exactly `1` asks both answer orders and averages their probabilities; changes the cache version. | disabled | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go` |
 | `SAGE_LOCAL_JUDGE_TIMEOUT` | Per-memory judge budget as a positive Go duration; invalid values use the default. | `60s` | sage-gui | `localJudgeFromEnv` — `cmd/sage-gui/local_judge.go` |
 | `SAGE_LOCAL_JUDGE_REVISION` | Operator tag in the cache version; change it when weights change behind the configured model name. | unset | sage-gui | `localJudgeVersion` — `cmd/sage-gui/local_judge.go` |

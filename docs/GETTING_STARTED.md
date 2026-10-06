@@ -27,7 +27,7 @@ sudo mv sage-gui /usr/local/bin/  # or add to your PATH
 
 ```bash
 sage-gui version
-# sage-gui v11.23.16
+# sage-gui v11.23.17
 ```
 
 ---
@@ -143,7 +143,7 @@ Prefer to bring your own? You can still point SAGE at any external TEI-compatibl
 
 v11.23.14 adds a managed local judge to the experimental memory gate. It is
 **off by default**. On a personal SQLite node, set
-`SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v15` in the node's environment before
+`SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v16` in the node's environment before
 starting it. SAGE downloads and verifies the pinned model in the background;
 memories wait for review while the judge is unavailable. The current managed
 adapter judges every domain; Hunch's include/exempt settings apply only to the
@@ -211,7 +211,7 @@ sage-gui setup
 
 ### 3. Start using it
 
-Just chat normally. SAGE v11.23.16 advertises 35 MCP tools. The core workflow is:
+Just chat normally. SAGE v11.23.17 advertises 35 MCP tools. The core workflow is:
 
 | Tool | What it does |
 |------|-------------|
