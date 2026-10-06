@@ -24,6 +24,9 @@ import (
 	"github.com/l33tdawg/sage/internal/taskidempotency"
 )
 
+// Both MCP task-creation paths use the same initial confidence.
+const defaultTaskConfidence = 0.90
+
 // Tool defines an MCP tool with its schema and handler.
 type Tool struct {
 	Name        string                                                        `json:"name"`
@@ -42,8 +45,8 @@ func (s *Server) registerTools() map[string]Tool {
 				"properties": map[string]any{
 					"content":            map[string]any{"type": "string", "description": "The memory content to store"},
 					"domain":             map[string]any{"type": "string", "description": "Domain tag. When omitted, a correction inherits its source domain and a new memory uses this app-v23 agent's owned home domain (legacy nodes use general). Explicit values are never silently remapped."},
-					"type":               map[string]any{"type": "string", "enum": []string{"fact", "observation", "inference", "task"}, "default": "observation", "description": "Memory type. A correction inherits the original type when omitted. fact (0.95+): verified durable knowledge — IPs, hostnames, architecture decisions, configs, infrastructure. observation (0.80): session-level context — what happened, what was discussed. inference (0.60): hypotheses and conclusions. task: actionable items."},
-					"confidence":         map[string]any{"type": "number", "description": "Confidence score 0-1", "default": 0.8},
+					"type":               map[string]any{"type": "string", "enum": []string{"fact", "observation", "inference", "task"}, "description": "Memory type. When omitted, a new memory defaults to observation and a correction inherits the original type. fact (0.95+): verified durable knowledge — IPs, hostnames, architecture decisions, configs, infrastructure. observation (0.80): session-level context — what happened, what was discussed. inference (0.60): hypotheses and conclusions. task: actionable items."},
+					"confidence":         map[string]any{"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence score 0-1. When omitted, defaults to 0.90 for tasks (including inherited correction types), otherwise 0.80. Explicit values are preserved."},
 					"tags":               map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "User-defined labels for this memory (e.g. 'important', 'project-x')"},
 					"replaces_memory_id": map[string]any{"type": "string", "description": "Optional committed memory ID this content corrects. The replacement is committed first; only then is the old memory challenged."},
 					"replacement_reason": map[string]any{"type": "string", "description": "Optional audit reason recorded when the replaced memory is challenged."},
@@ -777,6 +780,38 @@ func (s *Server) resolveWriteDomain(ctx context.Context, params map[string]any) 
 	return "general", nil
 }
 
+// rememberConfidence distinguishes omission from malformed explicit input.
+// MCP arguments arrive as float64 (or json.Number with UseNumber); never turn
+// an invalid caller-supplied score into an apparently successful default.
+func rememberConfidence(params map[string]any, memoryType string) (float64, error) {
+	value, supplied := params["confidence"]
+	if !supplied {
+		if memoryType == "task" {
+			return defaultTaskConfidence, nil
+		}
+		return 0.80, nil
+	}
+	var confidence float64
+	switch typed := value.(type) {
+	case float64:
+		confidence = typed
+	case int:
+		confidence = float64(typed)
+	case json.Number:
+		var err error
+		confidence, err = typed.Float64()
+		if err != nil {
+			return 0, fmt.Errorf("confidence must be a finite number between 0 and 1")
+		}
+	default:
+		return 0, fmt.Errorf("confidence must be a finite number between 0 and 1")
+	}
+	if math.IsNaN(confidence) || math.IsInf(confidence, 0) || confidence < 0 || confidence > 1 {
+		return 0, fmt.Errorf("confidence must be a finite number between 0 and 1")
+	}
+	return confidence, nil
+}
+
 func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, error) {
 	if s.checkVaultLocked(ctx) {
 		return map[string]any{
@@ -821,7 +856,6 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 
 	domain := stringParam(params, "domain", "")
 	memType := stringParam(params, "type", "observation")
-	confidence := floatParam(params, "confidence", 0.8)
 	if correctionSource != nil {
 		if rawDomain, supplied := params["domain"]; !supplied || rawDomain == "" {
 			domain = correctionSource.DomainTag
@@ -837,6 +871,12 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		if domainErr != nil {
 			return nil, domainErr
 		}
+	}
+
+	// Resolve correction inheritance before choosing the type-specific default.
+	confidence, confidenceErr := rememberConfidence(params, memType)
+	if confidenceErr != nil {
+		return nil, confidenceErr
 	}
 
 	// The node owns the duplicate rule. Its pre-validate route runs the named
@@ -993,13 +1033,14 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		// reconciling the transaction, and tx_hash is the handle that resolves
 		// it — a failure string would hide both facts from the agent.
 		return map[string]any{
-			"status":    "indeterminate",
-			"tx_hash":   submitResp.TxHash,
-			"committed": false,
-			"retryable": false,
-			"domain":    domain,
-			"type":      memType,
-			"message":   "The transaction reached the network but the node could not observe its fate before its own wait for inclusion expired; it may still commit. Do not resubmit: reconcile by tx_hash before repeating this write.",
+			"status":               "indeterminate",
+			"tx_hash":              submitResp.TxHash,
+			"committed":            false,
+			"retryable":            false,
+			"domain":               domain,
+			"type":                 memType,
+			"submitted_confidence": confidence,
+			"message":              "The transaction reached the network but the node could not observe its fate before its own wait for inclusion expired; it may still commit. Do not resubmit: reconcile by tx_hash before repeating this write.",
 		}, nil
 	}
 	if submitResp.MemoryID == "" {
@@ -1016,6 +1057,8 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 		"domain":    domain,
 		"type":      memType,
 		"provider":  s.provider,
+		// Report the signed input, not a claim about its later stored/read score.
+		"submitted_confidence": confidence,
 	}
 	if submitResp.Committed != nil {
 		result["committed"] = *submitResp.Committed
@@ -4237,7 +4280,7 @@ func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, erro
 			"memory_type":      "task",
 			"domain_tag":       domain,
 			"provider":         s.provider,
-			"confidence_score": 0.90,
+			"confidence_score": defaultTaskConfidence,
 			"embedding":        embedResp.Embedding,
 			// Assignment is materialized in the serving projection, while the
 			// app-v23 durable receipt consensus-binds its exact assignee. Create
@@ -4290,6 +4333,8 @@ func (s *Server) toolTask(ctx context.Context, params map[string]any) (any, erro
 		}
 		memoryID = submitResp.MemoryID
 		markEmbeddingQueuedResult(result, submitResp.EmbeddingQueued)
+		// A replay reports this request's input, not a new confidence assignment.
+		result["submitted_confidence"] = defaultTaskConfidence
 		if submitResp.ProjectionConfirmed != nil && !*submitResp.ProjectionConfirmed {
 			result["memory_id"] = memoryID
 			result["tx_hash"] = submitResp.TxHash

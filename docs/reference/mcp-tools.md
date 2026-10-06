@@ -316,7 +316,7 @@ replacement first, old-memory challenge second.
 | `content` | string | yes | Memory content to store. |
 | `domain` | string | no | Exact domain tag. A correction inherits its source domain when omitted; a new write uses the approved app-v23 owned home domain (legacy nodes use `general`). An explicit value is never remapped. |
 | `type` | string | no | `fact`, `observation`, `inference`, or `task`. Default: `observation`; a correction inherits the original type when omitted. |
-| `confidence` | number | no | Score 0–1. Default: 0.80. |
+| `confidence` | number | no | Score 0–1. Defaults to 0.90 for tasks, including an inherited task correction type; otherwise 0.80. Explicit values, including 0, are preserved. Supplied non-numeric, non-finite, or out-of-range values are rejected. |
 | `tags` | string[] | no | User-defined labels (e.g. `important`, `project-x`). Git branch is auto-appended. |
 | `evidence` | string | no | Optional source text, up to 32 KiB, for non-task memories. Uploaded separately and kept on this node; an enabled memory gate checks whether it supports the claim. |
 | `replaces_memory_id` | string | no | Live committed/challenged memory this content corrects. The replacement is pre-validated like any other write, so a body byte-identical to its source is refused as a duplicate — the voter would have deprecated it — and the correction must actually change the content. |
@@ -324,6 +324,11 @@ replacement first, old-memory challenge second.
 
 **Returns:**
 - `memory_id`, `status`, `tx_hash`, `domain`, `type`, `provider`, `tags`.
+- Submitted writes also return `submitted_confidence`: the score in the signed
+  submission, not a readback of stored or query-time confidence. It is present
+  even for an indeterminate submission and absent when pre-validation skips or
+  rejects the write. `committed: true` confirms transaction inclusion; the
+  returned lifecycle `status` may still be `proposed` until voting finishes.
 - A vectorless but committed write reports `embedding_queued: true`,
   `store_mode: "no_vector"`, `semantic_degraded: true`, and `degraded_reason`.
   The memory remains durable and is queued for automatic re-embedding.
@@ -348,6 +353,12 @@ replacement first, old-memory challenge second.
   - `replacement_committed_old_retained` when replacement succeeded but the
     challenge failed. This ordering is intentionally fail-safe: interruption
   can leave both memories live, but cannot leave neither.
+
+Before this default alignment, `sage_remember(type="task")` with omitted
+confidence submitted 0.80. Existing records retain that value. When deliberately
+retrying an earlier exact submission, preserve its original explicit confidence:
+idempotency checks include confidence and a changed payload must still conflict.
+The client does not change the key or retry another score to bypass a conflict.
 
 On an upgraded app-v23 node, MCP may observe a migration-only
 `legacy_restricted` policy through effective denials or CEREBRUM diagnostics,
@@ -844,7 +855,10 @@ request per domain.
 
 **Purpose:** Create a task, update its workflow status, or link related memories
 in the persistent backlog. Tasks use `memory_type: task` and do not decay while
-open. Their consensus-backed content is immutable after creation.
+open. Their consensus-backed content is immutable after creation. New tasks
+submit confidence 0.90, matching `sage_remember(type="task")` when confidence
+is omitted. This default does not rewrite existing records; `sage_remember`
+can still submit an explicitly chosen task confidence.
 
 **Source:** `internal/mcp/tools.go` (`registerTools` entry `sage_task`; `Server.toolTask`).
 
@@ -865,6 +879,10 @@ returns an error before any API request is sent.
 
 **Returns:**
 - Confirmed create/replay: `{memory_id, task_status, domain, assignee, action, committed, committed_height, tx_hash, idempotency_key, idempotency_key_source, idempotency_contract, idempotent_replay?, deduplicated?, linked, message}`. A fresh task has `action: "created"`. Every replay has `action: "existing"`, `idempotent_replay: true`, and `deduplicated: true`; its message says that no new task was created. A replay still in `planned` may perform a requested `planned`→`in_progress` transition and exact-assignee readback without pretending the task was newly created. `idempotency_key_source` is `derived` or `explicit`, and the corresponding contract is `permanent_semantic` or `permanent_explicit_key`. Fresh success is returned only after the submit commit and an immediate exact-assignee backlog readback.
+- Create/replay and committed-but-unconfirmed results also carry
+  `submitted_confidence: 0.90`. This describes the signed request; replay does
+  not change the existing record, and the field is absent for status/link-only
+  updates. Neither tool interprets consensus finalization as a confidence lift.
 - A newly committed task whose vector could not be generated additionally
   reports `embedding_queued: true`, `store_mode: "no_vector"`,
   `semantic_degraded: true`, and `degraded_reason`; task durability and workflow
