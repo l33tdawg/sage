@@ -17,6 +17,7 @@ SOURCE_DIR=desktop/SAGECerebrumNative/Sources/SAGECerebrumNative
 TRANSPORT_SOURCES=(
   "$SOURCE_DIR/ShellControlClient.swift"
   "$SOURCE_DIR/SAGEAPIClient.swift"
+  "$SOURCE_DIR/NativeBootstrapClient.swift"
   "$SOURCE_DIR/DashboardEvent.swift"
   "$SOURCE_DIR/DashboardModels.swift"
   "$SOURCE_DIR/MemoryModels.swift"
@@ -36,9 +37,10 @@ TRANSPORT_SOURCES=(
   scripts/v12-native-transport-qualification.py \
   scripts/v12-native-transport-qualification.sh > "$EVIDENCE_DIR/transport-sources.sha256"
 
-# Compile the actual shipping Foundation sources, with no DEBUG override and no
-# mock URLProtocol. Do not include this diagnostic @main in the native app.
-swiftc -parse-as-library -swift-version 6 -O \
+# Compile the shipping Foundation transport with a fixture-only legacy browser
+# metadata bridge; production excludes that branch. No DEBUG/URLProtocol mocks.
+# The separate signed session gate qualifies the actual production bootstrap.
+swiftc -parse-as-library -swift-version 6 -O -D SAGE_LEGACY_TRANSPORT_QUALIFICATION \
   -o "$WORK_DIR/native-transport-probe" "${TRANSPORT_SOURCES[@]}"
 go build -tags=v119testfixture \
   -ldflags "-X main.version=12.0.0-beta.1 -X main.commit=$(git rev-parse HEAD)" \

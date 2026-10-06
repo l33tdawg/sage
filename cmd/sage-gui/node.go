@@ -316,6 +316,11 @@ func runServe(startupProof string) (rerr error) {
 				logger.Warn().Err(closeErr).Msg("native shell control endpoint cleanup incomplete")
 			}
 		}()
+		if requirement := nativeBootstrapRequirement(); requirement != "" {
+			if err := nativeControl.EnableNativeBootstrap(requirement); err != nil {
+				logger.Warn().Err(err).Msg("native session bootstrap unavailable")
+			}
+		}
 		logger.Info().Str("endpoint", nativeControl.Endpoint()).Msg("native shell control endpoint ready for negotiation")
 	}
 
@@ -1599,6 +1604,10 @@ func runServe(startupProof string) (rerr error) {
 			}
 		}
 	})
+	if nativeControl != nil {
+		dashboard.NativeBootstrap = nativeControl.NativeBootstrap()
+		dashboard.NativeBinding = nativeControl.NativeBinding()
+	}
 	dashboard.VaultKeyPath = filepath.Join(SageHome(), "vault.key")
 	dashboard.SaveEncryptionConfig = func(enabled bool) error {
 		cfg.Encryption.Enabled = enabled

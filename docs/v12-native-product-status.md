@@ -51,6 +51,22 @@ update/rollback, physical keyboard/VoiceOver and signed release acceptance
 remain open. Dashboard session lock does not relock the shared vault. The
 native product baseline remains unchanged pending review and broader evidence.
 
+## Native bootstrap candidate — 2026-10-06
+
+The [native bootstrap candidate](v12-native-bootstrap-qualification.md) adds
+SSCP/2 signed-peer verification, a fresh same-socket proof, one-use HTTP redemption
+and private native admission. Default AppSession no longer sends fabricated
+browser metadata. The beta keeps `com.sage.cerebrum.beta`; production policy
+requires its approved Developer ID team and hardened runtime.
+
+Vault login and current Root/Admin checks remain separate. This first native
+admission slice requires an encrypted ledger; native-issued vault cookies are
+bound to their transport session. Disposable qualification uses a hardened ad-hoc
+probe and a test-build-only exact-code-hash policy. Developer ID distribution,
+notarization, installed acceptance and app-owned daemon lifecycle remain open.
+No-cgo release daemons cannot issue native admission. The native product baseline
+is unchanged; earlier candidate sections above describe their own review bounds.
+
 ## Direction reset: fully native
 
 The earlier bounded-WebView decision is superseded. The Tauri build remains

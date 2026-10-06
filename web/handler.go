@@ -35,6 +35,7 @@ import (
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/nativebootstrap"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
@@ -91,6 +92,9 @@ type rerankerInfoProvider interface {
 
 // DashboardHandler serves the CEREBRUM dashboard UI and its API endpoints.
 type DashboardHandler struct {
+	NativeBootstrap *nativebootstrap.Broker
+	NativeBinding   nativebootstrap.Binding
+
 	// memoryGate is the node's optional memory gate (nil = off); see write_gate.go.
 	memoryGate         atomic.Pointer[voter.Gate]
 	cleanupMu          sync.Mutex
@@ -675,7 +679,7 @@ func (h *DashboardHandler) isCEREBRUMOperatorRequest(r *http.Request) bool {
 		return false
 	}
 	cookie, err := r.Cookie(sessionCookieName)
-	return err == nil && h.validSession(cookie.Value)
+	return err == nil && h.validSessionForRequest(cookie.Value, r)
 }
 
 func (h *DashboardHandler) isCEREBRUMReadRequest(r *http.Request) bool {
@@ -1315,6 +1319,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 	// Use a group so securityHeaders doesn't conflict with already-registered routes on the parent router.
 	r.Group(func(r chi.Router) {
 		r.Use(securityHeaders)
+		r.Use(h.nativeSessionGate)
+		r.Post("/v1/dashboard/native/redeem", h.handleNativeRedeem)
+		r.Post("/v1/dashboard/native/revoke", h.handleNativeRevoke)
 
 		// Auth endpoints — always available (login page needs to load without auth).
 		r.With(cerebrumLoopbackOnly).Post("/v1/dashboard/auth/login", h.handleLogin)
@@ -1663,6 +1670,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 // reject unsigned LAN/dashboard access.
 func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rejectUnencryptedNative(w, r, h.Encrypted.Load()) {
+			return
+		}
 		// An agent identity is usable only when this exact request verifies. Check
 		// it before the local/browser path so a caller cannot forge X-Agent-ID (or
 		// omit a bad signature) and inherit same-origin/session authorization.
@@ -1685,7 +1695,7 @@ func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		cookie, err := r.Cookie(sessionCookieName)
-		if err != nil || !h.validSession(cookie.Value) {
+		if err != nil || !h.validSessionForRequest(cookie.Value, r) {
 			writeUnauthorized(w)
 			return
 		}
@@ -1941,6 +1951,9 @@ func (h *DashboardHandler) agentSignatureReplayed(key string) bool {
 
 // handleLogin verifies the vault passphrase and sets a session cookie.
 func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if rejectUnencryptedNative(w, r, h.Encrypted.Load()) {
+		return
+	}
 	if !h.Encrypted.Load() {
 		writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": "no auth required"})
 		return
@@ -2008,7 +2021,12 @@ func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 // from being stranded between setup and recovery-key acknowledgement.
 func (h *DashboardHandler) issueDashboardSession(w http.ResponseWriter, r *http.Request) {
 	token := generateToken()
-	h.sessions.Store(token, time.Now().Add(sessionTTL))
+	expiry := time.Now().Add(sessionTTL)
+	if native := nativeSessionToken(r); native != "" {
+		h.sessions.Store(token, nativeDashboardSession{Expires: expiry, Binding: sha256.Sum256([]byte(native))})
+	} else {
+		h.sessions.Store(token, expiry)
+	}
 
 	// gosec G124 wants a literal `Secure: true`; we set it based on
 	// r.TLS != nil because SAGE-Personal legitimately serves over plain
@@ -2028,6 +2046,9 @@ func (h *DashboardHandler) issueDashboardSession(w http.ResponseWriter, r *http.
 
 // handleLock invalidates the current session — like Cmd+L in 1Password.
 func (h *DashboardHandler) handleLock(w http.ResponseWriter, r *http.Request) {
+	if token := nativeSessionToken(r); token != "" {
+		h.revokeNativeSession(token)
+	}
 	if !h.Encrypted.Load() {
 		writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": "encryption not enabled"})
 		return
@@ -2056,13 +2077,16 @@ func (h *DashboardHandler) handleLock(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthCheck returns whether auth is required and if current session is valid.
 func (h *DashboardHandler) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
+	if rejectUnencryptedNative(w, r, h.Encrypted.Load()) {
+		return
+	}
 	if !h.Encrypted.Load() {
 		writeJSONResp(w, http.StatusOK, map[string]any{"auth_required": false, "authenticated": true})
 		return
 	}
 
 	cookie, err := r.Cookie(sessionCookieName)
-	authenticated := err == nil && h.validSession(cookie.Value)
+	authenticated := err == nil && h.validSessionForRequest(cookie.Value, r)
 
 	writeJSONResp(w, http.StatusOK, map[string]any{"auth_required": true, "authenticated": authenticated})
 }
@@ -2091,7 +2115,7 @@ func (h *DashboardHandler) IsRequestAuthenticated(r *http.Request) (bool, string
 		next := r.URL.RequestURI()
 		return false, "/ui/?next=" + url.QueryEscape(next)
 	}
-	if cookie, err := r.Cookie(sessionCookieName); err == nil && h.validSession(cookie.Value) {
+	if cookie, err := r.Cookie(sessionCookieName); err == nil && h.validSessionForRequest(cookie.Value, r) {
 		return true, ""
 	}
 	// Build a redirect to the SPA carrying `next=<original URL>` so the
@@ -2110,7 +2134,7 @@ func (h *DashboardHandler) HasValidSessionCookie(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return h.validSession(cookie.Value)
+	return h.validSessionForRequest(cookie.Value, r)
 }
 
 func (h *DashboardHandler) validSession(token string) bool {

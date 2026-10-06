@@ -37,6 +37,8 @@ func TestEveryProtectedDashboardMutationRejectsArbitrarySignedMember(t *testing.
 	reviewedExceptions := map[string]struct{}{
 		"POST /v1/dashboard/auth/lock":               {},
 		"POST /v1/dashboard/auth/login":              {},
+		"POST /v1/dashboard/native/redeem":           {}, // One-use native proof, no operator authority.
+		"POST /v1/dashboard/native/revoke":           {}, // Exact native admission revocation only.
 		"POST /v1/dashboard/network/claim":           {},
 		"POST /v1/dashboard/settings/ledger/recover": {},
 		"POST /v1/memory/pre-validate":               {},

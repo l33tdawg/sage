@@ -35,7 +35,7 @@ final class AppSession {
     private(set) var sessionEpoch: UInt64 = 0
 
     typealias Discovery = @Sendable () async throws -> ShellControlConnection
-    typealias ClientFactory = @MainActor @Sendable (ShellControlConnection, @escaping @Sendable () async -> Void) -> any SAGEAPI
+    typealias ClientFactory = @MainActor @Sendable (ShellControlConnection, @escaping @Sendable () async -> Void) async throws -> any SAGEAPI
     @ObservationIgnored private let discover: Discovery
     @ObservationIgnored private let makeClient: ClientFactory
     @ObservationIgnored private let sleep: @Sendable () async throws -> Void
@@ -60,7 +60,8 @@ final class AppSession {
     init(
         discover: @escaping Discovery = { try await ShellControlClient.discoverConnection(timeout: .seconds(1)) },
         makeClient: @escaping ClientFactory = { connection, unauthorized in
-            SAGEAPIClient(baseURL: connection.origin, onUnauthorized: unauthorized)
+            let credential = try await NativeBootstrapClient.bootstrap(connection: connection)
+            return SAGEAPIClient(baseURL: connection.origin, nativeCredential: credential, onUnauthorized: unauthorized)
         },
         sleep: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(1)) }
     ) {
@@ -149,8 +150,12 @@ final class AppSession {
             connection = found
             let id = UUID()
             clientID = id
-            let newAPI = makeClient(found) { [weak self] in
+            let newAPI = try await makeClient(found) { [weak self] in
                 await self?.handleUnauthorized(client: id)
+            }
+            guard connectionAttempt == attempt, clientID == id, !Task.isCancelled, !isLocking else {
+                await newAPI.invalidate()
+                return
             }
             api = newAPI
             let epoch = sessionEpoch

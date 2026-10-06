@@ -485,7 +485,7 @@ func (h *DashboardHandler) appV23SessionHasRootAuthority(r *http.Request) bool {
 		return false
 	}
 	cookie, err := r.Cookie(sessionCookieName)
-	return err == nil && h.validSession(cookie.Value)
+	return err == nil && h.validSessionForRequest(cookie.Value, r)
 }
 
 func (h *DashboardHandler) appV23LocalActorKey(actorID string) (ed25519.PrivateKey, bool) {

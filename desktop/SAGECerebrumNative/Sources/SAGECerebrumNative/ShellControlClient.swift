@@ -141,10 +141,10 @@ enum ShellControlClient {
             ), origin: override)
         }
         #endif
-        let status: ShellControlStatus = try await Task.detached(priority: .userInitiated) {
-            try readStatus(sageHome: sageHome, timeout: timeout)
-        }.value
-        try Task.checkCancellation()
+        let request = Data(#"{"control_protocol":1,"shell_protocol":1,"operation":"status"}"#.utf8)
+        let response = try await exchange(request: request, sageHome: sageHome, timeout: timeout)
+        let status = try JSONDecoder().decode(ShellControlStatus.self, from: response)
+        try validate(status)
         guard status.canServeNativeUI else { throw ShellControlError.notReady(status.state) }
         guard let raw = status.uiOrigin, let origin = URL(string: raw),
               SAGEAPIClient.isSafeLoopback(origin), (origin.path.isEmpty || origin.path == "/"),
@@ -219,7 +219,21 @@ enum ShellControlClient {
         }
     }
 
-    private static func readStatus(sageHome: URL, timeout: Duration) throws -> ShellControlStatus {
+    // Shared framing only. SSCP/1 status and SSCP/2 bootstrap each retain their
+    // own closed response decoder; this does not widen the status contract.
+    static func exchange(request: Data, sageHome: URL, timeout: Duration = .seconds(2),
+                         challengeResponse: (@Sendable (Data) throws -> Data)? = nil) async throws -> Data {
+        guard timeout > .zero, timeout <= .seconds(2) else { throw ShellControlError.invalidTimeout }
+        try Task.checkCancellation()
+        let response = try await Task.detached(priority: .userInitiated) {
+            try exchangeFrame(request: request, sageHome: sageHome, timeout: timeout, challengeResponse: challengeResponse)
+        }.value
+        try Task.checkCancellation()
+        return response
+    }
+
+    private static func exchangeFrame(request: Data, sageHome: URL, timeout: Duration,
+                                      challengeResponse: (@Sendable (Data) throws -> Data)?) throws -> Data {
         let deadline = ContinuousClock.now.advanced(by: timeout)
         let runDirectory = sageHome.appending(path: "run", directoryHint: .isDirectory)
         let endpoint = runDirectory.appending(path: "shell-control.sock")
@@ -270,12 +284,14 @@ enum ShellControlClient {
             throw ShellControlError.unsafeEndpoint
         }
 
-        let request = Data(#"{"control_protocol":1,"shell_protocol":1,"operation":"status"}"#.utf8)
         try writeFrame(request, to: descriptor, deadline: deadline)
         let response = try readFrame(from: descriptor, deadline: deadline)
-        let status = try JSONDecoder().decode(ShellControlStatus.self, from: response)
-        try validate(status)
-        return status
+        guard let challengeResponse else { return response }
+        // The server challenge must be answered on this exact connection. All
+        // four frames share the original connect/write/read deadline.
+        let proof = try challengeResponse(response)
+        try writeFrame(proof, to: descriptor, deadline: deadline)
+        return try readFrame(from: descriptor, deadline: deadline)
     }
 
     private static func secureAttributes(
