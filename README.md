@@ -97,7 +97,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.16`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.17`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -314,7 +314,17 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.23.16 and earlier)</summary>
+<summary>Recent release notes (v11.23.17 and earlier)</summary>
+
+## What's New in v11.23.17
+
+**The optional local judge is now pinned to v16.** On the disclosed frozen 40-item synthetic regression set, the attributed tank-warning example moves from rejection to operator review. All 18 genuine examples avoid rejection: 16 pass and two hold. All 22 negative examples still reject. These results were independently measured on Linux/arm64 with Ollama v0.31.1; they do not establish fresh-holdout accuracy or qualify production installation on every platform.
+
+Select `SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v16` to use the new pin. The memory gate remains experimental and off by default; upgrading does not rewrite an explicit v15 setting. The download uses an immutable Hugging Face revision with separate SHA-256 pins for the downloaded GGUF and Ollama's registered blob. Thresholds, serving template and runtime are unchanged. See the [memory-gate guide](docs/reference/write-gate.md) and [v16 regression results](bench/judge-qualify/results/sage-judge-v16-ollama-0.31.1-go-arm64.json). Thanks to [@ihubanov](https://github.com/ihubanov) for the update.
+
+No consensus execution change, app-version change or chain migration; app-v28 stays active.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.17`. SDK 11.23.17.
 
 ## What's New in v11.23.16
 
