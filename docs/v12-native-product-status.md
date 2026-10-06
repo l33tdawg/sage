@@ -36,6 +36,21 @@ not newly accepted. This candidate does not complete the production native
 session bootstrap, AppSession restart recovery or installed pair/rollback
 acceptance, and it does not advance the native product baseline.
 
+## Native session recovery candidate — 2026-10-06
+
+The follow-on [session qualification](v12-native-session-qualification.md)
+adds AppSession-owned discovery monitoring, daemon identity retention, private
+client invalidation and stale authentication-result fencing. Protected native
+views are rebuilt after a connection changes. A disposable encrypted-profile
+gate exercises the real native session through login, session lock and daemon
+restart, separately from the transport-only checks above.
+
+This candidate concerns attachment to an independently managed daemon. The
+one-use native bootstrap, app-owned daemon launch/supervision, installed
+update/rollback, physical keyboard/VoiceOver and signed release acceptance
+remain open. Dashboard session lock does not relock the shared vault. The
+native product baseline remains unchanged pending review and broader evidence.
+
 ## Direction reset: fully native
 
 The earlier bounded-WebView decision is superseded. The Tauri build remains

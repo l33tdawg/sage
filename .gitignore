@@ -142,6 +142,7 @@ docs/*
 !docs/v12-native-product-status.md
 !docs/v12-stable-convergence.md
 !docs/v12-native-transport-qualification.md
+!docs/v12-native-session-qualification.md
 !docs/v12-native-capability-ledger.md
 !docs/v12-native-acceptance-ledger.md
 !docs/v12-native-acceptance-ledger.schema.json

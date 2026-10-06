@@ -30,6 +30,8 @@ import Testing
         #expect(session.acceptsReadyCommands == false)
     }
     session.phase = .ready
+    #expect(!session.acceptsReadyCommands)
+    session.api = MutationTestAPI(forgetResults: [])
     #expect(session.acceptsReadyCommands)
 }
 

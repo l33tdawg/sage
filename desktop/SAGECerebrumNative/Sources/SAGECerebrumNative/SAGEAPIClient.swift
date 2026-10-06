@@ -33,6 +33,7 @@ enum SAGEAPIError: LocalizedError, Equatable, Sendable {
 }
 
 protocol SAGEAPI: Sendable {
+    func invalidate() async
     func authStatus() async throws -> AuthStatus
     func login(passphrase: String) async throws -> LoginResult
     func lock() async throws
@@ -54,12 +55,20 @@ protocol SAGEAPI: Sendable {
     func events() async -> AsyncThrowingStream<DashboardEventStreamElement, Error>
 }
 
+extension SAGEAPI {
+    // Stateless previews and fixture APIs do not own credentials or transports.
+    func invalidate() async {}
+}
+
 actor SAGEAPIClient: SAGEAPI {
     let baseURL: URL
     private let session: URLSession
     private let decoder = JSONDecoder.sageDashboard()
     private let encoder = JSONEncoder()
     private let onUnauthorized: @Sendable () async -> Void
+    private var invalidated = false
+    private var revocationSession: URLSession?
+    private var eventReaders: [UUID: Task<Void, Error>] = [:]
 
     init(
         baseURL: URL,
@@ -81,6 +90,19 @@ actor SAGEAPIClient: SAGEAPI {
                 delegateQueue: nil
             )
         }
+    }
+
+    func invalidate() async { invalidateTransport() }
+
+    private func invalidateTransport() {
+        revocationSession?.invalidateAndCancel()
+        revocationSession = nil
+        invalidated = true
+        let readers = eventReaders.values
+        eventReaders.removeAll()
+        for reader in readers { reader.cancel() }
+        session.invalidateAndCancel()
+        session.configuration.httpCookieStorage?.removeCookies(since: .distantPast)
     }
 
     static func isSafeLoopback(_ url: URL) -> Bool {
@@ -105,7 +127,33 @@ actor SAGEAPIClient: SAGEAPI {
     }
 
     func lock() async throws {
-        let _: LoginResult = try await send(.authLock, method: "POST")
+        guard !invalidated else { throw CancellationError() }
+        var request = makeRequest(.authLock, method: "POST")
+        if let cookies = session.configuration.httpCookieStorage?.cookies(for: baseURL) {
+            for (name, value) in HTTPCookie.requestHeaderFields(with: cookies) {
+                request.setValue(value, forHTTPHeaderField: name)
+            }
+        }
+        // The old client becomes unusable before the revocation request can
+        // suspend. Its event streams and protected requests stop immediately.
+        invalidateTransport()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.timeoutIntervalForRequest = 15
+        let revoker = URLSession(configuration: configuration,
+                                 delegate: LoopbackRedirectDelegate(origin: baseURL), delegateQueue: nil)
+        revocationSession = revoker
+        defer {
+            revoker.invalidateAndCancel()
+            revocationSession = nil
+        }
+        let (_, response) = try await revoker.data(for: request)
+        guard let response = response as? HTTPURLResponse else { throw SAGEAPIError.invalidResponse }
+        guard 200 ..< 300 ~= response.statusCode else {
+            throw SAGEAPIError.server(status: response.statusCode,
+                                     message: HTTPURLResponse.localizedString(forStatusCode: response.statusCode))
+        }
     }
 
     func health() async throws -> DashboardHealth {
@@ -180,15 +228,21 @@ actor SAGEAPIClient: SAGEAPI {
     }
 
     func events() async -> AsyncThrowingStream<DashboardEventStreamElement, Error> {
+        guard !invalidated else {
+            return AsyncThrowingStream { $0.finish(throwing: CancellationError()) }
+        }
+        let readerID = UUID()
         let request = makeRequest(.events)
         let session = self.session
         return AsyncThrowingStream { continuation in
             let reader = Task {
+                defer { self.eventReaders.removeValue(forKey: readerID) }
                 var reconnectDelay = Duration.seconds(1)
                 continuation.yield(.state(.connecting))
-                while !Task.isCancelled {
+                while !Task.isCancelled && !self.invalidated {
                     do {
                         let (bytes, response) = try await session.bytes(for: request)
+                        guard !Task.isCancelled, !self.invalidated else { break }
                         guard let response = response as? HTTPURLResponse else {
                             throw DashboardEventError.invalidResponse
                         }
@@ -205,7 +259,7 @@ actor SAGEAPIClient: SAGEAPI {
                         var lines = SSELineAccumulator()
                         var observedActivity = false
                         for try await byte in bytes {
-                            if Task.isCancelled { break }
+                            if Task.isCancelled || self.invalidated { break }
                             guard let line = try lines.consume(byte) else { continue }
                             if !observedActivity, !line.isEmpty {
                                 observedActivity = true
@@ -215,7 +269,7 @@ actor SAGEAPIClient: SAGEAPI {
                                 continuation.yield(.event(event))
                             }
                         }
-                        if !Task.isCancelled {
+                        if !Task.isCancelled && !self.invalidated {
                             continuation.yield(.state(.reconnecting))
                             do {
                                 try await Task.sleep(for: reconnectDelay)
@@ -229,7 +283,7 @@ actor SAGEAPIClient: SAGEAPI {
                     } catch is CancellationError {
                         break
                     } catch {
-                        if Task.isCancelled { break }
+                        if Task.isCancelled || self.invalidated { break }
                         continuation.yield(.state(.reconnecting))
                         do {
                             try await Task.sleep(for: reconnectDelay)
@@ -241,6 +295,7 @@ actor SAGEAPIClient: SAGEAPI {
                 }
                 continuation.finish()
             }
+            eventReaders[readerID] = reader
             continuation.onTermination = { _ in reader.cancel() }
         }
     }
@@ -256,11 +311,13 @@ actor SAGEAPIClient: SAGEAPI {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try encoder.encode(body)
         }
+        guard !invalidated else { throw CancellationError() }
         let (data, response) = try await session.data(for: request)
+        guard !invalidated else { throw CancellationError() }
         guard let response = response as? HTTPURLResponse else {
             throw SAGEAPIError.invalidResponse
         }
-        if response.statusCode == 401 {
+        if response.statusCode == 401 && endpoint != .authLogin {
             await onUnauthorized()
             throw SAGEAPIError.unauthorized
         }
@@ -292,7 +349,9 @@ actor SAGEAPIClient: SAGEAPI {
         }
         request.setValue(baseURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")), forHTTPHeaderField: "Origin")
         request.setValue("same-origin", forHTTPHeaderField: "Sec-Fetch-Site")
+        guard !invalidated else { throw CancellationError() }
         let (data, response) = try await session.data(for: request)
+        guard !invalidated else { throw CancellationError() }
         guard let response = response as? HTTPURLResponse else { throw SAGEAPIError.invalidResponse }
         if response.statusCode == 401 {
             await onUnauthorized()

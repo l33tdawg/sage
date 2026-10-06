@@ -14,7 +14,9 @@ actor ProbeTranscript {
     var events: [String] = []
     var unauthorizedCount = 0
     var failure: String?
+    private(set) var finished = false
 
+    func finish() { finished = true }
     func unauthorized() { unauthorizedCount += 1 }
     func record(_ element: DashboardEventStreamElement) {
         switch element {
@@ -28,10 +30,26 @@ actor ProbeTranscript {
     }
 }
 
+actor LockProbeState {
+    private(set) var completed = false
+    private(set) var cancelled = false
+    func finish(cancelled: Bool) { self.cancelled = cancelled; completed = true }
+}
+
 @main struct NativeTransportProbe {
     static func emit(_ value: [String: Any]) throws {
         let data = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
         print(String(decoding: data, as: UTF8.self))
+    }
+
+    static func waitForLockFixture(_ condition: @escaping @Sendable () async -> Bool) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !(await condition()) {
+            guard ContinuousClock.now < deadline else {
+                throw SAGEAPIError.server(status: 0, message: "Timed out waiting for delayed-lock fixture.")
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     static func main() async {
@@ -91,10 +109,59 @@ actor ProbeTranscript {
                     let after = try await client.authStatus()
                     let other = try await SAGEAPIClient(baseURL: origin).authStatus()
                     try await client.lock()
-                    let locked = try await client.authStatus()
+                    var oldClientInvalidated = false
+                    do { _ = try await client.authStatus() }
+                    catch is CancellationError { oldClientInvalidated = true }
+                    let locked = try await SAGEAPIClient(baseURL: origin).authStatus()
                     try emit(["ok": true, "before": before.authenticated, "login": login.ok,
                               "after": after.authenticated, "other_session": other.authenticated,
-                              "locked": locked.authenticated])
+                              "locked": locked.authenticated, "old_client_invalidated": oldClientInvalidated])
+                case "delayed-lock":
+                    let marker = URL(fileURLWithPath: args[2])
+                    let login = try await client.login(passphrase: "fixture-passphrase")
+                    guard login.ok else { throw SAGEAPIError.invalidResponse }
+                    let reader = Task {
+                        do {
+                            for try await element in await client.events() {
+                                await transcript.record(element)
+                            }
+                        } catch { await transcript.fail(error) }
+                        await transcript.finish()
+                    }
+                    defer { reader.cancel() }
+                    try await waitForLockFixture { await transcript.events.contains("consensus") }
+                    let lockState = LockProbeState()
+                    let locking = Task {
+                        do {
+                            try await client.lock()
+                            await lockState.finish(cancelled: false)
+                        } catch {
+                            let cancelled = error is CancellationError || (error as? URLError)?.code == .cancelled
+                            await lockState.finish(cancelled: cancelled)
+                        }
+                    }
+                    defer { locking.cancel() }
+                    // The HTTP fixture writes this only after it receives the
+                    // authenticated POST, then withholds the response entirely.
+                    try await waitForLockFixture { FileManager.default.fileExists(atPath: marker.path) }
+                    var oldHTTPCancelled = false
+                    do { _ = try await client.health() }
+                    catch is CancellationError { oldHTTPCancelled = true }
+                    try await waitForLockFixture { await transcript.finished }
+                    let streamFinished = await transcript.finished
+                    let lockPending = !(await lockState.completed)
+                    let start = ContinuousClock.now
+                    await client.invalidate()
+                    try await waitForLockFixture { await lockState.completed }
+                    await locking.value
+                    await reader.value
+                    let elapsed = start.duration(to: .now).components
+                    try emit(["ok": true, "old_http_cancelled": oldHTTPCancelled,
+                              "stream_finished_while_lock_pending": streamFinished && lockPending,
+                              "lock_pending_before_invalidate": lockPending,
+                              "revocation_cancelled": await lockState.cancelled,
+                              "unauthorized_count": await transcript.unauthorizedCount,
+                              "invalidation_seconds": Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18])
                 case "overview":
                     operation = "overview/auth"
                     let auth = try await client.authStatus()
