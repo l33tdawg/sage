@@ -73,8 +73,20 @@ struct ShellControlStatus: Decodable, Equatable, Sendable {
     var canServeNativeUI: Bool { state == .ready || state == .degraded }
 }
 
+struct ShellControlConnection: Equatable, Sendable {
+    let status: ShellControlStatus
+    let origin: URL
+
+    func hasSameIdentity(as other: Self) -> Bool {
+        status.instanceGeneration == other.status.instanceGeneration
+            && status.startupProof == other.status.startupProof
+            && origin == other.origin
+    }
+}
+
 enum ShellControlError: LocalizedError, Sendable {
     case unavailable(String)
+    case invalidTimeout
     case unsafeEndpoint
     case invalidFrame
     case incompatible
@@ -84,6 +96,7 @@ enum ShellControlError: LocalizedError, Sendable {
     var errorDescription: String? {
         switch self {
         case let .unavailable(message): "SAGE control is unavailable: \(message)"
+        case .invalidTimeout: "The SAGE control timeout must be greater than zero and at most two seconds."
         case .unsafeEndpoint: "The SAGE control socket failed its ownership or permission check."
         case .invalidFrame: "SAGE returned an invalid control frame."
         case .incompatible: "The running SAGE daemon is not compatible with this native app."
@@ -108,22 +121,36 @@ enum ShellControlClient {
         sageHome: URL = defaultSAGEHome(),
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) async throws -> URL {
+        try await discoverConnection(sageHome: sageHome, environment: environment).origin
+    }
+
+    static func discoverConnection(
+        sageHome: URL = defaultSAGEHome(),
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        timeout: Duration = .seconds(2)
+    ) async throws -> ShellControlConnection {
+        guard timeout > .zero, timeout <= .seconds(2) else { throw ShellControlError.invalidTimeout }
         #if DEBUG
         if let raw = environment["SAGE_API_URL"], let override = URL(string: raw) {
             guard SAGEAPIClient.isSafeLoopback(override) else { throw ShellControlError.unsafeOrigin }
-            return override
+            return ShellControlConnection(status: ShellControlStatus(
+                controlProtocol: 1, daemonVersion: "12.0.0-beta.1", apiSchema: 1,
+                minimumShellProtocol: 1, maximumShellProtocol: 1,
+                instanceGeneration: String(repeating: "A", count: 43), state: .ready,
+                uiOrigin: override.absoluteString, startupProof: nil
+            ), origin: override)
         }
         #endif
-
         let status: ShellControlStatus = try await Task.detached(priority: .userInitiated) {
-            try readStatus(sageHome: sageHome)
+            try readStatus(sageHome: sageHome, timeout: timeout)
         }.value
+        try Task.checkCancellation()
         guard status.canServeNativeUI else { throw ShellControlError.notReady(status.state) }
         guard let raw = status.uiOrigin, let origin = URL(string: raw),
               SAGEAPIClient.isSafeLoopback(origin), (origin.path.isEmpty || origin.path == "/"),
               origin.query == nil, origin.fragment == nil
         else { throw ShellControlError.unsafeOrigin }
-        return origin
+        return ShellControlConnection(status: status, origin: origin)
     }
 
     static func validate(_ status: ShellControlStatus) throws {
@@ -192,8 +219,8 @@ enum ShellControlClient {
         }
     }
 
-    private static func readStatus(sageHome: URL) throws -> ShellControlStatus {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    private static func readStatus(sageHome: URL, timeout: Duration) throws -> ShellControlStatus {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         let runDirectory = sageHome.appending(path: "run", directoryHint: .isDirectory)
         let endpoint = runDirectory.appending(path: "shell-control.sock")
         guard secureAttributes(at: runDirectory, expectedType: .typeDirectory, permissionsMask: 0o077),

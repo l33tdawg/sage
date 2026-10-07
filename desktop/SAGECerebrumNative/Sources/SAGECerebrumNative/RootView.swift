@@ -14,7 +14,7 @@ struct RootView: View {
                     systemImage: "brain.head.profile",
                     progress: true
                 )
-                .task { await session.connect() }
+
             case .locked:
                 LoginView(session: session)
             case let .failed(message):
@@ -25,7 +25,7 @@ struct RootView: View {
                     actionTitle: "Try Again"
                 ) { Task { await session.connect() } }
             case .ready:
-                if let api = session.api { nativeApplication(api: api) }
+                if let api = session.api { nativeApplication(api: api).id(session.sessionEpoch) }
             }
         }
         .tint(CerebrumTheme.cyan)
@@ -35,7 +35,9 @@ struct RootView: View {
         }
         .task {
             CerebrumNativeMenuCoordinator.shared.install(session: session)
+            session.startMonitoring()
         }
+        .onDisappear { session.stopMonitoring() }
     }
 
     private var designPreviewColorScheme: ColorScheme? {
@@ -198,7 +200,7 @@ private struct LoginView: View {
                         .controlSize(.large)
                         .onSubmit { Task { await session.login() } }
                         .focused($passphraseFocused)
-                        .disabled(session.isLoggingIn)
+                        .disabled(!session.canAttemptLogin)
                         .accessibilityHint("Unlocks the local encrypted SAGE vault")
                     if let error = session.loginError {
                         Label(error, systemImage: "exclamationmark.circle.fill")
@@ -210,15 +212,15 @@ private struct LoginView: View {
 
                 Button { Task { await session.login() } } label: {
                     HStack(spacing: 8) {
-                        if session.isLoggingIn { ProgressView().controlSize(.small) }
-                        Text(session.isLoggingIn ? "Unlocking…" : "Unlock CEREBRUM")
+                        if session.isLoggingIn || session.api == nil { ProgressView().controlSize(.small) }
+                        Text(session.api == nil ? "Connecting…" : session.isLoggingIn ? "Unlocking…" : "Unlock CEREBRUM")
                     }
                     .frame(maxWidth: .infinity)
                 }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(session.passphrase.isEmpty || session.isLoggingIn)
+                    .disabled(session.passphrase.isEmpty || !session.canAttemptLogin)
                     .frame(maxWidth: .infinity)
 
                 HStack(spacing: 14) {
@@ -241,7 +243,8 @@ private struct LoginView: View {
                 .padding(.bottom, 18)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task { passphraseFocused = true }
+        .task { passphraseFocused = session.canAttemptLogin }
+        .onChange(of: session.canAttemptLogin) { _, ready in if ready { passphraseFocused = true } }
         .onChange(of: session.loginFailureID) { _, _ in passphraseFocused = true }
     }
 }

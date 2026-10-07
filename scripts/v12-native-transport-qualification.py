@@ -226,8 +226,10 @@ class Qualification:
             result = self.run("cookies", fixture.origin)
             assert result["ok"] and result["login"] and result["after"], result
             assert not result["before"] and not result["other_session"] and not result["locked"], result
+            assert result["old_client_invalidated"], result
             assert len(fixture.requests) == 6, fixture.requests
         self.record("real URLSession private ephemeral cookies, login and lock", result)
+        self.delayed_lock()
         with self.http("unauthorized") as fixture:
             result = self.run("unauthorized", fixture.origin)
             assert result["ok"] and result["unauthorized_count"] == 1, result
@@ -262,6 +264,22 @@ class Qualification:
                 else:
                     assert len(times) == 1 and result["unauthorized_count"] == 1 and "failure" in result, result
                 self.record(f"real URLSession SSE {behavior} and cancellation", dict(transcript=result, gaps=gaps))
+
+    def delayed_lock(self):
+        with tempfile.TemporaryDirectory(prefix="sage-lock-", dir="/private/tmp") as root:
+            with self.http("delayed-lock") as fixture:
+                fixture.lock_marker = Path(root) / "lock-received"
+                result = self.run("delayed-lock", fixture.origin, fixture.lock_marker, timeout=12)
+                assert fixture.lock_started.is_set(), "revocation POST never reached fixture"
+                assert result["ok"] and result["old_http_cancelled"], result
+                assert result["stream_finished_while_lock_pending"] and result["lock_pending_before_invalidate"], result
+                assert result["revocation_cancelled"] and result["invalidation_seconds"] < 3, result
+                assert result["unauthorized_count"] == 0, result
+                assert fixture.disconnected.wait(3), "old SSE socket remained open"
+                assert [request["path"] for request in fixture.requests] == [
+                    "/v1/dashboard/auth/login", "/v1/dashboard/events", "/v1/dashboard/auth/lock"
+                ], fixture.requests
+        self.record("pending lock retires real HTTP and SSE; invalidation cancels held revocation", result)
 
     def daemon(self, binary):
         # Reserve ports first; release only immediately before our owned child.
@@ -403,6 +421,8 @@ class HTTPFixture:
         self.redirect = None
         self.stop = threading.Event()
         self.disconnected = threading.Event()
+        self.lock_started = threading.Event()
+        self.lock_marker = None
         fixture = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -448,6 +468,32 @@ class HTTPFixture:
                             self.reply(200, dict(ok=True), {"Set-Cookie": "sage_session=; Path=/; Max-Age=0"})
                         else:
                             self.reply(200, dict(auth_required=True, authenticated="sage_session=fixture" in self.headers.get("Cookie", "")))
+                    elif fixture.behavior == "delayed-lock":
+                        if self.path.endswith("/login"):
+                            assert self.command == "POST" and json.loads(body)["passphrase"] == "fixture-passphrase"
+                            self.reply(200, dict(ok=True), {"Set-Cookie": "sage_session=fixture; Path=/; HttpOnly; SameSite=Strict"})
+                        elif self.path.endswith("/lock"):
+                            assert self.command == "POST" and "sage_session=fixture" in self.headers.get("Cookie", "")
+                            fixture.lock_started.set()
+                            fixture.lock_marker.write_text("received")
+                            # Never release an HTTP response. The client must
+                            # cancel this task while ordinary transport is dead.
+                            assert fixture.stop.wait(10), "held revocation fixture exceeded its deadline"
+                            self.close_connection = True
+                        elif self.path.endswith("/events"):
+                            assert "sage_session=fixture" in self.headers.get("Cookie", "")
+                            self.send_response(200)
+                            self.send_header("Content-Type", "text/event-stream")
+                            self.send_header("Connection", "close")
+                            self.end_headers()
+                            self.close_connection = True
+                            self.wfile.write(b'event: consensus\ndata: {"height":42}\n\n')
+                            self.wfile.flush()
+                            while not fixture.stop.wait(0.1):
+                                self.wfile.write(b": heartbeat\n\n")
+                                self.wfile.flush()
+                        else:
+                            raise AssertionError("retired client made a protected HTTP request")
                     elif fixture.behavior in ("unauthorized", "event-401"):
                         self.reply(401, dict(error="locked"))
                     elif fixture.behavior == "redirect" and self.path != "/health":

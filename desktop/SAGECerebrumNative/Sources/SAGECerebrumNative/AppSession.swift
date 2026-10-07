@@ -31,16 +31,47 @@ final class AppSession {
     var searchInspectorCommandsBlocked = false
     var showsKeyboardShortcuts = false
     var api: (any SAGEAPI)?
+    private(set) var connection: ShellControlConnection?
+    private(set) var sessionEpoch: UInt64 = 0
 
-    var acceptsReadyCommands: Bool { phase == .ready }
+    typealias Discovery = @Sendable () async throws -> ShellControlConnection
+    typealias ClientFactory = @MainActor @Sendable (ShellControlConnection, @escaping @Sendable () async -> Void) -> any SAGEAPI
+    @ObservationIgnored private let discover: Discovery
+    @ObservationIgnored private let makeClient: ClientFactory
+    @ObservationIgnored private let sleep: @Sendable () async throws -> Void
+    @ObservationIgnored private var monitorTask: Task<Void, Never>?
+    @ObservationIgnored private var connectionTask: Task<Void, Never>?
+    @ObservationIgnored private var authTask: Task<Void, Never>?
+    @ObservationIgnored private var connectionAttempt: UUID?
+    @ObservationIgnored private var clientID: UUID?
+    @ObservationIgnored private var authOperation: UInt64 = 0
+    @ObservationIgnored private var isLocking = false
+    @ObservationIgnored private var lockAttempt: UUID?
+    @ObservationIgnored private var lockingClient: (any SAGEAPI)?
+    @ObservationIgnored private var isPreview = false
+
+    var acceptsReadyCommands: Bool { phase == .ready && api != nil }
+    var canAttemptLogin: Bool { phase == .locked && api != nil && !isLoggingIn && !isLocking }
 
     func acceptsRouteCommands(for candidate: AppRoute) -> Bool {
         acceptsReadyCommands && api != nil && candidate.isImplemented && candidate == route
     }
 
-    init() {}
+    init(
+        discover: @escaping Discovery = { try await ShellControlClient.discoverConnection(timeout: .seconds(1)) },
+        makeClient: @escaping ClientFactory = { connection, unauthorized in
+            SAGEAPIClient(baseURL: connection.origin, onUnauthorized: unauthorized)
+        },
+        sleep: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(1)) }
+    ) {
+        self.discover = discover
+        self.makeClient = makeClient
+        self.sleep = sleep
+    }
 
-    init(previewAPI: any SAGEAPI) {
+    convenience init(previewAPI: any SAGEAPI) {
+        self.init()
+        isPreview = true
         api = previewAPI
         phase = .ready
         #if DEBUG
@@ -51,50 +82,176 @@ final class AppSession {
         #endif
     }
 
-    func connect() async {
-        phase = .connecting
-        do {
-            let origin = try await ShellControlClient.discoverAPIOrigin()
-            let api = SAGEAPIClient(baseURL: origin) { [weak self] in
-                await self?.handleUnauthorized()
+    // Lifecycle discovery uses a one-second deadline plus a one-second poll
+    // interval: the two-second loss-detection budget excludes OS scheduling.
+    // Raw SSCP keeps its two-second default. HTTP auth cannot block these polls.
+    func startMonitoring() {
+        guard !isPreview, monitorTask == nil else { return }
+        monitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.connect()
+                do { try await self.sleep() } catch { return }
             }
-            self.api = api
-            let status = try await api.authStatus()
-            phase = status.authRequired && !status.authenticated ? .locked : .ready
+        }
+    }
+
+    func stopMonitoring() {
+        guard !isPreview else { return }
+        monitorTask?.cancel()
+        monitorTask = nil
+        connectionTask?.cancel()
+        connectionTask = nil
+        connectionAttempt = nil
+        let old = discardSession()
+        let retired = lockingClient
+        lockingClient = nil
+        lockAttempt = nil
+        isLocking = false
+        phase = .connecting
+        Task {
+            await old?.invalidate()
+            await retired?.invalidate()
+        }
+    }
+
+    // Retry and monitor share a discovery attempt. Authentication continues in a
+    // separate fenced task; callers observe phase for completion.
+    func connect() async {
+        guard !isPreview, !isLocking else { return }
+        if let connectionTask { await connectionTask.value; return }
+        let attempt = UUID()
+        connectionAttempt = attempt
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.checkConnection(attempt: attempt)
+        }
+        connectionTask = task
+        await task.value
+        if connectionAttempt == attempt {
+            connectionTask = nil
+            connectionAttempt = nil
+        }
+    }
+
+    private func checkConnection(attempt: UUID) async {
+        do {
+            let found = try await discover()
+            guard connectionAttempt == attempt, !Task.isCancelled, !isLocking else { return }
+            if let connection, api != nil, connection.hasSameIdentity(as: found) {
+                self.connection = found
+                return
+            }
+            let old = discardSession()
+            phase = .connecting
+            await old?.invalidate()
+            guard connectionAttempt == attempt, !Task.isCancelled, !isLocking else { return }
+            connection = found
+            let id = UUID()
+            clientID = id
+            let newAPI = makeClient(found) { [weak self] in
+                await self?.handleUnauthorized(client: id)
+            }
+            api = newAPI
+            let epoch = sessionEpoch
+            authTask = Task { [weak self] in
+                do {
+                    let status = try await newAPI.authStatus()
+                    guard let self, self.clientID == id, self.sessionEpoch == epoch,
+                          !Task.isCancelled else { return }
+                    self.phase = status.authRequired && !status.authenticated ? .locked : .ready
+                } catch {
+                    guard let self, self.clientID == id, self.sessionEpoch == epoch,
+                          !Task.isCancelled else { return }
+                    let old = self.discardSession()
+                    self.phase = .failed(error.localizedDescription)
+                    await old?.invalidate()
+                }
+            }
         } catch {
+            guard connectionAttempt == attempt, !Task.isCancelled, !isLocking else { return }
+            let old = discardSession()
             phase = .failed(error.localizedDescription)
+            await old?.invalidate()
         }
     }
 
     func login() async {
-        guard let api, !isLoggingIn else { return }
+        guard let api, let id = clientID, phase == .locked, !isLoggingIn, !isLocking else { return }
         let candidate = passphrase
+        passphrase = ""
+        let epoch = sessionEpoch
+        authOperation &+= 1
+        let operation = authOperation
         isLoggingIn = true
         loginError = nil
-        defer { isLoggingIn = false }
+        defer {
+            if sessionEpoch == epoch, authOperation == operation { isLoggingIn = false }
+        }
         do {
             let result = try await api.login(passphrase: candidate)
+            guard sessionEpoch == epoch, clientID == id, authOperation == operation else { return }
             if result.ok {
-                passphrase = ""
-                phase = .ready
+                let status = try await api.authStatus()
+                guard sessionEpoch == epoch, clientID == id, authOperation == operation else { return }
+                if !status.authRequired || status.authenticated {
+                    phase = .ready
+                } else {
+                    loginError = "The session could not be unlocked. Please try again."
+                    loginFailureID += 1
+                }
             } else {
                 loginError = result.error ?? "The vault could not be unlocked."
                 loginFailureID += 1
             }
         } catch {
+            guard sessionEpoch == epoch, clientID == id, authOperation == operation else { return }
             loginError = error.localizedDescription
             loginFailureID += 1
         }
     }
 
     func lock() async {
-        guard let api else { return }
-        do {
-            try await api.lock()
-            phase = .locked
-        } catch {
-            phase = .failed(error.localizedDescription)
-        }
+        guard let old = api, !isLocking else { return }
+        isLocking = true
+        let operation = UUID()
+        lockAttempt = operation
+        lockingClient = old
+        connectionTask?.cancel()
+        connectionTask = nil
+        connectionAttempt = nil
+        _ = discardSession()
+        let epoch = sessionEpoch
+        phase = .locked
+        // Hide protected content immediately. This revokes one dashboard session;
+        // it does not relock the shared vault or stop agents.
+        do { try await old.lock() } catch { /* Discard local credentials regardless. */ }
+        await old.invalidate()
+        guard sessionEpoch == epoch, lockAttempt == operation else { return }
+        lockingClient = nil
+        lockAttempt = nil
+        isLocking = false
+        await connect()
+    }
+
+    private func discardSession() -> (any SAGEAPI)? {
+        let old = api
+        authTask?.cancel()
+        authTask = nil
+        api = nil
+        connection = nil
+        clientID = nil
+        sessionEpoch &+= 1
+        authOperation &+= 1
+        passphrase = ""
+        loginError = nil
+        isLoggingIn = false
+        showsKeyboardShortcuts = false
+        consumedSearchFocusRequestID = searchFocusRequestID
+        consumedSearchInspectorToggleRequestID = searchInspectorToggleRequestID
+        clearSearchInspectorCommandState()
+        if !route.isImplemented { route = .overview }
+        return old
     }
 
     func focusSearch() {
@@ -135,9 +292,11 @@ final class AppSession {
         CerebrumNativeMenuCoordinator.shared.refresh()
     }
 
-    private func handleUnauthorized() {
-        passphrase = ""
-        loginError = nil
+    private func handleUnauthorized(client: UUID) async {
+        guard clientID == client else { return }
+        let old = discardSession()
         phase = .locked
+        await old?.invalidate()
+        // Fresh discovery/authentication happens on the monitor's next poll.
     }
 }
