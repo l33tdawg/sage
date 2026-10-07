@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 
 
-EXPECTED_ASSERTIONS = 20
+EXPECTED_ASSERTIONS = 32
 DISCONNECT_BOUND_SECONDS = 5
 CONTENT = "[TASK] Native encrypted session fixture: preserve this disposable memory across daemon restart."
 
@@ -71,7 +71,8 @@ class Probe:
 
 
 class Qualification:
-    def __init__(self, probe, daemon, evidence):
+    def __init__(self, probe, daemon, evidence, probe_cdhash):
+        self.probe_cdhash = probe_cdhash
         self.probe = probe
         self.daemon = daemon
         self.evidence = evidence
@@ -93,6 +94,7 @@ class Qualification:
                 ports = [reservation.getsockname()[1] for reservation in reservations]
                 assert len(set(ports)) == 4 and not set(ports) & {8080, 8443, 26656, 26657}, "fixture ports are not isolated"
                 self.record("fresh owned profile and four distinct non-production loopback ports")
+                self.record("hardened ad-hoc probe admitted only by compiled disposable exact-CDHash policy", cdhash=self.probe_cdhash)
                 environment = {key: value for key, value in os.environ.items()
                                if not key.startswith(("SAGE_", "V119_")) and key not in
                                ("REST_ADDR", "OLLAMA_URL", "OLLAMA_MODEL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
@@ -194,6 +196,9 @@ class Qualification:
                         child = start()
                         ready(child)
                         self.record("isolated daemon reaches governed app-v28")
+                        native = Probe(self.probe, home, environment, errors)
+                        assert native.command("unencrypted")["unencrypted_refused"], "transport admission enabled an unencrypted native session"
+                        self.record("native admission cannot confer operator authority on an unencrypted vault")
                         code, response = request("/v1/dashboard/settings/ledger/enable", {"passphrase": passphrase}, operator)
                         assert code == 200 and response["ok"] and response.get("recovery_key"), f"ledger enable failed: HTTP {code}"
                         del response  # Recovery material is never printed or persisted.
@@ -212,11 +217,21 @@ class Qualification:
                         assert code == 200 and health["encrypted"] and health["vault_locked"], "public health did not confirm an actually locked encrypted vault"
                         assert request("/v1/dashboard/memory/list")[0] == 401, "locked dashboard accepted an anonymous memory read"
                         self.record("encrypted daemon starts with locked vault and protected dashboard")
-                        native = Probe(self.probe, home, environment, errors)
                         native.command("start")
                         initial = wait_snapshot(lambda item: item["phase"] == "locked" and item["has_api"], 8)
                         assert initial["phase"] == "locked" and not initial["ready_commands"] and initial["generation"], "initial native session did not fail closed"
                         self.record("production AppSession discovers locked encrypted daemon through AF_UNIX")
+                        contract = native.command("bootstrap-contract")
+                        for field, label in [
+                            ("signature_and_key_refused", "real redemption rejects an invalid signature and a substituted signing key"),
+                            ("altered_binding_refused", "real redemption rejects changed generation origin startup proof and challenge"),
+                            ("signed_redemption_accepted", "hardened signed peer completes same-socket proof and genuine HTTP redemption"),
+                            ("concurrent_single_winner", "concurrent redemption of one ticket has exactly one success"),
+                            ("replay_refused", "redeemed one-use ticket cannot be replayed"),
+                            ("admission_without_vault_refused", "native transport admission alone cannot read encrypted memories"),
+                        ]:
+                            assert contract[field], "native bootstrap boundary failed: " + field
+                            self.record(label)
                         wrong = native.command("login", passphrase="incorrect-disposable-passphrase")
                         assert wrong["phase"] == "locked" and wrong["login_error"] and not wrong["ready_commands"], "wrong passphrase did not leave native session locked with an error"
                         assert not native.command("read")["read_succeeded"], "wrong passphrase allowed a protected read"
@@ -231,6 +246,11 @@ class Qualification:
                         self.record("correct native login opens actual vault and decodes encrypted fixture memory")
                         assert request("/v1/dashboard/memory/list")[0] == 401, "native cookie escaped its private Foundation session"
                         self.record("native session cookie remains private to its Foundation session")
+                        isolation = native.command("cookie-isolation")
+                        assert isolation["copied_cookie_refused"] and isolation["native_cookie_and_admission_accepted"], "native vault cookie did not require its matching transport admission"
+                        self.record("copied native vault cookie cannot authenticate through browser metadata without matching admission")
+                        assert isolation["browser_metadata_refused"], "native admission accepted fabricated browser metadata"
+                        self.record("native authenticated requests succeed without browser headers and reject fabricated browser metadata")
                         assert request("/v1/dashboard/auth/login", {"passphrase": passphrase}, operator)[0] == 200, "independent operator could not authenticate"
                         native.command("route", route="search")
                         native.command("retain-client")
@@ -239,6 +259,8 @@ class Qualification:
                         assert locked["phase"] == "locked" and not locked["ready_commands"], "native lock left commands accessible"
                         assert not native.command("retained-read")["read_succeeded"], "native lock did not invalidate old client"
                         self.record("native lock revokes prior client and closes ready commands")
+                        assert native.command("retained-admission")["admission_rejected"], "native lock left its old transport admission usable"
+                        self.record("native lock revokes old transport admission at the daemon")
                         code, health = request("/v1/dashboard/health", client=operator)
                         assert code == 200 and health["encrypted"] and not health["vault_locked"], "session lock disrupted independently authenticated shared vault access"
                         assert request("/v1/dashboard/memory/list", client=operator)[0] == 200, "session lock invalidated an independent operator session"
@@ -268,6 +290,8 @@ class Qualification:
                         self.record("fresh daemon generation automatically reconnects locked and preserves allowed route")
                         assert request("/v1/dashboard/memory/list", client=operator)[0] == 401, "restarted server accepted an old generation cookie"
                         self.record("old daemon cookie is rejected by restarted production server")
+                        assert native.command("retained-admission")["admission_rejected"], "daemon restart accepted old native transport admission"
+                        self.record("restarted daemon rejects native admission from the previous generation")
                         assert not native.command("read")["read_succeeded"], "restarted native session read protected data before fresh authentication"
                         self.record("restarted AppSession cannot read protected data before fresh authentication")
                         wait_snapshot(lambda item: item["phase"] == "locked" and item["has_api"], 8)
@@ -302,13 +326,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe", type=Path, required=True)
     parser.add_argument("--daemon", type=Path, required=True)
+    parser.add_argument("--probe-cdhash", required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     args = parser.parse_args()
     args.evidence.mkdir(parents=True, exist_ok=True)
-    qualification = Qualification(args.probe.resolve(), args.daemon.resolve(), args.evidence.resolve())
-    result = dict(schema="sage.v12.native-session.1", completed=False, skipped=0,
+    assert re.fullmatch(r"[a-f0-9]{40}", args.probe_cdhash), "invalid signed-probe CDHash"
+    qualification = Qualification(args.probe.resolve(), args.daemon.resolve(), args.evidence.resolve(), args.probe_cdhash)
+    result = dict(schema="sage.v12.native-session.2", completed=False, skipped=0,
                   expected_assertions=EXPECTED_ASSERTIONS, results=qualification.results,
-                  qualification_scope="release production AppSession, AF_UNIX and Foundation against isolated encrypted daemon",
+                  qualification_scope="release production AppSession, same-socket signed SSCP/2 proof and Foundation against isolated encrypted daemon",
+                  peer_policy="hardened ad-hoc exact-CDHash test fixture; production Developer ID distribution is not qualified",
+                  probe_cdhash=args.probe_cdhash, production_signing_policy=False,
                   daemon_fixture="v119testfixture: governed delay=3 blocks, proposer cooldown=1 block; not production timing",
                   disconnect_bound_seconds=DISCONNECT_BOUND_SECONDS,
                   physical_hid=False, voiceover=False, installed_app=False,

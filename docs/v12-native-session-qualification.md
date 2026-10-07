@@ -1,5 +1,9 @@
 # Native session recovery qualification
 
+This document records PR #420's recovery slice. The subsequent
+[bootstrap candidate](v12-native-bootstrap-qualification.md) replaces its
+production authentication bridge and extends the signed session gate.
+
 This review candidate builds on PR #419's Foundation transport fixes. It adds
 native attachment monitoring and session recovery without changing SSCP/1,
 the accepted daemon-version range, or the daemon's authorization rules.
@@ -76,7 +80,7 @@ supervision, stop, update or rollback. A transient discovery failure can recover
 to the same generation after fresh validation; only a changed generation is
 evidence of daemon replacement.
 
-The native beta still uses the existing same-origin metadata bridge. The
+At the PR #420 boundary, the native beta uses the existing same-origin metadata bridge. The
 accepted fully native ADR separately requires a one-use session bootstrap tied
 to daemon generation, origin, startup proof and verified app identity. SSCP/1
 is deliberately status-only, and its current Unix peer check proves the user

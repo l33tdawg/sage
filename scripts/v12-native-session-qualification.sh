@@ -14,6 +14,7 @@ trap 'rm -rf -- "$WORK_DIR"' EXIT
 SOURCE_DIR=desktop/SAGECerebrumNative/Sources/SAGECerebrumNative
 SESSION_SOURCES=(
   "$SOURCE_DIR/AppSession.swift"
+  "$SOURCE_DIR/NativeBootstrapClient.swift"
   "$SOURCE_DIR/AppRoute.swift"
   "$SOURCE_DIR/CerebrumCommands.swift"
   "$SOURCE_DIR/CerebrumDesignSystem.swift"
@@ -39,12 +40,25 @@ SESSION_SOURCES=(
   scripts/v12-native-session-qualification.sh > "$EVIDENCE_DIR/session-sources.sha256"
 swiftc -parse-as-library -swift-version 6 -O \
   -o "$WORK_DIR/native-session-probe" "${SESSION_SOURCES[@]}"
-go build -tags=v119testfixture \
-  -ldflags "-X main.version=12.0.0-beta.1 -X main.commit=$(git rev-parse HEAD)" \
-  -o "$WORK_DIR/sage-daemon-fixture" ./cmd/sage-gui
+# A disposable signed peer is admitted only by its exact code directory hash.
+# The override symbol exists solely in the explicit fixture build tag.
+/usr/bin/codesign --force --sign - --identifier com.sage.nativebootstrap.fixture \
+  --options runtime "$WORK_DIR/native-session-probe"
+/usr/bin/codesign --verify --strict --verbose=2 "$WORK_DIR/native-session-probe"
+/usr/bin/codesign -d --verbose=4 "$WORK_DIR/native-session-probe" > "$EVIDENCE_DIR/probe-signing.txt" 2>&1
+PROBE_CDHASH=$(awk -F= '/^CDHash=/{print $2}' "$EVIDENCE_DIR/probe-signing.txt")
+if [[ ! "$PROBE_CDHASH" =~ ^[a-f0-9]{40}$ ]]; then
+  echo 'The signed native probe has no exact CDHash.' >&2
+  exit 1
+fi
+# Go's linker parses the single quotes as one -X assignment; Apple requirement
+# syntax retains the double quotes around the hash literal.
+LINKER_FLAGS="-X main.version=12.0.0-beta.1 -X main.commit=$(git rev-parse HEAD) -X 'main.nativeBootstrapFixtureRequirement=cdhash H\"${PROBE_CDHASH}\"'"
+CGO_ENABLED=1 go build -tags=v119testfixture,nativebootstraptestfixture \
+  -ldflags "$LINKER_FLAGS" -o "$WORK_DIR/sage-daemon-fixture" ./cmd/sage-gui
 "$WORK_DIR/sage-daemon-fixture" version > "$EVIDENCE_DIR/daemon-version.txt"
 python3 scripts/v12-native-session-qualification.py \
-  --probe "$WORK_DIR/native-session-probe" --daemon "$WORK_DIR/sage-daemon-fixture" \
+  --probe "$WORK_DIR/native-session-probe" --probe-cdhash "$PROBE_CDHASH" --daemon "$WORK_DIR/sage-daemon-fixture" \
   --evidence "$EVIDENCE_DIR" | tee "$EVIDENCE_DIR/session.log"
 python3 - "$EVIDENCE_DIR/qualification.json" <<'PY'
 import json, sys

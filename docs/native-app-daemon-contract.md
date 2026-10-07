@@ -1,7 +1,7 @@
 # Native app-daemon trust and compatibility contract
 
-**Contract:** SAGE Shell Control Protocol 1 (SSCP/1)
-**Scope:** native shell lifecycle only; never application administration
+**Contract:** SSCP/1 lifecycle status; additive SSCP/2 native admission
+**Scope:** lifecycle status and native transport admission; neither grants application administration
 
 ## Boundaries
 
@@ -38,8 +38,9 @@ ownership/ACL plus SSCP negotiation and a fresh instance generation.
 
 Messages are UTF-8 JSON preceded by an unsigned big-endian 32-bit length.
 Frames are at most 16 KiB. Unknown fields are rejected, reads/writes have a
-two-second deadline, and one connection handles one request. Malformed,
-oversized, partial, or repeated frames close without a response.
+two-second deadline. SSCP/1 handles one request per connection. SSCP/2 uses
+one issue/challenge/proof exchange under that same deadline. Malformed,
+oversized, partial, or unexpected repeated frames close without a response.
 
 SSCP/1 supports one unprivileged request:
 
@@ -65,9 +66,27 @@ The response is:
 
 `ui_origin` is present only for `ready` or `degraded`, is loopback HTTP, has no
 userinfo/query/fragment, and is canonicalized before comparison. `startup_proof`
-is omitted for ordinary daemon starts and is never a credential. A later protocol
-may add bounded restart/stop and one-time launch tickets, but SSCP/1 intentionally
-cannot mutate daemon state.
+is omitted for ordinary daemon starts and is never a credential. SSCP/1 intentionally cannot mutate daemon state. SSCP/2 native admission is
+described below; it adds no restart or stop operation.
+
+## SSCP/2 native beta admission
+
+The Swift macOS app requires the separately decoded `native-session.issue`
+exchange after validated SSCP/1 discovery. The daemon verifies the accepted
+socket's current signed peer identity, challenges its ephemeral key on the same
+socket and checks that identity again before issuing a single-use ticket. The
+HTTP redemption proof binds the exact generation, origin, startup proof and key.
+The resulting transport credential is separate from vault authentication.
+
+The beta signing identifier is `com.sage.cerebrum.beta`, with a compiled Developer
+ID/team requirement and hardened-runtime restrictions. Unsupported builds or
+unsigned apps fail closed. The first native admission slice requires an encrypted
+vault and binds its dashboard cookie to the admitted native session; it does not
+inherit encryption-off browser Root authority.
+
+See [native bootstrap qualification](v12-native-bootstrap-qualification.md) for
+limits, complete transcripts, peer-lifetime caveats and test-build boundaries.
+The older browser-backed prototype remains an SSCP/1 consumer.
 
 ## Compatibility
 
@@ -94,11 +113,17 @@ Only that exact origin plus its paths/fragments may render. Explicit `https:`
 links open in the system browser after validation. Everything else is denied,
 including other loopback ports. Redirects are checked by the same rule.
 
-The WebView keeps the daemon's CSP, Host/DNS-rebinding checks, same-origin
-policy, cookies, and ordinary session/login flow. A control handshake grants no
+The older WebView prototype keeps the daemon's browser security policy. The
+Swift app uses a private Foundation session with explicit native admission and
+ordinary encrypted-vault login; it does not fabricate browser metadata. Both
+retain the exact-origin boundary. A control handshake grants no
 RBAC role, agent identity, federation identity, or signing authority.
 
 ## Lifecycle and recovery
+
+The launch/supervision behavior below describes the older shell prototype. The
+Swift candidate currently attaches to an independently managed daemon and uses
+the [session recovery lifecycle](v12-native-session-qualification.md).
 
 Repeated launch focuses the one window and queues a validated `sage://` route.
 On its first unavailable control check, the shell may start exactly one fixed

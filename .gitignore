@@ -211,3 +211,5 @@ integrations/levelup/paper4/
 # substituted in, so a tracked copy is both machine-specific and a credential
 # path in a public repo.
 .claude/hooks/
+
+!docs/v12-native-bootstrap-qualification.md

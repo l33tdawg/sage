@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/l33tdawg/sage/internal/nativebootstrap"
 )
 
 const (
@@ -60,10 +62,13 @@ type Server struct {
 	generation   string
 	startupProof string
 
-	mu    sync.RWMutex
-	state State
-	done  chan struct{}
-	once  sync.Once
+	mu                sync.RWMutex
+	state             State
+	nativeRequirement string
+	nativeBroker      *nativebootstrap.Broker
+	nativeChecks      chan struct{}
+	done              chan struct{}
+	once              sync.Once
 }
 
 func Start(sageHome, daemonVersion, uiOrigin, startupProof string) (*Server, error) {
@@ -85,7 +90,7 @@ func Start(sageHome, daemonVersion, uiOrigin, startupProof string) (*Server, err
 	s := &Server{
 		listener: listener, endpoint: endpoint, cleanup: cleanup, version: daemonVersion,
 		origin: origin, generation: base64.RawURLEncoding.EncodeToString(generationRaw), startupProof: startupProof,
-		state: StateStarting, done: make(chan struct{}),
+		state: StateStarting, done: make(chan struct{}), nativeChecks: make(chan struct{}, 4),
 	}
 	go s.serve()
 	return s, nil
@@ -101,6 +106,9 @@ func (s *Server) SetState(state State) error {
 	}
 	s.mu.Lock()
 	s.state = state
+	if (state == StateDraining || state == StateFailed) && s.nativeBroker != nil {
+		s.nativeBroker.Invalidate()
+	}
 	s.mu.Unlock()
 	return nil
 }
@@ -108,6 +116,7 @@ func (s *Server) SetState(state State) error {
 func (s *Server) Close() error {
 	var err error
 	s.once.Do(func() {
+		_ = s.SetState(StateDraining)
 		// Unlink the endpoint while our listener is still open, so cleanup can
 		// verify the path still names the socket we created. Unix listeners have
 		// automatic unlink disabled; otherwise Close could delete a replacement
@@ -138,12 +147,23 @@ func (s *Server) serve() {
 
 func (s *Server) handle(conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	deadline := time.Now().Add(2 * time.Second)
+	_ = conn.SetDeadline(deadline)
 	if err := verifyPeer(conn); err != nil {
 		return
 	}
 	payload, readErr := readFrame(conn)
 	if readErr != nil {
+		return
+	}
+	var envelope struct {
+		ControlProtocol int `json:"control_protocol"`
+	}
+	if json.Unmarshal(payload, &envelope) != nil {
+		return
+	}
+	if envelope.ControlProtocol == 2 {
+		s.handleNativeIssue(conn, payload, deadline)
 		return
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(payload)))

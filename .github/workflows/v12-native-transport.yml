@@ -2,7 +2,7 @@ name: v12 native app-daemon transport
 
 on:
   pull_request:
-    branches: [v12-beta, codex/v12-stable-convergence, codex/v12-native-daemon-qualification]
+    branches: [v12-beta, codex/v12-stable-convergence, codex/v12-native-daemon-qualification, codex/v12-native-session-lifecycle]
     paths:
       - "desktop/SAGECerebrumNative/**"
       - "api/**"
@@ -30,7 +30,7 @@ jobs:
   qualify:
     name: Real Swift transport, encrypted AppSession and governed app-v28 beta daemon
     runs-on: macos-15
-    timeout-minutes: 35
+    timeout-minutes: 45
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
       SAGE_NATIVE_VERSION: 12.0.0-beta.1
@@ -47,12 +47,19 @@ jobs:
           test -d "${DEVELOPER_DIR}"
           xcodebuild -version
           swift --version
+      - name: Verify native identity and bootstrap authorization
+        run: |
+          mkdir -p dist/v12-native/bootstrap-validation
+          set -o pipefail
+          CGO_ENABLED=1 go test -timeout 20m -race -json ./internal/nativeidentity ./internal/nativebootstrap ./internal/shellcontrol ./web > dist/v12-native/bootstrap-validation/go-security.jsonl
+          CGO_ENABLED=0 go test ./internal/nativeidentity
+          go vet ./internal/nativeidentity ./internal/nativebootstrap ./internal/shellcontrol
       - name: Exercise shipping transport over real sockets and URLSession
         run: bash scripts/v12-native-transport-qualification.sh
       - name: Exercise production AppSession login, lock and daemon restart
         run: bash scripts/v12-native-session-qualification.sh
       - name: Verify native contract unit tests
-        run: swift test --package-path desktop/SAGECerebrumNative --disable-sandbox --filter 'AppSessionLifecycle|ShellControlQualification|APIBaseURLRejects|shellControlRequires|SSEFrames|overviewPayloads|nativeCommandsAreAvailableOnlyForAReadySession|focusSearchIsReadyGatedAndConsumedExactlyOnce'
+        run: swift test --package-path desktop/SAGECerebrumNative --disable-sandbox --filter 'NativeCredentialLifecycleQualification|NativeBootstrapQualification|AppSessionLifecycle|ShellControlQualification|APIBaseURLRejects|shellControlRequires|SSEFrames|overviewPayloads|nativeCommandsAreAvailableOnlyForAReadySession|focusSearchIsReadyGatedAndConsumedExactlyOnce'
       - name: Build the release native application
         run: bash scripts/build-native-cerebrum-macos.sh
       - name: Verify release transport and linkage
@@ -61,7 +68,7 @@ jobs:
           test -x "${EXECUTABLE}"
           otool -L "${EXECUTABLE}" > dist/v12-native/transport-validation/linked-frameworks.txt
           if otool -L "${EXECUTABLE}" | grep -E 'WebKit|JavaScriptCore'; then exit 1; fi
-          if strings "${EXECUTABLE}" | grep -E 'NativeSessionProbe|NativeTransportProbe|SAGE_API_URL|NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture'; then exit 1; fi
+          if strings "${EXECUTABLE}" | grep -E 'NativeSessionProbe|NativeTransportProbe|SAGE_API_URL|NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture|Sec-Fetch-Site|SAGE_LEGACY_TRANSPORT_QUALIFICATION'; then exit 1; fi
           /usr/bin/shasum -a 256 "${EXECUTABLE}" > dist/v12-native/transport-validation/native-release.sha256
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
@@ -70,5 +77,6 @@ jobs:
           path: |
             dist/v12-native/transport-validation/
             dist/v12-native/session-validation/
+            dist/v12-native/bootstrap-validation/
           if-no-files-found: error
           retention-days: 14
