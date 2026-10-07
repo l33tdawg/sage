@@ -227,7 +227,26 @@ private extension KeyedDecodingContainer {
 extension JSONDecoder {
     static func sageDashboard() -> JSONDecoder {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        // Older Foundation's .iso8601 strategy rejects the fractional seconds
+        // in Go/CometBFT RFC3339Nano timestamps. Use the same explicit parser as
+        // Connectome rather than depending on the host OS's decoder strategy.
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let value = try decoder.singleValueContainer()
+            let timestamp = try value.decode(String.self)
+            guard let date = RFC3339Timestamp.parse(timestamp) else {
+                throw DecodingError.dataCorruptedError(in: value, debugDescription: "Expected an RFC3339 timestamp.")
+            }
+            return date
+        }
         return decoder
+    }
+}
+
+enum RFC3339Timestamp {
+    static func parse(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        return ISO8601DateFormatter().date(from: value)
     }
 }

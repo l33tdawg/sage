@@ -1,0 +1,68 @@
+name: v12 native app-daemon transport
+
+on:
+  pull_request:
+    branches: [v12-beta, codex/v12-stable-convergence]
+    paths:
+      - "desktop/SAGECerebrumNative/**"
+      - "api/**"
+      - "cmd/sage-gui/**"
+      - "internal/**"
+      - "web/**"
+      - "go.mod"
+      - "go.sum"
+      - "scripts/v12-native-transport-qualification.*"
+      - "scripts/fixtures/NativeTransportProbe.swift"
+      - "scripts/build-native-cerebrum-macos.sh"
+      - ".github/workflows/v12-native-transport.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v12-native-transport-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    name: Real Swift transport and governed app-v28 beta daemon
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      SAGE_NATIVE_VERSION: 12.0.0-beta.1
+      SAGE_NATIVE_CONFIGURATION: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Verify pinned Swift toolchain
+        run: |
+          test -d "${DEVELOPER_DIR}"
+          xcodebuild -version
+          swift --version
+      - name: Exercise shipping transport over real sockets and URLSession
+        run: bash scripts/v12-native-transport-qualification.sh
+      - name: Verify native contract unit tests
+        run: swift test --package-path desktop/SAGECerebrumNative --disable-sandbox --filter 'ShellControlQualification|APIBaseURLRejects|shellControlRequires|SSEFrames|overviewPayloads'
+      - name: Build the release native application
+        run: bash scripts/build-native-cerebrum-macos.sh
+      - name: Verify release transport and linkage
+        run: |
+          EXECUTABLE="dist/v12-native/${SAGE_NATIVE_VERSION}/SAGE CEREBRUM Native.app/Contents/MacOS/SAGECerebrumNative"
+          test -x "${EXECUTABLE}"
+          otool -L "${EXECUTABLE}" > dist/v12-native/transport-validation/linked-frameworks.txt
+          if otool -L "${EXECUTABLE}" | grep -E 'WebKit|JavaScriptCore'; then exit 1; fi
+          if strings "${EXECUTABLE}" | grep -E 'NativeTransportProbe|SAGE_API_URL|NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture'; then exit 1; fi
+          /usr/bin/shasum -a 256 "${EXECUTABLE}" > dist/v12-native/transport-validation/native-release.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: sage-v12-native-transport-${{ github.sha }}
+          path: dist/v12-native/transport-validation/
+          if-no-files-found: error
+          retention-days: 14

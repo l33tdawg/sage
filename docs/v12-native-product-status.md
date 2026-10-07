@@ -24,6 +24,18 @@ This candidate is not a merged integration, an installed native release, or
 permission to start an app-v28 daemon against stable data. PR #417 remains a
 separate native command/focus review unit.
 
+## Native transport review candidate — 2026-10-06
+
+The separate [development transport qualification](v12-native-transport-qualification.md)
+repairs an empty-version crash, the socket's unbounded trickle wait, real
+URLSession SSE framing and the Overview's federation on/off display. It tests
+the shipping Foundation clients against real sockets/HTTP and an isolated,
+governed app-v28 beta daemon, retaining explicit fixture timing and source
+identity. The Swift guard is still v11.10–11.19 / v12.0 beta; stable v11.23 is
+not newly accepted. This candidate does not complete the production native
+session bootstrap, AppSession restart recovery or installed pair/rollback
+acceptance, and it does not advance the native product baseline.
+
 ## Direction reset: fully native
 
 The earlier bounded-WebView decision is superseded. The Tauri build remains
