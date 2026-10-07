@@ -1,4 +1,4 @@
 -r ../requirements-test.txt
 # Optional HF download and uncached expansion; versions also belong in the run environment archive.
-datasets==4.8.5
+datasets==5.0.1
 openai==2.5.0

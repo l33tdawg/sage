@@ -6,9 +6,12 @@ const requiredAssertions = [
     'captured-real-scene-window',
     'rendered-navigate-brain-menu',
     'rendered-navigate-brain-dispatch',
+    'rendered-brain-mode-menu-and-keyboard',
     'brain-selection-preparation-does-not-manufacture-focus',
-    'production-brain-list-view-focus',
+    'rendered-brain-presentation-menu-and-keyboard', 'production-brain-list-view-focus',
     'brain-inspector-button-restores-table-focus',
+    'rendered-brain-inspector-menu-and-keyboard',
+    'brain-modal-command-guards',
     'application-keyboard-navigate-search',
     'rendered-focus-search-menu',
     'application-keyboard-focus-search',
@@ -67,7 +70,7 @@ const requiredMenuItems = [
 
 const successTopLevelKeys = [
     'application_keyboard_event_routing', 'architecture', 'assertions', 'brain_inspector_dismissal_snapshot',
-    'brain_lifecycle_snapshot', 'brain_menu_lifecycle_snapshot', 'bundle_id', 'bundle_version',
+    'brain_lifecycle_snapshot', 'brain_menu_lifecycle_snapshot', 'brain_command_snapshot', 'brain_modal_guard_snapshot', 'bundle_id', 'bundle_version',
     'captured_window_number', 'commit', 'completed_at', 'consumed_search_focus_request_id',
     'consumed_search_inspector_toggle_request_id', 'current_inspector_menu_snapshot',
     'current_search_snapshot', 'duration_ms', 'first_responder_class', 'keyboard_event_snapshot',
@@ -165,9 +168,88 @@ function validateNativeControlResponder(responder, stage, capturedWindowNumber, 
     }
 }
 
+const brainMenuStages = ['after-navigation', 'list-focused', 'inspector-open', 'inspector-dismissed'];
+const brainCommands = [
+    ['agent-mode-menu', 'NSApplication.sendAction', 'View > Brain Mode > Agent Network', 'connectome', false],
+    ['memory-mode-keyboard', 'NSApplication.sendEvent', 'View > Brain Mode > Memory Map', 'memory', false, '1', 18],
+    ['list-menu', 'NSApplication.sendAction', 'View > Brain Presentation > List View', 'memory', false],
+    ['interactive-menu', 'NSApplication.sendAction', 'View > Brain Presentation > Interactive Map', 'memory', false],
+    ['list-keyboard', 'NSApplication.sendEvent', 'View > Brain Presentation > List View', 'memory', false, 'l', 37],
+    ['inspector-menu', 'NSApplication.sendAction', 'View > Show Inspector', 'memory', true],
+    ['inspector-show-keyboard', 'NSApplication.sendEvent', 'View > Show Inspector', 'memory', true, 'i', 34],
+    ['inspector-hide-keyboard', 'NSApplication.sendEvent', 'View > Hide Inspector', 'memory', false, 'i', 34],
+];
+const brainCommandKeys = ['stage', 'dispatch_surface', 'menu_path', 'route', 'mode', 'presentation',
+    'selected_memory_id', 'inspector_is_presented', 'pending_request', 'window_number', 'first_responder_identifier'];
+const brainModalKeys = ['modal_surface', 'sheet_window_number', 'captured_window_number', 'disabled_navigation_items',
+    'disabled_brain_items', 'keyboard_dispatch_surface', 'key', 'key_code', 'modifiers', 'local_monitor_key_down_count',
+    'keyboard_window_number', 'app_is_active', 'sheet_is_key_window',
+    'stale_action_attempted', 'stale_action_dispatched', 'state_unchanged', 'owner_unchanged', 'pending_request', 'route',
+    'commands_restored_after_dismissal'];
+
+function validateBrainMenuCommands(result) {
+    requireExactOrderedStages(result.brain_menu_lifecycle_snapshot, brainMenuStages, 'Brain menu lifecycle');
+    result.brain_menu_lifecycle_snapshot.forEach((snapshot, index) => {
+        requireExactKeys(snapshot, ['stage', 'mode', 'presentation', 'items'], `Brain menu ${index}`);
+        if (snapshot.mode !== 'memory' || !['mri', 'table'].includes(snapshot.presentation) ||
+            (index > 0 && snapshot.presentation !== 'table')) throw new Error('invalid rendered Brain menu state');
+        const inspector = index === 2 ? 'Hide' : 'Show';
+        const expected = [
+            ['View > Refresh Brain', 'r', 'command', true, false],
+            ['View > Brain Mode > Memory Map', '1', 'control+command', true, true],
+            ['View > Brain Mode > Agent Network', '2', 'control+command', true, false],
+            ['View > Brain Presentation > Interactive Map', 'm', 'control+command', null, snapshot.presentation === 'mri'],
+            ['View > Brain Presentation > List View', 'l', 'control+command', true, snapshot.presentation === 'table'],
+            [`View > ${inspector} Inspector`, 'i', 'control+command', index > 0, false],
+            ['View > Show View Options', 'v', 'control+command', true, false],
+            ['View > Clear Brain Selection', '', '', index > 0, false],
+        ];
+        if (!Array.isArray(snapshot.items) || snapshot.items.length !== expected.length) throw new Error('invalid Brain command inventory');
+        snapshot.items.forEach(item => requireExactKeys(item, [...menuSnapshotKeys, 'checked'], 'Brain menu item'));
+        for (const [path, key, modifiers, enabled, checked] of expected) {
+            const matches = snapshot.items.filter(item => item.path === path);
+            if (matches.length !== 1 || matches[0].key !== key || matches[0].modifiers !== modifiers ||
+                typeof matches[0].enabled !== 'boolean' || (enabled !== null && matches[0].enabled !== enabled) ||
+                matches[0].checked !== checked) throw new Error(`invalid rendered Brain command ${path}`);
+        }
+    });
+    requireExactOrderedStages(result.brain_command_snapshot, brainCommands.map(([stage]) => stage), 'Brain command snapshot');
+    result.brain_command_snapshot.forEach((snapshot, index) => {
+        const [stage, surface, path, mode, inspector, key, keyCode] = brainCommands[index];
+        requireExactKeys(snapshot, key ? [...brainCommandKeys, 'keyboard_event'] : brainCommandKeys, `Brain command ${stage}`);
+        if (snapshot.dispatch_surface !== surface || snapshot.menu_path !== path || snapshot.route !== 'brain' ||
+            snapshot.mode !== mode || !['mri', 'table'].includes(snapshot.presentation) || snapshot.inspector_is_presented !== inspector ||
+            snapshot.pending_request !== false || snapshot.window_number !== result.captured_window_number) throw new Error(`invalid Brain command ${stage}`);
+        if (index >= 2 && (snapshot.presentation !== (stage === 'interactive-menu' ? 'mri' : 'table') || snapshot.selected_memory_id !== 'g1' ||
+            (stage !== 'interactive-menu' && snapshot.first_responder_identifier !== (inspector ? 'brain-inspector-close' : 'brain-memory-table')))) {
+            throw new Error(`invalid Brain command selection or focus ${stage}`);
+        }
+        if (key) {
+            const event = snapshot.keyboard_event;
+            requireExactKeys(event, keyboardSnapshotKeys, `Brain keyboard ${stage}`);
+            if (event.stage !== stage || event.dispatch_surface !== 'NSApplication.sendEvent' || event.event_sequence !== 'keyDown,keyUp' ||
+                event.key !== key || event.key_code !== keyCode || event.modifiers !== 'control+command' || event.menu_path !== path ||
+                event.route_before !== 'brain' || event.route_after !== 'brain' || event.observed_effect !== true ||
+                event.local_monitor_key_down_count !== 1 || event.window_number !== result.captured_window_number ||
+                event.app_is_active !== true || event.window_is_key !== true || event.is_repeat !== false) throw new Error(`invalid Brain keyboard ${stage}`);
+        }
+    });
+    const guard = result.brain_modal_guard_snapshot;
+    requireExactKeys(guard, brainModalKeys, 'Brain modal guard');
+    if (guard.modal_surface !== 'Keyboard Shortcuts' || !Number.isSafeInteger(guard.sheet_window_number) || guard.sheet_window_number <= 0 ||
+        guard.sheet_window_number === result.captured_window_number || guard.captured_window_number !== result.captured_window_number ||
+        guard.disabled_navigation_items !== 3 || guard.disabled_brain_items !== 8 || guard.keyboard_dispatch_surface !== 'NSApplication.sendEvent' ||
+        guard.key !== '2' || guard.key_code !== 19 || guard.modifiers !== 'control+command' || guard.local_monitor_key_down_count !== 1 ||
+        guard.keyboard_window_number !== guard.sheet_window_number || guard.app_is_active !== true || guard.sheet_is_key_window !== true ||
+        guard.stale_action_attempted !== true || guard.stale_action_dispatched !== true || guard.state_unchanged !== true ||
+        guard.owner_unchanged !== true || guard.pending_request !== false || guard.route !== 'brain' || guard.commands_restored_after_dismissal !== true) {
+        throw new Error('invalid Brain modal command guard');
+    }
+}
+
 export function validateNativeAppScene(result, expectedCommit, expectedSourceState, expectedRunID, expectedPID) {
     requireExactKeys(result, successTopLevelKeys, 'app-scene success result');
-    if (result.schema !== 'sage.v12.native-app-scene.v4') throw new Error('unexpected app-scene schema');
+    if (result.schema !== 'sage.v12.native-app-scene.v5') throw new Error('unexpected app-scene schema');
     if (result.scenario !== 'rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle') {
         throw new Error('unexpected app-scene scenario');
     }
@@ -191,7 +273,7 @@ export function validateNativeAppScene(result, expectedCommit, expectedSourceSta
         if (typeof result[key] !== 'string' || !Number.isFinite(Date.parse(result[key]))) throw new Error(`invalid ${key}`);
     }
     if (Date.parse(result.completed_at) < Date.parse(result.started_at)) throw new Error('app-scene timestamps are reversed');
-    if (!Number.isInteger(result.duration_ms) || result.duration_ms < 0 || result.duration_ms > 25_000) {
+    if (!Number.isInteger(result.duration_ms) || result.duration_ms < 0 || result.duration_ms > 45_000) {
         throw new Error('invalid app-scene duration');
     }
     if (result.passed !== true) throw new Error('app-scene fixture failed');
@@ -233,9 +315,7 @@ export function validateNativeAppScene(result, expectedCommit, expectedSourceSta
             snapshot.checked_menu_title !== title) throw new Error(`invalid route lifecycle at ${snapshot.stage}`);
     });
 
-    if (!Array.isArray(result.brain_menu_lifecycle_snapshot) || result.brain_menu_lifecycle_snapshot.length !== 0) {
-        throw new Error('Brain menu lifecycle must remain empty until focused Brain commands are independently rendered');
-    }
+    validateBrainMenuCommands(result);
 
     requireExactOrderedStages(result.brain_lifecycle_snapshot, brainLifecycleStages, 'Brain lifecycle snapshot');
     result.brain_lifecycle_snapshot.forEach((snapshot, index) => {

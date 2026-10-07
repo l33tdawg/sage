@@ -117,7 +117,7 @@ func (s *Server) handleNativeIssue(conn net.Conn, payload []byte, deadline time.
 	// cannot prove the verified application owns the public key. Challenge it on
 	// this socket after verification, then recheck the exact process/code identity.
 	var nonce [32]byte
-	if _, err := rand.Read(nonce[:]); err != nil {
+	if _, randomErr := rand.Read(nonce[:]); randomErr != nil {
 		return
 	}
 	challenge := base64.RawURLEncoding.EncodeToString(nonce[:])

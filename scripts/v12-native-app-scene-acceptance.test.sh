@@ -17,15 +17,17 @@ for required in \
   'compute_source_state()' \
   'SOURCE_STATE_BEFORE_BUILD=$(compute_source_state)' \
   'SOURCE_STATE_AFTER_BUILD=$(compute_source_state)' \
+  'SOURCE_STATE_AFTER_RUNTIME=$(compute_source_state)' \
+  'source state changed during native app-scene runtime' \
   'source state changed during native app-scene build' \
   'SOURCE_STATE="${SOURCE_STATE_BEFORE_BUILD}"' \
   'refusing to signal pid' \
-  '40-second outer deadline' \
+  '60-second outer deadline' \
   'SOURCE_STATE=' \
   'v12-native-app-scene-validate.mjs' \
   '"${SOURCE_STATE}" "${RUN_ID}" "${LAUNCHED_PID}"' \
   'app-scene acceptance pending' \
-  'schema=sage.v12.native-app-scene.manifest.v4' \
+  'schema=sage.v12.native-app-scene.manifest.v5' \
   'shasum -a 256'; do
   grep -Fq "${required}" "${HARNESS}"
 done
@@ -38,8 +40,13 @@ test "${pending_line}" -lt "${build_line}"
 test "${before_build_line}" -lt "${build_line}"
 test "${after_build_line}" -gt "${build_line}"
 test "${after_build_line}" -lt "${launch_line}"
+after_runtime_line=$(grep -nF 'SOURCE_STATE_AFTER_RUNTIME=$(compute_source_state)' "${HARNESS}" | head -1 | cut -d: -f1)
+wait_line=$(grep -nF 'wait "${APP_PID}"' "${HARNESS}" | tail -1 | cut -d: -f1)
+validate_line=$(grep -nF 'node "${ROOT}/scripts/v12-native-app-scene-validate.mjs"' "${HARNESS}" | head -1 | cut -d: -f1)
+test "${after_runtime_line}" -gt "${wait_line}"
+test "${after_runtime_line}" -lt "${validate_line}"
 for required in \
-  'sage.v12.native-app-scene.v4' \
+  'sage.v12.native-app-scene.v5' \
   'rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle' \
   'brain_lifecycle_snapshot' \
   'brain_inspector_dismissal_snapshot' \
@@ -88,7 +95,7 @@ for required in \
   'candidates.count == 1' \
   'field.placeholderString == "Search sovereign memory"' \
   '$0.path == [parent, title]' \
-  'deadline = startedInstant + .seconds(25)' \
+  'deadline = startedInstant + .seconds(45)' \
   'currentEditor() === window.firstResponder' \
   'system_ax_server": false' \
   'voiceover_spoken_evidence": false' \
@@ -106,6 +113,15 @@ for required in \
 done
 if grep -Eq 'pkill|killall' "${HARNESS}"; then
   echo "app-scene harness contains broad process-name cleanup" >&2
+  exit 1
+fi
+if grep -Eq 'selectListPresentation|showInspectorAction|shared\.showInspector' "${FIXTURE}"; then
+  echo "Brain acceptance retains an action bypass" >&2
+  exit 1
+fi
+brain_scenario=$(sed -n '/let brainItem = try uniqueMenuItem(/,/let searchItem = try uniqueMenuItem(/p' "${FIXTURE}")
+if printf '%s' "${brain_scenario}" | grep -Eq 'makeFirstResponder|requestBrainCommand|selectListPresentation|shared\.showInspector'; then
+  echo "Brain acceptance bypasses the rendered command or fabricates focus" >&2
   exit 1
 fi
 node --test "${ROOT}/scripts/v12-native-app-scene-validate.test.mjs"

@@ -92,6 +92,45 @@ struct AppSessionLifecycleTests {
         session.stopMonitoring()
     }
 
+    @Test func daemonLossRetiresBrainCommandsBeforeFreshSessionCanUseThem() async throws {
+        let discovery = LifecycleDiscovery()
+        let factory = LifecycleFactory()
+        let session = makeSession(discovery, factory)
+        await session.connect()
+        try await eventually { session.phase == .locked }
+        session.passphrase = "correct"
+        await session.login()
+        session.route = .brain
+        let oldOwner = UUID()
+        let state = BrainCommandState(hasInspector: true, hasSelection: true)
+        session.registerBrainCommands(owner: oldOwner, state: state)
+        session.requestBrainCommand(.brainToggleInspector, owner: oldOwner)
+        #expect(session.brainCommandRequest != nil)
+
+        await discovery.set(.failure(ShellControlError.unavailable("test loss")))
+        await session.connect()
+        #expect(session.brainCommandOwner == nil)
+        #expect(session.brainCommandState == nil)
+        #expect(session.brainCommandRequest == nil)
+        #expect(session.takeBrainCommand(owner: oldOwner, state: state) == nil)
+
+        await discovery.set(.success(connection("B")))
+        await session.connect()
+        try await eventually { session.phase == .locked }
+        session.passphrase = "correct"
+        await session.login()
+        #expect(session.phase == .ready)
+        let newOwner = UUID()
+        session.registerBrainCommands(owner: newOwner, state: state)
+        session.requestBrainCommand(.brainToggleInspector, owner: oldOwner)
+        #expect(session.brainCommandRequest == nil)
+        session.requestBrainCommand(.brainToggleInspector, owner: newOwner)
+        #expect(session.takeBrainCommand(owner: newOwner, state: state) == .brainToggleInspector)
+        session.stopMonitoring()
+        #expect(session.brainCommandOwner == nil)
+        #expect(session.brainCommandRequest == nil)
+    }
+
     @Test func wrongPasswordIsVisibleAndSuccessfulLoginRequiresCookieAuthentication() async throws {
         let discovery = LifecycleDiscovery()
         let factory = LifecycleFactory()

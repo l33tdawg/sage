@@ -46,12 +46,11 @@ cp "$ROOT_DIR/installer/macos/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 RESOURCE_BUNDLE="$SCRATCH_PATH/$CONFIGURATION/SAGECerebrumNative_SAGECerebrumNative.bundle"
 test -d "$RESOURCE_BUNDLE"
 cp -R "$RESOURCE_BUNDLE" "$CONTENTS/Resources/"
-PACKAGED_BRAIN="$CONTENTS/Resources/SAGECerebrumNative_SAGECerebrumNative.bundle/brain.obj"
-if [[ ! -r "$PACKAGED_BRAIN" ]]; then
-  # SwiftPM's Xcode build system (Swift 6.4) emits a standard macOS resource
-  # bundle; the native build system uses a flat bundle. Preserve either layout
-  # intact so the generated Bundle.module accessor resolves its own resources.
-  PACKAGED_BRAIN="$CONTENTS/Resources/SAGECerebrumNative_SAGECerebrumNative.bundle/Contents/Resources/brain.obj"
+PACKAGED_BUNDLE="$CONTENTS/Resources/SAGECerebrumNative_SAGECerebrumNative.bundle"
+# SwiftPM 6.4 emits a macOS bundle; older supported toolchains use a flat bundle.
+PACKAGED_BRAIN="$PACKAGED_BUNDLE/Contents/Resources/brain.obj"
+if [[ ! -r "$PACKAGED_BRAIN" || ! -s "$PACKAGED_BRAIN" ]]; then
+  PACKAGED_BRAIN="$PACKAGED_BUNDLE/brain.obj"
 fi
 test -r "$PACKAGED_BRAIN"
 test -s "$PACKAGED_BRAIN"

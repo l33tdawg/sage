@@ -3,6 +3,8 @@ import SwiftUI
 
 struct BrainView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.cerebrumSession) private var session
+    @State private var commandRegistrationID = UUID()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var model: BrainViewModel
     @State private var metalRecovery = BrainMetalRecoveryState()
@@ -149,7 +151,13 @@ struct BrainView: View {
             }
         }
         .navigationTitle("Brain")
-        .focusedSceneValue(\.cerebrumRouteCommandActions, routeCommandActions)
+        .onAppear {
+            session?.registerBrainCommands(owner: commandRegistrationID, state: commandState)
+        }
+        .onChange(of: commandState) { _, state in
+            session?.updateBrainCommands(owner: commandRegistrationID, state: state)
+        }
+        .onChange(of: session?.brainCommandRequest) { _, _ in deliverBrainCommand() }
         .toolbar { brainToolbar }
         .task(id: BrainRefreshKey(mode: model.mode, domain: model.selectedDomain, status: model.status)) {
             await model.refresh()
@@ -163,7 +171,7 @@ struct BrainView: View {
             await model.runLiveUpdates()
         }
         .onExitCommand {
-            guard hasSelection else { return }
+            guard hasSelection, !commandState.blocksGlobalCommands else { return }
             dismissCurrentSelectionAndRestoreFocus()
         }
         .onChange(of: model.selectedNodeID) { _, selected in
@@ -182,7 +190,7 @@ struct BrainView: View {
         .onChange(of: model.selectedEngramID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.selectedConnectionID) { _, _ in scheduleSelectionAnnouncement() }
         .onChange(of: model.hasVisibleInspector) { wasVisible, isVisible in
-            guard wasVisible, !isVisible, keyboardFocus == .inspectorClose else { return }
+            guard wasVisible, !isVisible, resolvedKeyboardFocus == .inspectorClose else { return }
             model.inspectorIsPresented = false
             requestFocus(returnFocusTarget)
         }
@@ -194,6 +202,10 @@ struct BrainView: View {
             layoutObserver(layoutPlan)
         }
         .onDisappear {
+            session?.unregisterBrainCommands(owner: commandRegistrationID)
+            keyboardFocusGeneration += 1
+            accessibilityFocusGeneration += 1
+            announcementGeneration += 1
             applyMetalEvent(.retryCancelled)
             #if DEBUG
             NativeAppSceneBrainBridge.shared.unregister(id: appSceneBridgeRegistrationID)
@@ -960,30 +972,40 @@ struct BrainView: View {
         return "\(rendered) memories · \(graph.edges.count.formatted()) links"
     }
 
-    private var routeCommandActions: CerebrumRouteCommandActions {
+    private var commandState: BrainCommandState {
         .init(
-            route: .brain,
+            mode: model.mode,
+            presentation: metalRecovery.effectivePresentation,
             isRefreshing: model.isLoading,
-            refresh: refreshBrain,
-            blocksGlobalCommands: showsNavigator || showsViewOptions,
-            brain: .init(
-                mode: model.mode,
-                presentation: metalRecovery.effectivePresentation,
-                inspectorIsPresented: inspectorIsPresented,
-                hasInspector: model.hasVisibleInspector,
-                hasSelection: hasSelection,
-                viewOptionsArePresented: showsViewOptions,
-                interactiveMapIsEnabled: BrainPresentationPolicy.resolve(
-                    requested: .mri,
-                    capability: metalRecovery.capability
-                ).mriEnabled,
-                setMode: { model.mode = $0 },
-                setPresentation: { applyMetalEvent(.presentationSelected($0)) },
-                toggleInspector: toggleInspectorPresentation,
-                clearSelection: { clearSelectionAndRestoreFocus() },
-                toggleViewOptions: toggleViewOptionsPresentation
-            )
+            inspectorIsPresented: inspectorIsPresented,
+            hasInspector: model.hasVisibleInspector,
+            hasSelection: hasSelection,
+            viewOptionsArePresented: showsViewOptions,
+            interactiveMapIsEnabled: BrainPresentationPolicy.resolve(
+                requested: .mri, capability: metalRecovery.capability
+            ).mriEnabled,
+            blocksGlobalCommands: showsNavigator || showsViewOptions
         )
+    }
+
+    private func deliverBrainCommand() {
+        guard let command = session?.takeBrainCommand(owner: commandRegistrationID, state: commandState) else { return }
+        switch command {
+        case .brainRefresh: refreshBrain()
+        case .brainModeMemory: selectMode(.memory)
+        case .brainModeAgent: selectMode(.connectome)
+        case .brainPresentationInteractive: applyMetalEvent(.presentationSelected(.mri))
+        case .brainPresentationList: applyMetalEvent(.presentationSelected(.table))
+        case .brainToggleInspector: toggleInspectorPresentation()
+        case .brainClearSelection: clearSelectionAndRestoreFocus()
+        case .brainViewOptions: toggleViewOptionsPresentation()
+        default: break
+        }
+    }
+
+    private func selectMode(_ mode: BrainMode) {
+        model.mode = mode
+        requestFocus(returnFocusTarget)
     }
 
     private func refreshBrain() {
@@ -1053,7 +1075,7 @@ struct BrainView: View {
         applyMetalEvent(.rendererReported(
             attemptID: attemptID,
             capability: capability,
-            keyboardSurfaceOwned: keyboardFocus == .surface,
+            keyboardSurfaceOwned: resolvedKeyboardFocus == .surface,
             accessibilitySurfaceOwned: accessibilityFocus == .surface
         ))
         if capability == .available, attemptID == pendingMetalRestorationAttemptID {
@@ -1224,7 +1246,7 @@ struct BrainView: View {
                     isReady: model.graph?.nodes.contains(where: { $0.id == "g1" }) == true,
                     selectedMemoryID: model.selectedNodeID,
                     inspectorIsPresented: inspectorIsPresented,
-                    focusTarget: keyboardFocus.map(focusTargetName)
+                    focusTarget: resolvedKeyboardFocus.map(focusTargetName)
                 )
             },
             prepareFirstMemorySelection: {
@@ -1233,13 +1255,6 @@ struct BrainView: View {
                 model.selectedNodeID = "g1"
                 model.inspectorIsPresented = false
                 return "g1"
-            },
-            selectListPresentation: {
-                applyMetalEvent(.presentationSelected(.table))
-            },
-            showInspector: {
-                guard !inspectorIsPresented else { return }
-                toggleInspectorPresentation()
             }
         )
     }
@@ -1256,19 +1271,43 @@ struct BrainView: View {
         }
     }
 
+    private func canFocus(_ target: BrainFocusTarget) -> Bool {
+        // Do not let an already-running responder handoff steal focus back
+        // from a popover that opened after the handoff began.
+        guard !showsNavigator, !showsViewOptions || target == .viewOptions else { return false }
+        guard let session else { return true }
+        return session.acceptsRouteCommands(for: .brain) &&
+            session.brainCommandOwner == commandRegistrationID && !session.showsKeyboardShortcuts
+    }
+
+    private var resolvedKeyboardFocus: BrainFocusTarget? {
+        // A represented AppKit control can own firstResponder while SwiftUI's
+        // FocusState is nil. Use the concrete mounted control for ownership;
+        // querying it never changes the responder or requests focus.
+        if let keyWindow = NSApplication.shared.keyWindow {
+            for target in [BrainFocusTarget.surface, .table, .inspectorClose, .metalRetry] {
+                guard let identifier = nativeFocusIdentifier(target),
+                      let view = nativeFocusView(identifier: identifier, target: target),
+                      view.window === keyWindow else { continue }
+                if keyWindow.firstResponder === view { return target }
+            }
+        }
+        return keyboardFocus
+    }
+
     private func requestKeyboardFocus(_ target: BrainFocusTarget) {
         keyboardFocusGeneration += 1
         let generation = keyboardFocusGeneration
         Task { @MainActor in
             await Task.yield()
-            guard generation == keyboardFocusGeneration else { return }
+            guard generation == keyboardFocusGeneration, canFocus(target) else { return }
             keyboardFocus = target
             guard let identifier = nativeFocusIdentifier(target) else { return }
             var stableView: NSView?
             var stableChecks = 0
             for _ in 0..<50 {
                 await Task.yield()
-                guard generation == keyboardFocusGeneration else { return }
+                guard generation == keyboardFocusGeneration, canFocus(target) else { return }
                 if let view = nativeFocusView(identifier: identifier, target: target),
                    let window = view.window {
                     if stableView !== view {
@@ -1360,7 +1399,7 @@ struct BrainView: View {
         let generation = accessibilityFocusGeneration
         Task { @MainActor in
             await Task.yield()
-            guard generation == accessibilityFocusGeneration else { return }
+            guard generation == accessibilityFocusGeneration, canFocus(target) else { return }
             accessibilityFocus = target
         }
     }

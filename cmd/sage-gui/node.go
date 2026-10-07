@@ -317,8 +317,8 @@ func runServe(startupProof string) (rerr error) {
 			}
 		}()
 		if requirement := nativeBootstrapRequirement(); requirement != "" {
-			if err := nativeControl.EnableNativeBootstrap(requirement); err != nil {
-				logger.Warn().Err(err).Msg("native session bootstrap unavailable")
+			if bootstrapErr := nativeControl.EnableNativeBootstrap(requirement); bootstrapErr != nil {
+				logger.Warn().Err(bootstrapErr).Msg("native session bootstrap unavailable")
 			}
 		}
 		logger.Info().Str("endpoint", nativeControl.Endpoint()).Msg("native shell control endpoint ready for negotiation")

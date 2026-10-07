@@ -9,6 +9,32 @@ on:
       - "scripts/v12-native-acceptance-validate.mjs"
       - "scripts/v12-native-acceptance-validate.test.mjs"
       - "scripts/v12-native-workflow.test.mjs"
+      - "scripts/v12-native-system-ax.sh"
+      - "scripts/v12-native-system-ax.swift"
+      - "scripts/v12-native-system-ax.test.sh"
+      - "scripts/v12-native-app-scene-acceptance.sh"
+      - "scripts/v12-native-app-scene-acceptance.test.sh"
+      - "scripts/v12-native-app-scene-validate.mjs"
+      - "scripts/v12-native-app-scene-validate.test.mjs"
+      - "docs/v12-native-acceptance-ledger.schema.json"
+      - "docs/v12-native-acceptance-ledger.md"
+      - "docs/v12-native-capability-ledger.md"
+      - "docs/v12-native-product-status.md"
+      - "docs/v12-native-app-scene-acceptance.md"
+      - "docs/v12-native-milestone-review.md"
+      - "docs/native-cerebrum-macos-v12-adr.md"
+      - ".github/workflows/v12-beta-macos.yml"
+  pull_request:
+    branches: [v12-beta]
+    paths:
+      - "desktop/SAGECerebrumNative/**"
+      - "scripts/build-native-cerebrum-macos.sh"
+      - "scripts/v12-native-acceptance-validate.mjs"
+      - "scripts/v12-native-acceptance-validate.test.mjs"
+      - "scripts/v12-native-workflow.test.mjs"
+      - "scripts/v12-native-system-ax.sh"
+      - "scripts/v12-native-system-ax.swift"
+      - "scripts/v12-native-system-ax.test.sh"
       - "scripts/v12-native-app-scene-acceptance.sh"
       - "scripts/v12-native-app-scene-acceptance.test.sh"
       - "scripts/v12-native-app-scene-validate.mjs"
@@ -39,7 +65,7 @@ concurrency:
 jobs:
   validate-unsigned-beta:
     name: Validate unsigned Swift-native macOS beta app
-    if: github.ref == 'refs/heads/v12-beta'
+    if: github.ref == 'refs/heads/v12-beta' || (github.event_name == 'pull_request' && github.base_ref == 'v12-beta')
     runs-on: macos-15
     timeout-minutes: 45
     env:
@@ -90,7 +116,7 @@ jobs:
                 echo "Swift-native deliverable must not dynamically reference WebKit: ${candidate}" >&2
                 exit 1
               fi
-              if strings "${candidate}" | grep -E 'NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture|NativeAppSceneSearchBridge|NativeAppSceneBrainBridge|SAGE_NATIVE_AX_|SAGE_NATIVE_APP_SCENE_|SAGE_NATIVE_DESIGN_PREVIEW|SAGE_NATIVE_PREVIEW_ROUTE|sage\.v12\.native-app-scene\.v4|rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle'; then
+              if strings "${candidate}" | grep -E 'NativeAXAcceptanceFixture|NativeAppSceneAcceptanceFixture|NativeAppSceneSearchBridge|NativeAppSceneBrainBridge|SAGE_NATIVE_AX_|SAGE_NATIVE_APP_SCENE_|SAGE_NATIVE_DESIGN_PREVIEW|SAGE_NATIVE_PREVIEW_ROUTE|sage\.v12\.native-app-scene\.v[45]|rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle'; then
                 echo "release Mach-O contains DEBUG-only acceptance markers: ${candidate}" >&2
                 exit 1
               fi

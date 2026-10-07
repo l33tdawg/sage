@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { validateNativeAppScene } from './v12-native-app-scene-validate.mjs';
 
 const commit = 'a'.repeat(40);
@@ -9,8 +13,8 @@ const expectedPID = 42;
 const windowNumber = 7;
 const assertionIDs = [
     'captured-real-scene-window', 'rendered-navigate-brain-menu', 'rendered-navigate-brain-dispatch',
-    'brain-selection-preparation-does-not-manufacture-focus', 'production-brain-list-view-focus',
-    'brain-inspector-button-restores-table-focus', 'application-keyboard-navigate-search',
+    'rendered-brain-mode-menu-and-keyboard', 'brain-selection-preparation-does-not-manufacture-focus', 'rendered-brain-presentation-menu-and-keyboard', 'production-brain-list-view-focus',
+    'brain-inspector-button-restores-table-focus', 'rendered-brain-inspector-menu-and-keyboard', 'brain-modal-command-guards', 'application-keyboard-navigate-search',
     'rendered-focus-search-menu', 'application-keyboard-focus-search', 'mounted-search-results-table',
     'repeated-rendered-focus-search', 'production-inspect-path', 'rendered-hide-inspector-menu',
     'hide-preserves-inspection-and-restores-table', 'rendered-show-inspector-menu',
@@ -59,8 +63,38 @@ const searchControlResponder = (stage, table) => ({
     window_number: windowNumber, window_title: 'CEREBRUM',
 });
 
+const brainMenu = (stage, index) => ({
+    stage, mode: 'memory', presentation: index === 0 ? 'mri' : 'table',
+    items: [
+        ['View > Refresh Brain', 'r', 'command', true, false],
+        ['View > Brain Mode > Memory Map', '1', 'control+command', true, true],
+        ['View > Brain Mode > Agent Network', '2', 'control+command', true, false],
+        ['View > Brain Presentation > Interactive Map', 'm', 'control+command', true, index === 0],
+        ['View > Brain Presentation > List View', 'l', 'control+command', true, index > 0],
+        [`View > ${index === 2 ? 'Hide' : 'Show'} Inspector`, 'i', 'control+command', index > 0, false],
+        ['View > Show View Options', 'v', 'control+command', true, false],
+        ['View > Clear Brain Selection', '', '', index > 0, false],
+    ].map(([path, key, modifiers, enabled, checked]) => ({path, key, modifiers, enabled, checked})),
+});
+const brainCommands = () => [
+    ['agent-mode-menu', 'NSApplication.sendAction', 'View > Brain Mode > Agent Network', 'connectome', false],
+    ['memory-mode-keyboard', 'NSApplication.sendEvent', 'View > Brain Mode > Memory Map', 'memory', false, '1', 18],
+    ['list-menu', 'NSApplication.sendAction', 'View > Brain Presentation > List View', 'memory', false],
+    ['interactive-menu', 'NSApplication.sendAction', 'View > Brain Presentation > Interactive Map', 'memory', false],
+    ['list-keyboard', 'NSApplication.sendEvent', 'View > Brain Presentation > List View', 'memory', false, 'l', 37],
+    ['inspector-menu', 'NSApplication.sendAction', 'View > Show Inspector', 'memory', true],
+    ['inspector-show-keyboard', 'NSApplication.sendEvent', 'View > Show Inspector', 'memory', true, 'i', 34],
+    ['inspector-hide-keyboard', 'NSApplication.sendEvent', 'View > Hide Inspector', 'memory', false, 'i', 34],
+].map(([stage, surface, path, mode, inspector, key, keyCode], index) => ({
+    stage, dispatch_surface: surface, menu_path: path, route: 'brain', mode,
+    presentation: index < 2 || stage === 'interactive-menu' ? 'mri' : 'table', selected_memory_id: index < 2 ? '' : 'g1',
+    inspector_is_presented: inspector, pending_request: false, window_number: windowNumber,
+    first_responder_identifier: index < 2 ? 'brain-memory-metal-surface' : inspector ? 'brain-inspector-close' : 'brain-memory-table',
+    ...(key ? {keyboard_event: keyboard({stage, key, keyCode, modifiers: 'control+command', menuPath: path, before: 'brain', after: 'brain'})} : {}),
+}));
+
 const valid = () => ({
-    schema: 'sage.v12.native-app-scene.v4',
+    schema: 'sage.v12.native-app-scene.v5',
     scenario: 'rendered-menu-application-keyboard-brain-search-inspector-focus-lifecycle',
     run_id: runID, commit, source_state: sourceState, bundle_id: 'com.sage.cerebrum.beta',
     bundle_version: '12.0.0-beta.1', pid: expectedPID, captured_window_number: windowNumber,
@@ -81,7 +115,16 @@ const valid = () => ({
         { stage: 'rendered-brain', route: 'brain', implemented_item_count: 3, checked_item_count: 1, checked_menu_title: 'Brain' },
         { stage: 'application-keyboard-search', route: 'search', implemented_item_count: 3, checked_item_count: 1, checked_menu_title: 'Search' },
     ],
-    brain_menu_lifecycle_snapshot: [],
+    brain_menu_lifecycle_snapshot: ['after-navigation', 'list-focused', 'inspector-open', 'inspector-dismissed'].map(brainMenu),
+    brain_command_snapshot: brainCommands(),
+    brain_modal_guard_snapshot: {
+        modal_surface: 'Keyboard Shortcuts', sheet_window_number: 8, captured_window_number: windowNumber,
+        disabled_navigation_items: 3, disabled_brain_items: 8, keyboard_dispatch_surface: 'NSApplication.sendEvent',
+        key: '2', key_code: 19, modifiers: 'control+command', local_monitor_key_down_count: 1,
+        keyboard_window_number: 8, app_is_active: true, sheet_is_key_window: true,
+        stale_action_attempted: true, stale_action_dispatched: true, state_unchanged: true, owner_unchanged: true,
+        pending_request: false, route: 'brain', commands_restored_after_dismissal: true,
+    },
     brain_lifecycle_snapshot: [
         { stage: 'table-focused-before-inspector', route: 'brain', mode: 'memory', effective_presentation: 'table', is_ready: true, selected_memory_id: 'g1', inspector_is_presented: false, focus_target: 'table' },
         { stage: 'inspector-open', route: 'brain', mode: 'memory', effective_presentation: 'table', is_ready: true, selected_memory_id: 'g1', inspector_is_presented: true, focus_target: 'inspectorClose' },
@@ -125,18 +168,18 @@ const valid = () => ({
     ],
 });
 
-const reject = (name, mutate, expected = {}) => test(`v4 rejects ${name}`, () => {
+const reject = (name, mutate, expected = {}) => test(`v5 rejects ${name}`, () => {
     const value = valid();
     mutate(value);
     assert.throws(() => validateNativeAppScene(value, expected.commit ?? commit, expected.sourceState ?? sourceState,
         expected.runID ?? runID, expected.pid ?? expectedPID));
 });
 
-test('v4 accepts the complete Brain and retained Search native lifecycle proof', () => {
+test('v5 accepts the complete Brain and retained Search native lifecycle proof', () => {
     assert.equal(validateNativeAppScene(valid(), commit, sourceState, runID, expectedPID), true);
 });
 
-test('v4 accepts a SwiftUI-replaced Brain backing table when the replacement is exactly focused and cross-bound', () => {
+test('v5 accepts a SwiftUI-replaced Brain backing table when the replacement is exactly focused and cross-bound', () => {
     const value = valid();
     value.brain_inspector_dismissal_snapshot.table_object_identity_after = '0x2000';
     value.brain_inspector_dismissal_snapshot.same_table_object = false;
@@ -145,6 +188,31 @@ test('v4 accepts a SwiftUI-replaced Brain backing table when the replacement is 
 });
 
 const mutations = [
+    ['Brain menu missing', v => { v.brain_menu_lifecycle_snapshot = []; }],
+    ['Brain menu unchecked mode', v => { v.brain_menu_lifecycle_snapshot[1].items[1].checked = false; }],
+    ['Brain menu wrong shortcut', v => { v.brain_menu_lifecycle_snapshot[1].items[4].key = 'm'; }],
+    ['Brain menu duplicate', v => { v.brain_menu_lifecycle_snapshot[1].items[4] = v.brain_menu_lifecycle_snapshot[1].items[3]; }],
+    ['Brain command DEBUG bypass', v => { v.brain_command_snapshot[2].dispatch_surface = 'DEBUG bridge'; }],
+    ['Brain command wrong mode', v => { v.brain_command_snapshot[0].mode = 'memory'; }],
+    ['Brain command pending request', v => { v.brain_command_snapshot[2].pending_request = true; }],
+    ['Brain keyboard missing', v => { delete v.brain_command_snapshot[1].keyboard_event; }],
+    ['Brain keyboard wrong modifier', v => { v.brain_command_snapshot[1].keyboard_event.modifiers = 'command'; }],
+    ['Brain keyboard unobserved', v => { v.brain_command_snapshot[4].keyboard_event.local_monitor_key_down_count = 0; }],
+    ['Brain keyboard loses focus', v => { v.brain_command_snapshot[7].first_responder_identifier = 'brain-inspector-close'; }],
+    ['Brain modal missing', v => { delete v.brain_modal_guard_snapshot; }],
+    ['Brain modal same window', v => { v.brain_modal_guard_snapshot.sheet_window_number = windowNumber; }],
+    ['Brain modal enables navigation', v => { v.brain_modal_guard_snapshot.disabled_navigation_items = 2; }],
+    ['Brain modal command enabled', v => { v.brain_modal_guard_snapshot.disabled_brain_items = 7; }],
+    ['Brain modal changed state', v => { v.brain_modal_guard_snapshot.state_unchanged = false; }],
+    ['Brain modal changed owner', v => { v.brain_modal_guard_snapshot.owner_unchanged = false; }],
+    ['Brain modal queued request', v => { v.brain_modal_guard_snapshot.pending_request = true; }],
+    ['Brain modal stale action skipped', v => { v.brain_modal_guard_snapshot.stale_action_attempted = false; }],
+    ['Brain modal action not dispatched', v => { v.brain_modal_guard_snapshot.stale_action_dispatched = false; }],
+    ['Brain modal keyboard wrong window', v => { v.brain_modal_guard_snapshot.keyboard_window_number = windowNumber; }],
+    ['Brain modal application inactive', v => { v.brain_modal_guard_snapshot.app_is_active = false; }],
+    ['Brain modal sheet not key', v => { v.brain_modal_guard_snapshot.sheet_is_key_window = false; }],
+    ['Brain modal commands not restored', v => { v.brain_modal_guard_snapshot.commands_restored_after_dismissal = false; }],
+
     ['schema downgrade', v => { v.schema = 'sage.v12.native-app-scene.v3'; }],
     ['scenario mismatch', v => { v.scenario = 'rendered-menu-application-keyboard-search-inspector-lifecycle'; }],
     ['unknown top-level key', v => { v.window_server_event_routing = true; }],
@@ -170,7 +238,7 @@ const mutations = [
     ['bundle version malformed', v => { v.bundle_version = '12-beta'; }],
     ['timestamp malformed', v => { v.started_at = 'bad'; }],
     ['timestamps reversed', v => { v.completed_at = '2026-08-23T00:00:00Z'; }],
-    ['duration exceeds deadline', v => { v.duration_ms = 25_001; }],
+    ['duration exceeds deadline', v => { v.duration_ms = 45_001; }],
     ['failed result', v => { v.passed = false; }],
     ['assertion missing', v => { v.assertions.pop(); }],
     ['assertion extra', v => { v.assertions.push({ ...v.assertions[0], id: 'extra' }); }],
@@ -275,4 +343,100 @@ for (const field of ['window_is_key', 'control_window_matches', 'control_is_exac
 for (const field of ['window_is_key', 'field_is_editable', 'field_is_ns_search_field', 'field_window_matches',
     'field_editor_matches_first_responder', 'field_owns_first_responder']) {
     reject(`false Search field ${field}`, v => { v.responder_snapshot[3][field] = false; });
+}
+
+
+const appSceneHarness = readFileSync(new URL('./v12-native-app-scene-acceptance.sh', import.meta.url), 'utf8');
+const sourceFingerprintFunction = appSceneHarness.slice(
+    appSceneHarness.indexOf('compute_source_state() {'),
+    appSceneHarness.indexOf('\nmkdir -p "${EVIDENCE_DIR}"'),
+);
+
+function temporarySourceRepository(run) {
+    const root = mkdtempSync(join(tmpdir(), 'sage-app-scene-source-'));
+    const git = (...args) => execFileSync('git', ['-C', root, ...args], {encoding: 'utf8', stdio: 'pipe'}).trim();
+    try {
+        git('init', '--quiet');
+        git('config', 'user.name', 'Acceptance provenance fixture');
+        git('config', 'user.email', 'acceptance@example.invalid');
+        git('config', 'commit.gpgsign', 'false');
+        git('config', 'core.hooksPath', join(root, 'disabled-hooks'));
+        writeFileSync(join(root, '.gitignore'), 'dist/\n');
+        writeFileSync(join(root, 'source.txt'), 'initial source\n');
+        git('add', '.');
+        git('commit', '--quiet', '-m', 'initial');
+        run(root, git);
+    } finally { rmSync(root, {recursive: true, force: true}); }
+}
+
+function fingerprint(root) {
+    return execFileSync('/bin/bash', ['-euo', 'pipefail', '-c', `${sourceFingerprintFunction}\ncompute_source_state`], {
+        env: {...process.env, ROOT: root}, encoding: 'utf8', stdio: 'pipe',
+    }).trim();
+}
+
+test('source fingerprint binds clean HEAD and tree, including an empty commit', () => {
+    temporarySourceRepository((root, git) => {
+        const initial = fingerprint(root);
+        assert.match(initial, /^clean:[a-f0-9]{64}$/);
+        const tree = git('rev-parse', 'HEAD^{tree}');
+        git('commit', '--quiet', '--allow-empty', '-m', 'different commit, same tree');
+        assert.equal(git('rev-parse', 'HEAD^{tree}'), tree);
+        const sameTree = fingerprint(root);
+        assert.match(sameTree, /^clean:[a-f0-9]{64}$/);
+        assert.notEqual(sameTree, initial, 'a clean HEAD change must change the source fingerprint');
+        writeFileSync(join(root, 'source.txt'), 'different committed source\n');
+        git('add', 'source.txt');
+        git('commit', '--quiet', '-m', 'different tree');
+        assert.notEqual(git('rev-parse', 'HEAD^{tree}'), tree);
+        const differentTree = fingerprint(root);
+        assert.match(differentTree, /^clean:[a-f0-9]{64}$/);
+        assert.notEqual(differentTree, sameTree, 'a clean source-tree change must change the fingerprint');
+    });
+});
+
+for (const phase of ['build', 'runtime']) {
+    test(`app-scene harness rejects clean commit drift during ${phase} before accepting evidence`, {skip: process.platform !== 'darwin'}, () => {
+        temporarySourceRepository((root, git) => {
+            mkdirSync(join(root, 'scripts'));
+            writeFileSync(join(root, 'scripts/v12-native-app-scene-acceptance.sh'), appSceneHarness);
+            writeFileSync(join(root, 'scripts/build-native-cerebrum-macos.sh'), `#!/bin/bash
+set -euo pipefail
+if [ "$SAGE_PROVENANCE_TEST_PHASE" = build ]; then
+  git -C "$SAGE_PROVENANCE_TEST_ROOT" commit --quiet --allow-empty -m drift-during-build
+fi
+mkdir -p "$SAGE_NATIVE_OUTPUT_DIR/SAGE CEREBRUM Native.app/Contents/MacOS"
+cp "$SAGE_PROVENANCE_TEST_ROOT/runtime-fixture.sh" "$SAGE_NATIVE_OUTPUT_DIR/SAGE CEREBRUM Native.app/Contents/MacOS/SAGECerebrumNative"
+chmod +x "$SAGE_NATIVE_OUTPUT_DIR/SAGE CEREBRUM Native.app/Contents/MacOS/SAGECerebrumNative"
+`);
+            writeFileSync(join(root, 'runtime-fixture.sh'), `#!/bin/bash
+set -euo pipefail
+if [ "$SAGE_PROVENANCE_TEST_PHASE" = runtime ]; then
+  git -C "$SAGE_PROVENANCE_TEST_ROOT" commit --quiet --allow-empty -m drift-during-runtime
+fi
+printf '%s\n' '{"unit_fixture_only":true}'
+`);
+            writeFileSync(join(root, 'scripts/v12-native-app-scene-validate.mjs'),
+                `import {writeFileSync} from 'node:fs'; writeFileSync(process.env.SAGE_PROVENANCE_VALIDATOR_MARKER, 'reached'); process.exit(99);`);
+            git('add', '.');
+            git('commit', '--quiet', '-m', 'install non-GUI control fixtures');
+            const before = git('rev-parse', 'HEAD');
+            const tree = git('rev-parse', 'HEAD^{tree}');
+            const marker = join(root, 'dist/validator-reached');
+            const result = spawnSync('/bin/bash', [join(root, 'scripts/v12-native-app-scene-acceptance.sh')], {
+                env: {...process.env, SAGE_NATIVE_VERSION: '12.0.0-beta.1',
+                    SAGE_NATIVE_APP_SCENE_EVIDENCE_DIR: join(root, 'dist/v12-native/12.0.0-beta.1/app-scene-validation'),
+                    SAGE_PROVENANCE_TEST_ROOT: root, SAGE_PROVENANCE_TEST_PHASE: phase,
+                    SAGE_PROVENANCE_VALIDATOR_MARKER: marker}, encoding: 'utf8', timeout: 10_000,
+            });
+            assert.equal(result.status, 1, result.stderr);
+            assert.match(result.stderr, new RegExp(`source state changed during native app-scene ${phase}`));
+            assert.notEqual(git('rev-parse', 'HEAD'), before);
+            assert.equal(git('rev-parse', 'HEAD^{tree}'), tree, 'regression must exercise a clean same-tree commit');
+            assert.equal(git('status', '--porcelain'), '');
+            assert.equal(existsSync(marker), false, 'drifted evidence must never reach the result validator');
+            assert.equal(readFileSync(join(root, 'dist/v12-native/12.0.0-beta.1/app-scene-validation/STATUS.txt'), 'utf8'),
+                'app-scene acceptance pending\n');
+        });
+    });
 }

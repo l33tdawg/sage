@@ -577,6 +577,19 @@ struct SearchView: View {
         syncInspectorCommandState(state)
     }
 
+    private var resolvedKeyboardFocus: SearchFocusTarget? {
+        // Match the represented control's actual responder ownership when the
+        // SwiftUI binding has cleared; this observation never requests focus.
+        if let keyWindow = NSApplication.shared.keyWindow {
+            for target in [SearchFocusTarget.results, .inspectorClose] {
+                guard let view = nativeFocusableView(for: target),
+                      view.window === keyWindow else { continue }
+                if keyWindow.firstResponder === view { return target }
+            }
+        }
+        return keyboardFocus
+    }
+
     private func requestFocus(_ target: SearchFocusTarget) {
         focusGeneration += 1
         let generation = focusGeneration
@@ -695,7 +708,7 @@ struct SearchView: View {
                     isReady: !model.isLoading && model.memories.contains(where: { $0.id == "mem-native-001" }),
                     inspectedMemoryID: model.inspectedMemoryID,
                     inspectorIsPresented: inspectorIsPresented,
-                    focusTarget: keyboardFocus?.rawValue
+                    focusTarget: resolvedKeyboardFocus?.rawValue
                 )
             },
             inspectFirstMemory: {
