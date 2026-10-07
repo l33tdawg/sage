@@ -104,6 +104,12 @@ func TestRequirePristineStateSyncProjectionAcceptsOnlyCanonicalSchemaSeeds(t *te
 		require.NoError(t, err)
 		require.ErrorContains(t, s.RequirePristineStateSyncProjection(ctx), "exact canonical default domains")
 	})
+	t.Run("invalid inbox activity incarnation", func(t *testing.T) {
+		s := newTestStore(t)
+		_, err := s.conn.ExecContext(ctx, `UPDATE inbox_activity_meta SET epoch = ? WHERE singleton = 1`, strings.Repeat("z", 32))
+		require.NoError(t, err)
+		require.ErrorContains(t, s.RequirePristineStateSyncProjection(ctx), "pristine inbox activity database incarnation")
+	})
 }
 
 func TestRequirePristineStateSyncProjectionRejectsAdvancedMemorySpaceRevision(t *testing.T) {
@@ -401,6 +407,39 @@ func TestGetEvidenceCountsAndLinksAmong(t *testing.T) {
 	el, err := s.GetLinksAmong(ctx, nil)
 	require.NoError(t, err)
 	assert.Empty(t, el)
+}
+
+func TestLinkMemoriesRetypeUpdatesInPlace(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	for _, id := range []string{"m1", "m2"} {
+		require.NoError(t, s.InsertMemory(ctx, testMemory(id, "agent1", "content "+id, "general")))
+	}
+
+	// First link: m1 -> m2 as 'related' (e.g. auto-created alongside a capture).
+	require.NoError(t, s.LinkMemories(ctx, "m1", "m2", "related"))
+	// Re-link the SAME pair with a stronger type. This must UPDATE the type in place,
+	// not be silently discarded — the previous `ON CONFLICT DO NOTHING` dropped it, so
+	// a related->supersedes upgrade vanished with no error.
+	require.NoError(t, s.LinkMemories(ctx, "m1", "m2", "supersedes"))
+
+	links, err := s.GetLinksAmong(ctx, []string{"m1", "m2"})
+	require.NoError(t, err)
+	require.Len(t, links, 1, "a pair still holds exactly one link (PK is source+target)")
+	assert.Equal(t, "supersedes", links[0].LinkType, "re-linking a pair updates its type; last write wins")
+
+	// Re-asserting the same type is an idempotent no-op: still one row, same type.
+	require.NoError(t, s.LinkMemories(ctx, "m1", "m2", "supersedes"))
+	links, err = s.GetLinksAmong(ctx, []string{"m1", "m2"})
+	require.NoError(t, err)
+	require.Len(t, links, 1)
+	assert.Equal(t, "supersedes", links[0].LinkType)
+
+	// The reverse direction is a distinct pair and is unaffected by the upsert.
+	require.NoError(t, s.LinkMemories(ctx, "m2", "m1", "refines"))
+	links, err = s.GetLinksAmong(ctx, []string{"m1", "m2"})
+	require.NoError(t, err)
+	assert.Len(t, links, 2, "m1->m2 and m2->m1 are independent links")
 }
 
 func TestEvidenceProjectionCompletenessIsOneWayAndDefaultsComplete(t *testing.T) {

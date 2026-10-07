@@ -150,8 +150,8 @@ func TestAppV23CerebrumCleanupCannotDeprecateOnlySQLite(t *testing.T) {
 		t, fixture, http.MethodPost, "/v1/dashboard/cleanup/run",
 		[]byte(`{"dry_run":false}`),
 	)
-	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	require.Contains(t, rec.Body.String(), "canonical_cleanup_required")
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "consensus_rpc_unavailable")
 }
 
 func TestAppV23UnreadableDeprecationBroadcastsConsensusWithoutMutatingSQLite(t *testing.T) {

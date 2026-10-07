@@ -325,6 +325,20 @@ CREATE TABLE IF NOT EXISTS agent_notifications (
 CREATE INDEX IF NOT EXISTS idx_agent_notifications_inbox ON agent_notifications(agent_id, state, created_at);
 CREATE INDEX IF NOT EXISTS idx_agent_notifications_task ON agent_notifications(task_id, assignment_version, state);
 
+-- Payload-free exact-agent novelty clock for task notices and passive replies.
+-- This is deliberately separate from canonical message work wake state.
+CREATE TABLE IF NOT EXISTS agent_inbox_activity (
+    agent_id TEXT PRIMARY KEY,
+    seq BIGINT NOT NULL CHECK (seq >= 0)
+);
+CREATE TABLE IF NOT EXISTS inbox_activity_meta (
+    singleton SMALLINT PRIMARY KEY CHECK (singleton = 1),
+    epoch TEXT NOT NULL CHECK (length(epoch) = 32)
+);
+INSERT INTO inbox_activity_meta(singleton, epoch)
+VALUES (1, md5(random()::text || clock_timestamp()::text))
+ON CONFLICT (singleton) DO NOTHING;
+
 -- ============================================================
 -- 9. domain_registry (federation ACL)
 -- ============================================================
@@ -524,8 +538,10 @@ CREATE INDEX IF NOT EXISTS idx_memories_domain_live_status
 CREATE INDEX IF NOT EXISTS idx_memories_assignee ON memories (assignee) WHERE assignee != '';
 CREATE INDEX IF NOT EXISTS idx_memories_task_picked_up_by ON memories (task_picked_up_by) WHERE task_picked_up_by != '';
 -- Serves FindByContentHash, which voter.Run evaluates per pending memory on a
--- 2s poll. Partial predicate matches the dedup query exactly.
-CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories (content_hash) WHERE status = 'committed';
+-- 2s poll. NOT partial: the dedup predicate spans every non-proposed status
+-- (existing databases migrate via DROP INDEX idx_memories_content_hash +
+-- CREATE INDEX idx_memories_content_hash_dedup in postgresTaskAssignmentSchema).
+CREATE INDEX IF NOT EXISTS idx_memories_content_hash_dedup ON memories (content_hash);
 
 -- HNSW index for vector similarity search
 CREATE INDEX idx_memories_embedding_hnsw ON memories

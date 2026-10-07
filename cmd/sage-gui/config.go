@@ -30,10 +30,11 @@ func expandTilde(path string) string {
 
 // Config holds the sage-gui configuration.
 type Config struct {
-	Embedding  EmbeddingConfig  `yaml:"embedding"`
-	Encryption EncryptionConfig `yaml:"encryption"`
-	Quorum     QuorumConfig     `yaml:"quorum"`
-	RBAC       RBACConfig       `yaml:"rbac,omitempty"`
+	Embedding    EmbeddingConfig    `yaml:"embedding"`
+	Encryption   EncryptionConfig   `yaml:"encryption"`
+	PrivateMedia PrivateMediaConfig `yaml:"private_media,omitempty"`
+	Quorum       QuorumConfig       `yaml:"quorum"`
+	RBAC         RBACConfig         `yaml:"rbac,omitempty"`
 	// VendoredAgentBootstrap is an explicit, genesis-only first-party
 	// enrollment contract. When configured before a personal chain is created,
 	// SAGE binds the companion key to the genesis root key and atomically seeds
@@ -285,6 +286,9 @@ func LoadConfig() (*Config, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			if os.Getenv("SAGE_LANTERN_PRIVATE_LISTENERS") != "" {
+				return nil, errors.New("lantern private node requires explicit configuration")
+			}
 			applyEnvOverrides(cfg)
 			if vErr := cfg.validate(); vErr != nil {
 				return nil, vErr
@@ -295,6 +299,9 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
+	if err := validateLanternPrivateYAML(data); err != nil {
+		return nil, err
+	}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
@@ -350,6 +357,12 @@ func rawConfigRoundTripDefaults() Config {
 // validate rejects contradictory configuration after the file + env merge.
 // Load-time, so a misconfigured node refuses to boot instead of guessing.
 func (cfg *Config) validate() error {
+	if err := enforceLanternPrivateListeners(cfg); err != nil {
+		return err
+	}
+	if err := cfg.PrivateMedia.validate(); err != nil {
+		return err
+	}
 	if cfg.Voter.Required && !cfg.Voter.Enabled {
 		return fmt.Errorf("invalid config: voter.required=true but voter.enabled=false — a required voter cannot be disabled (fix the voter block in config.yaml or SAGE_VOTER_ENABLED/SAGE_VOTER_REQUIRED)")
 	}

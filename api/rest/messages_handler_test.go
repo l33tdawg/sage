@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,6 +70,7 @@ func messageRouterAs(s *Server, callerID string, exactProof bool) http.Handler {
 	r.Post("/v1/messages", s.handleMessageSend)
 	r.Get("/v1/messages/wake", s.handleMessageWake)
 	r.Get("/v1/messages/wake-state", s.handleMessageWakeState)
+	r.Get("/v1/inbox/activity-state", s.handleInboxActivityState)
 	r.Get("/v1/messages/claimed-elsewhere", s.handleMessagesClaimedElsewhere)
 	r.Get("/v1/messages/own-claimed-unfinished", s.handleOwnClaimedUnfinishedMessages)
 	r.Post("/v1/messages/receive", s.handleMessagesReceive)
@@ -282,14 +284,19 @@ func TestProviderAddressedSessionlessClaimsUseImmediateLegacyFence(t *testing.T)
 		"/v1/messages/claimed-elsewhere?claimant_session_id=session-new&limit=5", nil)
 	require.Equal(t, http.StatusOK, elsewhere.Code, elsewhere.Body.String())
 	require.Contains(t, elsewhere.Body.String(), `"claimed_elsewhere_count":2`)
-	for _, id := range []string{"msg-provider-sessionless-inbox", "msg-provider-sessionless-explicit"} {
+	for index, id := range []string{"msg-provider-sessionless-inbox", "msg-provider-sessionless-explicit"} {
 		require.Contains(t, elsewhere.Body.String(), `"message_id":"`+id+`"`)
 		require.Contains(t, elsewhere.Body.String(), `"claimant_session_id":"legacy"`)
+		body := map[string]any{
+			"from_session_id": "legacy", "to_session_id": "session-new",
+		}
+		if index != 0 {
+			body["from_revision"] = 0
+		}
 		handoff := callMessageJSON(t, messageRouterAs(s, bob, true), http.MethodPut,
-			"/v1/messages/"+id+"/handoff", map[string]any{
-				"from_session_id": "legacy", "to_session_id": "session-new",
-			})
+			"/v1/messages/"+id+"/handoff", body)
 		require.Equal(t, http.StatusOK, handoff.Code, handoff.Body.String())
+		require.Contains(t, handoff.Body.String(), `"claim_revision":1`)
 	}
 	own := callMessageJSON(t, messageRouterAs(s, bob, true), http.MethodGet,
 		"/v1/messages/own-claimed-unfinished?claimant_session_id=session-new&limit=5", nil)
@@ -512,15 +519,20 @@ func TestCanonicalLocalMessagesEndToEndAndAntiEnumeration(t *testing.T) {
 
 	handoff := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodPut,
 		"/v1/messages/"+messageID+"/handoff", map[string]any{
-			"from_session_id": "mcp-helper", "to_session_id": "mcp-supervisor",
+			"from_session_id": "mcp-helper", "to_session_id": "mcp-supervisor", "from_revision": 0,
 		})
 	require.Equal(t, http.StatusOK, handoff.Code, handoff.Body.String())
 	require.Contains(t, handoff.Body.String(), `"claimant_session_id":"mcp-supervisor"`)
 	staleHandoff := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodPut,
 		"/v1/messages/"+messageID+"/handoff", map[string]any{
-			"from_session_id": "mcp-helper", "to_session_id": "mcp-third",
+			"from_session_id": "mcp-helper", "to_session_id": "mcp-third", "from_revision": 0,
 		})
 	require.Equal(t, http.StatusConflict, staleHandoff.Code, staleHandoff.Body.String())
+	overflowHandoff := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodPut,
+		"/v1/messages/"+messageID+"/handoff", map[string]any{
+			"from_session_id": "mcp-supervisor", "to_session_id": "mcp-third", "from_revision": uint64(math.MaxInt64),
+		})
+	require.Equal(t, http.StatusBadRequest, overflowHandoff.Code, overflowHandoff.Body.String())
 
 	read := callMessageJSON(t, messageRouterAs(s, "bob", true), http.MethodPut, "/v1/messages/"+messageID+"/read", map[string]any{})
 	require.Equal(t, http.StatusOK, read.Code, read.Body.String())
@@ -574,7 +586,7 @@ func TestClaimedElsewhereRecoveryIsPaginatedPassiveAndContentFree(t *testing.T) 
 	require.NotContains(t, first.Body.String(), "sender-")
 	for _, item := range firstPage.Items {
 		require.ElementsMatch(t,
-			[]string{"message_id", "claimant_session_id", "created_at", "claimed_at", "expires_at", "foreign"},
+			[]string{"message_id", "claimant_session_id", "claim_revision", "created_at", "claimed_at", "expires_at", "foreign"},
 			mapKeys(item))
 	}
 

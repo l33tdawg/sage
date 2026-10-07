@@ -26,11 +26,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -62,6 +64,8 @@ func runUpgrade(args []string) error {
 	switch args[0] {
 	case "propose":
 		return runUpgradePropose(args[1:])
+	case "vote":
+		return runUpgradeVote(args[1:])
 	case "status":
 		return runUpgradeStatus(args[1:])
 	case "preflight":
@@ -81,7 +85,7 @@ func printUpgradeUsage() {
 	// Derive the ladder's top rung from the binary instead of hardcoding it —
 	// the help text drifted stale once before (it still said app-v10 after the
 	// v11+ forks shipped).
-	maxV := sageabci.MaxSupportedAppVersion()
+	maxV := sageabci.MaxCompiledAppVersion()
 	fmt.Printf(`Usage: sage-gui upgrade <subcommand>
 
 Activate the governance-gated app-version consensus forks (app-v7…app-v%d).
@@ -100,6 +104,11 @@ Subcommands:
                                emit a repair manifest; take a stopped-node backup first
   lineage verify --manifest F  Independently verify exact claims on each validator before voting
   propose --target <N>         Propose activation of app-v<N> (must be current+1)
+  vote --decision <D>          Cast an explicit governance vote (accept|reject|abstain) on the
+                               active app-version upgrade ballot, or on --proposal <id>. The
+                               upgrade auto-voter abstains above the binary's readiness ceiling,
+                               so a deliberately dormant gate can only be activated by votes
+                               cast here (or through CEREBRUM's governance surface).
 
 propose flags:
   --target <N>      App version to activate. MUST be the chain's current version + 1.
@@ -151,15 +160,38 @@ func runUpgradeStatus(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	current, err := readChainAppVersion(ctx, *rpc)
+	governanceStatus, err := readUpgradeGovernanceStatus(ctx, *rpc)
 	if err != nil {
-		return fmt.Errorf("read chain app_version (is the node running? try --rpc): %w", err)
+		return fmt.Errorf("read authoritative upgrade governance status (is the node running? try --rpc): %w", err)
 	}
+	current := governanceStatus.CurrentAppVersion
 	maxV := sageabci.MaxSupportedAppVersion()
+	maxCompiled := sageabci.MaxCompiledAppVersion()
 
 	fmt.Printf("Chain app version : %d (app-v%d)\n", current, current)
-	fmt.Printf("Binary supports   : up to app-v%d\n", maxV)
-	if current >= maxV {
+	fmt.Printf("Binary supports   : up to app-v%d (compiled)\n", maxCompiled)
+	if maxCompiled != maxV {
+		fmt.Printf("Auto-vote ceiling : app-v%d — a target above it needs explicitly voted validators\n", maxV)
+	}
+	if governanceStatus.PendingPlan == nil {
+		fmt.Println("Pending plan      : none")
+	} else {
+		plan := governanceStatus.PendingPlan
+		fmt.Printf("Pending plan      : %s (target app-v%d, activation height %d)\n",
+			plan.Name, plan.TargetAppVersion, plan.ActivationHeight)
+	}
+	if governanceStatus.ActiveProposal == nil {
+		fmt.Println("Active ballot     : none")
+	} else {
+		proposal := governanceStatus.ActiveProposal
+		fmt.Printf("Active ballot     : %s (%s, target %s, status %s",
+			proposal.ProposalID, proposal.Operation, proposal.TargetID, proposal.Status)
+		if proposal.TargetAppVersion != nil {
+			fmt.Printf(", target app-v%d", *proposal.TargetAppVersion)
+		}
+		fmt.Println(")")
+	}
+	if current >= maxCompiled {
 		fmt.Println("Next fork         : none — chain is at the highest version this binary supports")
 		return nil
 	}
@@ -186,6 +218,45 @@ func runUpgradeStatus(args []string) error {
 		fmt.Printf("    sage-gui upgrade propose --target %d\n", current+1)
 	}
 	return nil
+}
+
+type upgradeGovernanceRPCStatus struct {
+	Schema            string                              `json:"schema"`
+	CurrentAppVersion uint64                              `json:"current_app_version"`
+	PendingPlan       *upgradeGovernanceRPCPendingPlan    `json:"pending_plan"`
+	ActiveProposal    *upgradeGovernanceRPCActiveProposal `json:"active_proposal"`
+}
+
+type upgradeGovernanceRPCPendingPlan struct {
+	Name             string `json:"name"`
+	TargetAppVersion uint64 `json:"target_app_version"`
+	ActivationHeight int64  `json:"activation_height"`
+}
+
+type upgradeGovernanceRPCActiveProposal struct {
+	ProposalID       string  `json:"proposal_id"`
+	Operation        string  `json:"operation"`
+	TargetID         string  `json:"target_id"`
+	Status           string  `json:"status"`
+	TargetAppVersion *uint64 `json:"target_app_version,omitempty"`
+}
+
+func readUpgradeGovernanceStatus(ctx context.Context, rpc string) (*upgradeGovernanceRPCStatus, error) {
+	raw, err := readABCIQueryValue(ctx, rpc, "/upgrade/governance-status")
+	if err != nil {
+		return nil, err
+	}
+	var status upgradeGovernanceRPCStatus
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return nil, fmt.Errorf("decode upgrade governance status: %w", err)
+	}
+	if status.Schema != "sage-upgrade-governance-status/v1" {
+		return nil, fmt.Errorf("unsupported upgrade governance status schema %q", status.Schema)
+	}
+	if status.CurrentAppVersion == 0 {
+		return nil, errors.New("upgrade governance status returned zero current_app_version")
+	}
+	return &status, nil
 }
 
 // runUpgradePropose submits a signed UpgradePropose for the given target.
@@ -239,9 +310,24 @@ func runUpgradePropose(args []string) error {
 		}
 	}
 
-	canonical, err := validateUpgradeTarget(current, *target, sageabci.MaxSupportedAppVersion(), *name)
+	canonical, err := validateUpgradeTarget(current, *target, sageabci.MaxCompiledAppVersion(), *name)
 	if err != nil {
 		return err
+	}
+	// A target between the auto-vote ceiling and the compiled ceiling is a
+	// deliberately dormant gate: this binary can execute it, but every node's
+	// auto-voter abstains, so the plan only activates if validators vote for it
+	// explicitly. Say that plainly instead of letting an operator discover it
+	// from vote silence.
+	if autoVoteCeiling := sageabci.MaxSupportedAppVersion(); *target > autoVoteCeiling {
+		fmt.Printf("WARNING: app-v%d is compiled but DORMANT in this binary.\n", *target)
+		fmt.Printf("  The auto-voter abstains on every node until the readiness ceiling\n")
+		fmt.Printf("  (currently app-v%d) is raised in the release that carries the activation\n", autoVoteCeiling)
+		fmt.Printf("  evidence. The plan will NOT reach quorum on its own — every validator\n")
+		fmt.Println("  must cast an explicit vote, and the activation takes effect at H+1.")
+		if !*yes {
+			fmt.Println()
+		}
 	}
 	var chainID string
 	if *target == 20 {
@@ -420,6 +506,182 @@ func printProposeAcceptedGuidance(target uint64, lineageRepair bool) {
 			fmt.Println("   pass --agent-key for the admin identity if it isn't your default agent.key)")
 		}
 	}
+}
+
+// runUpgradeVote casts an explicit governance vote on the active app-version
+// upgrade ballot (or on an explicitly named proposal).
+//
+// This is the deliberate-vote half of the dormant-gate design. The upgrade
+// auto-voter refuses to vote for any target above the binary's readiness
+// ceiling (MaxSupportedAppVersion), which is what keeps a compiled-but-dormant
+// gate from advancing on its own — and also means that until this command
+// existed, nothing in the product could cast the explicit vote such a gate
+// requires. Votes are weighted by the signer's on-chain validator power, so the
+// default signer is this node's consensus key; an operator key records a vote
+// that cannot move the tally unless that identity is itself in the validator
+// set.
+func runUpgradeVote(args []string) error {
+	fs := flag.NewFlagSet("upgrade vote", flag.ContinueOnError)
+	decision := fs.String("decision", "accept", "vote to cast: accept, reject, or abstain")
+	proposalID := fs.String("proposal", "", "proposal id to vote on (default: the active upgrade ballot)")
+	rpc := fs.String("rpc", defaultCometRPC(), "CometBFT RPC endpoint")
+	yes := fs.Bool("yes", false, "skip the confirmation prompt")
+	agentKeyPath := fs.String("agent-key", "", "explicit signing-key override (agent.key seed, raw 64-byte key, or CometBFT priv_validator_key.json); defaults to this node's consensus key")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	logger := zerolog.New(os.Stderr).Level(zerolog.WarnLevel).With().Timestamp().Logger()
+
+	decisionValue, err := parseUpgradeVoteDecision(*decision)
+	if err != nil {
+		return err
+	}
+
+	readCtx, cancelRead := context.WithTimeout(context.Background(), 30*time.Second)
+	status, err := readUpgradeGovernanceStatus(readCtx, *rpc)
+	cancelRead()
+	if err != nil {
+		return fmt.Errorf("read authoritative upgrade governance status (is the node running? try --rpc): %w", err)
+	}
+
+	id := strings.TrimSpace(*proposalID)
+	if id == "" {
+		if status.ActiveProposal == nil {
+			return errors.New("this chain has no active governance ballot; nothing to vote on (propose first, then vote)")
+		}
+		if status.ActiveProposal.Operation != "upgrade" {
+			return fmt.Errorf(
+				"the active ballot %s is a %q proposal, not an app-version upgrade; pass --proposal %s to vote on it deliberately",
+				status.ActiveProposal.ProposalID, status.ActiveProposal.Operation, status.ActiveProposal.ProposalID,
+			)
+		}
+		id = status.ActiveProposal.ProposalID
+	}
+
+	key, keySource, err := resolveUpgradeVoteSigningKey(*agentKeyPath, logger)
+	if err != nil {
+		return err
+	}
+	pub, ok := key.Public().(ed25519.PublicKey)
+	if !ok {
+		return errors.New("resolved signing key has no usable ed25519 public key")
+	}
+	voterID := hex.EncodeToString(pub)
+
+	target := ""
+	if status.ActiveProposal != nil && status.ActiveProposal.ProposalID == id && status.ActiveProposal.TargetAppVersion != nil {
+		target = fmt.Sprintf(" (target app-v%d)", *status.ActiveProposal.TargetAppVersion)
+	}
+	if !*yes {
+		fmt.Printf("Cast %s on governance proposal %s%s?\n", strings.ToLower(strings.TrimSpace(*decision)), id, target)
+		fmt.Printf("  • Signed with %s\n", keySource)
+		fmt.Printf("  • Voter identity %s — the vote counts only as far as this identity holds validator power.\n", voterID)
+		if ceiling := sageabci.MaxSupportedAppVersion(); status.ActiveProposal != nil && status.ActiveProposal.TargetAppVersion != nil && *status.ActiveProposal.TargetAppVersion > ceiling {
+			fmt.Printf("  • Target app-v%d is above this binary's auto-vote ceiling (app-v%d): no node's auto-voter will\n", *status.ActiveProposal.TargetAppVersion, ceiling)
+			fmt.Println("    accept it, so this explicit vote is the only thing that can carry it to quorum.")
+		}
+		fmt.Print("Proceed? [y/N]: ")
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		if s := strings.ToLower(strings.TrimSpace(line)); s != "y" && s != "yes" {
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
+	bcastCtx, cancelBcast := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelBcast()
+	var res *broadcastCommitResp
+	err = tx.WithNonceLease(bcastCtx, key, func(nonce uint64) error {
+		voteTx := &tx.ParsedTx{
+			Type:      tx.TxTypeGovVote,
+			Nonce:     nonce,
+			Timestamp: time.Now(),
+			GovVote: &tx.GovVote{
+				ProposalID: id,
+				Decision:   decisionValue,
+			},
+		}
+		if signErr := tx.SignTx(voteTx, key); signErr != nil {
+			return fmt.Errorf("sign governance vote: %w", signErr)
+		}
+		encoded, encodeErr := tx.EncodeTx(voteTx)
+		if encodeErr != nil {
+			return fmt.Errorf("encode governance vote: %w", encodeErr)
+		}
+		var broadcastErr error
+		res, broadcastErr = broadcastTxCommitWithSigner(bcastCtx, *rpc, key, encoded)
+		if broadcastErr != nil {
+			return fmt.Errorf("broadcast: %w\n(if the commit timed out the vote may still land — re-check with: sage-gui upgrade status)", broadcastErr)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if res.CheckTxCode != 0 {
+		return fmt.Errorf("rejected at CheckTx (code %d): %s", res.CheckTxCode, res.CheckTxLog)
+	}
+	if res.TxResultCode != 0 {
+		hint := "votes are weighted by validator power: a signer whose agent ID (hex of its ed25519 pubkey) is not in the on-chain validator set records a vote that cannot move the tally. Use the node's consensus key, or --agent-key <validator key>."
+		return fmt.Errorf("rejected at block execution (code %d): %s\n(%s)", res.TxResultCode, res.TxResultLog, hint)
+	}
+
+	fmt.Printf("✓ Vote %s recorded on %s — accepted at height %d.\n", strings.ToLower(strings.TrimSpace(*decision)), id, res.Height)
+	fmt.Printf("  tx hash: %s\n", res.Hash)
+	fmt.Printf("  voter:   %s (%s)\n", voterID, keySource)
+	fmt.Println("  Re-check the tally with: sage-gui upgrade status (or CEREBRUM's governance view).")
+	if status.ActiveProposal != nil && status.ActiveProposal.TargetAppVersion != nil &&
+		*status.ActiveProposal.TargetAppVersion > sageabci.MaxSupportedAppVersion() {
+		fmt.Printf("  NOTE: app-v%d is dormant in this binary — every validator must vote explicitly before its plan can activate.\n",
+			*status.ActiveProposal.TargetAppVersion)
+	}
+	return nil
+}
+
+// parseUpgradeVoteDecision maps the operator-facing word onto the tx decision.
+func parseUpgradeVoteDecision(value string) (tx.VoteDecision, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "accept", "yes", "approve":
+		return tx.VoteDecisionAccept, nil
+	case "reject", "no":
+		return tx.VoteDecisionReject, nil
+	case "abstain":
+		return tx.VoteDecisionAbstain, nil
+	default:
+		return 0, fmt.Errorf("--decision %q is not accept, reject, or abstain", value)
+	}
+}
+
+// resolveUpgradeVoteSigningKey selects the voting identity. Explicit --agent-key
+// always wins; otherwise this node's consensus key is the default, because that
+// identity is the validator whose power the vote is weighted by. The operator
+// agent.key is only a fallback (it votes, but with no power unless it happens to
+// be a validator) so the command still works on a non-validator host.
+func resolveUpgradeVoteSigningKey(explicitPath string, logger zerolog.Logger) (ed25519.PrivateKey, string, error) {
+	if explicitPath != "" {
+		key, err := loadProposeSigningKey(explicitPath)
+		if err != nil {
+			return nil, "", err
+		}
+		return key, explicitPath, nil
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		return nil, "", fmt.Errorf("load local config for upgrade voting: %w", err)
+	}
+	consensusKeyPath := filepath.Join(cfg.DataDir, "cometbft", "config", "priv_validator_key.json")
+	if key, keyErr := loadProposeSigningKey(consensusKeyPath); keyErr == nil {
+		return key, consensusKeyPath + " (this node's consensus key)", nil
+	}
+	if cfg.AgentKey != "" {
+		if key := loadOperatorAgentKeyAt(cfg.AgentKey, logger); key != nil {
+			return key, cfg.AgentKey + " (operator agent key — counts only if it is in the validator set)", nil
+		}
+	}
+	return nil, "", fmt.Errorf(
+		"no usable voting key: %s (consensus) and %s (operator) are both unreadable — run this on the node host or pass --agent-key",
+		consensusKeyPath, cfg.AgentKey,
+	)
 }
 
 // resolveProposeSigningKey selects the proposal identity and returns a

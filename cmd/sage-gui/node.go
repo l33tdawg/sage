@@ -316,6 +316,11 @@ func runServe(startupProof string) (rerr error) {
 				logger.Warn().Err(closeErr).Msg("native shell control endpoint cleanup incomplete")
 			}
 		}()
+		if requirement := nativeBootstrapRequirement(); requirement != "" {
+			if bootstrapErr := nativeControl.EnableNativeBootstrap(requirement); bootstrapErr != nil {
+				logger.Warn().Err(bootstrapErr).Msg("native session bootstrap unavailable")
+			}
+		}
 		logger.Info().Str("endpoint", nativeControl.Endpoint()).Msg("native shell control endpoint ready for negotiation")
 	}
 
@@ -509,6 +514,12 @@ func runServe(startupProof string) (rerr error) {
 		stopWorkers()
 		_ = sqliteStore.Close()
 	}()
+
+	privateMedia, closePrivateMedia, mediaErr := configurePrivateMediaStore(ctx, cfg.PrivateMedia, sqliteStore, sqlitePath, newPrivateMediaSpaceProbe)
+	if mediaErr != nil {
+		return fmt.Errorf("configure private media: %w", mediaErr)
+	}
+	defer closePrivateMedia()
 
 	// Created before the ABCI app so canonical scoped-projection recovery can
 	// publish a fail-closed readiness state during construction.
@@ -986,13 +997,14 @@ func runServe(startupProof string) (rerr error) {
 
 	// Seed the replay-nonce allocator from the final chain store. This callback
 	// must never capture the closed pre-state-sync Badger instance.
-	tx.SetNonceFloorFunc(func(pub ed25519.PublicKey) (uint64, bool) {
+	chainNonceFloor := func(pub ed25519.PublicKey) (uint64, bool) {
 		n, gerr := badgerStore.GetNonce(auth.PublicKeyToAgentID(pub))
 		if gerr != nil || n == 0 {
 			return 0, false
 		}
 		return n, true
-	})
+	}
+	tx.SetNonceFloorFunc(chainNonceFloor)
 
 	// Badger is canonical scoped content; SQLite is only the serving projection.
 	// Verify/rebuild only after the final app/store graph is frozen.
@@ -1173,6 +1185,74 @@ func runServe(startupProof string) (rerr error) {
 	// merely unlikely.
 	tx.SetTxResolverFunc(tx.CometTxResolver(cometRPC))
 
+	// The proof reader for fences RESTORED from durable intent
+	// (internal/tx/nonce_fence.go). Those fences have no bytes left to
+	// re-submit, so before this was wired the only thing that could ever lift
+	// one was an operator POST — and a node that came back holding one refused
+	// to sign that key, and refused every coordinated restart (every update),
+	// for as long as it ran. The proofs it needs are read from the node itself:
+	// the recorded hash against CometBFT's transaction index, and the signer's
+	// committed nonce against the fenced allocation. Both sources are the ones
+	// the rest of the node already trusts — the same RPC URL the broadcasters
+	// use, and the same store the allocator seeds from — so a restored fence
+	// resolves the moment the chain can prove its fate.
+	tx.SetFenceProverFunc(func(proveCtx context.Context, fence tx.FencedSigner) (tx.FenceLiftProof, error) {
+		return tx.ProveFenceLiftFromChain(proveCtx, cometRPC, chainNonceFloor, fence)
+	})
+
+	// The startup resolution for a restored fence that no proof can settle and
+	// nothing can deliver back. This is what makes the desktop recovery work
+	// without a terminal: a user whose node came back fenced (writes refused,
+	// updater refused) replaces the app bundle and relaunches, and the first
+	// boot resolves the fence when the evidence says the transaction cannot
+	// return — caught up, no peer ever seen this run, no mempool copy, no
+	// committed fate, allocation unspent — recording the decision instead of
+	// asking a person to run a command. A node that has talked to a peer keeps
+	// its fence: there the transaction CAN come back, and only a proof (or an
+	// operator who knows the topology) may lift it.
+	//
+	// THE SECOND HALF IS THE QUIET CHAIN. Since app-v12 every node runs with
+	// CreateEmptyBlocks=false, so a chain mints a block exactly when a signed
+	// transaction enters its mempool. A restored fence refuses to sign and its
+	// bytes are gone, so on a chain that was already quiet when the fence was
+	// raised the fence is holding the only mechanism that could produce its own
+	// proof: no transaction, no block; no block, no provable fate. That is the
+	// shape a personal node reaches after an upgrade restart between writes, and
+	// it is why a fence can outlive every write and every update attempt on an
+	// otherwise healthy node. The quiescent rule settles it from evidence the
+	// node reads itself — caught up, no peer and none seen while this fence was
+	// held, no mempool copy, allocation unspent, and a tip that predates this
+	// fence — and records mode=automatic_quiescent. A tip that has minted since
+	// the fence was raised, a peer, or a mempool copy all stand it down.
+	tx.SetFenceAutoResolverFunc(func(resolveCtx context.Context, fence tx.FencedSigner) (bool, string, error) {
+		if resolved, detail, err := tx.AutoResolveUnprovableFence(resolveCtx, cometRPC, chainNonceFloor, fence); resolved || err != nil {
+			return resolved, detail, err
+		}
+		return tx.AutoResolveQuiescentFence(resolveCtx, cometRPC, chainNonceFloor, fence)
+	})
+
+	// Durable fence intent, and the restore that makes it matter. The fence
+	// itself is in-process state: a restart, crash or SIGKILL used to discard it,
+	// after which the allocator re-seeded each key from the highest COMMITTED
+	// nonce — below the abandoned one — and signed into the gap, losing that
+	// transaction to a Code 4 that looked like an unrelated replay failure.
+	// Wiring the store makes the intent outlive the process; the restore
+	// re-raises a fence for every submission whose fate was never proven, so the
+	// node comes back REFUSING to sign those keys until an operator supplies the
+	// proof. It runs after the resolver is wired on purpose: a restored fence is
+	// reconciled by the same machinery, and restoring before the resolver would
+	// park every restored fence on "no resolver" until the next start.
+	tx.SetFenceIntentStore(signerFenceIntentStore{store: sqliteStore})
+	if restored, restoreErr := tx.RestoreFencesFromIntents(ctx); restoreErr != nil {
+		logger.Warn().Err(restoreErr).
+			Msg("durable signer-fence intents could not be restored; a key abandoned by the previous process " +
+				"is NOT fenced and may allocate past its unresolved nonce")
+	} else if restored > 0 {
+		logger.Warn().Int("restored_fences", restored).
+			Msg("signer fences restored from durable intent: the previous process ended with submissions " +
+				"whose fate was never proven, and those keys refuse to sign until it is")
+	}
+
 	// Backfill on_chain_height and first_seen for agents already registered on-chain
 	// but missing these fields in SQLite (upgrade path from v3.5 → v3.7.6+)
 	signingKeyForMigrate := loadNodeSigningKey(cometCfg.PrivValidatorKeyFile(), logger)
@@ -1227,6 +1307,7 @@ func runServe(startupProof string) (rerr error) {
 
 	// Create REST server
 	restServer := rest.NewServer(cometRPC, sqliteStore, sqliteStore, badgerStore, health, logger, embedProvider)
+	restServer.SetPrivateMediaStore(privateMedia)
 	// This runtime's Comet home is authoritative. Close the legacy env-loaded
 	// gateway before attempting that explicit key so a stale VALIDATOR_KEY_FILE
 	// can never survive a failed home-key load.
@@ -1334,6 +1415,24 @@ func runServe(startupProof string) (rerr error) {
 	// lifecycle so every listener/store/consensus component drains before exec.
 	restartRequested = make(chan preparedRestartRequest, 1)
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
+	// Two ways to judge memories, in this order: a judge SERVICE when SAGE_HUNCH_URL is set, else
+	// the model this node serves through its own managed Ollama (SAGE_LOCAL_JUDGE_MODEL). A node
+	// with neither runs with the built-in checks alone.
+	memoryGate := writeGateFromEnv(logger)
+	if memoryGate == nil && ollamaMgr != nil {
+		memoryGate = localJudgeFromEnv(logger, ollamaMgr.URL())
+		// If the configured local judge is the pinned, verified build, make sure it is installed in the
+		// managed Ollama — downloaded from its pinned URL and sha256-checked, refusing a mismatch. Done in
+		// the background so a first-run weights download never blocks node startup.
+		if memoryGate != nil && strings.TrimSpace(os.Getenv("SAGE_LOCAL_JUDGE_MODEL")) == ollamad.JudgeModelTag {
+			startWorker(func() {
+				if err := ollamaMgr.EnsureJudgeModel(ctx, func(s string) { logger.Info().Str("step", s).Msg("local judge model") }); err != nil {
+					logger.Warn().Err(err).Msg("could not install the pinned local judge model — the gate will hold memories for review until it is present")
+				}
+			})
+		}
+	}
+	dashboard.SetMemoryGate(memoryGate)
 	dashboard.NodeOperatorAgentID = operatorAgentID
 	dashboard.RunBackground = func(fn func(context.Context)) {
 		startWorker(func() { fn(ctx) })
@@ -1388,20 +1487,44 @@ func runServe(startupProof string) (rerr error) {
 			return fmt.Errorf("restart already in progress")
 		}
 	}
-	dashboard.PrepareVersionTransition = func(snapshotCtx context.Context, targetVersion string) (_ func(), retErr error) {
+	dashboard.PrepareVersionTransition = func(snapshotCtx context.Context, targetVersion string, replacementMaxAppVersion uint64) (_ func(), retErr error) {
 		if snapshotScheduler == nil {
 			return nil, fmt.Errorf("snapshot scheduler is unavailable")
 		}
-		height, appHash, release := app.AcquireSnapshotStateFence()
+		// Ordinary users never need to inspect governance or run a terminal
+		// preflight. The updater reads canonical state itself and carries every
+		// compatible pending plan/ballot through the verified snapshot. Only
+		// malformed state or an upgrade target this binary cannot execute blocks
+		// mutation; a supported in-flight upgrade is not a reason to deadlock the
+		// installation of a newer patch binary.
+		governanceStatus, height, appHash, release, governanceErr :=
+			app.AcquireVerifiedUpgradeSnapshotFence(replacementMaxAppVersion)
+		if governanceErr != nil {
+			return nil, governanceErr
+		}
 		handedOff := false
 		defer func() {
 			if !handedOff {
 				release()
 			}
 		}()
-		if height <= 0 || len(appHash) == 0 {
-			return nil, fmt.Errorf("read committed state for pre-update snapshot: no committed application state")
+		logEvent := logger.Info().
+			Str("target_release", targetVersion).
+			Uint64("replacement_max_app_version", replacementMaxAppVersion).
+			Uint64("current_app_version", governanceStatus.CurrentAppVersion)
+		if governanceStatus.PendingPlan != nil {
+			logEvent = logEvent.
+				Str("pending_plan", governanceStatus.PendingPlan.Name).
+				Uint64("pending_target_app_version", governanceStatus.PendingPlan.TargetAppVersion).
+				Int64("pending_activation_height", governanceStatus.PendingPlan.ActivationHeight)
 		}
+		if governanceStatus.ActiveProposal != nil {
+			logEvent = logEvent.
+				Str("active_proposal", governanceStatus.ActiveProposal.ProposalID).
+				Str("active_operation", governanceStatus.ActiveProposal.Operation)
+		}
+		logEvent.Msg("automatic updater governance compatibility verified")
+
 		_, snapshotErr := snapshotScheduler.TakeVerified(
 			snapshotCtx,
 			height,
@@ -1481,6 +1604,10 @@ func runServe(startupProof string) (rerr error) {
 			}
 		}
 	})
+	if nativeControl != nil {
+		dashboard.NativeBootstrap = nativeControl.NativeBootstrap()
+		dashboard.NativeBinding = nativeControl.NativeBinding()
+	}
 	dashboard.VaultKeyPath = filepath.Join(SageHome(), "vault.key")
 	dashboard.SaveEncryptionConfig = func(enabled bool) error {
 		cfg.Encryption.Enabled = enabled
@@ -1685,7 +1812,9 @@ func runServe(startupProof string) (rerr error) {
 	// Wire pre-validate function into both dashboard and REST API. This is the
 	// advisory pre-vote display; it delegates to voter.DecideVerbose so it shows the
 	// EXACT named checks (dedup/quality/consistency) the node's real vote applies —
-	// one rule set, no second drifting copy.
+	// one rule set, no second drifting copy. No candidate row exists yet at
+	// pre-validate time, so no memory id is excluded: any committed, challenged,
+	// or rejected row with this hash reports duplicate.
 	preValidate := func(content, contentHash, domain, memType string, confidence float64) []web.PreValidateVote {
 		_, checks := voter.DecideVerbose(ctx, sqliteStore, voter.MemoryInput{
 			Content: content, ContentHash: contentHash, Domain: domain, MemType: memType, Confidence: confidence,
@@ -1780,11 +1909,9 @@ func runServe(startupProof string) (rerr error) {
 	rest.MountOAuthRoutes(r, oauthHandler)
 	logger.Info().Msg("OAuth 2.0 + PKCE wrapper enabled (/.well-known/oauth-authorization-server, /oauth/authorize, /oauth/token)")
 
-	// App-v23+ lifecycle state is consensus-authoritative. The historical
-	// cleanup loop changed only SQLite, so its next projection audit hid each
-	// affected memory as divergent. Cleanup remains available as a dry run in
-	// CEREBRUM; an actual forget must travel through the canonical challenge
-	// transaction path.
+	// Explicitly authorized cleanup uses canonical challenge transactions only.
+	// Supervise shutdown so it never outlives stores or the signing runtime.
+	startWorker(func() { dashboard.RunCanonicalCleanupWorker(ctx) })
 
 	// Prometheus scrape endpoint. amid serves this via internal/metrics's
 	// dedicated metrics server; sage-gui has no such listener, so the default
@@ -2270,8 +2397,9 @@ func runServe(startupProof string) (rerr error) {
 		}
 		// Health wired in so /ready's "voter" block tracks liveness + the
 		// proposed backlog (nil-safe: amid starts the voter without one).
+		gate := memoryGate
 		startWorker(func() {
-			voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: pollInterval, Health: health}, logger)
+			voter.Run(ctx, app, sqliteStore, voter.Config{Key: selfKey, CometRPC: cometRPC, PollInterval: pollInterval, Health: health, Gate: gate}, logger)
 		})
 	case cfg.Voter.Required:
 		// Normally unreachable — the pre-serve gate before StartChain already refused
@@ -2450,6 +2578,21 @@ func runServe(startupProof string) (rerr error) {
 		}
 	}
 	signal.Stop(quit)
+	// An ORDINARY exit (a signal, or a serve error that is not a scheduled
+	// restart) gets the drain the coordinated path already ran: signing is
+	// stopped and the in-flight submissions are given a small bounded window to
+	// finish BEFORE any listener is force-closed under them. Without it the
+	// teardown below is a fence factory — a broadcast severed mid-flight ends
+	// with an unobserved fate, and the next start pays for it with one lost
+	// payload. The error is logged and never vetoes an operator-ordered
+	// shutdown; whatever did not make it is covered by the durable intent and
+	// the restored fence.
+	if !restarting {
+		if err := drainSigningForOrdinaryShutdown(ordinaryShutdownSigningIdleBudget); err != nil {
+			logger.Warn().Err(err).Msg("in-flight signing did not reach idle before the shutdown drain — " +
+				"a submission whose fate is still unobserved is fenced, and the fence is restored at the next start")
+		}
+	}
 	if nativeControl != nil {
 		_ = nativeControl.SetState(shellcontrol.StateDraining)
 	}

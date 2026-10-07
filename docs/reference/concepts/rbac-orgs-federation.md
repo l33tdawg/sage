@@ -1,8 +1,8 @@
-<!-- Core document reconciled through SAGE v11.19.0/app-v27, including consensus-backed Access Group authority, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
+<!-- Core document reconciled through SAGE v11.23.15/app-v27, including consensus-backed Access Group authority, Root continuity, linked federated readers, and the quorum/state-sync/governance-gateway sections. -->
 
 # RBAC, Organizations, and Federation
 
-Verified against SAGE v11.19.0. Legacy organization/federation sections retain
+Verified against SAGE v11.23.15. Legacy organization/federation sections retain
 their historical context; app-v23 roles, Root, Access Groups, and app-v25
 historical writer continuity are the current local-control model.
 
@@ -362,6 +362,7 @@ Read policy
 Two dashboard surfaces now write to the on-chain RBAC state above instead of merely displaying it. They reuse the existing transaction types; app-v18 fork-extends their optional wire payload and consensus authorization for administrator overrides.
 
 - **The access matrix issues real grants.** Saving an agent's per-domain Read (level 1), Write (level 2), or Modify (level 3) matrix (`PATCH /v1/dashboard/network/agents/{id}`) reconciles the desired levels against the ACTUAL on-chain grant state (`GetAccessGrant`) and issues real `TxTypeAccessGrant` / `TxTypeAccessRevoke` txs for each divergence. Modify includes Read and Write and authorizes the app-v15 challenge/deprecate/reinstate verb ladder. The normal path signs as the effective leaf/ancestor domain owner. A genuinely unowned domain is atomically claimed by the genesis admin on its first grant, matching the existing consensus rule instead of being rejected in the dashboard. The reconcile is idempotent and self-healing. Permission-bearing dashboard edits are operator-only: an ordinary signed agent cannot make the node admin-sign its own clearance/domain/org/visibility elevation. Earlier versions wrote only the advisory `DomainAccess` blob and not the enforced grant keys (`grant:<domain>:<agentID>`) that `HasAccessMultiOrg`'s direct-grant path actually checks, so cross-agent grants set from the matrix did not take effect (`web/reassign_handler.go`, `web/network_handler.go`).
+- **An amid-only fleet gets the same enrollment write, not a second implementation.** A validator fleet with no CEREBRUM SPA reaches `GET /v1/dashboard/network/access` and `PUT /v1/dashboard/network/access/agents/{id}/policy` on the `amid` REST listener. Those are the dashboard handlers and the dashboard operator gate, so the resulting `TxTypeAgentRoleChange` is identical to CEREBRUM's; the caller is a locally signed current Root. This matters because the enrollment clearance set here is the value the memory-write gate compares a submission's classification against — org/department membership clearance is a different record and never satisfies it (`web/network_handler.go`, `cmd/amid/main.go`).
 
 - **app-v18 explicit genesis-admin override (v11.7 candidate).** CEREBRUM may offer **Admin override & assign** only when the target agent's private key is held on this node (local, not merely visible through federation). The confirmation identifies the effective original owner and desired read/write level. The transaction carries that expected owner and owning ancestor as a consensus-checked binding, so a concurrent ownership change rejects rather than applying a stale confirmation. Once app-v18 is activated, a registered global admin may sign `AccessGrant` / `AccessRevoke` even when it is not the domain owner; the grant remains an ordinary auditable `grant:<domain>:<agentID>` record and does **not** change domain ownership or memory authorship. Ordinary agents remain owner/ancestor-owner gated. Level 1 is read-only; memory submit and co-commit require the effective owner or an explicit level-2 direct/ancestor grant—org membership and federation clearance do not imply write authority. Pre-app-v18 blocks and the activation block retain the old rule byte-for-byte (`internal/abci/app.go`, `web/reassign_handler.go`).
 
@@ -384,7 +385,7 @@ A `POST /v1/memory/query` request passes through these gates in order (`memory_h
 
 ### Gate 1: checkDomainAccess (DomainAccess policy)
 
-`checkDomainAccess` (`memory_handler.go:339-342`) reads the agent's `DomainAccess` JSON field (on-chain BadgerDB first, SQLite fallback):
+`checkDomainAccess` (`memory_handler.go:369-372`) reads the agent's `DomainAccess` JSON field (on-chain BadgerDB first, SQLite fallback):
 
 - `role == "admin"` → bypass all checks, full access
 - `role == "observer"` → write operations blocked
@@ -406,7 +407,7 @@ Applied when `domainAccessApproved == false` and the domain has a registered own
 - `agentID == nodeOperatorID` → `seeAll = true` (node operator bypass)
 - `role == "admin"` → `seeAll = true`
 - `visible_agents == "*"` → `seeAll = true`
-- **Any org member with clearance=4 (TOP SECRET)** → `seeAll = true` (`agentHasTopSecretClearance` check, `memory_handler.go:1074`)
+- **Any org member with clearance=4 (TOP SECRET)** → `seeAll = true` (`agentHasTopSecretClearance` check, `memory_handler.go:1180`)
 - Otherwise: agent sees memories from `[agentID] + parsed(visible_agents)` list
 
 If `seeAll == false`, `opts.SubmittingAgents` is set to the allowed list, which `QuerySimilar` uses to filter at the PostgreSQL level.
@@ -503,7 +504,7 @@ The `FederationID` is deterministic: computed from the two org IDs + height to a
 
 ### MaxClearance Cap
 
-`checkFederationAccess` (`badger.go:6421-6501`) enforces: `if memoryClassification > maxClearance → deny`. This means a federation with `max_clearance=1` (INTERNAL) cannot expose CONFIDENTIAL (2) or higher memories to the federated org, regardless of the individual agent's clearance within their own org.
+`checkFederationAccess` (`badger.go:6444-6524`) enforces: `if memoryClassification > maxClearance → deny`. This means a federation with `max_clearance=1` (INTERNAL) cannot expose CONFIDENTIAL (2) or higher memories to the federated org, regardless of the individual agent's clearance within their own org.
 
 Every proposal remains `"proposed"` until an explicit target-organization
 approval changes it to `"active"`, regardless of the stored

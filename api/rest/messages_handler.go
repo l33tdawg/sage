@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +17,27 @@ import (
 )
 
 const messageNotFoundTitle = "Message not found"
+
+type encryptedStorageRequirement struct {
+	required bool
+	seen     bool
+}
+
+func (value *encryptedStorageRequirement) UnmarshalJSON(raw []byte) error {
+	if value.seen {
+		return errors.New("duplicate require_encrypted_storage")
+	}
+	value.seen = true
+	switch strings.TrimSpace(string(raw)) {
+	case "true":
+		value.required = true
+	case "false":
+		value.required = false
+	default:
+		return errors.New("require_encrypted_storage must be boolean")
+	}
+	return nil
+}
 
 func canonicalMessageStore(s *Server) (store.MessageStore, bool) {
 	messageStore, ok := s.store.(store.MessageStore)
@@ -50,11 +72,12 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ToAgent        string `json:"to_agent"`
-		Intent         string `json:"intent"`
-		Payload        string `json:"payload"`
-		TTLMinutes     *int   `json:"ttl_minutes"`
-		IdempotencyKey string `json:"idempotency_key"`
+		ToAgent                 string                      `json:"to_agent"`
+		Intent                  string                      `json:"intent"`
+		Payload                 string                      `json:"payload"`
+		TTLMinutes              *int                        `json:"ttl_minutes"`
+		IdempotencyKey          string                      `json:"idempotency_key"`
+		RequireEncryptedStorage encryptedStorageRequirement `json:"require_encrypted_storage"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -94,6 +117,10 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 	}
 	messageStore, ok := canonicalMessageStore(s)
 	if !ok {
+		if req.RequireEncryptedStorage.required {
+			writeProblem(w, http.StatusServiceUnavailable, "Message storage unavailable", "Encrypted message storage required.")
+			return
+		}
 		writeProblem(w, http.StatusNotImplemented, "Messages unavailable", "The active store does not support canonical messages.")
 		return
 	}
@@ -117,13 +144,24 @@ func (s *Server) handleMessageSend(w http.ResponseWriter, r *http.Request) {
 	if ttl > 0 {
 		lifetime = time.Duration(ttl) * time.Minute
 	}
-	msg, replayed, err := messageStore.SendLocalMessage(r.Context(), req.IdempotencyKey, &store.PipelineMessage{
+	send := messageStore.SendLocalMessage
+	if req.RequireEncryptedStorage.required {
+		sqlite, supported := s.store.(*store.SQLiteStore)
+		if !supported || sqlite == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "Message storage unavailable", "Encrypted message storage required.")
+			return
+		}
+		send = sqlite.SendEncryptedLocalMessage
+	}
+	msg, replayed, err := send(r.Context(), req.IdempotencyKey, &store.PipelineMessage{
 		PipeID: generatePipeID(), FromAgent: senderID, FromProvider: fromProvider,
 		ToAgent: req.ToAgent, Intent: req.Intent, Payload: req.Payload,
 		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(lifetime),
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, store.ErrEncryptedMessageStorageRequired):
+			writeProblem(w, http.StatusServiceUnavailable, "Message storage unavailable", "Encrypted message storage required.")
 		case errors.Is(err, store.ErrMessageIdempotencyConflict):
 			writeProblem(w, http.StatusConflict, "Idempotency key conflict",
 				"That idempotency key was already used for a different message.")
@@ -258,6 +296,7 @@ func (s *Server) handleMessagesReceive(w http.ResponseWriter, r *http.Request) {
 		Trust              string    `json:"trust"`
 		SecurityNotice     string    `json:"security_notice"`
 		ClaimantSessionID  string    `json:"claimant_session_id,omitempty"`
+		ClaimRevision      uint64    `json:"claim_revision"`
 	}
 	agentIDs := make([]string, 0, len(items))
 	for _, item := range items {
@@ -277,6 +316,7 @@ func (s *Server) handleMessagesReceive(w http.ResponseWriter, r *http.Request) {
 			Authority: pipeRequestAuthority, Trust: pipeLocalTrust,
 			SecurityNotice:    pipeRESTRequestSecurityNotice,
 			ClaimantSessionID: item.ClaimedSessionID,
+			ClaimRevision:     item.ClaimRevision,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -341,7 +381,8 @@ func (s *Server) handleMessagesClaimedElsewhere(w http.ResponseWriter, r *http.R
 	for _, item := range items {
 		entry := map[string]any{
 			"message_id": item.MessageID, "claimant_session_id": item.ClaimantSessionID,
-			"created_at": item.CreatedAt, "expires_at": item.ExpiresAt, "foreign": item.Foreign,
+			"claim_revision": item.ClaimRevision,
+			"created_at":     item.CreatedAt, "expires_at": item.ExpiresAt, "foreign": item.Foreign,
 		}
 		if item.ClaimedAt != nil {
 			entry["claimed_at"] = item.ClaimedAt
@@ -409,7 +450,7 @@ func (s *Server) handleOwnClaimedUnfinishedMessages(w http.ResponseWriter, r *ht
 			"message_id": item.PipeID, "from_agent": item.FromAgent,
 			"intent": item.Intent, "payload": item.Payload, "status": item.Status,
 			"created_at": item.CreatedAt, "expires_at": item.ExpiresAt,
-			"claimant_session_id": claimantSessionID, "already_claimed_by_you": true,
+			"claimant_session_id": claimantSessionID, "claim_revision": item.ClaimRevision, "already_claimed_by_you": true,
 			"requires_reply": true, "authority": pipeRequestAuthority, "trust": pipeLocalTrust,
 			"security_notice": pipeRESTRequestSecurityNotice,
 		}
@@ -440,16 +481,19 @@ func (s *Server) handleMessageHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		FromSessionID string `json:"from_session_id"`
-		ToSessionID   string `json:"to_session_id"`
+		FromSessionID string  `json:"from_session_id"`
+		ToSessionID   string  `json:"to_session_id"`
+		FromRevision  *uint64 `json:"from_revision"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
 	if req.FromSessionID == "" || req.ToSessionID == "" ||
+		req.FromSessionID == req.ToSessionID ||
+		(req.FromRevision != nil && *req.FromRevision >= math.MaxInt64) ||
 		len(req.FromSessionID) > store.MaxMessageClaimantSessionBytes || len(req.ToSessionID) > store.MaxMessageClaimantSessionBytes {
-		writeProblem(w, http.StatusBadRequest, "Invalid claimant session", "from_session_id and to_session_id are required and bounded")
+		writeProblem(w, http.StatusBadRequest, "Invalid claimant fence", "distinct, bounded session IDs and a representable revision are required")
 		return
 	}
 	messageStore, ok := canonicalMessageStore(s)
@@ -457,8 +501,12 @@ func (s *Server) handleMessageHandoff(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusNotImplemented, "Messages unavailable", "The active store does not support canonical messages.")
 		return
 	}
-	replayed, err := messageStore.HandoffLocalMessageClaim(r.Context(), middleware.ContextAgentID(r.Context()),
-		chi.URLParam(r, "message_id"), req.FromSessionID, req.ToSessionID)
+	expectedRevision := uint64(0)
+	if req.FromRevision != nil {
+		expectedRevision = *req.FromRevision
+	}
+	replayed, revision, err := messageStore.HandoffLocalMessageClaim(r.Context(), middleware.ContextAgentID(r.Context()),
+		chi.URLParam(r, "message_id"), req.FromSessionID, req.ToSessionID, expectedRevision)
 	if err != nil {
 		if errors.Is(err, store.ErrMessageReceiveConflict) {
 			writeProblem(w, http.StatusConflict, "Claimant session changed", "The message is no longer assigned to from_session_id; refresh passive history before retrying.")
@@ -468,7 +516,7 @@ func (s *Server) handleMessageHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"message_id": chi.URLParam(r, "message_id"),
-		"claimant_session_id": req.ToSessionID, "idempotent_replay": replayed})
+		"claimant_session_id": req.ToSessionID, "claim_revision": revision, "idempotent_replay": replayed})
 }
 
 func (s *Server) handleFederatedMessageClaimSession(w http.ResponseWriter, r *http.Request) {
@@ -687,19 +735,41 @@ func (s *Server) handleMessageReplyStatus(w http.ResponseWriter, r *http.Request
 		writeCanonicalMessageNotFound(w, replyEventID)
 		return
 	}
+	response := map[string]any{"reply_event_id": replyEventID, "scope": "federated"}
+	appendFederatedReplyTransportStatus(response, event)
+	writeJSON(w, http.StatusOK, response)
+}
+
+// appendFederatedReplyTransportStatus reports retained delivery evidence, never
+// inferring that an idempotent reply replay requeued a terminal transport event.
+func appendFederatedReplyTransportStatus(response map[string]any, event *store.PipelineTransportOutbox) {
 	transportStatus := event.State
 	if transportStatus == "pending" {
 		transportStatus = "queued"
 	}
-	response := map[string]any{
-		"reply_event_id":   replyEventID,
-		"scope":            "federated",
-		"reply_status":     transportStatus,
-		"transport_status": transportStatus,
-		"created_at":       event.CreatedAt,
-	}
+	response["reply_status"] = transportStatus
+	response["transport_status"] = transportStatus
+	response["created_at"] = event.CreatedAt
 	if event.DeliveredAt != nil {
 		response["delivered_at"] = event.DeliveredAt
 	}
-	writeJSON(w, http.StatusOK, response)
+	if event.LastError != "" {
+		response["last_error"] = event.LastError
+		response["security_notice"] = pipeRESTUpdateSecurityNotice
+	}
+}
+
+func (s *Server) addFederatedReplyTransportStatus(w http.ResponseWriter, r *http.Request, replyEventID string, response map[string]any) bool {
+	transportStore, ok := s.store.(store.FederatedPipelineStore)
+	if ok {
+		event, err := transportStore.GetPipelineTransport(r.Context(), replyEventID)
+		if err == nil && event != nil && event.EventKind == "result" &&
+			event.SourceAgentID == middleware.ContextAgentID(r.Context()) {
+			appendFederatedReplyTransportStatus(response, event)
+			return true
+		}
+	}
+	writeProblem(w, http.StatusServiceUnavailable, "Reply delivery status unavailable",
+		"The reply was recorded, but its delivery status could not be read. Retry the same reply or query its event status; do not assume it is queued or delivered.")
+	return false
 }

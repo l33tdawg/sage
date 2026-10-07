@@ -402,9 +402,9 @@ rpc_tx_height() {
       return 1
       ;;
   esac
-  rpc_json "${port}" "/tx?hash=0x${hash}&prove=false" | python3 -c '
-import json, sys
-print(int(json.load(sys.stdin)["result"]["height"]))'
+  # Commit acknowledgement can precede the local asynchronous tx index.
+  # Wait only for exact-hash absence; preserve all other RPC/execution failures.
+  python3 deploy/scripts/wait-comet-tx.py "${port}" "${hash}"
 }
 
 rpc_commit_signers() {

@@ -53,6 +53,13 @@ type SubmitMemoryRequest struct {
 	// by the caller's signed request and consensus-bound to the exact task and
 	// assignee.
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// EvidenceID claims evidence uploaded beforehand with POST
+	// /v1/memory/evidence: source material the memory is based on, kept
+	// NODE-LOCAL on this node so its memory gate can ask whether the memory is
+	// supported by it (docs/reference/write-gate.md). Only this random id is
+	// part of the signed body; the evidence itself never enters a transaction.
+	// Not accepted for tasks.
+	EvidenceID string `json:"evidence_id,omitempty"`
 }
 
 // SubmitMemoryResponse is the JSON body for a successful submission.
@@ -235,12 +242,25 @@ type FilterInfo struct {
 	TotalBeforeFilter *int     `json:"total_before_filter,omitempty"`
 	Visible           *int     `json:"visible,omitempty"`
 	HiddenCount       *int     `json:"hidden_count,omitempty"`
+	// ConfidenceFloor is the decayed-confidence floor this recall ran with, and
+	// HiddenByConfidenceFloor counts the candidates it removed BEFORE ranking.
+	//
+	// Both are present because the floor is the one silent-hide filter whose
+	// setting lives in operator preferences rather than in the call: without
+	// them a recall that returned nothing usable is indistinguishable from a
+	// recall over an empty store, and the observed failure was an agent
+	// concluding a memory was never written when it was merely below the
+	// threshold. A floor above a tier the write path produces (observations at
+	// 0.80, inferences at 0.60) hides that entire tier.
+	ConfidenceFloor         *float64 `json:"confidence_floor,omitempty"`
+	HiddenByConfidenceFloor *int     `json:"hidden_by_confidence_floor,omitempty"`
 }
 
 const (
 	filterHeader           = "X-SAGE-Filter-Applied"
 	filterBySubmittingAgts = "rbac_submitting_agents"
 	filterByClassification = "classification"
+	filterByConfidence     = "confidence_floor"
 )
 
 // MemoryResult is a memory record with computed confidence.
@@ -337,6 +357,14 @@ type MemoryDetailResponse struct {
 // checkDomainAccess verifies an agent has the required access level for a domain.
 // Returns nil if allowed, descriptive error if denied.
 // Unregistered agents (not in network_agents) are always allowed for backwards compatibility.
+// errAccessControlOperational marks a retryable access-control backend/policy
+// failure — the current authorization state could not be resolved — as distinct
+// from an ordinary read/write denial. Every operational failure in the access
+// path is wrapped with it, so callers can classify it with errors.Is (typed and
+// complete) rather than matching message fragments, and surface it as a 5xx
+// instead of silently treating a broken policy backend as "denied".
+var errAccessControlOperational = errors.New("access-control policy state could not be resolved")
+
 // Admins bypass all checks. Observers cannot write.
 func checkDomainAccess(ctx context.Context, agentStore store.AgentStore, badgerStore *store.BadgerStore, agentID, domain, action string) error {
 	return checkDomainAccessWithCapabilities(ctx, agentStore, badgerStore, agentID, domain, action, false)
@@ -351,7 +379,7 @@ func checkDomainAccessWithCapabilities(ctx context.Context, agentStore store.Age
 	if badgerStore != nil {
 		if capabilitiesActive {
 			if _, _, err := badgerStore.GetRegisteredAgentCapabilities(agentID); err != nil {
-				return fmt.Errorf("agent capability policy is invalid: %w", err)
+				return fmt.Errorf("%w: agent capability policy is invalid: %w", errAccessControlOperational, err)
 			}
 		}
 		onChainAgent, err := badgerStore.GetRegisteredAgent(agentID)
@@ -374,7 +402,7 @@ func checkDomainAccessWithCapabilities(ctx context.Context, agentStore store.Age
 					Modify bool   `json:"modify"`
 				}
 				if err := json.Unmarshal([]byte(onChainAgent.DomainAccess), &access); err != nil {
-					return fmt.Errorf("agent domain access policy is invalid")
+					return fmt.Errorf("%w: agent domain access policy is invalid", errAccessControlOperational)
 				}
 				if len(access) > 0 {
 					for _, a := range access {
@@ -463,7 +491,7 @@ func (s *Server) checkDomainAccess(ctx context.Context, agentID, domain, action 
 		}
 		policyID, err := appV23PolicyPrincipal(s.badgerStore, agentID)
 		if err != nil {
-			return errors.New("app-v23 access-control state is invalid")
+			return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 		}
 		legacy, err := s.badgerStore.AppV23LegacyReadCompatibility(
 			policyID, domain, 0, time.Now(),
@@ -475,7 +503,7 @@ func (s *Server) checkDomainAccess(ctx context.Context, agentID, domain, action 
 			if recoveredErr == nil && recovered {
 				return nil
 			}
-			return errors.New("app-v23 access-control state is invalid")
+			return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 		}
 		// The frozen H-1 allowlist remains authoritative over ordinary grants,
 		// but it must not make a directly governed current owner, recovered-group
@@ -532,7 +560,7 @@ func writeDomainReadAccessError(w http.ResponseWriter, accessErr error) {
 // for AuthorizeAppV23LocalDomain.
 func appV23PolicyPrincipal(badgerStore *store.BadgerStore, credentialID string) (string, error) {
 	if badgerStore == nil || credentialID == "" {
-		return "", errors.New("app-v23 access-control state is unavailable")
+		return "", fmt.Errorf("%w: app-v23 access-control state is unavailable", errAccessControlOperational)
 	}
 	root, err := badgerStore.GetAppV23Root()
 	if err != nil {
@@ -563,7 +591,7 @@ func appV23PolicyPrincipal(badgerStore *store.BadgerStore, credentialID string) 
 // level-2/3 grant.
 func checkAppV23DomainAccess(badgerStore *store.BadgerStore, agentID, domain, action string) error {
 	if badgerStore == nil || agentID == "" || domain == "" {
-		return errors.New("app-v23 access-control state is unavailable")
+		return fmt.Errorf("%w: app-v23 access-control state is unavailable", errAccessControlOperational)
 	}
 	var verb store.AppV23DomainVerb
 	var grantLevel uint8
@@ -582,7 +610,7 @@ func checkAppV23DomainAccess(badgerStore *store.BadgerStore, agentID, domain, ac
 	}
 	policyID, err := appV23PolicyPrincipal(badgerStore, agentID)
 	if err != nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	enrollment, err := badgerStore.GetAppV23Enrollment(policyID)
 	if err != nil || enrollment == nil || !enrollment.Active {
@@ -590,13 +618,13 @@ func checkAppV23DomainAccess(badgerStore *store.BadgerStore, agentID, domain, ac
 	}
 	shared, err := badgerStore.IsAppV23SharedDomain(domain)
 	if err != nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	decision, err := badgerStore.AuthorizeAppV23LocalDomain(
 		agentID, domain, verb, shared,
 	)
 	if err != nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	if decision.ExplicitDeny {
 		return fmt.Errorf("the agent's named security profile denies %s access", action)
@@ -615,7 +643,7 @@ func checkAppV23DomainAccess(badgerStore *store.BadgerStore, agentID, domain, ac
 
 func appV23WriteDenial(code authzdenial.Code) error {
 	if _, ok := authzdenial.Definition(code); !ok {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	return fmt.Errorf("access denied: denial_code=%s", code)
 }
@@ -630,11 +658,11 @@ func appV23OmittedTaskDomain(
 	agentID string,
 ) (string, error) {
 	if badgerStore == nil || agentID == "" {
-		return "", errors.New("app-v23 access-control state is unavailable")
+		return "", fmt.Errorf("%w: app-v23 access-control state is unavailable", errAccessControlOperational)
 	}
 	enrollment, err := badgerStore.GetAppV23Enrollment(agentID)
 	if err != nil {
-		return "", errors.New("app-v23 access-control state is invalid")
+		return "", fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	if enrollment == nil || !enrollment.Active {
 		return "", appV23WriteDenial(authzdenial.CodePrincipalPendingReview)
@@ -656,7 +684,7 @@ func checkAppV23EffectiveWriteAccess(
 ) error {
 	root, err := badgerStore.GetAppV23Root()
 	if err != nil || root == nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	policyID, err := appV23PolicyPrincipal(badgerStore, credentialID)
 	if err != nil {
@@ -664,7 +692,7 @@ func checkAppV23EffectiveWriteAccess(
 	}
 	enrollment, err := badgerStore.GetAppV23Enrollment(policyID)
 	if err != nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	if enrollment == nil || !enrollment.Active {
 		return appV23WriteDenial(authzdenial.CodePrincipalPendingReview)
@@ -674,7 +702,7 @@ func checkAppV23EffectiveWriteAccess(
 		store.ValidateAppV23Policy(
 			role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 		) != nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	if policyID != root.PrincipalID && role.Role == store.AppV23RoleAdmin &&
 		enrollment.RootGeneration != root.Generation {
@@ -700,7 +728,7 @@ func checkAppV23EffectiveWriteAccess(
 		domain,
 	)
 	if err != nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	if restored {
 		// Match the consensus app-v25 compatibility decision exactly. The
@@ -712,7 +740,7 @@ func checkAppV23EffectiveWriteAccess(
 
 	shared, err := badgerStore.IsAppV23SharedDomain(domain)
 	if err != nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	if shared && enrollment.Capabilities.Has(store.AgentCapabilityDenySharedDomainWrite) {
 		return appV23WriteDenial(authzdenial.CodeSharedWriteRestricted)
@@ -724,7 +752,7 @@ func checkAppV23EffectiveWriteAccess(
 		recoveredGroup, recoveredGroupErr :=
 			badgerStore.AuthorizeAppV25RecoveredGroupDomain(policyID, domain, store.AppV23VerbWrite)
 		if recoveredGroupErr != nil {
-			return errors.New("app-v23 access-control state is invalid")
+			return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 		}
 		if recoveredGroup {
 			return nil
@@ -732,7 +760,7 @@ func checkAppV23EffectiveWriteAccess(
 		grandfathered, grandfatherErr :=
 			badgerStore.AppV23AllowsGrandfatheredSharedDomainWrite(policyID, domain)
 		if grandfatherErr != nil {
-			return errors.New("app-v23 access-control state is invalid")
+			return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 		}
 		if grandfathered {
 			return nil
@@ -741,7 +769,7 @@ func checkAppV23EffectiveWriteAccess(
 			domain, credentialID, 2, at, true,
 		)
 		if grantErr != nil {
-			return errors.New("app-v23 access-control state is invalid")
+			return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 		}
 		if hasGrant {
 			return nil
@@ -750,10 +778,10 @@ func checkAppV23EffectiveWriteAccess(
 			credentialID, domain, store.AppV23VerbWrite, true,
 		)
 		if decisionErr != nil {
-			return errors.New("app-v23 access-control state is invalid")
+			return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 		}
 		if decision.ExplicitDeny {
-			return errors.New("app-v23 access-control state is invalid")
+			return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 		}
 		if decision.Allowed {
 			return nil
@@ -766,7 +794,7 @@ func checkAppV23EffectiveWriteAccess(
 
 	owner, _, err := badgerStore.ResolveAppV23OwningAncestor(domain)
 	if err != nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	if owner == "" {
 		if enrollment.Capabilities.Has(store.AgentCapabilityDenyDomainClaim) {
@@ -793,7 +821,7 @@ func checkAppV23EffectiveWriteAccess(
 		domain, credentialID, 2, at, false,
 	)
 	if err != nil {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	if hasGrant {
 		return nil
@@ -802,7 +830,7 @@ func checkAppV23EffectiveWriteAccess(
 		credentialID, domain, store.AppV23VerbWrite, false,
 	)
 	if err != nil || decision.ExplicitDeny {
-		return errors.New("app-v23 access-control state is invalid")
+		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
 	}
 	if decision.Allowed {
 		return nil
@@ -943,6 +971,84 @@ func (s *Server) resolveVisibleAgents(agentID string) ([]string, bool) {
 	return allowed, false
 }
 
+// resolveVisibleSubmittersOrError is the error-preserving pre-v23 submitter
+// visibility resolution used by the link-read endpoint. resolveVisibleAgents
+// deliberately has no error return and collapses GetRegisteredAgent /
+// capability-state / agent-directory failures into self-only visibility; used as a
+// pre-filter that would silently skip an other-authored record and yield a false
+// empty graph during an operational failure. This variant surfaces those failures
+// instead. It is only invoked after the handler's identity gate has already
+// verified the caller's on-chain and directory records exist, so any store error
+// here is operational, not a legitimate not-found. Post-v23 the endpoint does not
+// use a submitter pre-filter at all (per-record disclosure is the sole gate).
+func (s *Server) resolveVisibleSubmittersOrError(agentID string) ([]string, bool, error) {
+	if agentID == "" {
+		return nil, true, nil
+	}
+	if s.nodeOperatorID != "" && agentID == s.nodeOperatorID {
+		return nil, true, nil
+	}
+	var role, visibleAgents string
+	var capabilities store.AgentCapabilities
+	if s.badgerStore != nil {
+		agent, err := s.badgerStore.GetRegisteredAgent(agentID)
+		if err != nil {
+			return nil, false, fmt.Errorf("%w: registered-agent state: %w", errAccessControlOperational, err)
+		}
+		if agent != nil {
+			if s.isPostV22ForNextTx() && !agent.Capabilities.Valid() {
+				return []string{agentID}, false, nil
+			}
+			role = agent.Role
+			visibleAgents = agent.VisibleAgents
+			capabilities = agent.Capabilities
+		} else if s.isPostV22ForNextTx() {
+			if _, _, capErr := s.badgerStore.GetRegisteredAgentCapabilities(agentID); capErr != nil {
+				return nil, false, fmt.Errorf("%w: agent capability state: %w", errAccessControlOperational, capErr)
+			}
+		}
+	}
+	if visibleAgents == "" && s.agentStore != nil {
+		sqlAgent, err := s.agentStore.GetAgent(context.Background(), agentID)
+		if err != nil {
+			return nil, false, fmt.Errorf("%w: agent directory state: %w", errAccessControlOperational, err)
+		}
+		if sqlAgent != nil {
+			if role == "" {
+				role = sqlAgent.Role
+			}
+			visibleAgents = sqlAgent.VisibleAgents
+		}
+	}
+	if role == "admin" {
+		return nil, true, nil
+	}
+	if s.isPostV22ForNextTx() && capabilities.Has(store.AgentCapabilityReadAllDomains) {
+		return nil, true, nil
+	}
+	if visibleAgents == "*" {
+		return nil, true, nil
+	}
+	if s.badgerStore != nil {
+		topSecret, clearanceErr := s.agentHasTopSecretClearanceOrError(agentID)
+		if clearanceErr != nil {
+			return nil, false, fmt.Errorf("%w: top-secret visibility state: %w", errAccessControlOperational, clearanceErr)
+		}
+		if topSecret {
+			return nil, true, nil
+		}
+	}
+	allowed := []string{agentID}
+	if visibleAgents != "" {
+		var list []string
+		if err := json.Unmarshal([]byte(visibleAgents), &list); err != nil {
+			return nil, false, fmt.Errorf("%w: visible-agent policy is invalid: %w", errAccessControlOperational, err)
+		}
+		allowed = append(allowed, list...)
+	}
+	return allowed, false, nil
+}
+
 func (s *Server) appV23LegacyVisibilityRestricted(agentID string) bool {
 	if !s.isPostV23ForNextTx() || s.badgerStore == nil || agentID == "" {
 		return false
@@ -1072,23 +1178,36 @@ func (s *Server) hasMemoryReadAccess(domain, agentID string, classification uint
 // for trusted agents without forcing admins to configure visible_agents="*"
 // per member. Iterates every org membership — TS in one org is enough.
 func (s *Server) agentHasTopSecretClearance(agentID string) bool {
+	allowed, err := s.agentHasTopSecretClearanceOrError(agentID)
+	return err == nil && allowed
+}
+
+// agentHasTopSecretClearanceOrError is the error-preserving variant used when
+// a caller must distinguish an ordinary lack of top-secret visibility from an
+// unavailable org-membership policy store. Existing list/recall paths retain
+// the historical fail-closed bool helper above; the link graph must instead
+// surface an operational failure so it never reports a false complete graph.
+func (s *Server) agentHasTopSecretClearanceOrError(agentID string) (bool, error) {
 	if s.badgerStore == nil {
-		return false
+		return false, nil
 	}
 	orgIDs, err := s.badgerStore.ListAgentOrgs(agentID)
-	if err != nil || len(orgIDs) == 0 {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if len(orgIDs) == 0 {
+		return false, nil
 	}
 	for _, orgID := range orgIDs {
 		clearance, _, gerr := s.badgerStore.GetMemberClearance(orgID, agentID)
 		if gerr != nil {
-			continue
+			return false, gerr
 		}
 		if clearance >= uint8(tx.ClearanceTopSecret) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // --- Handlers ----------------------------------------------------------------
@@ -1121,6 +1240,10 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	if req.ConfidenceScore < 0 || req.ConfidenceScore > 1 {
 		writeProblem(w, http.StatusBadRequest, "Invalid confidence score",
 			"confidence_score must be between 0 and 1.")
+		return
+	}
+	if req.EvidenceID != "" && req.MemoryType == string(memory.TypeTask) {
+		writeProblem(w, http.StatusBadRequest, "Invalid evidence", "evidence is not accepted for task memories.")
 		return
 	}
 	if req.IdempotencyKey != "" && req.MemoryType != string(memory.TypeTask) {
@@ -1395,11 +1518,18 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	// Keep nonce-lease ownership on that same detached lifecycle; using
 	// r.Context() here would turn an already-authorized durable write into a 503
 	// before it reaches the historical background commit path.
+	// Evidence is attached before the transaction is signed, so this node's
+	// gate can never judge the memory without it, and released again only if
+	// nothing was signed or sent (releaseUnsentEvidence).
+	if !s.claimSubmittedEvidence(w, r, req.EvidenceID, agentID, memoryID) {
+		return
+	}
 	stage, err := s.submitConsensusTx(context.Background(), submitTx, func(encoded []byte) error {
 		var submitErr error
 		txHash, committedHeight, submitErr = s.broadcastTxCommitWithHeight(encoded)
 		return submitErr
 	})
+	s.releaseUnsentEvidence(req.EvidenceID, memoryID, stage, err)
 	if err != nil {
 		if stage != consensusTxSubmit {
 			s.writeConsensusTxError(w, stage, "submit", err)
@@ -1426,6 +1556,15 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		}
 		if denial, ok := authzdenial.Classify(err); ok {
 			writeEffectiveWriteDenial(w, denial)
+			return
+		}
+		// Above app-v23 there is no idempotency key to replay, and below it the
+		// replay may have proved nothing. What remains after every definitive
+		// verdict is either an ambiguous outcome — reported as ambiguous, with
+		// the exact transaction hash, instead of as a 500 a caller can only
+		// answer by re-signing work that may already be committed — or a
+		// genuine fault that keeps its opaque mapping.
+		if writeIndeterminateBroadcast(w, err) {
 			return
 		}
 		status, publicMsg := broadcastErrorPublic(err)
@@ -1615,12 +1754,26 @@ func (s *Server) confirmCommittedTaskRecord(
 // below. The legacy stored-column MinConfidence filter is disabled so it cannot also
 // run (it is decay-blind in both directions). No-op when no floor is requested, so
 // the fast path is unchanged. `now` must be the same instant used for serialization.
-func setDecayFloor(opts *store.QueryOptions, now time.Time) {
-	if opts.MinConfidence > 0 {
-		opts.DecayFloor = opts.MinConfidence
-		opts.DecayNow = now
-		opts.MinConfidence = 0
+func setDecayFloor(opts *store.QueryOptions, now time.Time) floorInfo {
+	if opts.MinConfidence <= 0 {
+		return floorInfo{}
 	}
+	opts.DecayFloor = opts.MinConfidence
+	opts.DecayNow = now
+	opts.MinConfidence = 0
+	// The store counts what the floor removed into this sink, so the response can
+	// disclose a filter that is otherwise invisible to the caller.
+	opts.DecayFloorDropped = new(int)
+	return floorInfo{floor: opts.DecayFloor, applied: true}
+}
+
+// resolved folds the store's count into the envelope facts. Called AFTER the
+// query returns; before that the sink still reads zero.
+func (f floorInfo) resolved(dropped *int) floorInfo {
+	if dropped != nil {
+		f.hidden = *dropped
+	}
+	return f
 }
 
 const appV23DisclosureRecallScanLimit = 100
@@ -1920,7 +2073,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	// min_confidence is a DECAYED-confidence floor (rest-api.md): hand it to the
 	// store as DecayFloor, which filters the decayed value over the full candidate
 	// set before the top-K trim, pinned to `start` so it matches what we serialize.
-	setDecayFloor(&opts, start)
+	floor := setDecayFloor(&opts, start)
 
 	// Capture the exact canonical + vector-space source BEFORE semantic lookup.
 	// If any serving, canonical, or embedding-space mutation occurs before the
@@ -2096,7 +2249,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	if s.isPostV23ForNextTx() {
 		hiddenByClassification = 0
 	}
-	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
+	setFilterInfo(w, &resp, filterApplied, hiddenByClassification, floor.resolved(opts.DecayFloorDropped))
 
 	federatedMode := federation.ModeSemantic
 	if req.Query != "" {
@@ -2180,8 +2333,21 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 // submittingAgentsApplied indicates the store-level agent-isolation filter was
 // used; hiddenByClassification is the count of records dropped by the
 // in-handler classification+multi-org gate.
-func setFilterInfo(w http.ResponseWriter, resp *QueryMemoryResponse, submittingAgentsApplied bool, hiddenByClassification int) {
-	if !submittingAgentsApplied && hiddenByClassification == 0 {
+// floorInfo carries what the decayed-confidence floor did to this recall. It is
+// zero-valued when the caller requested no floor, in which case nothing is
+// reported: a filter that did not run must not appear in the envelope.
+type floorInfo struct {
+	floor   float64
+	hidden  int
+	applied bool
+}
+
+func setFilterInfo(
+	w http.ResponseWriter, resp *QueryMemoryResponse,
+	submittingAgentsApplied bool, hiddenByClassification int, floor floorInfo,
+) {
+	floorRan := floor.applied && floor.floor > 0
+	if !submittingAgentsApplied && hiddenByClassification == 0 && !floorRan {
 		return
 	}
 	var applied []string
@@ -2191,11 +2357,22 @@ func setFilterInfo(w http.ResponseWriter, resp *QueryMemoryResponse, submittingA
 	if hiddenByClassification > 0 {
 		applied = append(applied, filterByClassification)
 	}
+	if floorRan {
+		applied = append(applied, filterByConfidence)
+	}
 	w.Header().Set(filterHeader, strings.Join(applied, ","))
 	info := &FilterInfo{By: applied}
 	if hiddenByClassification > 0 {
 		hc := hiddenByClassification
 		info.HiddenCount = &hc
+	}
+	if floorRan {
+		// Reported even when nothing was dropped: "the floor ran and removed
+		// nothing" is the fact that lets a caller trust an empty result.
+		threshold := floor.floor
+		info.ConfidenceFloor = &threshold
+		hidden := floor.hidden
+		info.HiddenByConfidenceFloor = &hidden
 	}
 	resp.Filtered = info
 }
@@ -2700,7 +2877,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	// min_confidence is a DECAYED-confidence floor (rest-api.md): hand it to the
 	// store as DecayFloor, which filters the decayed value over the full candidate
 	// set before the top-K trim, pinned to `start` so it matches what we serialize.
-	setDecayFloor(&opts, start)
+	floor := setDecayFloor(&opts, start)
 
 	var records []*memory.MemoryRecord
 	var err error
@@ -2860,7 +3037,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	if s.isPostV23ForNextTx() {
 		hiddenByClassification = 0
 	}
-	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
+	setFilterInfo(w, &resp, filterApplied, hiddenByClassification, floor.resolved(opts.DecayFloorDropped))
 
 	planSourceChainID, agreementBindings, queryChallenges, authorizationModels, authorizationAttestations := federationPlanFields(req.FederationContext)
 	s.mergeFederatedRecall(r, &resp, req.Federated, req.FederateChains, &federation.QueryRequest{
@@ -3031,7 +3208,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	// min_confidence is a DECAYED-confidence floor (rest-api.md): hand it to the
 	// store as DecayFloor. Carried on the fused opts, both hybrid sub-queries filter
 	// the decayed value before their trim, pinned to `start` for serialize-parity.
-	setDecayFloor(&opts, start)
+	floor := setDecayFloor(&opts, start)
 
 	var records []*memory.MemoryRecord
 	var err error
@@ -3188,7 +3365,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	if s.isPostV23ForNextTx() {
 		hiddenByClassification = 0
 	}
-	setFilterInfo(w, &resp, filterApplied, hiddenByClassification)
+	setFilterInfo(w, &resp, filterApplied, hiddenByClassification, floor.resolved(opts.DecayFloorDropped))
 
 	planSourceChainID, agreementBindings, queryChallenges, authorizationModels, authorizationAttestations := federationPlanFields(req.FederationContext)
 	s.mergeFederatedRecall(r, &resp, req.Federated, req.FederateChains, &federation.QueryRequest{
@@ -3432,7 +3609,11 @@ const defaultBroadcastTxCommitTimeout = 60 * time.Second
 
 func broadcastTxCommitTimeout() time.Duration {
 	if v := os.Getenv("SAGE_TX_COMMIT_TIMEOUT_MS"); v != "" {
-		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+		if ms, err := strconv.ParseInt(v, 10, 64); err == nil && ms > 0 {
+			const maxDuration = time.Duration(1<<63 - 1)
+			if ms > int64(maxDuration/time.Millisecond) {
+				return defaultBroadcastTxCommitTimeout
+			}
 			return time.Duration(ms) * time.Millisecond
 		}
 	}
@@ -3807,6 +3988,190 @@ func (s *Server) handleLinkMemories(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// maxLinkReadBatch bounds the per-id authorization work of a single link read.
+const maxLinkReadBatch = 256
+
+// handleGetLinksAmong handles POST /v1/memory/links — a batch, read-only lookup of
+// typed links among a set of memory IDs. It returns only links whose BOTH endpoints
+// the caller may read: the request IDs are first filtered to the caller-readable
+// subset, then GetLinksAmong (which requires both endpoints in the input set) can
+// only return links between two readable memories. A link therefore never discloses
+// the existence of a memory the caller cannot see.
+func (s *Server) handleGetLinksAmong(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MemoryIDs []string `json:"memory_ids"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+
+	// An active registered identity is required before any early return, so an
+	// unauthenticated caller cannot probe the endpoint even with empty input.
+	credentialID := middleware.ContextAgentID(r.Context())
+	if credentialID == "" || s.agentStore == nil || s.badgerStore == nil {
+		writeProblem(w, http.StatusForbidden, "Active agent required", "A registered active agent identity is required.")
+		return
+	}
+	agentID := credentialID
+	if s.isPostV23ForNextTx() {
+		var policyErr error
+		agentID, policyErr = appV23PolicyPrincipal(s.badgerStore, credentialID)
+		if policyErr != nil {
+			writeProblem(w, http.StatusServiceUnavailable, "Authorization unavailable", "Current Root policy state could not be resolved.")
+			return
+		}
+	}
+	agent, err := s.agentStore.GetAgent(r.Context(), agentID)
+	onChainAgent, onChainErr := s.badgerStore.GetRegisteredAgent(agentID)
+	if err != nil || agent == nil || agent.Status != "active" || agent.RemovedAt != nil ||
+		onChainErr != nil || onChainAgent == nil {
+		writeProblem(w, http.StatusForbidden, "Active agent required", "A registered active agent identity is required.")
+		return
+	}
+
+	// Input-shape checks, after identity. Empty input is a valid empty result; an
+	// oversize batch is REJECTED rather than silently truncated, so a caller never
+	// receives an order-dependent partial graph presented as complete.
+	if len(req.MemoryIDs) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"links": []any{}})
+		return
+	}
+	if len(req.MemoryIDs) > maxLinkReadBatch {
+		writeProblem(w, http.StatusBadRequest, "Too many memory IDs",
+			fmt.Sprintf("At most %d memory IDs may be queried per request; received %d.",
+				maxLinkReadBatch, len(req.MemoryIDs)))
+		return
+	}
+
+	isAdmin := onChainAgent.Role == "admin"
+
+	// Post-v23, per-record app-v23 disclosure is the SOLE visibility gate: it
+	// already enforces legacy author visibility AND surfaces operational failures.
+	// resolveVisibleAgents is deliberately NOT used there — it collapses every
+	// policy/backend failure into "see only self", which would skip a record by
+	// another author before disclosure runs and mask an operational failure as a
+	// false empty result. The submitter pre-filter is therefore pre-v23 only.
+	postV23 := s.isPostV23ForNextTx()
+	var allowedSubmitters []string
+	var seeAll bool
+	if !postV23 {
+		var visErr error
+		allowedSubmitters, seeAll, visErr = s.resolveVisibleSubmittersOrError(credentialID)
+		if visErr != nil {
+			// An operational failure resolving submitter visibility must surface,
+			// not collapse into self-only (which would drop other-authored records
+			// and produce a false empty graph).
+			writeProblem(w, http.StatusServiceUnavailable, "Authorization unavailable",
+				"Submitter visibility could not be resolved; retry later.")
+			return
+		}
+	}
+
+	// One authorization instant for the whole batch, so every per-record decision
+	// is evaluated against a single, consistent point in time.
+	at := time.Now()
+	readable := make([]string, 0, len(req.MemoryIDs))
+	for _, id := range req.MemoryIDs {
+		rec, getErr := s.store.GetMemory(r.Context(), id)
+		if getErr != nil {
+			if errors.Is(getErr, store.ErrMemoryNotFound) {
+				continue // absent id: skip — never distinguishable from a protected one
+			}
+			// An operational lookup failure is surfaced, not collapsed into a
+			// false empty answer.
+			writeProblem(w, http.StatusServiceUnavailable, "Memory lookup failed",
+				"Memory records could not be read; retry later.")
+			return
+		}
+		if rec == nil {
+			continue
+		}
+		if !postV23 && !seeAll && !containsAgentID(allowedSubmitters, rec.SubmittingAgent) {
+			continue
+		}
+		ok, authErr := s.linkReadRecordDisclosable(r.Context(), credentialID, isAdmin, rec, at)
+		if authErr != nil {
+			writeProblem(w, http.StatusServiceUnavailable, "Authorization unavailable",
+				"Memory authorization could not be verified; retry later.")
+			return
+		}
+		if ok {
+			readable = append(readable, id)
+		}
+	}
+
+	links, err := s.store.GetLinksAmong(r.Context(), readable)
+	if err != nil {
+		writeProblem(w, http.StatusInternalServerError, "Link read failed", err.Error())
+		return
+	}
+	out := make([]map[string]string, 0, len(links))
+	for _, l := range links {
+		out = append(out, map[string]string{
+			"source_id": l.SourceID,
+			"target_id": l.TargetID,
+			"link_type": l.LinkType,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"links": out})
+}
+
+// linkReadRecordDisclosable is the per-record READ gate for the link-read batch.
+// It must distinguish three outcomes so a link never leaks a memory's existence
+// and a backend failure is never reported as a clean "not visible":
+//   - allowed        → (true, nil)
+//   - a plain denial or a nondisclosable/unsafe projection → (false, nil): the id
+//     is skipped, exactly as an absent id is, so a protected record can never be
+//     distinguished from one that does not exist.
+//   - an operational failure (authorization/policy/storage backend) → (false, err):
+//     surfaced by the caller as a retryable 5xx, never collapsed into an empty answer.
+//
+// Post-v23 this mirrors collectAppV23VisibleRecords exactly (record disclosure is
+// the whole gate; unsafe/quarantined/unpublished projections are nondisclosable).
+// Pre-v23 uses the classic domain + classification gate, surfacing a recognized
+// operational access-control failure while treating an ordinary denial as a skip.
+func (s *Server) linkReadRecordDisclosable(ctx context.Context, credentialID string, isAdmin bool, rec *memory.MemoryRecord, at time.Time) (bool, error) {
+	if s.isPostV23ForNextTx() {
+		disclosure, disclosureErr := s.evaluateAppV23RecordDisclosure(credentialID, rec, at)
+		if disclosureErr != nil {
+			if isUnsafeAppV23Projection(disclosureErr) {
+				return false, nil
+			}
+			return false, appV23RecordDisclosureError(disclosureErr)
+		}
+		return disclosure.Allowed, nil
+	}
+	if accessErr := s.checkDomainAccess(ctx, credentialID, rec.DomainTag, "read"); accessErr != nil {
+		if isAccessControlOperationalError(accessErr) {
+			return false, accessErr
+		}
+		return false, nil
+	}
+	if isAdmin {
+		return true, nil
+	}
+	classification, classErr := s.badgerStore.GetMemoryClassification(rec.MemoryID)
+	if classErr != nil {
+		return false, classErr
+	}
+	allowed, accessErr := s.hasMemoryReadAccess(rec.DomainTag, credentialID, classification, at)
+	if accessErr != nil {
+		return false, accessErr
+	}
+	return allowed, nil
+}
+
+// isAccessControlOperationalError distinguishes a retryable access-control
+// backend/policy failure from an ordinary read denial. It is typed (errors.Is on
+// errAccessControlOperational, which every operational path in the access layer is
+// wrapped with) rather than matching message fragments, so a new operational
+// failure mode cannot silently fall through as a denial. A denial must skip the
+// record (without leaking existence); an operational failure must be surfaced.
+func isAccessControlOperationalError(err error) bool {
+	return errors.Is(err, errAccessControlOperational)
+}
+
 func containsAgentID(agentIDs []string, target string) bool {
 	for _, agentID := range agentIDs {
 		if agentID == target {
@@ -3815,6 +4180,13 @@ func containsAgentID(agentIDs []string, target string) bool {
 	}
 	return false
 }
+
+// openTaskVisibleLimit bounds one open-task collection pass. It is a scan
+// budget, not a total: when a caller's board is larger than this the response
+// must SAY it stopped early (scan_capped) instead of presenting a truncated
+// board as the whole board. A caller that needs the rest narrows by domain or
+// provider.
+const openTaskVisibleLimit = 500
 
 // handleGetOpenTasks handles GET /v1/memory/tasks.
 func (s *Server) handleGetOpenTasks(w http.ResponseWriter, r *http.Request) {
@@ -3859,7 +4231,7 @@ func (s *Server) handleGetOpenTasks(w http.ResponseWriter, r *http.Request) {
 	if s.isPostV23ForNextTx() {
 		if pager, ok := s.store.(store.OpenTaskPageStore); ok {
 			tasks, err = s.collectAppV23VisibleRecords(
-				r.Context(), agentID, 500,
+				r.Context(), agentID, openTaskVisibleLimit,
 				func(ctx context.Context, limit, offset int) ([]*memory.MemoryRecord, error) {
 					return pager.GetOpenTasksPage(
 						ctx, domain, provider, agentID, limit, offset,
@@ -3971,9 +4343,15 @@ func (s *Server) handleGetOpenTasks(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// `total` remains the returned count for backward compatibility. The two new
+	// fields are what let a client tell a complete board from a bounded one:
+	// without them @sage_backlog could only present whatever arrived, which is
+	// how a truncated board came to look like an authoritative one.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"tasks": results,
-		"total": len(results),
+		"tasks":       results,
+		"total":       len(results),
+		"returned":    len(results),
+		"scan_capped": len(tasks) >= openTaskVisibleLimit,
 	})
 }
 

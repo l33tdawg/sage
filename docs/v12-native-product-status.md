@@ -1,8 +1,8 @@
 # v12 native product status
 
-**Baseline status date:** 2026-08-24 · **Latest native evidence:** 2026-10-05
+**Baseline status date:** 2026-08-24 · **Latest native evidence:** 2026-10-06
 
-**Code baseline:** SAGE v11.19.0 / app-v27
+**August product baseline:** SAGE v11.19.0 / app-v27
 
 **Release lines at the August baseline:** `11.19.x` was stable; `v12-beta`
 carries experimental native macOS CEREBRUM builds and must not alter stable
@@ -13,6 +13,24 @@ publication. The October stable parity audit below tracks the later stable line.
 **Product-boundary ADR:**
 [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md) — the
 macOS product surface is SwiftUI/AppKit/Metal with no WebView renderer.
+
+## Beta integration status — 2026-10-08
+
+PRs [#418](https://github.com/l33tdawg/sage/pull/418),
+[#419](https://github.com/l33tdawg/sage/pull/419),
+[#420](https://github.com/l33tdawg/sage/pull/420) and
+[#421](https://github.com/l33tdawg/sage/pull/421) are merged into `v12-beta`.
+The beta tip `fec13e9c` carries backend convergence, transport qualification,
+session recovery and one-use native bootstrap. The dated candidate sections
+below retain the scope of each slice when reviewed; later slices address some
+of the earlier sections' open items. The Swift daemon guard still accepts
+v11.10–11.19 / v12.0 beta, and the native product baseline has not advanced.
+
+PR #417 integrates its Brain command/focus changes with this beta state.
+Its October 5 runtime evidence applies to the recorded older head; the combined
+candidate requires fresh CI. Source integration does not establish installed
+release, physical keyboard/HID, audible VoiceOver, signing or notarization
+acceptance.
 
 ## Stable parity audit — 2026-10-05
 
@@ -68,6 +86,60 @@ candidate runtime evidence. Physical keyboard/HID, audible VoiceOver, retry
 restoration through the external probe, installed-release acceptance, and
 command/focus paths outside this scenario remain open. These results do not
 advance the daemon compatibility baseline or close full product acceptance.
+
+## Backend convergence candidate — 2026-10-05
+
+The [stable backend integration](v12-stable-convergence.md) carries the complete
+published v11.23.15/app-v28 state into an isolated beta review branch. Backend,
+API, browser, SDK and reference sources match the stable parent; beta's Swift
+source and daemon guard are unchanged. The native product baseline above
+remains v11.19.0/app-v27 until separate app/daemon compatibility qualification.
+PR #418 subsequently merged this integration into `v12-beta`. This does not
+establish an installed native release or authorize starting an app-v28 daemon
+against stable data. PR #417 remains a separate native command/focus review unit.
+
+## Native transport review candidate — 2026-10-06
+
+The separate [development transport qualification](v12-native-transport-qualification.md)
+repairs an empty-version crash, the socket's unbounded trickle wait, real
+URLSession SSE framing and the Overview's federation on/off display. It tests
+the shipping Foundation clients against real sockets/HTTP and an isolated,
+governed app-v28 beta daemon, retaining explicit fixture timing and source
+identity. The Swift guard is still v11.10–11.19 / v12.0 beta; stable v11.23 is
+not newly accepted. This candidate does not complete the production native
+session bootstrap, AppSession restart recovery or installed pair/rollback
+acceptance, and it does not advance the native product baseline.
+
+## Native session recovery candidate — 2026-10-06
+
+The follow-on [session qualification](v12-native-session-qualification.md)
+adds AppSession-owned discovery monitoring, daemon identity retention, private
+client invalidation and stale authentication-result fencing. Protected native
+views are rebuilt after a connection changes. A disposable encrypted-profile
+gate exercises the real native session through login, session lock and daemon
+restart, separately from the transport-only checks above.
+
+This candidate concerns attachment to an independently managed daemon. The
+one-use native bootstrap, app-owned daemon launch/supervision, installed
+update/rollback, physical keyboard/VoiceOver and signed release acceptance
+remain open. Dashboard session lock does not relock the shared vault. The
+native product baseline remains unchanged pending review and broader evidence.
+
+## Native bootstrap candidate — 2026-10-06
+
+The [native bootstrap candidate](v12-native-bootstrap-qualification.md) adds
+SSCP/2 signed-peer verification, a fresh same-socket proof, one-use HTTP redemption
+and private native admission. Default AppSession no longer sends fabricated
+browser metadata. The beta keeps `com.sage.cerebrum.beta`; production policy
+requires its approved Developer ID team and hardened runtime.
+
+Vault login and current Root/Admin checks remain separate. This first native
+admission slice requires an encrypted ledger; native-issued vault cookies are
+bound to their transport session. Disposable qualification uses a hardened ad-hoc
+probe and a test-build-only exact-code-hash policy. Developer ID distribution,
+notarization, installed acceptance and app-owned daemon lifecycle remain open.
+No-cgo release daemons cannot issue native admission. The native product baseline
+is unchanged; earlier candidate sections above describe their own review bounds.
 
 ## Direction reset: fully native
 

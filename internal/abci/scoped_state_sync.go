@@ -328,7 +328,19 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 		applied.AppliedHeight <= 0 || state.Height <= applied.AppliedHeight {
 		return 0, nil, errors.New("state sync state is not from an active post-app-v20 height")
 	}
-	computed, hashErr := badgerStore.ComputeAppHashExcludingBookkeeping()
+	// The persisted AppHash was produced by the rule in force at this height,
+	// which on a post-app-v28 chain is the composite public-memory root rather
+	// than the app-v13 narrow hash. Select the rule instead of assuming the
+	// pre-v28 one: recomputing the wrong rule here makes every v28 provider
+	// refuse to serve and read as an RPC stall at the caller.
+	ruleInputs, ruleErr := appHashRuleInputsForOfflineState(badgerStore)
+	if ruleErr != nil {
+		return 0, nil, fmt.Errorf("select %s AppHash rule: %w", label, ruleErr)
+	}
+	computed, hashErr := computeAppHashForRule(
+		badgerStore,
+		selectAppHashRule(state.Height, ruleInputs),
+	)
 	if hashErr != nil {
 		return 0, nil, hashErr
 	}
@@ -463,6 +475,22 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 		}
 		if appV27.AppliedHeight <= appV26.AppliedHeight {
 			return 0, nil, fmt.Errorf("%s app-v27 activation does not follow app-v26", label)
+		}
+	}
+	appV28, upgradeErr := badgerStore.GetAppliedUpgrade(appV28UpgradeName)
+	if upgradeErr != nil {
+		return 0, nil, fmt.Errorf("read %s app-v28 activation: %w", label, upgradeErr)
+	}
+	if appV28 != nil {
+		if appV28.Name != appV28UpgradeName || appV28.TargetAppVersion != 28 ||
+			appV28.AppliedHeight <= 0 || state.Height < appV28.AppliedHeight {
+			return 0, nil, fmt.Errorf("%s has invalid active app-v28 record", label)
+		}
+		if appV27 == nil {
+			return 0, nil, fmt.Errorf("%s app-v28 activation is missing app-v27 predecessor", label)
+		}
+		if appV28.AppliedHeight <= appV27.AppliedHeight {
+			return 0, nil, fmt.Errorf("%s app-v28 activation does not follow app-v27", label)
 		}
 	}
 	return uint64(state.Height), computed, nil // #nosec G115 -- positive int64 checked above

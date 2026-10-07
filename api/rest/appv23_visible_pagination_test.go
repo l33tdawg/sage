@@ -460,12 +460,17 @@ func TestAppV23VisiblePaginationFillsPastRevokedPrefixAcrossRoutes(t *testing.T)
 		srv.handleGetOpenTasks(out, req)
 		require.Equal(t, http.StatusOK, out.Code, out.Body.String())
 		var response struct {
-			Tasks []struct {
+			Returned   int  `json:"returned"`
+			ScanCapped bool `json:"scan_capped"`
+			Tasks      []struct {
 				MemoryID string `json:"memory_id"`
 			} `json:"tasks"`
 		}
 		require.NoError(t, json.Unmarshal(out.Body.Bytes(), &response))
 		require.Len(t, response.Tasks, 3)
+		require.Equal(t, 3, response.Returned)
+		require.False(t, response.ScanCapped,
+			"a board inside the scan bound must be reported as complete, not capped")
 		for _, result := range response.Tasks {
 			require.Contains(t, result.MemoryID, "allowed-")
 		}

@@ -436,11 +436,15 @@ func TestAppV9_ActiveUpgradeVote_SupportedTarget(t *testing.T) {
 func TestAppV9_ActiveUpgradeVote_UnsupportedTarget(t *testing.T) {
 	app, admin, _, _ := setupAppV8Chain(t, 5)
 
-	// One rung beyond maxSupportedAppVersion: the binary has no compiled fork
-	// gate for it. The readiness gate must report supported=false so the
+	// One rung beyond the highest COMPILED fork gate (maxCompiledAppVersion),
+	// which is the case this test is about: the binary has no gate for the
+	// target at all. The readiness gate must report supported=false so the
 	// auto-voter abstains — the liveness-layer guard against the
 	// maxSupportedAppVersion halt footgun (no consensus reject, no divergence).
-	unsupported := MaxSupportedAppVersion() + 1
+	// The target deliberately sits above the compiled ceiling as well as above
+	// the auto-vote ceiling: app-v28 is compiled but dormant, so a v28 proposal
+	// is refused by its own activation precondition instead.
+	unsupported := maxCompiledAppVersion + 1
 	propose := encodeSignedUpgradePropose(t, admin, tx.CanonicalUpgradeName(unsupported), unsupported, "", 200)
 	require.Equal(t, uint32(0), finalizeBlock(t, app, 10, propose).TxResults[0].Code)
 

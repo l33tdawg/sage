@@ -44,7 +44,7 @@ func platformPendingUpdateMarker(execPath string) string {
 	return execPath + pendingUpdateSuffix
 }
 
-func installDarwinAppUpdate(ctx context.Context, dmgPath, execPath, expectedVersion string) (string, error) {
+func installDarwinAppUpdate(ctx context.Context, dmgPath, execPath, expectedVersion string, prepareCandidate func(string) (func(), error)) (string, error) {
 	destination := macOSAppBundleForExecutable(execPath)
 	if destination == "" {
 		return "", fmt.Errorf("SAGE is not running from a macOS .app bundle")
@@ -82,6 +82,17 @@ func installDarwinAppUpdate(ctx context.Context, dmgPath, execPath, expectedVers
 	if !sameReleaseVersion(stagedVersion, expectedVersion) {
 		return "", fmt.Errorf("signed app reports %s but selected release is %s", stagedVersion, expectedVersion)
 	}
+	if prepareCandidate == nil {
+		return "", errors.New("replacement compatibility preparation is unavailable")
+	}
+	release, prepareErr := prepareCandidate(filepath.Join(sourceBundle, "Contents", "MacOS", "sage-gui"))
+	if prepareErr != nil {
+		return "", prepareErr
+	}
+	if release == nil {
+		return "", errors.New("replacement compatibility preparation returned no release fence")
+	}
+	defer release()
 	// The destination becomes the rollback bundle. Verify it before relying on
 	// it as recovery state; a damaged or foreign app must be replaced manually,
 	// not silently preserved as an automatic rollback target.

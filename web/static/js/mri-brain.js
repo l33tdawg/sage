@@ -27,7 +27,9 @@ const LINK_TYPES = {
   causes:      { color: '#5ab0ff', label: 'causes',      typed: true },
   precedes:    { color: '#ffd166', label: 'precedes',    typed: true },
   refines:     { color: '#c08bff', label: 'refines',     typed: true },
+  supersedes:  { color: '#ff8a3d', label: 'supersedes',  typed: true },
   related:     { color: '#42587a', label: 'related',     typed: true },
+  duplicates:  { color: '#8a9bb8', label: 'duplicates',  typed: true },
   parent:      { color: '#243450', label: 'lineage',     typed: false },
   domain:      { color: '#1b2942', label: 'same domain', typed: false },
   focus:       { color: '#39d0ff', label: 'train of thought', typed: false },
@@ -169,6 +171,7 @@ const STYLE = `
 .mrib .hud .btn{cursor:pointer;color:#39d0ff;background:transparent;font:inherit;border:1px solid #15233b;border-radius:8px;padding:6px 11px;user-select:none}
 .mrib .hud .btn:hover{background:#0e1b30}
 .mrib .hud .b-mode[aria-pressed="true"]{background:#0e2943;border-color:#39d0ff}
+.mrib .hud .b-typed[aria-pressed="true"]{background:#0e2943;border-color:#39d0ff}
 .mrib .hud .btn:focus-visible,.mrib .lg-toggle:focus-visible{outline:2px solid #39d0ff;outline-offset:2px}
 .mrib .hud .sld{display:flex;align-items:center;gap:7px;color:#5d7395;font-size:10px;letter-spacing:1px;text-transform:uppercase}
 .mrib .hud .sld input{width:84px;accent-color:#39d0ff;cursor:pointer}
@@ -252,6 +255,7 @@ const STYLE = `
 :root[data-theme="light"] .mrib .explore .ex-back:hover,
 :root[data-theme="light"] .mrib .explore .ex-font button:hover:not(:disabled){background:#e9eef4;color:#0e7490}
 :root[data-theme="light"] .mrib .hud .b-mode[aria-pressed="true"]{background:#dff5fb;border-color:#0e7490}
+:root[data-theme="light"] .mrib .hud .b-typed[aria-pressed="true"]{background:#dff5fb;border-color:#0e7490}
 :root[data-theme="light"] .mrib .legend .cls,
 :root[data-theme="light"] .mrib .legend .row .t span,
 :root[data-theme="light"] .mrib .lobes .more,
@@ -398,6 +402,7 @@ export function mountMriBrain(container, opts = {}) {
       <div><div class="n nc">0</div><div class="l">consolidated</div></div>
       <button type="button" class="btn b-rot">⏸ pause</button>
       <button type="button" class="btn b-flow">⚡ flow: on</button>
+      <button type="button" class="btn b-typed" aria-pressed="false" aria-label="Show typed reasoning links only, hiding domain and lineage edges">◈ links: all</button>
       ${allowConnectome ? '<button type="button" class="btn b-mode" aria-label="Connectome view" aria-pressed="false">◉ connectome</button>' : ''}
       <label class="sld">skull <input class="b-op" type="range" min="0" max="60" value="8"></label>
     </div>
@@ -567,7 +572,7 @@ export function mountMriBrain(container, opts = {}) {
   function linkWidthFor(l){
     if(l.link_type==='synapse') return 0.25 + restingWeight(l)*2.4 + synapsePulse(l)*2.0 + (isPinnedConnection(l)?2.4:0);
     if(l.link_type==='engram-bridge') return 0.5;
-    return l.link_type==='focus'?0.8 : l.link_type==='contradicts'?0.6 : (LINK_TYPES[l.link_type]||{}).typed?0.35:0.18;
+    return l.link_type==='focus'?0.8 : (l.link_type==='contradicts'||l.link_type==='supersedes')?0.6 : (LINK_TYPES[l.link_type]||{}).typed?0.35:0.18;
   }
   function linkParticlesFor(l){
     if(l.link_type==='synapse') return flow ? Math.min(10, 1+Math.round(restingWeight(l)*5)+Math.round(synapsePulse(l)*2)+(isPinnedConnection(l)?2:0)) : 0;
@@ -583,6 +588,16 @@ export function mountMriBrain(container, opts = {}) {
   function linkColorFor(l){
     if(l.link_type==='synapse') return isPinnedConnection(l) ? 'rgba(238,248,255,1)' : `rgba(${SYNAPSE_RGB},${(0.40 + 0.60*plasticityOf(l)).toFixed(2)})`;
     return (LINK_TYPES[l.link_type]||LINK_TYPES.related).color;
+  }
+  // "Typed links only" filter (memory mode): when on, the domain-grouping and
+  // lineage scaffolding — domain + parent edges, which are ~99% of the edges in a
+  // mature brain — are hidden so the typed reasoning links (supersedes/contradicts/
+  // refines/supports/causes/precedes/related/duplicates) stand out instead of
+  // drowning. Transient focus highlights and connectome synapse/engram-bridge
+  // links are untouched (they belong to interaction / connectome mode).
+  function linkVisibleFor(l){
+    if(!typedOnly) return true;
+    return l.link_type!=='domain' && l.link_type!=='parent';
   }
 
   // Clicking a neuron lights its synaptic neighbourhood (the clicked cell + every
@@ -751,7 +766,7 @@ export function mountMriBrain(container, opts = {}) {
   }
 
   const reduceMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-  let Graph = null, controls = null, disposed = false, flow = !reduceMotion, scanning = !reduceMotion;
+  let Graph = null, controls = null, disposed = false, flow = !reduceMotion, scanning = !reduceMotion, typedOnly = false;
   let graphPointerDown = null;
   let selectedAgentID = null, selectedAgentNode = null;
   let selectedConnectionPeerID = null, selectedSnapshotAt = 0;
@@ -1463,6 +1478,7 @@ export function mountMriBrain(container, opts = {}) {
       .nodeVal(nodeVal).nodeColor(nodeColorRGBA).nodeRelSize(2.4).nodeResolution(10).nodeOpacity(0.9)
       .linkColor(linkColorFor)
       .linkWidth(linkWidthFor)
+      .linkVisibility(linkVisibleFor)
       .linkOpacity(0.32)
       .linkDirectionalParticles(linkParticlesFor)
       .linkDirectionalParticleWidth(1.1).linkDirectionalParticleSpeed(linkParticleSpeedFor)
@@ -1822,6 +1838,9 @@ export function mountMriBrain(container, opts = {}) {
     const title = $('.lg-title'); if (title) title.textContent = connectome ? 'Connectome' : 'Domain tags';
     const browser = $('.agent-browser'); if (browser) { browser.classList.toggle('visible',connectome); browser.setAttribute('aria-hidden',connectome?'false':'true'); }
     const memoryGuide = $('.guide-memory'); if (memoryGuide) memoryGuide.hidden = connectome;
+    // The typed-links filter isolates memory-mode reasoning edges (domain/parent
+    // don't exist in connectome mode), so hide its toggle there.
+    const typedFilterBtn = $('.b-typed'); if (typedFilterBtn) typedFilterBtn.hidden = connectome;
     const connectomeGuide = $('.guide-connectome'); if (connectomeGuide) connectomeGuide.hidden = !connectome;
     const set = mode==='connectome' ? ['neurons','synapses','hubs'] : ['memories','synapses','consolidated'];
     root.querySelectorAll('.hud .l').forEach((el,i)=>{ if(set[i]) el.textContent=set[i]; });
@@ -1865,6 +1884,15 @@ export function mountMriBrain(container, opts = {}) {
 
   $('.b-rot').onclick=function(){ scanning=!scanning; if(controls) controls.autoRotate=scanning; this.textContent=scanning?'⏸ pause':'▶ scan'; };
   $('.b-flow').onclick=function(){ flow=!flow; if(Graph) Graph.linkDirectionalParticles(linkParticlesFor); this.textContent=flow?'⚡ flow: on':'⚡ flow: off'; };
+  $('.b-typed').onclick=function(){
+    typedOnly=!typedOnly;
+    this.setAttribute('aria-pressed', typedOnly?'true':'false');
+    this.textContent = typedOnly ? '◈ links: typed' : '◈ links: all';
+    if(Graph) Graph.linkVisibility(linkVisibleFor);
+    // Surface the typed-links legend key the moment the filter isolates them, so
+    // the now-dominant reasoning edges have a colour reference on screen.
+    if(typedOnly && legendMode!=='full'){ legendMode='full'; applyLegendMode(); }
+  };
   $('.b-op').oninput=function(){ const o=this.value/100; setHullOpacity(o); hullState.record(mode, o); };
   if (allowConnectome) $('.b-mode').onclick=function(){ setMode(mode==='connectome'?'memory':'connectome'); };
   $('.ai-select').onchange=function(){

@@ -87,6 +87,29 @@ func TestNotifyAgentTargetsExactSSESessionsWithoutContentOrBackpressure(t *testi
 	require.Equal(t, 0, transport.NotifyAgent("unknown", AgentMessageNotification{MessageID: "msg-3"}))
 }
 
+func TestSSESessionCloseDrainsInflightRequestBeforeClaimantRelease(t *testing.T) {
+	registry := NewSSESessionRegistry()
+	sess := registry.register("session", "agent", "bearer")
+	require.NotNil(t, sess)
+	require.Same(t, sess, registry.beginRequest("session"))
+
+	registry.unregister("session")
+	drained := sess.beginClose()
+	select {
+	case <-drained:
+		t.Fatal("session drained before its in-flight request completed")
+	default:
+	}
+	require.Nil(t, registry.beginRequest("session"), "closing session must reject new requests")
+
+	sess.endRequest()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("session did not drain after its final request completed")
+	}
+}
+
 func TestStreamableHTTP_BasicCall(t *testing.T) {
 	transport := newTestTransport(t)
 	mux := http.NewServeMux()
@@ -141,6 +164,36 @@ func TestStreamableHTTP_BadJSON(t *testing.T) {
 	defer resp.Body.Close()
 
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+}
+
+func TestStreamableHTTPReturnsUnavailableInsteadOfEvictingInflightConversation(t *testing.T) {
+	t.Setenv("SAGE_HOME", t.TempDir())
+	transport := newTestTransport(t)
+	transport.server.streamConversationLimit = 1
+	transport.server.streamConversationTTL = time.Nanosecond
+	t.Cleanup(transport.server.closeClaimantLease)
+
+	heldCtx := withClaimantDurableScope(
+		WithConversationID(context.Background(), "stream:held"),
+		"http-stream:held",
+	)
+	releaseHeld, admitted := transport.server.beginStreamConversationUse(heldCtx)
+	require.True(t, admitted)
+
+	requestBody := `{"jsonrpc":"2.0","id":1,"method":"initialize"}`
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp/streamable", strings.NewReader(requestBody))
+	transport.HandleStreamable(rr, req)
+	require.Equal(t, http.StatusServiceUnavailable, rr.Code)
+	require.Contains(t, rr.Body.String(), "too many active streamable MCP conversations")
+	require.Contains(t, transport.server.conversations, "stream:held")
+
+	releaseHeld()
+	rr = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/v1/mcp/streamable", strings.NewReader(requestBody))
+	transport.HandleStreamable(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code)
+	require.NotContains(t, transport.server.conversations, "stream:held")
 }
 
 // TestSSE_HandshakeAndCall simulates ChatGPT's flow: open a long-lived SSE

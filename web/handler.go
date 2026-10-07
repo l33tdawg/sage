@@ -35,9 +35,11 @@ import (
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/embedding"
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/nativebootstrap"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
+	"github.com/l33tdawg/sage/internal/voter"
 )
 
 // errDeprecatedNoFTS forces handleListMemories onto the keyword pool-scan path
@@ -59,8 +61,6 @@ type PreferencesStore interface {
 	GetPreference(ctx context.Context, key string) (string, error)
 	SetPreference(ctx context.Context, key, value string) error
 	GetAllPreferences(ctx context.Context) (map[string]string, error)
-	GetCleanupCandidates(ctx context.Context, observationTTLDays int, sessionTTLDays int, staleThreshold float64) ([]*memory.MemoryRecord, error)
-	DeprecateMemories(ctx context.Context, memoryIDs []string) (int, error)
 }
 
 // Embedder generates vector embeddings for text content. The dashboard
@@ -92,12 +92,26 @@ type rerankerInfoProvider interface {
 
 // DashboardHandler serves the CEREBRUM dashboard UI and its API endpoints.
 type DashboardHandler struct {
-	store     store.MemoryStore
-	prefStore PreferencesStore
-	embedder  Embedder
-	SSE       *SSEBroadcaster
-	Version   string
-	BootID    string // unique per serve process; restart verification must observe a change
+	NativeBootstrap *nativebootstrap.Broker
+	NativeBinding   nativebootstrap.Binding
+
+	// memoryGate is the node's optional memory gate (nil = off); see write_gate.go.
+	memoryGate         atomic.Pointer[voter.Gate]
+	cleanupMu          sync.Mutex
+	cleanupWorkerReady atomic.Bool
+	// backgroundWG counts goroutines started by runBackground when NO lifecycle owner was injected
+	// (the embedded and test handlers). Such a goroutine is otherwise unowned: it can outlive the
+	// stores its caller is about to close, and one touching a closed Badger DB panics the whole
+	// process — observed in this package's suite, where a projection-audit goroutine from one test
+	// tore down another test's store (2026-09-25). A caller that owns the stores drains with
+	// WaitBackground first.
+	backgroundWG sync.WaitGroup
+	store        store.MemoryStore
+	prefStore    PreferencesStore
+	embedder     Embedder
+	SSE          *SSEBroadcaster
+	Version      string
+	BootID       string // unique per serve process; restart verification must observe a change
 	// NodeOperatorAgentID is the identity actually held by HTTP MCP's signing
 	// key. OAuth/wizard bearer metadata must use this exact ID.
 	NodeOperatorAgentID string
@@ -123,7 +137,7 @@ type DashboardHandler struct {
 	// snapshot for the exact currently committed state before an updater may
 	// replace the executable or a coordinated restart may enter a newer binary.
 	// Production wiring is mandatory; nil fails closed for version transitions.
-	PrepareVersionTransition func(context.Context, string) (func(), error)
+	PrepareVersionTransition func(context.Context, string, uint64) (func(), error)
 	// RunBackground binds operator-triggered jobs to the node lifecycle. The
 	// production node cancels and joins these before closing stores; nil keeps
 	// the lightweight test/embed behavior.
@@ -483,7 +497,23 @@ func (h *DashboardHandler) runBackground(fn func(context.Context)) {
 		h.RunBackground(fn)
 		return
 	}
-	go fn(context.Background()) //nolint:gosec // embedded/test handler has no lifecycle owner
+	h.backgroundWG.Add(1)
+	go func() {
+		defer h.backgroundWG.Done()
+		fn(context.Background()) //nolint:gosec // embedded/test handler has no lifecycle owner
+	}()
+}
+
+// WaitBackground blocks until every goroutine started by runBackground WITHOUT an injected
+// RunBackground owner has returned.
+//
+// A caller that owns the handler's stores (a test, or an embedding without a lifecycle owner) MUST
+// call this before closing them: these goroutines are otherwise unowned, and one touching a closed
+// store panics the process rather than failing the request that started it. A handler with an injected
+// RunBackground hands its work to that owner, so nothing here is outstanding and this returns
+// immediately.
+func (h *DashboardHandler) WaitBackground() {
+	h.backgroundWG.Wait()
 }
 
 func (h *DashboardHandler) startPostUnlockRepairs() {
@@ -503,7 +533,7 @@ func (h *DashboardHandler) publishUnlockedVault(v *vault.Vault, passphrase strin
 	if !ok {
 		return errors.New("serving projection does not support vault publication")
 	}
-	vs.SetVault(v)
+	vs.ActivateVault(v)
 	if h.OnVaultUnlocked != nil {
 		h.OnVaultUnlocked(passphrase)
 	}
@@ -582,17 +612,20 @@ func verifiedDashboardAgentID(ctx context.Context) string {
 // control plane. Check both the connected peer and Host: the peer blocks LAN
 // management while Host blocks DNS-rebinding and misleading forwarded hosts.
 func isLoopbackCEREBRUMRequest(r *http.Request) bool {
-	if r == nil || !isLoopbackRemote(r.RemoteAddr) || !hostIsLoopback(r.Host) {
+	if r == nil || !isLoopbackRemote(r.RemoteAddr) || !hostIsTrustedCEREBRUMHost(r.Host) {
 		return false
 	}
 	// Forwarding metadata is deny-only corroboration. A remote browser reaching
 	// SAGE through a loopback reverse-proxy socket must not become CEREBRUM just
 	// because that proxy rewrote Host to localhost. Conversely, no forwarded
 	// header can ever turn a non-loopback socket/Host into a local request.
+	// Forwarded HOST values additionally accept operator-configured extra
+	// hostnames (SAGE_ALLOWED_CEREBRUM_HOSTS) so a local proxy may pass the
+	// original Host through instead of rewriting it.
 	return forwardedIPListIsLoopback(r.Header.Values("X-Forwarded-For")) &&
 		forwardedIPListIsLoopback(r.Header.Values("X-Real-IP")) &&
-		forwardedHostListIsLoopback(r.Header.Values("X-Forwarded-Host")) &&
-		rfcForwardedIsLoopback(r.Header.Values("Forwarded"))
+		forwardedHostListIsTrusted(r.Header.Values("X-Forwarded-Host")) &&
+		rfcForwardedIsTrusted(r.Header.Values("Forwarded"))
 }
 
 // isCEREBRUMOperatorRequest distinguishes the dashboard operator from an
@@ -646,7 +679,7 @@ func (h *DashboardHandler) isCEREBRUMOperatorRequest(r *http.Request) bool {
 		return false
 	}
 	cookie, err := r.Cookie(sessionCookieName)
-	return err == nil && h.validSession(cookie.Value)
+	return err == nil && h.validSessionForRequest(cookie.Value, r)
 }
 
 func (h *DashboardHandler) isCEREBRUMReadRequest(r *http.Request) bool {
@@ -657,14 +690,15 @@ func (h *DashboardHandler) isCEREBRUMReadRequest(r *http.Request) bool {
 // isLoopbackCEREBRUMBrowserRequest recognizes the local dashboard SPA without
 // treating every process that can connect to localhost as the human operator.
 // Fetch Metadata is browser-controlled; Origin is the fallback for older
-// browsers on requests that carry one. Host and peer must both be loopback so
-// an unencrypted node opened over the LAN never acquires operator authority.
+// browsers on requests that carry one. The peer must be loopback and Host must
+// be loopback or explicitly operator-configured, so an unencrypted node opened
+// over the LAN never acquires operator authority.
 func isLoopbackCEREBRUMBrowserRequest(r *http.Request) bool {
 	if verifiedDashboardAgentID(r.Context()) != "" ||
 		strings.TrimSpace(r.Header.Get("X-Agent-ID")) != "" {
 		return false
 	}
-	if !isLoopbackRemote(r.RemoteAddr) || !hostIsLoopback(r.Host) || !isLocalRequest(r) {
+	if !isLoopbackRemote(r.RemoteAddr) || !hostIsTrustedCEREBRUMHost(r.Host) || !isLocalRequest(r) {
 		return false
 	}
 	secFetch := strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))
@@ -707,10 +741,10 @@ func forwardedIPListIsLoopback(values []string) bool {
 	return true
 }
 
-func forwardedHostListIsLoopback(values []string) bool {
+func forwardedHostListIsTrusted(values []string) bool {
 	for _, value := range values {
 		for _, entry := range strings.Split(value, ",") {
-			if !hostIsLoopback(strings.Trim(strings.TrimSpace(entry), `"`)) {
+			if !hostIsTrustedCEREBRUMHost(strings.Trim(strings.TrimSpace(entry), `"`)) {
 				return false
 			}
 		}
@@ -734,7 +768,7 @@ func forwardedAddressIsLoopback(raw string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func rfcForwardedIsLoopback(values []string) bool {
+func rfcForwardedIsTrusted(values []string) bool {
 	for _, value := range values {
 		for _, element := range strings.Split(value, ",") {
 			for _, parameter := range strings.Split(element, ";") {
@@ -748,7 +782,7 @@ func rfcForwardedIsLoopback(values []string) bool {
 						return false
 					}
 				case "host":
-					if !hostIsLoopback(strings.Trim(strings.TrimSpace(raw), `"`)) {
+					if !hostIsTrustedCEREBRUMHost(strings.Trim(strings.TrimSpace(raw), `"`)) {
 						return false
 					}
 				}
@@ -1285,6 +1319,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 	// Use a group so securityHeaders doesn't conflict with already-registered routes on the parent router.
 	r.Group(func(r chi.Router) {
 		r.Use(securityHeaders)
+		r.Use(h.nativeSessionGate)
+		r.Post("/v1/dashboard/native/redeem", h.handleNativeRedeem)
+		r.Post("/v1/dashboard/native/revoke", h.handleNativeRevoke)
 
 		// Auth endpoints — always available (login page needs to load without auth).
 		r.With(cerebrumLoopbackOnly).Post("/v1/dashboard/auth/login", h.handleLogin)
@@ -1321,6 +1358,12 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.With(h.cerebrumOperatorGate).
 				Get("/v1/dashboard/chain/scopes", h.handleChainScopes)
 			r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/export", h.handleExport)
+			// Memory-gate review queue (internal/voter.Gate): memories the judge was
+			// uncertain about wait here for the operator's decision.
+			r.With(h.cerebrumOperatorGate, h.appV23ProjectionBroadReadGate).
+				Get("/v1/dashboard/memory/review-queue", h.handleReviewQueue)
+			r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/memory/{id}/judgements", h.handleMemoryJudgements)
+			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/memory/{id}/review", h.handleReviewDecision)
 			r.With(h.cerebrumOperatorGate, h.appV23ProjectionBroadReadGate).
 				Get("/v1/dashboard/memory/timeline", h.handleTimeline)
 			r.With(h.cerebrumOperatorGate, h.appV23ProjectionBroadReadGate).
@@ -1332,6 +1375,12 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/memory/adoption-progress", h.handleAppV25LegacyAdoptionProgress)
 			r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/memory/adoption-inventory", h.handleAppV26LegacyRecoveryInventory)
 			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/memory/adoption-retry", h.handleAppV25LegacyAdoptionRetry)
+			// Operator recovery for a signer fence whose transaction is provably
+			// dead. It reads the proof from this node — the committed nonce floor
+			// and the node's own RPC — and refuses anything weaker than a proven
+			// fate; see web/signer_fence_lift.go.
+			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/signer-fence/lift", h.handleSignerFenceLift)
+			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/signer-fence/abandon", h.handleSignerFenceAbandon)
 			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/memory/adoption-assign", h.handleAppV26LegacyAdoptionAssign)
 			r.With(h.cerebrumOperatorGate).Post("/v1/dashboard/memory/adoption-deprecate", h.handleAppV25LegacyAdoptionDeprecate)
 			// Pre-v11.16.2 MCP bridges still call this dashboard-shaped read during
@@ -1450,6 +1499,7 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 
 			// Governance routes
 			h.RegisterGovernanceRoutes(r)
+			h.RegisterUpgradeRoutes(r)
 
 			// ChatGPT setup wizard — orchestrates the OpenAI tunnel-client setup
 			// from CEREBRUM so non-power-users can wire SAGE up to ChatGPT's
@@ -1620,6 +1670,9 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 // reject unsigned LAN/dashboard access.
 func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rejectUnencryptedNative(w, r, h.Encrypted.Load()) {
+			return
+		}
 		// An agent identity is usable only when this exact request verifies. Check
 		// it before the local/browser path so a caller cannot forge X-Agent-ID (or
 		// omit a bad signature) and inherit same-origin/session authorization.
@@ -1642,7 +1695,7 @@ func (h *DashboardHandler) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		cookie, err := r.Cookie(sessionCookieName)
-		if err != nil || !h.validSession(cookie.Value) {
+		if err != nil || !h.validSessionForRequest(cookie.Value, r) {
 			writeUnauthorized(w)
 			return
 		}
@@ -1682,7 +1735,10 @@ func isLocalRequest(r *http.Request) bool {
 	// not constrained here. Sec-Fetch-Site is a browser-set forbidden header that
 	// page JS cannot suppress when the browser supplies Fetch Metadata; older
 	// WebViews may omit it and are handled by the stricter operator gate above.
-	if (secFetch != "" || origin != "") && !hostIsLoopbackOrIP(r.Host) {
+	// Operator-configured extra hostnames (SAGE_ALLOWED_CEREBRUM_HOSTS) count
+	// as local here too, so a loopback reverse proxy presenting its own
+	// hostname is not mistaken for a rebinding page.
+	if (secFetch != "" || origin != "") && !hostIsAllowedBrowserHost(r.Host) {
 		return false
 	}
 	switch secFetch {
@@ -1736,6 +1792,17 @@ func originMatchesRequest(r *http.Request, origin string) bool {
 	requestScheme := "http"
 	if r.TLS != nil {
 		requestScheme = "https"
+	}
+	// A loopback TLS-terminating reverse proxy presents the request as plain
+	// HTTP while the browser origin is HTTPS. Trust X-Forwarded-Proto only when
+	// every field-line and comma-joined hop is valid and agrees; ambiguous or
+	// malformed forwarding metadata fails closed.
+	if forwardedProto := r.Header.Values("X-Forwarded-Proto"); len(forwardedProto) > 0 {
+		var ok bool
+		requestScheme, ok = forwardedProtoScheme(forwardedProto)
+		if !ok {
+			return false
+		}
 	}
 	if u.Scheme != requestScheme {
 		return false
@@ -1884,6 +1951,9 @@ func (h *DashboardHandler) agentSignatureReplayed(key string) bool {
 
 // handleLogin verifies the vault passphrase and sets a session cookie.
 func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if rejectUnencryptedNative(w, r, h.Encrypted.Load()) {
+		return
+	}
 	if !h.Encrypted.Load() {
 		writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": "no auth required"})
 		return
@@ -1951,7 +2021,12 @@ func (h *DashboardHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 // from being stranded between setup and recovery-key acknowledgement.
 func (h *DashboardHandler) issueDashboardSession(w http.ResponseWriter, r *http.Request) {
 	token := generateToken()
-	h.sessions.Store(token, time.Now().Add(sessionTTL))
+	expiry := time.Now().Add(sessionTTL)
+	if native := nativeSessionToken(r); native != "" {
+		h.sessions.Store(token, nativeDashboardSession{Expires: expiry, Binding: sha256.Sum256([]byte(native))})
+	} else {
+		h.sessions.Store(token, expiry)
+	}
 
 	// gosec G124 wants a literal `Secure: true`; we set it based on
 	// r.TLS != nil because SAGE-Personal legitimately serves over plain
@@ -1971,6 +2046,9 @@ func (h *DashboardHandler) issueDashboardSession(w http.ResponseWriter, r *http.
 
 // handleLock invalidates the current session — like Cmd+L in 1Password.
 func (h *DashboardHandler) handleLock(w http.ResponseWriter, r *http.Request) {
+	if token := nativeSessionToken(r); token != "" {
+		h.revokeNativeSession(token)
+	}
 	if !h.Encrypted.Load() {
 		writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "message": "encryption not enabled"})
 		return
@@ -1999,13 +2077,16 @@ func (h *DashboardHandler) handleLock(w http.ResponseWriter, r *http.Request) {
 
 // handleAuthCheck returns whether auth is required and if current session is valid.
 func (h *DashboardHandler) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
+	if rejectUnencryptedNative(w, r, h.Encrypted.Load()) {
+		return
+	}
 	if !h.Encrypted.Load() {
 		writeJSONResp(w, http.StatusOK, map[string]any{"auth_required": false, "authenticated": true})
 		return
 	}
 
 	cookie, err := r.Cookie(sessionCookieName)
-	authenticated := err == nil && h.validSession(cookie.Value)
+	authenticated := err == nil && h.validSessionForRequest(cookie.Value, r)
 
 	writeJSONResp(w, http.StatusOK, map[string]any{"auth_required": true, "authenticated": authenticated})
 }
@@ -2034,7 +2115,7 @@ func (h *DashboardHandler) IsRequestAuthenticated(r *http.Request) (bool, string
 		next := r.URL.RequestURI()
 		return false, "/ui/?next=" + url.QueryEscape(next)
 	}
-	if cookie, err := r.Cookie(sessionCookieName); err == nil && h.validSession(cookie.Value) {
+	if cookie, err := r.Cookie(sessionCookieName); err == nil && h.validSessionForRequest(cookie.Value, r) {
 		return true, ""
 	}
 	// Build a redirect to the SPA carrying `next=<original URL>` so the
@@ -2053,7 +2134,7 @@ func (h *DashboardHandler) HasValidSessionCookie(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	return h.validSession(cookie.Value)
+	return h.validSessionForRequest(cookie.Value, r)
 }
 
 func (h *DashboardHandler) validSession(token string) bool {
@@ -3387,9 +3468,10 @@ func (h *DashboardHandler) computeGraphJSON(ctx context.Context, statusParam, dr
 	// Build domain groups for edge generation
 	domainMemories := make(map[string][]string)
 	rootAuthors := make(map[string]bool)
-	renderedIDs := make(map[string]struct{}, len(records))
+	renderedRecords := make(map[string]*memory.MemoryRecord, len(records))
+	parents := make(map[string]*store.MemoryParent)
 	for _, record := range records {
-		renderedIDs[record.MemoryID] = struct{}{}
+		renderedRecords[record.MemoryID] = record
 	}
 	for _, rec := range records {
 		agentLabel := ""
@@ -3424,9 +3506,25 @@ func (h *DashboardHandler) computeGraphJSON(ctx context.Context, statusParam, dr
 
 		// Parent edge
 		if rec.ParentHash != "" {
-			if _, ok := renderedIDs[rec.ParentHash]; ok {
+			parent, resolved := parents[rec.ParentHash]
+			if !resolved {
+				var parentErr error
+				parent, parentErr = h.findMemoryParent(ctx, rec.ParentHash)
+				if parentErr != nil && !errors.Is(parentErr, store.ErrMemoryNotFound) {
+					return nil, parentErr
+				}
+				parents[rec.ParentHash] = parent
+			}
+			if parent == nil || parent.MemoryID == rec.MemoryID {
+				continue
+			}
+			if rendered := renderedRecords[parent.MemoryID]; rendered != nil &&
+				(parent.ContentHash == nil || bytes.Equal(parent.ContentHash, rendered.ContentHash)) {
+				if err := h.validateAppV23DashboardRecord(rendered); err != nil {
+					return nil, err
+				}
 				edges = append(edges, graphEdge{
-					Source: rec.MemoryID, Target: rec.ParentHash, Type: "parent",
+					Source: rec.MemoryID, Target: parent.MemoryID, Type: "parent",
 				})
 			}
 		}
@@ -4774,6 +4872,11 @@ func (h *DashboardHandler) handleHealth(w http.ResponseWriter, r *http.Request) 
 		health["rest_addr"] = h.RESTAddr
 	}
 	health["signer_fences"] = signerFenceHealth(h.isCEREBRUMReadRequest(r))
+	if h.isCEREBRUMReadRequest(r) {
+		health["memory_gate"] = h.memoryGateStatus()
+	} else {
+		health["memory_gate"] = map[string]any{"enabled": h.memoryGate.Load() != nil}
+	}
 
 	// Embedder status. Before v6.8.8 the dashboard hard-coded an Ollama probe
 	// to localhost:11434, which painted "Ollama offline" any time the operator
@@ -5188,111 +5291,14 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "..."
 }
 
-// handleGetCleanupSettings returns the current cleanup configuration.
 func (h *DashboardHandler) handleGetCleanupSettings(w http.ResponseWriter, r *http.Request) {
-	if h.prefStore == nil {
-		writeError(w, http.StatusNotImplemented, "preferences not available")
-		return
-	}
-
-	prefs, err := h.prefStore.GetAllPreferences(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	cfg := memory.CleanupConfigFromPrefs(prefs)
-
-	// Also include last run info
-	resp := map[string]any{
-		"config":      cfg,
-		"last_run":    prefs["cleanup_last_run"],
-		"last_result": prefs["cleanup_last_result"],
-	}
-
-	writeJSONResp(w, http.StatusOK, resp)
+	h.canonicalCleanupSettings(w, r)
 }
-
-// handleSaveCleanupSettings saves the cleanup configuration.
 func (h *DashboardHandler) handleSaveCleanupSettings(w http.ResponseWriter, r *http.Request) {
-	if h.prefStore == nil {
-		writeError(w, http.StatusNotImplemented, "preferences not available")
-		return
-	}
-
-	var cfg memory.CleanupConfig
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
-
-	// Validate bounds
-	if cfg.ObservationTTLDays < 1 {
-		cfg.ObservationTTLDays = 1
-	}
-	if cfg.SessionTTLDays < 1 {
-		cfg.SessionTTLDays = 1
-	}
-	if cfg.StaleThreshold < 0.01 {
-		cfg.StaleThreshold = 0.01
-	}
-	if cfg.StaleThreshold > 0.5 {
-		cfg.StaleThreshold = 0.5
-	}
-	if cfg.CleanupIntervalHours < 1 {
-		cfg.CleanupIntervalHours = 1
-	}
-
-	prefs := memory.CleanupConfigToPrefs(cfg)
-	for k, v := range prefs {
-		if err := h.prefStore.SetPreference(r.Context(), k, v); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
-
-	writeJSONResp(w, http.StatusOK, map[string]any{"ok": true, "config": cfg})
+	h.canonicalSaveCleanup(w, r)
 }
-
-// handleRunCleanup triggers an on-demand cleanup (supports dry_run).
 func (h *DashboardHandler) handleRunCleanup(w http.ResponseWriter, r *http.Request) {
-	if h.prefStore == nil {
-		writeError(w, http.StatusNotImplemented, "preferences not available")
-		return
-	}
-
-	var body struct {
-		DryRun bool `json:"dry_run"`
-	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		// Default to dry run for safety
-		body.DryRun = true
-	}
-	if h.appV23IsActive() && !body.DryRun {
-		writeAppV23AccessError(w, http.StatusConflict, "canonical_cleanup_required",
-			"Automatic cleanup cannot rewrite only CEREBRUM's local index. Review the dry run and forget memories through consensus.")
-		return
-	}
-
-	prefs, err := h.prefStore.GetAllPreferences(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	cfg := memory.CleanupConfigFromPrefs(prefs)
-	// For manual runs, force enabled so it actually runs
-	cfg.Enabled = true
-
-	result, err := memory.RunCleanup(r.Context(), h.prefStore, cfg, body.DryRun)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	writeJSONResp(w, http.StatusOK, result)
+	h.canonicalRunCleanup(w, r)
 }
 
 // handleGetBootInstructions returns the custom boot instructions for MCP inception.
@@ -5349,7 +5355,10 @@ func (h *DashboardHandler) handleGetRecallSettings(w http.ResponseWriter, r *htt
 		}
 	}
 
-	confidence := 70 // Default 70% — catches observations (0.80+) and inferences (0.60+), not just facts
+	// Default 70%: facts (0.95) and observations (0.80) stay reachable, and the
+	// inference tier (0.60) is deliberately below it. The handler warns when a
+	// stored value hides a tier; see recallFloorTierWarning.
+	confidence := 70
 	if v, ok := prefs["recall_min_confidence"]; ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			confidence = n
@@ -5359,7 +5368,39 @@ func (h *DashboardHandler) handleGetRecallSettings(w http.ResponseWriter, r *htt
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"top_k":          topK,
 		"min_confidence": confidence,
+		// Read-side disclosure, for a node whose stored floor was written by an
+		// older build whose input floor was 85 (see the clamp note on save): the
+		// operator should learn what the value hides the moment they look at it.
+		"warning": recallFloorTierWarning(confidence),
 	})
+}
+
+// recallFloorTierWarning names the write tiers a confidence floor hides.
+//
+// The floor is a hard filter applied before ranking, so it cannot be compensated
+// for by a better query: a tier below it is simply unreachable by recall while
+// remaining visible to a tag or list lookup. The default exists precisely to
+// avoid that — web/handler.go sets 70 with the comment "catches observations
+// (0.80+) and inferences (0.60+), not just facts" — so a value above a tier was
+// chosen against the grain of the data and should say so where it is set.
+func recallFloorTierWarning(percent int) string {
+	floor := float64(percent) / 100.0
+	var hidden []string
+	if floor > 0.95 {
+		hidden = append(hidden, "facts written at 0.95")
+	}
+	if floor > 0.80 {
+		hidden = append(hidden, "observations written at 0.80")
+	}
+	if floor > 0.60 {
+		hidden = append(hidden, "inferences written at 0.60")
+	}
+	if len(hidden) == 0 {
+		return ""
+	}
+	return "This floor hides " + strings.Join(hidden, ", ") +
+		": recall will not return them however well they match, though a tag or list lookup still will. " +
+		"The default is 70, which keeps every tier reachable."
 }
 
 // handleSaveRecallSettings saves recall tuning parameters.
@@ -5411,6 +5452,8 @@ func (h *DashboardHandler) handleSaveRecallSettings(w http.ResponseWriter, r *ht
 		"ok":             true,
 		"top_k":          body.TopK,
 		"min_confidence": body.MinConfidence,
+		// Saving a floor above a write tier is allowed, but never silent.
+		"warning": recallFloorTierWarning(body.MinConfidence),
 	})
 }
 

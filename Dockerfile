@@ -5,7 +5,7 @@
 #   docker exec -i -e SAGE_PROVIDER=claude-code -e SAGE_PROJECT=my-project \
 #     -e SAGE_IDENTITY_PATH=/root/.sage/agents/claude-code-my-project/agent.key \
 #     sage /usr/local/bin/sage-gui mcp
-FROM golang:1.25.13-alpine AS builder
+FROM golang:1.26.8-alpine AS builder
 
 WORKDIR /src
 COPY go.mod go.sum ./

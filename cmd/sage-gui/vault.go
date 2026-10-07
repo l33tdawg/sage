@@ -414,11 +414,30 @@ func runRecover() error {
 		return fmt.Errorf("passphrase must be at least 8 characters")
 	}
 
+	return recoverVault(recoveryKey, newPassphrase)
+}
+
+// recoverVault resets the vault passphrase by rewrapping the vault's data key.
+//
+// The supplied recovery key must prove it belongs to the CURRENT on-disk vault
+// before anything is written. InitFromRecoveryKey can build a key file from any
+// 32-byte data key, so a typo or an old-epoch key would otherwise replace
+// vault.key and orphan every ciphertext encrypted under the live key. The
+// dashboard recovery route has always verified first (web/handler_ledger.go);
+// this brings the CLI in line.
+func recoverVault(recoveryKey, newPassphrase string) error {
 	home := SageHome()
 	vaultKeyPath := filepath.Join(home, "vault.key")
 
 	if !vault.Exists(vaultKeyPath) {
 		return fmt.Errorf("no vault.key found at %s — encryption was never enabled", vaultKeyPath)
+	}
+
+	if err := vault.VerifyRecoveryKey(vaultKeyPath, recoveryKey); err != nil {
+		return fmt.Errorf(
+			"recovery key does not match this vault — refusing to overwrite %s: %w",
+			vaultKeyPath, err,
+		)
 	}
 
 	// Back up the current vault.key before overwriting.

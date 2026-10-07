@@ -1,87 +1,29 @@
 #!/usr/bin/env python3
-"""LongMemEval-S benchmark harness for SAGE v7.0.
+"""longmemeval retrieval benchmark using the active SAGE embedder and verified seeds.
 
-Loads the longmemeval-cleaned dataset (Wu et al., ICLR 2025), seeds each
-question's haystack sessions into a running SAGE node as committed memories,
-runs the v7.0 hybrid recall path against the probe question, and scores the
-returned memory_ids against the dataset's answer_session_ids ground truth.
-
-Outputs:
-    bench/results/longmemeval-<git_sha>.json   summary + per-question detail
-
-Required:
-    SAGE node running and reachable at SAGE_API_URL (default http://localhost:8080).
-    OPENAI_API_KEY set in the environment.
-    pip install -r bench/longmemeval/requirements.txt
-
-The harness isolates each question in its own domain (`bench-lme-<question_id>`)
-so cross-question pollution can't artificially inflate or deflate recall.
+See README.md and ../REPRODUCIBILITY.md for disposable-node prerequisites.
 """
 
 from __future__ import annotations
 
 import argparse
 import collections
-import hashlib
 import json
 import os
 import statistics
-import struct
-import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any
 
-import httpx
 
-try:
-    from nacl.signing import SigningKey
-except ImportError:
-    sys.exit("missing dep: pip install pynacl")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from sage_bench import (BenchmarkError, ExpansionSource, SageBenchmark, add_protocol_arguments,
+                        dataset_provenance, git_sha, json_digest, pinned_revision)
 
-try:
-    from openai import OpenAI
-except ImportError:
-    sys.exit("missing dep: pip install openai")
-
-BASE_URL = os.environ.get("SAGE_API_URL", "http://localhost:8080")
-OPENAI_MODEL = os.environ.get("LONGMEMEVAL_EMBED_MODEL", "text-embedding-3-small")
 SESSION_ID_PREFIX = "[longmemeval-sid:"
 SESSION_ID_SUFFIX = "]\n"
 CONTENT_MAX_BYTES = 50_000
-EMBED_INPUT_MAX_CHARS = 8000
-
-
-class SageAgent:
-    """Ephemeral agent that signs REST requests with a fresh Ed25519 key."""
-
-    def __init__(self) -> None:
-        self.signing_key = SigningKey.generate()
-        self.agent_id = self.signing_key.verify_key.encode().hex()
-
-    def _signature(self, method: str, path: str, body: bytes, ts: int) -> str:
-        canonical = f"{method} {path}\n".encode() + body
-        body_hash = hashlib.sha256(canonical).digest()
-        ts_bytes = struct.pack(">q", ts)
-        return self.signing_key.sign(body_hash + ts_bytes).signature.hex()
-
-    def headers(self, method: str, path: str, body: bytes) -> dict[str, str]:
-        ts = int(time.time())
-        return {
-            "Content-Type": "application/json",
-            "X-Agent-ID": self.agent_id,
-            "X-Signature": self._signature(method, path, body, ts),
-            "X-Timestamp": str(ts),
-        }
-
-
-def embed(client: OpenAI, text: str) -> list[float]:
-    text = (text or "")[:EMBED_INPUT_MAX_CHARS]
-    if not text.strip():
-        text = "."
-    resp = client.embeddings.create(model=OPENAI_MODEL, input=text)
-    return resp.data[0].embedding
 
 
 def session_to_text(session: list[dict[str, Any]]) -> str:
@@ -94,111 +36,17 @@ def session_to_text(session: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def submit_session(
-    sage_client: httpx.Client,
-    agent: SageAgent,
-    openai_client: OpenAI,
-    domain: str,
-    session_id: str,
-    session_text: str,
-) -> dict[str, Any] | None:
-    """Seed a single haystack session as a committed memory and return the response."""
-    # Embed the session BEFORE prefixing the session-id sentinel — we want the
-    # vector to capture the conversation content, not the bookkeeping prefix.
-    embedding = embed(openai_client, session_text)
-    body_text = f"{SESSION_ID_PREFIX}{session_id}{SESSION_ID_SUFFIX}{session_text}"[:CONTENT_MAX_BYTES]
-
-    body = {
-        "content": body_text,
-        "memory_type": "observation",
-        "domain_tag": domain,
-        "confidence_score": 0.85,
-        "embedding": embedding,
-    }
-    body_bytes = json.dumps(body).encode()
-    path = "/v1/memory/submit"
-    try:
-        r = sage_client.post(
-            path,
-            headers=agent.headers("POST", path, body_bytes),
-            content=body_bytes,
-            timeout=60.0,
-        )
-        r.raise_for_status()
-        return r.json()
-    except httpx.HTTPError as exc:
-        print(f"  ! submit failed (sid={session_id[:8]}): {exc}", file=sys.stderr)
-        return None
+def submit_session(sage: SageBenchmark, domain: str, session_id: str, session_text: str) -> dict[str, Any]:
+    # The server embeds the exact stored content, including its bookkeeping prefix.
+    content = f"{SESSION_ID_PREFIX}{session_id}{SESSION_ID_SUFFIX}{session_text}"
+    if len(content.encode()) > CONTENT_MAX_BYTES:
+        raise BenchmarkError("Seed exceeds 50000 UTF-8 bytes; do not silently truncate evidence")
+    return sage.seed(domain, content)
 
 
-def generate_expansions(openai_client: OpenAI, question_text: str, n: int) -> list[str]:
-    """Ask an LLM for `n` paraphrase/entity/temporal variants of the question.
-
-    Variants are best-effort: failures or malformed responses return [] so the
-    harness falls back to the single-query recall cleanly. We use a small
-    chat-completion call (cheap) and parse a newline-separated response.
-    """
-    if n <= 0 or not question_text.strip():
-        return []
-    prompt = (
-        "Generate {n} short paraphrase/entity/temporal variants of the question below. "
-        "Output ONLY the variants, one per line, no numbering or commentary. "
-        "Vary phrasing, surface named entities explicitly, and concretise relative "
-        "time references when context permits."
-        "\n\nQuestion: {q}"
-    ).format(n=n, q=question_text)
-    try:
-        resp = openai_client.chat.completions.create(
-            model=os.environ.get("LONGMEMEVAL_EXPANSION_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4,
-            max_tokens=200,
-        )
-        text = (resp.choices[0].message.content or "").strip()
-    except Exception as exc:
-        print(f"  ! expansion generation failed: {exc}", file=sys.stderr)
-        return []
-    lines: list[str] = []
-    for raw in text.splitlines():
-        line = raw.strip().lstrip("-*0123456789.) ").strip()
-        if line and line != question_text:
-            lines.append(line)
-    return lines[:n]
-
-
-def hybrid_recall(
-    sage_client: httpx.Client,
-    agent: SageAgent,
-    openai_client: OpenAI,
-    domain: str,
-    question_text: str,
-    top_k: int,
-    n_expansions: int = 0,
-) -> list[dict[str, Any]]:
-    q_embedding = embed(openai_client, question_text)
-    body: dict[str, Any] = {
-        "query": question_text,
-        "embedding": q_embedding,
-        "domain_tag": domain,
-        "top_k": top_k,
-        "status_filter": "committed",
-    }
-    if n_expansions > 0:
-        variants = generate_expansions(openai_client, question_text, n_expansions)
-        if variants:
-            body["expansions"] = [
-                {"query": v, "embedding": embed(openai_client, v)} for v in variants
-            ]
-    body_bytes = json.dumps(body).encode()
-    path = "/v1/memory/hybrid"
-    r = sage_client.post(
-        path,
-        headers=agent.headers("POST", path, body_bytes),
-        content=body_bytes,
-        timeout=60.0,
-    )
-    r.raise_for_status()
-    return r.json().get("results", []) or []
+def hybrid_recall(sage: SageBenchmark, expansions: ExpansionSource, domain: str,
+                  question_text: str, top_k: int) -> list[dict[str, Any]]:
+    return sage.hybrid(domain, question_text, top_k, expansions.variants(question_text))
 
 
 def extract_session_id(content: str) -> str | None:
@@ -232,16 +80,13 @@ def score(returned_sids: list[str], answer_sids: set[str]) -> dict[str, float]:
 
 
 def run_question(
-    sage_client: httpx.Client,
-    agent: SageAgent,
-    openai_client: OpenAI,
+    sage: SageBenchmark,
+    expansions: ExpansionSource,
     question: dict[str, Any],
     top_k: int,
-    n_expansions: int = 0,
 ) -> dict[str, Any]:
     qid = question["question_id"]
     qtype = question.get("question_type", "unknown")
-    domain = f"bench-lme-{qid}"
     answer_sids = set(question.get("answer_session_ids", []) or [])
 
     haystack_ids = question.get("haystack_session_ids", []) or []
@@ -254,20 +99,22 @@ def run_question(
             "error": "haystack id/session length mismatch",
         }
 
+    if not haystack_ids or len(set(haystack_ids)) != len(haystack_ids) or not answer_sids.issubset(set(haystack_ids)):
+        raise BenchmarkError("Haystack IDs must be nonempty/unique and contain all answer IDs")
+    domain = sage.new_domain("lme", qid)
     n_seeded = 0
     t_seed_start = time.time()
     for sid, session in zip(haystack_ids, haystack_sessions):
         text = session_to_text(session)
         if not text.strip():
-            continue
-        if submit_session(sage_client, agent, openai_client, domain, sid, text):
+            raise BenchmarkError("Empty haystack session cannot become a verified seed")
+        if submit_session(sage, domain, sid, text):
             n_seeded += 1
     seed_seconds = time.time() - t_seed_start
 
     t_query_start = time.time()
     results = hybrid_recall(
-        sage_client, agent, openai_client, domain, question["question"], top_k,
-        n_expansions=n_expansions,
+        sage, expansions, domain, question["question"], top_k,
     )
     query_seconds = time.time() - t_query_start
 
@@ -282,6 +129,8 @@ def run_question(
     return {
         "question_id": qid,
         "question_type": qtype,
+        "domain": domain,
+        "expansions": sage.last_expansions,
         "n_seeded": n_seeded,
         "n_haystack": len(haystack_ids),
         "n_answer": len(answer_sids),
@@ -307,7 +156,7 @@ def load_dataset_hf() -> list[dict[str, Any]]:
             "Either set LONGMEMEVAL_DATA_PATH to a local longmemeval_s.json, "
             "or run: pip install datasets"
         )
-    ds = load_dataset("xiaowu0162/longmemeval-cleaned", split="train")
+    ds = load_dataset("xiaowu0162/longmemeval-cleaned", split="train", revision=pinned_revision("LONGMEMEVAL_HF_REVISION"))
     return list(ds)
 
 
@@ -346,39 +195,6 @@ def aggregate(per_q: list[dict[str, Any]]) -> dict[str, Any]:
     return {"overall": overall, "per_type": per_type}
 
 
-def git_sha() -> str:
-    try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], stderr=subprocess.DEVNULL
-        )
-        return out.decode().strip()
-    except Exception:
-        return "unknown"
-
-
-def probe_reranker_backend(rerank_url: str) -> dict[str, Any] | None:
-    """Best-effort GET of the reranker's /info endpoint so the bench JSON
-    is self-describing about which reranker backend produced the number.
-
-    Translates the docker-internal hostname `host.docker.internal` to
-    `localhost` because the SAGE container reaches the host via the former
-    while the bench harness on the host should use the latter.
-    Returns None on any error - the bench result file is still valid;
-    the field just won't tell you which backend was used.
-    """
-    if not rerank_url:
-        return None
-    probe_url = rerank_url.replace("host.docker.internal", "localhost")
-    info_url = probe_url.rstrip("/") + "/info"
-    try:
-        r = httpx.get(info_url, timeout=3.0)
-        if r.status_code < 200 or r.status_code >= 300:
-            return {"probe_url": probe_url, "status_code": r.status_code}
-        return {"probe_url": probe_url, **r.json()}
-    except Exception as exc:
-        return {"probe_url": probe_url, "error": str(exc)}
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -397,7 +213,7 @@ def main() -> int:
         "--out",
         type=str,
         default=None,
-        help="output JSON path. Default: bench/results/longmemeval-<sha>.json",
+        help="output JSON path. Default: bench/results/longmemeval-<sha>-<run>.json",
     )
     parser.add_argument(
         "--question-type",
@@ -423,10 +239,11 @@ def main() -> int:
             "+ N extra embedding calls per question. 0 (default) = no expansion."
         ),
     )
+    add_protocol_arguments(parser)
     args = parser.parse_args()
-
-    if not os.environ.get("OPENAI_API_KEY"):
-        sys.exit("OPENAI_API_KEY not set in environment")
+    sage = SageBenchmark.from_args(args)
+    sage.preflight()
+    expansions = ExpansionSource(args.expand, args.expansion_cache, os.environ.get("LONGMEMEVAL_EXPANSION_MODEL", "gpt-4o-mini"))
 
     data_path = os.environ.get("LONGMEMEVAL_DATA_PATH")
     if data_path:
@@ -435,6 +252,8 @@ def main() -> int:
     else:
         questions = load_dataset_hf()
         print(f"loaded {len(questions)} questions from huggingface")
+
+    dataset = dataset_provenance(questions, data_path, "xiaowu0162/longmemeval-cleaned", os.environ.get("LONGMEMEVAL_HF_REVISION") if not data_path else None)
 
     if args.question_type:
         questions = [q for q in questions if q.get("question_type") == args.question_type]
@@ -456,18 +275,17 @@ def main() -> int:
         questions = questions[: args.limit]
         print(f"limited to first {len(questions)} questions")
 
-    openai_client = OpenAI()
-    sage_client = httpx.Client(base_url=BASE_URL, timeout=60.0)
-    agent = SageAgent()
+    if not questions:
+        raise BenchmarkError("Selection contains no questions")
+    selected_questions_sha256 = json_digest(questions)
 
-    print(f"benchmarking {len(questions)} questions against {BASE_URL}")
+    print(f"benchmarking {len(questions)} questions against {args.sage_url}")
     per_q: list[dict[str, Any]] = []
     t_total = time.time()
     for i, q in enumerate(questions, start=1):
         try:
             row = run_question(
-                sage_client, agent, openai_client, q, args.top_k,
-                n_expansions=args.expand,
+                sage, expansions, q, args.top_k,
             )
         except KeyboardInterrupt:
             print("\ninterrupted — partial results will be written")
@@ -479,6 +297,9 @@ def main() -> int:
                 "error": str(exc),
             }
         per_q.append(row)
+        if "error" in row:
+            print(f"  [{i:3d}/{len(questions)}] ERROR: {row['error']}")
+            break
         if "r5" in row:
             print(
                 f"  [{i:3d}/{len(questions)}] {row['question_type'][:24]:24s} "
@@ -490,29 +311,31 @@ def main() -> int:
 
     total_seconds = time.time() - t_total
     summary = aggregate(per_q)
-    # Reranker on/off is a server-side decision (SAGE_RERANK_ENABLED on the
-    # SAGE node). Recording the operator-side env values lets future diffs
-    # tell apart "v7.0 stock" runs from "v7.1 reranker enabled" runs.
-    rerank_url = os.environ.get("SAGE_RERANK_URL", "")
-    rerank_enabled = os.environ.get("SAGE_RERANK_ENABLED", "").lower() in {"1", "true", "yes", "on"}
-    rerank_backend = probe_reranker_backend(rerank_url) if rerank_enabled else None
+    final_error = None
+    try:
+        sage.observe_server()
+    except Exception as exc:
+        final_error = str(exc)
     payload = {
-        "git_sha": git_sha(),
-        "sage_url": BASE_URL,
-        "embed_model": OPENAI_MODEL,
-        "rerank_enabled_env": rerank_enabled,
-        "rerank_url_env": rerank_url,
-        "rerank_backend_info": rerank_backend,
+        **sage.metadata(),
+        "dataset": dataset,
+        "selected_questions_sha256": selected_questions_sha256,
+        "n_planned": len(questions),
+        "expansion": expansions.metadata(),
+        "server_final_check_error": final_error,
         "expand_n": args.expand,
         "top_k": args.top_k,
         "limit": args.limit,
+        "selection": {"limit": args.limit, "per_type": args.per_type, "question_type": args.question_type},
         "n_total": len(per_q),
         "duration_seconds": round(total_seconds, 1),
         "summary": summary,
         "per_question": per_q,
     }
 
-    out_path = args.out or f"bench/results/longmemeval-{git_sha()}.json"
+    payload["complete"] = not final_error and len(per_q) == len(questions) and all("r5" in row for row in per_q)
+    payload["failed_questions"] = sum("r5" not in row for row in per_q)
+    out_path = args.out or f"bench/results/longmemeval-{git_sha()[:12]}-{sage.run_id[:12]}.json"
     out_full = Path(out_path)
     out_full.parent.mkdir(parents=True, exist_ok=True)
     with out_full.open("w") as f:
@@ -529,7 +352,8 @@ def main() -> int:
         for t, m in summary.get("per_type", {}).items():
             print(f"  {t:30s} n={m['n']:3d}  R@5={m['r5']:.4f}  R@10={m['r10']:.4f}  MRR={m['mrr']:.4f}")
     print(f"total wall time: {total_seconds:.1f}s")
-    return 0
+    sage.client.close()
+    return 0 if payload["complete"] else 1
 
 
 if __name__ == "__main__":

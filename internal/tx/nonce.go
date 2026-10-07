@@ -269,6 +269,24 @@ var (
 // RPC, and internal/abci does not import web, so the FinalizeBlock work that
 // /broadcast_tx_commit waits on cannot call back into a lease. Do NOT "fix" a future re-entrancy report with a reentrant lock — a
 // reentrant lease would silently re-permit the interleaving this exists to stop.
+// nonceLeaseMaxWait bounds a lease acquisition or a fence wait when the caller's
+// context carries NO deadline of its own. This primitive documents that a fenced
+// key is "held indefinitely, bounded by the caller's ctx" (see the header comment
+// and nonce_fence.go). A caller that passes a non-cancellable context removes
+// that bound — the REST submit path does exactly this
+// (memory_handler.go: submitConsensusTx(context.Background(), ...), deliberately
+// NOT r.Context(), so an authorized durable write is not turned into a 503 on a
+// client disconnect) — and a single held fence then parks the whole write path
+// AND the auto-voter that would lift it, forever (observed 2026-09-22: 19+
+// handlers parked 122-768 min in acquireNonceLease/awaitFenceLifted). Deriving a
+// deadline restores the documented invariant without re-introducing
+// client-driven cancellation. The mutable value below lets tests shrink it.
+// DefaultNonceLeaseMaxWait is the production limit, also used by REST to keep
+// the response writer alive while a detached submit acquires its signing slot.
+const DefaultNonceLeaseMaxWait = 90 * time.Second
+
+var nonceLeaseMaxWait = DefaultNonceLeaseMaxWait
+
 func WithNonceLease(ctx context.Context, sk ed25519.PrivateKey, submit func(nonce uint64) error) error {
 	if submit == nil {
 		// A nil submit cannot be "success": nothing was allocated and nothing was
@@ -294,6 +312,18 @@ func WithNonceLease(ctx context.Context, sk ed25519.PrivateKey, submit func(nonc
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	// Restore the "bounded by its own ctx" invariant this primitive documents: a
+	// caller with no deadline (the REST submit path passes context.Background())
+	// would otherwise let a held fence or an un-released slot park this goroutine
+	// — and every later writer for the key, plus the auto-voter — indefinitely.
+	// Deriving a deadline makes the existing ctx.Done() paths in acquireNonceLease
+	// and awaitFenceLifted return a retryable ErrSignerFenced/DeadlineExceeded
+	// instead of parking. A caller that already set a deadline keeps it.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, nonceLeaseMaxWait)
+		defer cancel()
 	}
 	// Checked BEFORE the lease, so a quiesced node neither queues callers behind
 	// a slot nor burns a nonce. A transaction signed into a teardown that is
@@ -412,6 +442,12 @@ func WithNonceLease(ctx context.Context, sk ed25519.PrivateKey, submit func(nonc
 			})
 		}
 	}
+	if subErr == nil {
+		// The submit reported success, so the transaction is committed and its
+		// nonce is consumed: the durable shadow has served its purpose and must
+		// not survive to fence a key whose fate is known.
+		discardFenceIntent(key)
+	}
 	return subErr
 }
 
@@ -489,6 +525,11 @@ func RegisterSubmittedTx(sk ed25519.PrivateKey, encoded []byte, resolve TxResolv
 	registeredMu.Lock()
 	registeredSubmissions[string(pub)] = &registeredSubmission{encoded: txBytes, resolve: resolve}
 	registeredMu.Unlock()
+	// Durable shadow, written at the same boundary and for the same reason the
+	// in-memory registration exists: from here on the bytes may be in flight,
+	// and a process that dies before their fate is proven must not let the next
+	// start re-seed the allocator past them. See nonce_fence_intent.go.
+	recordFenceIntent(sk, encoded)
 }
 
 // ClearSubmittedTx retires sk's registration from INSIDE a WithNonceLease
@@ -532,6 +573,9 @@ func ClearSubmittedTx(sk ed25519.PrivateKey) {
 		return
 	}
 	takeRegisteredSubmission(string(pub))
+	// A definitive verdict on these exact bytes: nothing is in flight, so the
+	// durable shadow must not survive to fence the next start.
+	discardFenceIntent(string(pub))
 }
 
 // takeRegisteredSubmission removes and returns key's registration, or nil.

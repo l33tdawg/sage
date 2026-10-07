@@ -559,7 +559,7 @@ func readABCIQueryValue(ctx context.Context, rpc, path string) ([]byte, error) {
 		return nil, err
 	}
 	if out.Error != nil || out.Result.Response.Code != 0 {
-		return nil, fmt.Errorf("ABCI lineage query rejected: %s", out.Result.Response.Log)
+		return nil, fmt.Errorf("ABCI query %s rejected: %s", path, out.Result.Response.Log)
 	}
 	return base64.StdEncoding.DecodeString(out.Result.Response.Value)
 }

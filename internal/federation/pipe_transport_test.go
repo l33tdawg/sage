@@ -61,6 +61,13 @@ func TestHandlePipeEventSendVerifiesProofLifetimeContactAndDeduplicates(t *testi
 	m.messageNotifier = func(target string, notification AgentMessageNotification) {
 		wakes = append(wakes, wake{target: target, notification: notification})
 	}
+	var durableWakes []uint64
+	m.SetMessageWakeNotifier(func(target string, seq uint64) {
+		state, err := ss.GetMessageWakeState(ctx, target)
+		require.NoError(t, err)
+		require.Equal(t, store.MessageWakeState{Seq: seq, Pending: true}, state, "callback runs after durable commit")
+		durableWakes = append(durableWakes, seq)
+	})
 	peerOperator := newPeerOperatorID(t)
 	agreement := configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerOperator, "host", nil, 4)
 	owner := newPeerOperatorID(t)
@@ -136,6 +143,7 @@ func TestHandlePipeEventSendVerifiesProofLifetimeContactAndDeduplicates(t *testi
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&duplicate))
 	require.Equal(t, "duplicate", duplicate.Status)
 	require.Len(t, wakes, 1, "a duplicate federated admission must not wake the recipient again")
+	require.Equal(t, []uint64{1}, durableWakes)
 	require.NoError(t, ss.UpdateAgentStatus(ctx, unrelatedOwner, "inactive"))
 	rr = callPipeEvent(t, m, agreement, peerOperator, event)
 	require.Equal(t, http.StatusOK, rr.Code, "unrelated availability must not invalidate exact-target work: %s", rr.Body.String())
@@ -285,13 +293,13 @@ func TestHandlePipeEventResultAppliesOnlyToBoundOriginAndDeduplicates(t *testing
 	}
 	require.NoError(t, ss.InsertPipelineWithTransport(ctx, msg, outbox))
 
-	resultBody, _ := json.Marshal(map[string]any{"result": "done safely", "source_pipe_id": originEventID, "source_chain_id": "chain-peer"})
+	resultBody, _ := json.Marshal(map[string]any{"result": "done safely", "source_pipe_id": originEventID, "source_chain_id": "chain-peer", "claimant_session_id": "mcp-replying-session"})
 	resultProof := signedPipeProof(t, remotePriv, remoteAgent, http.MethodPut, "/v1/pipe/pipe-remote-import/result", resultBody, now.Add(time.Minute).Unix())
 	event := &PipeEvent{
 		Version: PipeEventVersion, Kind: "result", OriginEventID: originEventID, SourcePipeID: "pipe-remote-import",
 		SourceChainID: "chain-peer", DestinationChainID: "chain-local", SourceAgentID: remoteAgent,
 		TargetAgentID: localSender, Result: "done safely", CreatedAt: now.Add(time.Minute),
-		ExpiresAt: now.Add(time.Minute).Add(pipeEventResultLifetime), PolicyEpoch: msg.FederationPolicyEpoch,
+		ExpiresAt: now.Add(time.Minute).Add(PipeEventResultLifetime), PolicyEpoch: msg.FederationPolicyEpoch,
 		AgreementID: msg.FederationAgreementID, ContactID: msg.FederationContactID,
 		ContactRevision: msg.FederationContactRevision, Proof: resultProof,
 	}
@@ -317,6 +325,31 @@ func TestHandlePipeEventResultAppliesOnlyToBoundOriginAndDeduplicates(t *testing
 	wrongSource.EventID = PipelineProofEventID(wrongSource.SourceChainID, wrongSource.Kind, wrongSourceProof)
 	rr = callPipeEvent(t, m, agreement, peerOperator, &wrongSource)
 	require.Equal(t, http.StatusBadRequest, rr.Code, "a result proof must bind its exact source chain: %s", rr.Body.String())
+
+	// The lifetime is part of the signed binding, not a local retention choice.
+	// Re-deriving it as created+PipeEventResultLifetime is the ONLY form the
+	// destination admits, so a result row whose expires_at was re-stamped by a
+	// transport-retention migration (this is how a receiver-local msg-fed-… row
+	// became 'msg-%'-matched) is rejected before admission exactly as the peer's
+	// "400 invalid pipeline agent proof" reported.
+	retentionExtended := *event
+	retentionExtended.ExpiresAt = event.CreatedAt.Add(store.CanonicalMessageLifetime)
+	rr = callPipeEvent(t, m, agreement, peerOperator, &retentionExtended)
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"only the proof-derived lifetime may be admitted: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "invalid pipeline agent proof")
+
+	// The legacy 24-hour window of v11.19.x stays admissible so a peer that has
+	// not adopted the current one can still return the result of work this node
+	// sent. Checked at the admission gate itself: re-applying the same proof
+	// through the handler would be a replay conflict for reasons that have nothing
+	// to do with the window.
+	legacyWindow := *event
+	legacyWindow.ExpiresAt = event.CreatedAt.Add(24 * time.Hour)
+	require.NoError(t, prevalidatePipeEventAgentProof(&legacyWindow),
+		"a legacy reply window must still pass destination prevalidation")
+	require.Error(t, prevalidatePipeEventAgentProof(&retentionExtended),
+		"a retention-extended reply window must not pass destination prevalidation")
 
 	wrongOrigin := *event
 	wrongOrigin.OriginEventID = "pipe-event-" + hex.EncodeToString(sha256.New().Sum(nil))
@@ -538,6 +571,91 @@ func TestPipelineOutboxRetriesPeerSuspensionInsteadOfTerminalizing(t *testing.T)
 	updates, err := ss.ListPipelineDeliveryUpdates(ctx, sourceAgent, 10)
 	require.NoError(t, err)
 	require.Empty(t, updates, "temporary suspension must not emit terminal feedback")
+}
+
+func TestPipelineHTTPFailureVerdictKeepsPeerBodyLimitRetryable(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		terminal   bool
+		retryFloor time.Duration
+	}{
+		{name: "bad request stays permanent", status: http.StatusBadRequest, terminal: true},
+		{name: "forbidden stays permanent", status: http.StatusForbidden, terminal: true},
+		{name: "unprocessable stays permanent", status: http.StatusUnprocessableEntity, terminal: true},
+		{name: "body limit retries on a floor", status: http.StatusRequestEntityTooLarge,
+			terminal: false, retryFloor: time.Hour},
+		{name: "not implemented retries on a floor", status: http.StatusNotImplemented,
+			terminal: false, retryFloor: time.Hour},
+		{name: "server error retries on backoff", status: http.StatusInternalServerError},
+		{name: "gateway timeout retries on backoff", status: http.StatusGatewayTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			terminal, retryFloor := pipelineHTTPFailureVerdict(tc.status)
+			require.Equal(t, tc.terminal, terminal)
+			require.Equal(t, tc.retryFloor, retryFloor)
+		})
+	}
+}
+
+// The peer's per-route body cap moves when the peer upgrades, and a peer can emit
+// 413 from a failed body read rather than a real overflow. Terminalizing it
+// stranded msg-cc112a6a on 2026-09-15 while the same peer accepted a larger
+// message unchanged; the event has to stay queued for the retry to happen.
+func TestPipelineOutboxRetriesPeerBodyLimitInsteadOfTerminalizing(t *testing.T) {
+	ctx := context.Background()
+	m, ss, _ := newDrainTestManager(t)
+	sourceAgent := newPeerOperatorID(t)
+	targetAgent := newPeerOperatorID(t)
+	require.NoError(t, ss.CreateAgent(ctx, &store.AgentEntry{AgentID: sourceAgent, Name: "sender", Status: "active"}))
+	now := time.Now().UTC().Truncate(time.Second)
+	proof := store.PipelineAgentProof{
+		AgentID: sourceAgent, Signature: make([]byte, ed25519.SignatureSize), Timestamp: now.Unix(),
+		Nonce: []byte("12345678"), CanonicalRequest: []byte("POST /v1/pipe/send\n{}"),
+	}
+	msg := &store.PipelineMessage{
+		PipeID: "pipe-body-limit", FromAgent: sourceAgent, ToAgent: targetAgent, DestinationChainID: "chain-peer",
+		FederationPolicyEpoch: "epoch-1", FederationAgreementID: strings.Repeat("a", 64),
+		FederationContactID: strings.Repeat("b", 64), FederationContactRevision: strings.Repeat("c", 64),
+		Payload: "message the peer refused as too large", Status: "pending", CreatedAt: now,
+		ExpiresAt: now.Add(7 * 24 * time.Hour),
+	}
+	outbox := &store.PipelineTransportOutbox{
+		EventID: PipelineProofEventID("chain-local", "send", proof), PipeID: msg.PipeID,
+		RemoteChainID: msg.DestinationChainID, EventKind: "send", PolicyEpoch: msg.FederationPolicyEpoch,
+		AgreementID: msg.FederationAgreementID, ContactID: msg.FederationContactID,
+		ContactRevision: msg.FederationContactRevision, SourceAgentID: sourceAgent,
+		TargetAgentID: targetAgent, Proof: proof, CreatedAt: now, ExpiresAt: msg.ExpiresAt,
+	}
+	require.NoError(t, ss.InsertPipelineWithTransport(ctx, msg, outbox))
+	m.pipeTargetResolveFn = func(context.Context, string) (*RemotePipeTarget, error) {
+		return &RemotePipeTarget{
+			ChainID: "chain-peer", AgentID: targetAgent, PolicyEpoch: msg.FederationPolicyEpoch,
+			AgreementID: msg.FederationAgreementID, ContactID: msg.FederationContactID,
+			ContactRevision: msg.FederationContactRevision,
+		}, nil
+	}
+	m.pipeEventPushFn = func(context.Context, string, *PipeEvent) (*PipeEventResponse, error) {
+		return nil, &pipeEventHTTPError{
+			Status: http.StatusRequestEntityTooLarge,
+			Body:   `{"error":"request body too large"}`,
+		}
+	}
+
+	m.pipelineDrain(ctx, ss)
+	stored, err := ss.GetPipelineTransport(ctx, outbox.EventID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", stored.State,
+		"a peer body-limit refusal must not permanently fail the event")
+	require.Equal(t, 1, stored.Attempts)
+	require.Contains(t, stored.LastError, "413")
+	queued, err := ss.GetPipeline(ctx, msg.PipeID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", queued.Status,
+		"the message itself must stay deliverable")
+	updates, err := ss.ListPipelineDeliveryUpdates(ctx, sourceAgent, 10)
+	require.NoError(t, err)
+	require.Empty(t, updates, "a retryable refusal must not emit terminal feedback")
 }
 
 func TestOutboundPipeSendHoldsSourceAvailabilityLeaseThroughPeerAck(t *testing.T) {
@@ -806,6 +924,13 @@ func TestPipelineOutboxResultPreflightFailureNeverPushesOrBuildsResultEnvelope(t
 	require.NoError(t, err)
 	require.False(t, terminal)
 	require.Empty(t, event.Result, "result bytes entered the outbound envelope before the fresh peer preflight")
+	// The outbox row above carries msg.ExpiresAt (one hour) as its expiry, which
+	// is what a retention re-stamp looks like to a reply. The envelope must be
+	// derived from the signed proof instead: the destination admits ONLY
+	// created+PipeEventResultLifetime and calls anything else an invalid proof.
+	require.Equal(t, now, event.CreatedAt)
+	require.Equal(t, now.Add(PipeEventResultLifetime), event.ExpiresAt,
+		"the wire lifetime must come from the signed proof, never from the retained row")
 
 	preflightCalls := 0
 	preflightPipeID := ""
@@ -834,6 +959,81 @@ func TestPipelineOutboxResultPreflightFailureNeverPushesOrBuildsResultEnvelope(t
 	require.NoError(t, err)
 	require.Equal(t, "pending", stored.State)
 	require.Contains(t, stored.LastError, "fresh authenticated peer status unavailable")
+}
+
+// A destination older than the current reply window refuses an otherwise valid
+// reply with one opaque 400. The delivery loop must narrow the row to the legacy
+// window and retry instead of terminalizing a reply that is still deliverable,
+// and it must not loop: once the row carries the legacy value, a second refusal
+// is the ordinary terminal failure.
+func TestPipelineOutboxResultDowngradesReplyWindowOnceForAnOlderDestination(t *testing.T) {
+	ctx := context.Background()
+	m, ss, bs := newDrainTestManager(t)
+	ensurePipeContactAppV23(t, m, bs)
+	peerOperator := newPeerOperatorID(t)
+	configurePeerRBACConnection(t, m, ss, bs, "chain-peer", peerOperator, "host", nil, 4)
+	completerPub, completerPriv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	completer := hex.EncodeToString(completerPub)
+	remoteAgent := newPeerOperatorID(t)
+	seedPipeContactOrdinaryAgent(t, m, ss, bs, completer, "completer", "active", 0, 10)
+	require.NoError(t, bs.RegisterDomain("window", completer, "", 10))
+	_, err = m.ReplacePeerRBACPolicy(ctx, "chain-peer", []store.PeerRBACDomainPermission{{Domain: "window.work", Read: true}})
+	require.NoError(t, err)
+	exportPipeContactAgent(t, m, "chain-peer", completer)
+	grant, err := m.LocalPipeContacts(ctx, "chain-peer")
+	require.NoError(t, err)
+	require.Len(t, grant.Contacts, 1)
+	contact := grant.Contacts[0]
+	now := time.Now().UTC().Truncate(time.Second)
+	msg := &store.PipelineMessage{
+		PipeID: "pipe-result-window", FromAgent: remoteAgent, ToAgent: completer,
+		SourceChainID: "chain-peer", SourcePipeID: "remote-send-window",
+		FederationPolicyEpoch: "epoch-chain-peer", FederationAgreementID: grant.AgreementID,
+		FederationContactID:       contact.ContactID,
+		FederationContactRevision: pipeContactAuthorizationRevision(grant, &contact),
+		Payload:                   "work", Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}
+	require.NoError(t, ss.InsertPipeline(ctx, msg))
+	require.NoError(t, ss.ClaimPipeline(ctx, msg.PipeID, completer))
+	resultBody, err := json.Marshal(map[string]any{
+		"result": "done", "source_pipe_id": msg.SourcePipeID, "source_chain_id": "chain-local",
+	})
+	require.NoError(t, err)
+	proof := signedPipeProof(t, completerPriv, completer, http.MethodPut, "/v1/pipe/"+msg.PipeID+"/result", resultBody, now.Unix())
+	outbox := &store.PipelineTransportOutbox{
+		EventID: PipelineProofEventID("chain-local", "result", proof), PipeID: msg.PipeID,
+		RemoteChainID: msg.SourceChainID, EventKind: "result", PolicyEpoch: msg.FederationPolicyEpoch,
+		AgreementID: msg.FederationAgreementID, ContactID: msg.FederationContactID,
+		ContactRevision: msg.FederationContactRevision, SourceAgentID: completer,
+		TargetAgentID: remoteAgent, Proof: proof, CreatedAt: now, ExpiresAt: now.Add(PipeEventResultLifetime),
+	}
+	require.NoError(t, ss.CompleteFederatedPipelineWithTransport(ctx, msg.PipeID, completer, "done", outbox))
+
+	m.pipeResultPreflightFn = func(context.Context, *store.PipelineMessage, *store.PipelineTransportOutbox) error {
+		return nil
+	}
+	var windows []time.Duration
+	m.pipeEventPushFn = func(_ context.Context, _ string, event *PipeEvent) (*PipeEventResponse, error) {
+		windows = append(windows, event.ExpiresAt.Sub(event.CreatedAt))
+		return nil, &pipeEventHTTPError{Status: http.StatusBadRequest, Body: `{"error":"invalid pipeline agent proof"}`}
+	}
+
+	m.deliverPipelineEvent(ctx, ss, outbox)
+	require.Equal(t, []time.Duration{PipeEventResultLifetime}, windows,
+		"the first refusal of a valid reply must not terminalize it")
+	downgraded, err := ss.GetPipelineTransport(ctx, outbox.EventID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", downgraded.State)
+	require.Equal(t, now.Add(24*time.Hour).Unix(), downgraded.ExpiresAt.Unix(),
+		"the retry must carry the legacy window a destination that old can accept")
+
+	m.deliverPipelineEvent(ctx, ss, downgraded)
+	require.Equal(t, []time.Duration{PipeEventResultLifetime, 24 * time.Hour}, windows)
+	terminal, err := ss.GetPipelineTransport(ctx, outbox.EventID)
+	require.NoError(t, err)
+	require.Equal(t, "failed", terminal.State, "a second refusal has nothing left to downgrade")
+	require.Contains(t, terminal.LastError, "invalid pipeline agent proof")
 }
 
 func TestImportedPipeActionHoldsOwnerLeaseThroughSideEffect(t *testing.T) {
@@ -1007,4 +1207,49 @@ func TestImportedPipeActionHoldsAgentAvailabilityLeaseThroughSideEffect(t *testi
 	require.NoError(t, <-authorized)
 	require.NoError(t, <-suspended)
 	require.Error(t, m.AuthorizeImportedPipe(ctx, msg), "an unavailable target must fail the next authorization")
+}
+
+func TestSessionBoundReplyProofRemainsStrictAndSigned(t *testing.T) {
+	pub, key, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	agent := hex.EncodeToString(pub)
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, tc := range []struct {
+		name           string
+		session, extra bool
+		wantError      bool
+	}{
+		{"legacy", false, false, false},
+		{"session", true, false, false},
+		{"unknown-field", true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := map[string]any{"result": "done", "source_pipe_id": "origin", "source_chain_id": "replying-chain"}
+			if tc.session {
+				body["claimant_session_id"] = "mcp-owner"
+			}
+			if tc.extra {
+				body["unexpected_authority"] = "root"
+			}
+			encoded, err := json.Marshal(body)
+			require.NoError(t, err)
+			proof := signedPipeProof(t, key, agent, http.MethodPut, "/v1/pipe/imported/result", encoded, now.Unix())
+			event := &PipeEvent{Kind: "result", SourceChainID: "replying-chain", SourcePipeID: "imported", OriginEventID: "origin", Result: "done", CreatedAt: now, ExpiresAt: now.Add(PipeEventResultLifetime), Proof: proof}
+			if tc.wantError {
+				require.Error(t, prevalidatePipeEventAgentProof(event))
+				return
+			}
+			require.NoError(t, prevalidatePipeEventAgentProof(event))
+			if tc.session {
+				event.Proof.CanonicalRequest = bytes.Replace(event.Proof.CanonicalRequest, []byte("mcp-owner"), []byte("mcp-other"), 1)
+				require.Error(t, prevalidatePipeEventAgentProof(event), "the session field remains covered by the exact agent signature")
+			}
+		})
+	}
+}
+
+func TestFederatedMessageWakeNotifierIsPanicSafe(t *testing.T) {
+	m := &Manager{}
+	m.SetMessageWakeNotifier(func(string, uint64) { panic("broken bridge") })
+	require.NotPanics(t, func() { m.notifyMessageWake("recipient", 1) })
 }

@@ -543,11 +543,17 @@ type availableFederationConnection struct {
 	CopyOfferedDomains        []string                        `json:"copy_offered_domains"`
 	RemoteAgents              []federation.PipeContact        `json:"remote_agents,omitempty"`
 	RemoteAgentsTruncated     bool                            `json:"remote_agents_truncated,omitempty"`
+	NextAgentCursor           string                          `json:"next_agent_cursor,omitempty"`
+	AgentDirectoryUnavailable bool                            `json:"agent_directory_unavailable,omitempty"`
 	Sync                      *availableFederationSync        `json:"sync,omitempty"`
 }
 
 type federationPipeContactFinder interface {
 	FindRemotePipeContacts(ctx context.Context, remoteChainID, name string, limit int) (*federation.PipeContactLookupResponse, error)
+}
+
+type federationNodeContactLister interface {
+	ListRemoteNodeContacts(context.Context, string, *federation.StatusResponse, string) (*federation.PipeContactLookupResponse, error)
 }
 
 type federationPipeContactStatusFinder interface {
@@ -727,6 +733,11 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	callerMayPipe := s.callerMayUseFederatedPipe(callerID)
+	agentCursor := strings.TrimSpace(r.URL.Query().Get("agent_cursor"))
+	if agentCursor != "" && (peerChain == "" || agentName != "" || len(agentCursor) > 192 || strings.Trim(agentCursor, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_") != "") {
+		writeProblem(w, http.StatusBadRequest, "Invalid agent cursor", "Use next_agent_cursor with its exact peer_chain and no agent_name")
+		return
+	}
 	if agentName != "" && !callerMayPipe {
 		// Named federation discovery feeds sage_find_agent and therefore is a
 		// pipeline capability, not general federation topology discovery. Keep a
@@ -763,7 +774,7 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 		if revisioner, ok := s.federation.(federationReaderPolicyRevisioner); ok {
 			readerPolicyRevision = revisioner.FederatedReaderPolicyRevision()
 		}
-		cacheKey := callerID + "\x00" + agentName + "\x00" + peerChain + "\x00" + strconv.Itoa(agentLimit) + "\x00" + peerCursor + "\x00" + strconv.FormatUint(readerPolicyRevision, 10)
+		cacheKey := callerID + "\x00" + agentName + "\x00" + peerChain + "\x00" + strconv.Itoa(agentLimit) + "\x00" + peerCursor + "\x00" + agentCursor + "\x00" + strconv.FormatUint(readerPolicyRevision, 10)
 		response, cacheErr := s.federationAvailability.load(
 			r.Context(), cacheKey, func(loadCtx context.Context) federationAvailabilityResponse {
 				recorder := newFederationAvailabilityRecorder()
@@ -850,6 +861,9 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	peerLimit := maxFederationAvailablePeers
+	if agentCursor != "" && callerMayPipe {
+		peerCallCost++
+	}
 	if agentName != "" {
 		peerLimit = maxFederatedNameLookupPeers
 	}
@@ -906,6 +920,20 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 				var lookupErr error
 				var linked *federation.LinkedMessageDirectoryResult
 				var linkedErr error
+				directoryUnavailable := false
+				if agentCursor != "" && callerMayPipe {
+					copyStatus := *status
+					copyStatus.PipeContacts = nil
+					directoryUnavailable = true
+					if lister, ok := s.federation.(federationNodeContactLister); ok {
+						page, err := lister.ListRemoteNodeContacts(ctx, chain, status, agentCursor)
+						if err == nil && page != nil {
+							copyStatus.PipeContacts = page.Grant
+							directoryUnavailable = false
+						}
+					}
+					status = &copyStatus
+				}
 				// Run the optional targeted lookup in the same bounded worker as
 				// status. A slow earlier peer cannot starve later jobs, and the
 				// raw result is filtered before this worker retains anything.
@@ -931,6 +959,11 @@ func (s *Server) handleFederationAvailable(w http.ResponseWriter, r *http.Reques
 					hasContactFinder || hasStatusContactFinder, linked, linkedErr,
 					hasLinkedContactFinder || hasLinkedDirectoryLister, callerMayPipe,
 				); ok {
+					if directoryUnavailable {
+						connection.AgentDirectoryUnavailable = true
+						connection.RemoteAgentsTruncated = true
+						connection.NextAgentCursor = agentCursor
+					}
 					results[index].connection = connection
 				}
 				release()
@@ -1086,6 +1119,10 @@ func (s *Server) availableFederationConnectionForCaller(
 	if contacts != nil && !contacts.Paused &&
 		federation.ValidateRemotePipeContactGrant(remoteChainID, contacts) == nil {
 		connection.RemoteAgents = filterAvailablePipeContacts(contacts.Contacts, connection.ReadCandidateDomains)
+		if slices.Contains(status.Capabilities, federation.CapabilityNodeMessaging) {
+			connection.NextAgentCursor = contacts.NextCursor
+			connection.RemoteAgentsTruncated = contacts.NextCursor != ""
+		}
 	}
 	if includePipeContacts && hasLinkedLookup &&
 		linkedErr == nil && linked != nil &&
@@ -1127,7 +1164,8 @@ func (s *Server) availableFederationConnectionForCaller(
 			connection.RemoteAgents = admitted
 		}
 	}
-	if len(connection.RemotePermissions) == 0 && len(connection.ReadCandidateDomains) == 0 && len(connection.RemoteAgents) == 0 {
+	nodeDirectoryVisible := includePipeContacts && agentName == "" && slices.Contains(status.Capabilities, federation.CapabilityNodeMessaging)
+	if len(connection.RemotePermissions) == 0 && len(connection.ReadCandidateDomains) == 0 && len(connection.RemoteAgents) == 0 && !nodeDirectoryVisible {
 		return nil, false
 	}
 	if agentName != "" {
@@ -1376,7 +1414,7 @@ func filterAvailablePipeContacts(contacts []federation.PipeContact, allowed []st
 		// every remote domain this recipient can read. One basis keeps the
 		// per-name cache bounded without changing send authorization: sage_pipe
 		// resolves the exact recipient live and rechecks its full domain basis.
-		visible := false
+		visible := contact.AuthorizationMode == federation.NodeMessageAuthorizationMode && contact.Available && contact.Accepting && len(contact.Domains) == 0
 		for _, domain := range contact.Domains {
 			for _, scope := range allowed {
 				switch {
@@ -1404,7 +1442,7 @@ func filterAvailablePipeContacts(contacts []federation.PipeContact, allowed []st
 				break
 			}
 		}
-		if len(filtered.Domains) > 0 {
+		if visible {
 			out = append(out, filtered)
 		}
 	}

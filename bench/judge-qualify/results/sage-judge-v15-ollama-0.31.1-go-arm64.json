@@ -1,0 +1,3292 @@
+{
+  "measured_at": "2026-10-03",
+  "platform": "darwin/arm64",
+  "runtime": "Ollama v0.31.1",
+  "reader": "SAGE internal/hunch.LocalClient",
+  "checks_version": "sage-lasting/1+supported/1",
+  "download_gguf_sha256": "714ff9324133ba3b7166fe82fa362226fae5574c4f9cfbc53c054248b16f2cfd",
+  "registered_gguf_sha256": "86bc739212ea59719839a59a1b994d720f2c9ec4010c32c8d92800db7b465169",
+  "dataset_digest": "a8e5f4ad30a56dc9",
+  "runs": {
+    "debias=false": {
+      "support": {
+        "n": 126,
+        "positives": 36,
+        "negatives": 90,
+        "auroc": 0.9941,
+        "brier": 0.0313,
+        "ece": 0.0358,
+        "gate": {
+          "threshold": 0.9,
+          "n": 126,
+          "n_pass": 33,
+          "precision": 0.9696969696969697,
+          "coverage": 0.2619047619047619,
+          "accepted_positives": 32,
+          "total_positives": 36,
+          "accepted_negatives": 1,
+          "total_negatives": 90
+        },
+        "median_positive": 0.9847,
+        "median_negative": 0.0131,
+        "categories": {
+          "support_direct": {
+            "n": 24,
+            "positives": 24,
+            "mean": 0.9777,
+            "pass": 23,
+            "pass_positives": 23,
+            "pass_rate": 0.9583
+          },
+          "support_attributed": {
+            "n": 12,
+            "positives": 12,
+            "mean": 0.8347,
+            "pass": 9,
+            "pass_positives": 9,
+            "pass_rate": 0.75
+          },
+          "trap_earlier_time": {
+            "n": 18,
+            "positives": 0,
+            "mean": 0.1473,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "trap_reported": {
+            "n": 18,
+            "positives": 0,
+            "mean": 0.0539,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "trap_weaker": {
+            "n": 14,
+            "positives": 0,
+            "mean": 0.033,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "trap_different": {
+            "n": 16,
+            "positives": 0,
+            "mean": 0.0964,
+            "pass": 1,
+            "pass_positives": 0,
+            "pass_rate": 0.0625
+          },
+          "trap_contradiction": {
+            "n": 12,
+            "positives": 0,
+            "mean": 0.0869,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "trap_unrelated": {
+            "n": 12,
+            "positives": 0,
+            "mean": 0.0011,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          }
+        },
+        "reject_side": {
+          "threshold": 0.5,
+          "positives_rejected": 2,
+          "total_positives": 36,
+          "negatives_rejected": 86,
+          "total_negatives": 90
+        },
+        "flip_rate": 0.0,
+        "verdict": {
+          "qualified": true,
+          "reasons": [],
+          "usable": true,
+          "power_reasons": [],
+          "positive_recall": 0.8889,
+          "criteria": {
+            "min_gate_precision": 0.9,
+            "max_ece": 0.15,
+            "max_flip_rate": 0.02,
+            "min_positive_recall": 0.3,
+            "min_accepted_positives": 10
+          },
+          "source": "all items"
+        },
+        "items": [
+          {
+            "id": "s001",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9869769733414434,
+            "p2": 0.9869769733414434
+          },
+          {
+            "id": "s002",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9909129246210816,
+            "p2": 0.9909129246210816
+          },
+          {
+            "id": "s003",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.995807097241199,
+            "p2": 0.995807097241199
+          },
+          {
+            "id": "s004",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9940341034756035,
+            "p2": 0.9940341034756035
+          },
+          {
+            "id": "s005",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.990743026508873,
+            "p2": 0.990743026508873
+          },
+          {
+            "id": "s006",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9924540704305959,
+            "p2": 0.9924540704305959
+          },
+          {
+            "id": "s007",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9486013044391371,
+            "p2": 0.9486013044391371
+          },
+          {
+            "id": "s008",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9875626682550025,
+            "p2": 0.9875626682550025
+          },
+          {
+            "id": "s009",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9869654206677861,
+            "p2": 0.9869654206677861
+          },
+          {
+            "id": "s010",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.8900036743871588,
+            "p2": 0.8900036743871588
+          },
+          {
+            "id": "s011",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9940488797304585,
+            "p2": 0.9940488797304585
+          },
+          {
+            "id": "s012",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9725316682983787,
+            "p2": 0.9725316682983787
+          },
+          {
+            "id": "s013",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9940691334601742,
+            "p2": 0.9940691334601742
+          },
+          {
+            "id": "s014",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.96283338329811,
+            "p2": 0.96283338329811
+          },
+          {
+            "id": "s015",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9550052484291494,
+            "p2": 0.9550052484291494
+          },
+          {
+            "id": "s016",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9884611619655718,
+            "p2": 0.9884611619655718
+          },
+          {
+            "id": "s017",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9958478086274873,
+            "p2": 0.9958478086274873
+          },
+          {
+            "id": "s018",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9943603630456532,
+            "p2": 0.9943603630456532
+          },
+          {
+            "id": "s019",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9817453465449214,
+            "p2": 0.9817453465449214
+          },
+          {
+            "id": "s020",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9138007304274836,
+            "p2": 0.9138007304274836
+          },
+          {
+            "id": "s021",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9848844290444182,
+            "p2": 0.9848844290444182
+          },
+          {
+            "id": "s022",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9901927106929177,
+            "p2": 0.9901927106929177
+          },
+          {
+            "id": "s023",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9876197697203023,
+            "p2": 0.9876197697203023
+          },
+          {
+            "id": "s024",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9844549111021905,
+            "p2": 0.9844549111021905
+          },
+          {
+            "id": "s025",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.950329288839304,
+            "p2": 0.950329288839304
+          },
+          {
+            "id": "s026",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9588834081990255,
+            "p2": 0.9588834081990255
+          },
+          {
+            "id": "s027",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9898381983754864,
+            "p2": 0.9898381983754864
+          },
+          {
+            "id": "s028",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.20878699547743296,
+            "p2": 0.20878699547743296
+          },
+          {
+            "id": "s029",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.4983377666914166,
+            "p2": 0.4983377666914166
+          },
+          {
+            "id": "s030",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.5906659604844958,
+            "p2": 0.5906659604844958
+          },
+          {
+            "id": "s031",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.982598803639206,
+            "p2": 0.982598803639206
+          },
+          {
+            "id": "s032",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9356742419292232,
+            "p2": 0.9356742419292232
+          },
+          {
+            "id": "s033",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.982732854399694,
+            "p2": 0.982732854399694
+          },
+          {
+            "id": "s034",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9973191179239642,
+            "p2": 0.9973191179239642
+          },
+          {
+            "id": "s035",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9471784118001811,
+            "p2": 0.9471784118001811
+          },
+          {
+            "id": "s036",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9742284554563428,
+            "p2": 0.9742284554563428
+          },
+          {
+            "id": "s037",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.08155689407832348,
+            "p2": 0.08155689407832348
+          },
+          {
+            "id": "s038",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.06258278194836633,
+            "p2": 0.06258278194836633
+          },
+          {
+            "id": "s039",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.20847243411043723,
+            "p2": 0.20847243411043723
+          },
+          {
+            "id": "s040",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.02992152816354967,
+            "p2": 0.02992152816354967
+          },
+          {
+            "id": "s041",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.0335723595630957,
+            "p2": 0.0335723595630957
+          },
+          {
+            "id": "s042",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.013214979559999966,
+            "p2": 0.013214979559999966
+          },
+          {
+            "id": "s043",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.03861479537908726,
+            "p2": 0.03861479537908726
+          },
+          {
+            "id": "s044",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.059129351993037,
+            "p2": 0.059129351993037
+          },
+          {
+            "id": "s045",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.03672146413991767,
+            "p2": 0.03672146413991767
+          },
+          {
+            "id": "s046",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.013444701824067762,
+            "p2": 0.013444701824067762
+          },
+          {
+            "id": "s047",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.02437100019127467,
+            "p2": 0.02437100019127467
+          },
+          {
+            "id": "s048",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.16135765745829536,
+            "p2": 0.16135765745829536
+          },
+          {
+            "id": "s049",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.11727522902643275,
+            "p2": 0.11727522902643275
+          },
+          {
+            "id": "s050",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.039731624975707924,
+            "p2": 0.039731624975707924
+          },
+          {
+            "id": "s051",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.6732265009923263,
+            "p2": 0.6732265009923263
+          },
+          {
+            "id": "s052",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.036587374223454566,
+            "p2": 0.036587374223454566
+          },
+          {
+            "id": "s053",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.7554862420687694,
+            "p2": 0.7554862420687694
+          },
+          {
+            "id": "s054",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.26595046398842936,
+            "p2": 0.26595046398842936
+          },
+          {
+            "id": "s055",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.00788243509847674,
+            "p2": 0.00788243509847674
+          },
+          {
+            "id": "s056",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.004508802467692144,
+            "p2": 0.004508802467692144
+          },
+          {
+            "id": "s057",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.12884820204949693,
+            "p2": 0.12884820204949693
+          },
+          {
+            "id": "s058",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.006568703080439477,
+            "p2": 0.006568703080439477
+          },
+          {
+            "id": "s059",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.0077590969339238,
+            "p2": 0.0077590969339238
+          },
+          {
+            "id": "s060",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.015272962759896197,
+            "p2": 0.015272962759896197
+          },
+          {
+            "id": "s061",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.019119826536211047,
+            "p2": 0.019119826536211047
+          },
+          {
+            "id": "s062",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.054300807681544855,
+            "p2": 0.054300807681544855
+          },
+          {
+            "id": "s063",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.3425900051550408,
+            "p2": 0.3425900051550408
+          },
+          {
+            "id": "s064",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.054427063110960225,
+            "p2": 0.054427063110960225
+          },
+          {
+            "id": "s065",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.005065879939090671,
+            "p2": 0.005065879939090671
+          },
+          {
+            "id": "s066",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.06114371867176491,
+            "p2": 0.06114371867176491
+          },
+          {
+            "id": "s067",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.10057181474949134,
+            "p2": 0.10057181474949134
+          },
+          {
+            "id": "s068",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.03652027785512682,
+            "p2": 0.03652027785512682
+          },
+          {
+            "id": "s069",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.02752197907383518,
+            "p2": 0.02752197907383518
+          },
+          {
+            "id": "s070",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.02435388528167985,
+            "p2": 0.02435388528167985
+          },
+          {
+            "id": "s071",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.018464984200973044,
+            "p2": 0.018464984200973044
+          },
+          {
+            "id": "s072",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.05447851361640262,
+            "p2": 0.05447851361640262
+          },
+          {
+            "id": "s073",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.04099114980319894,
+            "p2": 0.04099114980319894
+          },
+          {
+            "id": "s074",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.002294212870852501,
+            "p2": 0.002294212870852501
+          },
+          {
+            "id": "s075",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.004400345504176434,
+            "p2": 0.004400345504176434
+          },
+          {
+            "id": "s076",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.004539270818446648,
+            "p2": 0.004539270818446648
+          },
+          {
+            "id": "s077",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.009234434016893191,
+            "p2": 0.009234434016893191
+          },
+          {
+            "id": "s078",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.014197859981539123,
+            "p2": 0.014197859981539123
+          },
+          {
+            "id": "s079",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.0037187505532556755,
+            "p2": 0.0037187505532556755
+          },
+          {
+            "id": "s080",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.012427780263954408,
+            "p2": 0.012427780263954408
+          },
+          {
+            "id": "s081",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.24506683864589726,
+            "p2": 0.24506683864589726
+          },
+          {
+            "id": "s082",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.047566106496749486,
+            "p2": 0.047566106496749486
+          },
+          {
+            "id": "s083",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.005922403952990739,
+            "p2": 0.005922403952990739
+          },
+          {
+            "id": "s084",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.001410712170429433,
+            "p2": 0.001410712170429433
+          },
+          {
+            "id": "s085",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.0673120706525177,
+            "p2": 0.0673120706525177
+          },
+          {
+            "id": "s086",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.0035877451022495407,
+            "p2": 0.0035877451022495407
+          },
+          {
+            "id": "s087",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.00918109188885257,
+            "p2": 0.00918109188885257
+          },
+          {
+            "id": "s088",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0015401485322173898,
+            "p2": 0.0015401485322173898
+          },
+          {
+            "id": "s089",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.012907383228740722,
+            "p2": 0.012907383228740722
+          },
+          {
+            "id": "s090",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0011390413451227068,
+            "p2": 0.0011390413451227068
+          },
+          {
+            "id": "s091",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.037577968823202974,
+            "p2": 0.037577968823202974
+          },
+          {
+            "id": "s092",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.003807370702379378,
+            "p2": 0.003807370702379378
+          },
+          {
+            "id": "s093",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0025010006736245574,
+            "p2": 0.0025010006736245574
+          },
+          {
+            "id": "s094",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.2587559798459154,
+            "p2": 0.2587559798459154
+          },
+          {
+            "id": "s095",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0026655506457618065,
+            "p2": 0.0026655506457618065
+          },
+          {
+            "id": "s096",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.004452780770808771,
+            "p2": 0.004452780770808771
+          },
+          {
+            "id": "s097",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.05002305523267101,
+            "p2": 0.05002305523267101
+          },
+          {
+            "id": "s098",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.006697744896457598,
+            "p2": 0.006697744896457598
+          },
+          {
+            "id": "s099",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.003933296584186329,
+            "p2": 0.003933296584186329
+          },
+          {
+            "id": "s100",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.14895428843677724,
+            "p2": 0.14895428843677724
+          },
+          {
+            "id": "s101",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.05731200582683602,
+            "p2": 0.05731200582683602
+          },
+          {
+            "id": "s102",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.9412008087724992,
+            "p2": 0.9412008087724992
+          },
+          {
+            "id": "s103",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0005840415755278949,
+            "p2": 0.0005840415755278949
+          },
+          {
+            "id": "s104",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0005865048496556628,
+            "p2": 0.0005865048496556628
+          },
+          {
+            "id": "s105",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0029065997130640147,
+            "p2": 0.0029065997130640147
+          },
+          {
+            "id": "s106",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0012210946764320662,
+            "p2": 0.0012210946764320662
+          },
+          {
+            "id": "s107",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0002808329407233177,
+            "p2": 0.0002808329407233177
+          },
+          {
+            "id": "s108",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.007463098241034452,
+            "p2": 0.007463098241034452
+          },
+          {
+            "id": "s109",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.07743422308872958,
+            "p2": 0.07743422308872958
+          },
+          {
+            "id": "s110",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.434278518106873,
+            "p2": 0.434278518106873
+          },
+          {
+            "id": "s111",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.010943205530345616,
+            "p2": 0.010943205530345616
+          },
+          {
+            "id": "s112",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.00034545757072733065,
+            "p2": 0.00034545757072733065
+          },
+          {
+            "id": "s113",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.5000968128430665,
+            "p2": 0.5000968128430665
+          },
+          {
+            "id": "s114",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.006699190923858677,
+            "p2": 0.006699190923858677
+          },
+          {
+            "id": "s115",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0007802039744995652,
+            "p2": 0.0007802039744995652
+          },
+          {
+            "id": "s116",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0026306323153005807,
+            "p2": 0.0026306323153005807
+          },
+          {
+            "id": "s117",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0010237904142635754,
+            "p2": 0.0010237904142635754
+          },
+          {
+            "id": "s118",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0010139031423050122,
+            "p2": 0.0010139031423050122
+          },
+          {
+            "id": "s119",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0004755735536337199,
+            "p2": 0.0004755735536337199
+          },
+          {
+            "id": "s120",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0010320514820700184,
+            "p2": 0.0010320514820700184
+          },
+          {
+            "id": "s121",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0018368728999717955,
+            "p2": 0.0018368728999717955
+          },
+          {
+            "id": "s122",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0005055511829801684,
+            "p2": 0.0005055511829801684
+          },
+          {
+            "id": "s123",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0009208568664884233,
+            "p2": 0.0009208568664884233
+          },
+          {
+            "id": "s124",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0008823995408638514,
+            "p2": 0.0008823995408638514
+          },
+          {
+            "id": "s125",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0004864537034614338,
+            "p2": 0.0004864537034614338
+          },
+          {
+            "id": "s126",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0012171630080360402,
+            "p2": 0.0012171630080360402
+          }
+        ]
+      },
+      "lasting": {
+        "n": 80,
+        "positives": 49,
+        "negatives": 31,
+        "auroc": 0.9993,
+        "brier": 0.026,
+        "ece": 0.0881,
+        "gate": {
+          "threshold": 0.9,
+          "n": 80,
+          "n_pass": 36,
+          "precision": 1.0,
+          "coverage": 0.45,
+          "accepted_positives": 36,
+          "total_positives": 49,
+          "accepted_negatives": 0,
+          "total_negatives": 31
+        },
+        "median_positive": 0.9451,
+        "median_negative": 0.0902,
+        "categories": {
+          "lasting_fact": {
+            "n": 26,
+            "positives": 26,
+            "mean": 0.8822,
+            "pass": 19,
+            "pass_positives": 19,
+            "pass_rate": 0.7308
+          },
+          "lasting_rule": {
+            "n": 20,
+            "positives": 20,
+            "mean": 0.9075,
+            "pass": 15,
+            "pass_positives": 15,
+            "pass_rate": 0.75
+          },
+          "session_remark": {
+            "n": 28,
+            "positives": 0,
+            "mean": 0.0908,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "durability_edge": {
+            "n": 6,
+            "positives": 3,
+            "mean": 0.4976,
+            "pass": 2,
+            "pass_positives": 2,
+            "pass_rate": 0.3333
+          }
+        },
+        "reject_side": {
+          "threshold": 0.5,
+          "positives_rejected": 1,
+          "total_positives": 49,
+          "negatives_rejected": 31,
+          "total_negatives": 31
+        },
+        "flip_rate": 0.0,
+        "verdict": {
+          "qualified": true,
+          "reasons": [],
+          "usable": true,
+          "power_reasons": [],
+          "positive_recall": 0.7347,
+          "criteria": {
+            "min_gate_precision": 0.9,
+            "max_ece": 0.15,
+            "max_flip_rate": 0.02,
+            "min_positive_recall": 0.3,
+            "min_accepted_positives": 10
+          },
+          "source": "all items"
+        },
+        "items": [
+          {
+            "id": "l001",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9681678423146064,
+            "p2": 0.9681678423146064
+          },
+          {
+            "id": "l002",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9927357972036057,
+            "p2": 0.9927357972036057
+          },
+          {
+            "id": "l003",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.8671045937726365,
+            "p2": 0.8671045937726365
+          },
+          {
+            "id": "l004",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.964009814928732,
+            "p2": 0.964009814928732
+          },
+          {
+            "id": "l005",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9804283821501607,
+            "p2": 0.9804283821501607
+          },
+          {
+            "id": "l006",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9450814983451278,
+            "p2": 0.9450814983451278
+          },
+          {
+            "id": "l007",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9818869983432319,
+            "p2": 0.9818869983432319
+          },
+          {
+            "id": "l008",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9066592560836666,
+            "p2": 0.9066592560836666
+          },
+          {
+            "id": "l009",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.888528332795903,
+            "p2": 0.888528332795903
+          },
+          {
+            "id": "l010",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.6995174654527666,
+            "p2": 0.6995174654527666
+          },
+          {
+            "id": "l011",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9796624179717976,
+            "p2": 0.9796624179717976
+          },
+          {
+            "id": "l012",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9770652179687143,
+            "p2": 0.9770652179687143
+          },
+          {
+            "id": "l013",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9537597767848144,
+            "p2": 0.9537597767848144
+          },
+          {
+            "id": "l014",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9302315737091452,
+            "p2": 0.9302315737091452
+          },
+          {
+            "id": "l015",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9068584272967195,
+            "p2": 0.9068584272967195
+          },
+          {
+            "id": "l016",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9880746284243985,
+            "p2": 0.9880746284243985
+          },
+          {
+            "id": "l017",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9637527732817385,
+            "p2": 0.9637527732817385
+          },
+          {
+            "id": "l018",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9036697788646296,
+            "p2": 0.9036697788646296
+          },
+          {
+            "id": "l019",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.6276468138353832,
+            "p2": 0.6276468138353832
+          },
+          {
+            "id": "l020",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.697639910450908,
+            "p2": 0.697639910450908
+          },
+          {
+            "id": "l021",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.2478003804816754,
+            "p2": 0.2478003804816754
+          },
+          {
+            "id": "l022",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9600338574614111,
+            "p2": 0.9600338574614111
+          },
+          {
+            "id": "l023",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9606119112107867,
+            "p2": 0.9606119112107867
+          },
+          {
+            "id": "l024",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.7614317772566703,
+            "p2": 0.7614317772566703
+          },
+          {
+            "id": "l025",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.966843533546455,
+            "p2": 0.966843533546455
+          },
+          {
+            "id": "l026",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9174531477592645,
+            "p2": 0.9174531477592645
+          },
+          {
+            "id": "l027",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9925603229280688,
+            "p2": 0.9925603229280688
+          },
+          {
+            "id": "l028",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9747813319938019,
+            "p2": 0.9747813319938019
+          },
+          {
+            "id": "l029",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9778914113645832,
+            "p2": 0.9778914113645832
+          },
+          {
+            "id": "l030",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9848503883581685,
+            "p2": 0.9848503883581685
+          },
+          {
+            "id": "l031",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9859049962095339,
+            "p2": 0.9859049962095339
+          },
+          {
+            "id": "l032",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9429595891075652,
+            "p2": 0.9429595891075652
+          },
+          {
+            "id": "l033",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9875250971215144,
+            "p2": 0.9875250971215144
+          },
+          {
+            "id": "l034",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.7936265812891407,
+            "p2": 0.7936265812891407
+          },
+          {
+            "id": "l035",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9660539091779983,
+            "p2": 0.9660539091779983
+          },
+          {
+            "id": "l036",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.7929967041336599,
+            "p2": 0.7929967041336599
+          },
+          {
+            "id": "l037",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9594456091534542,
+            "p2": 0.9594456091534542
+          },
+          {
+            "id": "l038",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.8209314270594471,
+            "p2": 0.8209314270594471
+          },
+          {
+            "id": "l039",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9797427546281032,
+            "p2": 0.9797427546281032
+          },
+          {
+            "id": "l040",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.906914304888987,
+            "p2": 0.906914304888987
+          },
+          {
+            "id": "l041",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.6194919763910229,
+            "p2": 0.6194919763910229
+          },
+          {
+            "id": "l042",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9320242548834401,
+            "p2": 0.9320242548834401
+          },
+          {
+            "id": "l043",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.6791695558688432,
+            "p2": 0.6791695558688432
+          },
+          {
+            "id": "l044",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9285182606282373,
+            "p2": 0.9285182606282373
+          },
+          {
+            "id": "l045",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9911407152643998,
+            "p2": 0.9911407152643998
+          },
+          {
+            "id": "l046",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9332992476203383,
+            "p2": 0.9332992476203383
+          },
+          {
+            "id": "l047",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.0051129951554031335,
+            "p2": 0.0051129951554031335
+          },
+          {
+            "id": "l048",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.07764718506964113,
+            "p2": 0.07764718506964113
+          },
+          {
+            "id": "l049",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.005947506066705564,
+            "p2": 0.005947506066705564
+          },
+          {
+            "id": "l050",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.0029284488048384807,
+            "p2": 0.0029284488048384807
+          },
+          {
+            "id": "l051",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.011020703191861497,
+            "p2": 0.011020703191861497
+          },
+          {
+            "id": "l052",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.15885185090092607,
+            "p2": 0.15885185090092607
+          },
+          {
+            "id": "l053",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.0860868425166604,
+            "p2": 0.0860868425166604
+          },
+          {
+            "id": "l054",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.12138476972197017,
+            "p2": 0.12138476972197017
+          },
+          {
+            "id": "l055",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.039346031485152186,
+            "p2": 0.039346031485152186
+          },
+          {
+            "id": "l056",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.13035480713589764,
+            "p2": 0.13035480713589764
+          },
+          {
+            "id": "l057",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.2076622084205829,
+            "p2": 0.2076622084205829
+          },
+          {
+            "id": "l058",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.022362685050107238,
+            "p2": 0.022362685050107238
+          },
+          {
+            "id": "l059",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.0731236113843609,
+            "p2": 0.0731236113843609
+          },
+          {
+            "id": "l060",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.1186231894577119,
+            "p2": 0.1186231894577119
+          },
+          {
+            "id": "l061",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.03040302763373485,
+            "p2": 0.03040302763373485
+          },
+          {
+            "id": "l062",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.010091249063250993,
+            "p2": 0.010091249063250993
+          },
+          {
+            "id": "l063",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.1087095635579106,
+            "p2": 0.1087095635579106
+          },
+          {
+            "id": "l064",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.16200136292565545,
+            "p2": 0.16200136292565545
+          },
+          {
+            "id": "l065",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.15966372499318868,
+            "p2": 0.15966372499318868
+          },
+          {
+            "id": "l066",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.14416767513995304,
+            "p2": 0.14416767513995304
+          },
+          {
+            "id": "l067",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.011652001176113019,
+            "p2": 0.011652001176113019
+          },
+          {
+            "id": "l068",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.00620449492608432,
+            "p2": 0.00620449492608432
+          },
+          {
+            "id": "l069",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.18497991595424015,
+            "p2": 0.18497991595424015
+          },
+          {
+            "id": "l070",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.17301185145094444,
+            "p2": 0.17301185145094444
+          },
+          {
+            "id": "l071",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.15469148736668784,
+            "p2": 0.15469148736668784
+          },
+          {
+            "id": "l072",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.2122779581697201,
+            "p2": 0.2122779581697201
+          },
+          {
+            "id": "l073",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.0379041918641495,
+            "p2": 0.0379041918641495
+          },
+          {
+            "id": "l074",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.08723523704626523,
+            "p2": 0.08723523704626523
+          },
+          {
+            "id": "l075",
+            "category": "durability_edge",
+            "label": true,
+            "p1": 0.5666884182311223,
+            "p2": 0.5666884182311223
+          },
+          {
+            "id": "l076",
+            "category": "durability_edge",
+            "label": false,
+            "p1": 0.0901763677402176,
+            "p2": 0.0901763677402176
+          },
+          {
+            "id": "l077",
+            "category": "durability_edge",
+            "label": false,
+            "p1": 0.11988346514398718,
+            "p2": 0.11988346514398718
+          },
+          {
+            "id": "l078",
+            "category": "durability_edge",
+            "label": true,
+            "p1": 0.9862666211968565,
+            "p2": 0.9862666211968565
+          },
+          {
+            "id": "l079",
+            "category": "durability_edge",
+            "label": true,
+            "p1": 0.9428097322215494,
+            "p2": 0.9428097322215494
+          },
+          {
+            "id": "l080",
+            "category": "durability_edge",
+            "label": false,
+            "p1": 0.27964402845721353,
+            "p2": 0.27964402845721353
+          }
+        ]
+      }
+    },
+    "debias=true": {
+      "support": {
+        "n": 126,
+        "positives": 36,
+        "negatives": 90,
+        "auroc": 0.9944,
+        "brier": 0.0311,
+        "ece": 0.04,
+        "gate": {
+          "threshold": 0.9,
+          "n": 126,
+          "n_pass": 33,
+          "precision": 0.9696969696969697,
+          "coverage": 0.2619047619047619,
+          "accepted_positives": 32,
+          "total_positives": 36,
+          "accepted_negatives": 1,
+          "total_negatives": 90
+        },
+        "median_positive": 0.9836,
+        "median_negative": 0.0126,
+        "categories": {
+          "support_direct": {
+            "n": 24,
+            "positives": 24,
+            "mean": 0.9767,
+            "pass": 23,
+            "pass_positives": 23,
+            "pass_rate": 0.9583
+          },
+          "support_attributed": {
+            "n": 12,
+            "positives": 12,
+            "mean": 0.8335,
+            "pass": 9,
+            "pass_positives": 9,
+            "pass_rate": 0.75
+          },
+          "trap_earlier_time": {
+            "n": 18,
+            "positives": 0,
+            "mean": 0.1477,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "trap_reported": {
+            "n": 18,
+            "positives": 0,
+            "mean": 0.0477,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "trap_weaker": {
+            "n": 14,
+            "positives": 0,
+            "mean": 0.0339,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "trap_different": {
+            "n": 16,
+            "positives": 0,
+            "mean": 0.0944,
+            "pass": 1,
+            "pass_positives": 0,
+            "pass_rate": 0.0625
+          },
+          "trap_contradiction": {
+            "n": 12,
+            "positives": 0,
+            "mean": 0.0853,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "trap_unrelated": {
+            "n": 12,
+            "positives": 0,
+            "mean": 0.0009,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          }
+        },
+        "reject_side": {
+          "threshold": 0.5,
+          "positives_rejected": 1,
+          "total_positives": 36,
+          "negatives_rejected": 86,
+          "total_negatives": 90
+        },
+        "flip_rate": 0.0,
+        "verdict": {
+          "qualified": true,
+          "reasons": [],
+          "usable": true,
+          "power_reasons": [],
+          "positive_recall": 0.8889,
+          "criteria": {
+            "min_gate_precision": 0.9,
+            "max_ece": 0.15,
+            "max_flip_rate": 0.02,
+            "min_positive_recall": 0.3,
+            "min_accepted_positives": 10
+          },
+          "source": "all items"
+        },
+        "items": [
+          {
+            "id": "s001",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9856194983445865,
+            "p2": 0.9856194983445865
+          },
+          {
+            "id": "s002",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.99035513848887,
+            "p2": 0.99035513848887
+          },
+          {
+            "id": "s003",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.995627879864952,
+            "p2": 0.995627879864952
+          },
+          {
+            "id": "s004",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9937047791783731,
+            "p2": 0.9937047791783731
+          },
+          {
+            "id": "s005",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9901715050530238,
+            "p2": 0.9901715050530238
+          },
+          {
+            "id": "s006",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9916824238040199,
+            "p2": 0.9916824238040199
+          },
+          {
+            "id": "s007",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9440212769363195,
+            "p2": 0.9440212769363195
+          },
+          {
+            "id": "s008",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9870826687270917,
+            "p2": 0.9870826687270917
+          },
+          {
+            "id": "s009",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9863554976662741,
+            "p2": 0.9863554976662741
+          },
+          {
+            "id": "s010",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.8852817164587603,
+            "p2": 0.8852817164587603
+          },
+          {
+            "id": "s011",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.993140946324579,
+            "p2": 0.993140946324579
+          },
+          {
+            "id": "s012",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9722945014247755,
+            "p2": 0.9722945014247755
+          },
+          {
+            "id": "s013",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9941957160654054,
+            "p2": 0.9941957160654054
+          },
+          {
+            "id": "s014",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9601884683099591,
+            "p2": 0.9601884683099591
+          },
+          {
+            "id": "s015",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9507335114730905,
+            "p2": 0.9507335114730905
+          },
+          {
+            "id": "s016",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9881455220114643,
+            "p2": 0.9881455220114643
+          },
+          {
+            "id": "s017",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9956743887865858,
+            "p2": 0.9956743887865858
+          },
+          {
+            "id": "s018",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9938005262996793,
+            "p2": 0.9938005262996793
+          },
+          {
+            "id": "s019",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9812496865478413,
+            "p2": 0.9812496865478413
+          },
+          {
+            "id": "s020",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9159237430568351,
+            "p2": 0.9159237430568351
+          },
+          {
+            "id": "s021",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9840548883656255,
+            "p2": 0.9840548883656255
+          },
+          {
+            "id": "s022",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9898733771214645,
+            "p2": 0.9898733771214645
+          },
+          {
+            "id": "s023",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9874497347925283,
+            "p2": 0.9874497347925283
+          },
+          {
+            "id": "s024",
+            "category": "support_direct",
+            "label": true,
+            "p1": 0.9831176648884701,
+            "p2": 0.9831176648884701
+          },
+          {
+            "id": "s025",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9503447253155733,
+            "p2": 0.9503447253155733
+          },
+          {
+            "id": "s026",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9561967770094659,
+            "p2": 0.9561967770094659
+          },
+          {
+            "id": "s027",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9906619211221466,
+            "p2": 0.9906619211221466
+          },
+          {
+            "id": "s028",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.2093799666676957,
+            "p2": 0.2093799666676957
+          },
+          {
+            "id": "s029",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.5080317161546705,
+            "p2": 0.5080317161546705
+          },
+          {
+            "id": "s030",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.5608704636418695,
+            "p2": 0.5608704636418695
+          },
+          {
+            "id": "s031",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9819142845361206,
+            "p2": 0.9819142845361206
+          },
+          {
+            "id": "s032",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9400429918192746,
+            "p2": 0.9400429918192746
+          },
+          {
+            "id": "s033",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.982975265314205,
+            "p2": 0.982975265314205
+          },
+          {
+            "id": "s034",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9971792017937906,
+            "p2": 0.9971792017937906
+          },
+          {
+            "id": "s035",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9497391284553831,
+            "p2": 0.9497391284553831
+          },
+          {
+            "id": "s036",
+            "category": "support_attributed",
+            "label": true,
+            "p1": 0.9747359464778853,
+            "p2": 0.9747359464778853
+          },
+          {
+            "id": "s037",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.07912608880350071,
+            "p2": 0.07912608880350071
+          },
+          {
+            "id": "s038",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.05652234647312172,
+            "p2": 0.05652234647312172
+          },
+          {
+            "id": "s039",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.20075760289753747,
+            "p2": 0.20075760289753747
+          },
+          {
+            "id": "s040",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.02838252445899941,
+            "p2": 0.02838252445899941
+          },
+          {
+            "id": "s041",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.03331840193083599,
+            "p2": 0.03331840193083599
+          },
+          {
+            "id": "s042",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.01365033645237821,
+            "p2": 0.01365033645237821
+          },
+          {
+            "id": "s043",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.04148127276427054,
+            "p2": 0.04148127276427054
+          },
+          {
+            "id": "s044",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.06067032614811993,
+            "p2": 0.06067032614811993
+          },
+          {
+            "id": "s045",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.03761272451915583,
+            "p2": 0.03761272451915583
+          },
+          {
+            "id": "s046",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.01334739152557693,
+            "p2": 0.01334739152557693
+          },
+          {
+            "id": "s047",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.023947197716179574,
+            "p2": 0.023947197716179574
+          },
+          {
+            "id": "s048",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.15285920646861156,
+            "p2": 0.15285920646861156
+          },
+          {
+            "id": "s049",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.11766215859560739,
+            "p2": 0.11766215859560739
+          },
+          {
+            "id": "s050",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.042376813420351746,
+            "p2": 0.042376813420351746
+          },
+          {
+            "id": "s051",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.6913670580443474,
+            "p2": 0.6913670580443474
+          },
+          {
+            "id": "s052",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.036118450587088596,
+            "p2": 0.036118450587088596
+          },
+          {
+            "id": "s053",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.7629989612457744,
+            "p2": 0.7629989612457744
+          },
+          {
+            "id": "s054",
+            "category": "trap_earlier_time",
+            "label": false,
+            "p1": 0.2670686396241583,
+            "p2": 0.2670686396241583
+          },
+          {
+            "id": "s055",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.007385731548963255,
+            "p2": 0.007385731548963255
+          },
+          {
+            "id": "s056",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.004090709370937905,
+            "p2": 0.004090709370937905
+          },
+          {
+            "id": "s057",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.11999149517196514,
+            "p2": 0.11999149517196514
+          },
+          {
+            "id": "s058",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.006279463266747269,
+            "p2": 0.006279463266747269
+          },
+          {
+            "id": "s059",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.006866109641888815,
+            "p2": 0.006866109641888815
+          },
+          {
+            "id": "s060",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.012817028135547725,
+            "p2": 0.012817028135547725
+          },
+          {
+            "id": "s061",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.015202405801272597,
+            "p2": 0.015202405801272597
+          },
+          {
+            "id": "s062",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.05009422005342077,
+            "p2": 0.05009422005342077
+          },
+          {
+            "id": "s063",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.27730193512923396,
+            "p2": 0.27730193512923396
+          },
+          {
+            "id": "s064",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.05712046552684233,
+            "p2": 0.05712046552684233
+          },
+          {
+            "id": "s065",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.0043939773627441805,
+            "p2": 0.0043939773627441805
+          },
+          {
+            "id": "s066",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.060874451863423995,
+            "p2": 0.060874451863423995
+          },
+          {
+            "id": "s067",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.08851451182732632,
+            "p2": 0.08851451182732632
+          },
+          {
+            "id": "s068",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.029799458414392195,
+            "p2": 0.029799458414392195
+          },
+          {
+            "id": "s069",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.02266548507485557,
+            "p2": 0.02266548507485557
+          },
+          {
+            "id": "s070",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.020978137090207065,
+            "p2": 0.020978137090207065
+          },
+          {
+            "id": "s071",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.016727086348500553,
+            "p2": 0.016727086348500553
+          },
+          {
+            "id": "s072",
+            "category": "trap_reported",
+            "label": false,
+            "p1": 0.05796791059661044,
+            "p2": 0.05796791059661044
+          },
+          {
+            "id": "s073",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.04219963446145253,
+            "p2": 0.04219963446145253
+          },
+          {
+            "id": "s074",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.0023497135098452435,
+            "p2": 0.0023497135098452435
+          },
+          {
+            "id": "s075",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.00417316184273147,
+            "p2": 0.00417316184273147
+          },
+          {
+            "id": "s076",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.005174768643584999,
+            "p2": 0.005174768643584999
+          },
+          {
+            "id": "s077",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.009815816365200375,
+            "p2": 0.009815816365200375
+          },
+          {
+            "id": "s078",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.01472243246065938,
+            "p2": 0.01472243246065938
+          },
+          {
+            "id": "s079",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.003788364111210322,
+            "p2": 0.003788364111210322
+          },
+          {
+            "id": "s080",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.01228358216131608,
+            "p2": 0.01228358216131608
+          },
+          {
+            "id": "s081",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.2528467087660588,
+            "p2": 0.2528467087660588
+          },
+          {
+            "id": "s082",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.04740510101422371,
+            "p2": 0.04740510101422371
+          },
+          {
+            "id": "s083",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.006763772280157013,
+            "p2": 0.006763772280157013
+          },
+          {
+            "id": "s084",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.0013207829808129126,
+            "p2": 0.0013207829808129126
+          },
+          {
+            "id": "s085",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.06767800698712456,
+            "p2": 0.06767800698712456
+          },
+          {
+            "id": "s086",
+            "category": "trap_weaker",
+            "label": false,
+            "p1": 0.0033968085050730744,
+            "p2": 0.0033968085050730744
+          },
+          {
+            "id": "s087",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0076380075127147696,
+            "p2": 0.0076380075127147696
+          },
+          {
+            "id": "s088",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0012286200910817673,
+            "p2": 0.0012286200910817673
+          },
+          {
+            "id": "s089",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.012191576390870524,
+            "p2": 0.012191576390870524
+          },
+          {
+            "id": "s090",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0009439648431784011,
+            "p2": 0.0009439648431784011
+          },
+          {
+            "id": "s091",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.037645164278158554,
+            "p2": 0.037645164278158554
+          },
+          {
+            "id": "s092",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.003144386681260526,
+            "p2": 0.003144386681260526
+          },
+          {
+            "id": "s093",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0020292429289643123,
+            "p2": 0.0020292429289643123
+          },
+          {
+            "id": "s094",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.24530055031685488,
+            "p2": 0.24530055031685488
+          },
+          {
+            "id": "s095",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0022070606981272997,
+            "p2": 0.0022070606981272997
+          },
+          {
+            "id": "s096",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.003675561513930893,
+            "p2": 0.003675561513930893
+          },
+          {
+            "id": "s097",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.044833320048915,
+            "p2": 0.044833320048915
+          },
+          {
+            "id": "s098",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.005658580833017261,
+            "p2": 0.005658580833017261
+          },
+          {
+            "id": "s099",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.0030395916152661843,
+            "p2": 0.0030395916152661843
+          },
+          {
+            "id": "s100",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.1538833203211693,
+            "p2": 0.1538833203211693
+          },
+          {
+            "id": "s101",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.05135321499861352,
+            "p2": 0.05135321499861352
+          },
+          {
+            "id": "s102",
+            "category": "trap_different",
+            "label": false,
+            "p1": 0.9355111680993743,
+            "p2": 0.9355111680993743
+          },
+          {
+            "id": "s103",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0008929170410561397,
+            "p2": 0.0008929170410561397
+          },
+          {
+            "id": "s104",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0006082225045770692,
+            "p2": 0.0006082225045770692
+          },
+          {
+            "id": "s105",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0028738338172747064,
+            "p2": 0.0028738338172747064
+          },
+          {
+            "id": "s106",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0011816236679224785,
+            "p2": 0.0011816236679224785
+          },
+          {
+            "id": "s107",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0002976692149786041,
+            "p2": 0.0002976692149786041
+          },
+          {
+            "id": "s108",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.007040314095244867,
+            "p2": 0.007040314095244867
+          },
+          {
+            "id": "s109",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.08148148792169913,
+            "p2": 0.08148148792169913
+          },
+          {
+            "id": "s110",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.3996013997731215,
+            "p2": 0.3996013997731215
+          },
+          {
+            "id": "s111",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.010341068759395458,
+            "p2": 0.010341068759395458
+          },
+          {
+            "id": "s112",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.0003627129605625057,
+            "p2": 0.0003627129605625057
+          },
+          {
+            "id": "s113",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.5123494391519605,
+            "p2": 0.5123494391519605
+          },
+          {
+            "id": "s114",
+            "category": "trap_contradiction",
+            "label": false,
+            "p1": 0.006563284776656698,
+            "p2": 0.006563284776656698
+          },
+          {
+            "id": "s115",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.00068474796316888,
+            "p2": 0.00068474796316888
+          },
+          {
+            "id": "s116",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.002242069357483023,
+            "p2": 0.002242069357483023
+          },
+          {
+            "id": "s117",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0008927270349487001,
+            "p2": 0.0008927270349487001
+          },
+          {
+            "id": "s118",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.000879919950963169,
+            "p2": 0.000879919950963169
+          },
+          {
+            "id": "s119",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.00039424517995621024,
+            "p2": 0.00039424517995621024
+          },
+          {
+            "id": "s120",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0008755492362249712,
+            "p2": 0.0008755492362249712
+          },
+          {
+            "id": "s121",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0017211651097349563,
+            "p2": 0.0017211651097349563
+          },
+          {
+            "id": "s122",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0004232692325370341,
+            "p2": 0.0004232692325370341
+          },
+          {
+            "id": "s123",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0007925553920731863,
+            "p2": 0.0007925553920731863
+          },
+          {
+            "id": "s124",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0007291921748551217,
+            "p2": 0.0007291921748551217
+          },
+          {
+            "id": "s125",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.00042361562576167535,
+            "p2": 0.00042361562576167535
+          },
+          {
+            "id": "s126",
+            "category": "trap_unrelated",
+            "label": false,
+            "p1": 0.0010193811048877512,
+            "p2": 0.0010193811048877512
+          }
+        ]
+      },
+      "lasting": {
+        "n": 80,
+        "positives": 49,
+        "negatives": 31,
+        "auroc": 1.0,
+        "brier": 0.0276,
+        "ece": 0.1041,
+        "gate": {
+          "threshold": 0.9,
+          "n": 80,
+          "n_pass": 34,
+          "precision": 1.0,
+          "coverage": 0.425,
+          "accepted_positives": 34,
+          "total_positives": 49,
+          "accepted_negatives": 0,
+          "total_negatives": 31
+        },
+        "median_positive": 0.9406,
+        "median_negative": 0.0896,
+        "categories": {
+          "lasting_fact": {
+            "n": 26,
+            "positives": 26,
+            "mean": 0.864,
+            "pass": 18,
+            "pass_positives": 18,
+            "pass_rate": 0.6923
+          },
+          "lasting_rule": {
+            "n": 20,
+            "positives": 20,
+            "mean": 0.9063,
+            "pass": 14,
+            "pass_positives": 14,
+            "pass_rate": 0.7
+          },
+          "session_remark": {
+            "n": 28,
+            "positives": 0,
+            "mean": 0.0862,
+            "pass": 0,
+            "pass_positives": 0,
+            "pass_rate": 0.0
+          },
+          "durability_edge": {
+            "n": 6,
+            "positives": 3,
+            "mean": 0.4814,
+            "pass": 2,
+            "pass_positives": 2,
+            "pass_rate": 0.3333
+          }
+        },
+        "reject_side": {
+          "threshold": 0.5,
+          "positives_rejected": 1,
+          "total_positives": 49,
+          "negatives_rejected": 31,
+          "total_negatives": 31
+        },
+        "flip_rate": 0.0,
+        "verdict": {
+          "qualified": true,
+          "reasons": [],
+          "usable": true,
+          "power_reasons": [],
+          "positive_recall": 0.6939,
+          "criteria": {
+            "min_gate_precision": 0.9,
+            "max_ece": 0.15,
+            "max_flip_rate": 0.02,
+            "min_positive_recall": 0.3,
+            "min_accepted_positives": 10
+          },
+          "source": "all items"
+        },
+        "items": [
+          {
+            "id": "l001",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9478483490996268,
+            "p2": 0.9478483490996268
+          },
+          {
+            "id": "l002",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9920675684502502,
+            "p2": 0.9920675684502502
+          },
+          {
+            "id": "l003",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.8559250530180993,
+            "p2": 0.8559250530180993
+          },
+          {
+            "id": "l004",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9528299934731532,
+            "p2": 0.9528299934731532
+          },
+          {
+            "id": "l005",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9696486174127268,
+            "p2": 0.9696486174127268
+          },
+          {
+            "id": "l006",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9043719798712662,
+            "p2": 0.9043719798712662
+          },
+          {
+            "id": "l007",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.979134442773246,
+            "p2": 0.979134442773246
+          },
+          {
+            "id": "l008",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.8831471204180116,
+            "p2": 0.8831471204180116
+          },
+          {
+            "id": "l009",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9019949945820218,
+            "p2": 0.9019949945820218
+          },
+          {
+            "id": "l010",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.6633612091512985,
+            "p2": 0.6633612091512985
+          },
+          {
+            "id": "l011",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.97920413017948,
+            "p2": 0.97920413017948
+          },
+          {
+            "id": "l012",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9705671032034341,
+            "p2": 0.9705671032034341
+          },
+          {
+            "id": "l013",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9504265137119038,
+            "p2": 0.9504265137119038
+          },
+          {
+            "id": "l014",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9025913383514719,
+            "p2": 0.9025913383514719
+          },
+          {
+            "id": "l015",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9037203267421261,
+            "p2": 0.9037203267421261
+          },
+          {
+            "id": "l016",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9873629364769116,
+            "p2": 0.9873629364769116
+          },
+          {
+            "id": "l017",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9408376625390888,
+            "p2": 0.9408376625390888
+          },
+          {
+            "id": "l018",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.8238305646465771,
+            "p2": 0.8238305646465771
+          },
+          {
+            "id": "l019",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.5386027979378148,
+            "p2": 0.5386027979378148
+          },
+          {
+            "id": "l020",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.6220245316522999,
+            "p2": 0.6220245316522999
+          },
+          {
+            "id": "l021",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.2618615899110339,
+            "p2": 0.2618615899110339
+          },
+          {
+            "id": "l022",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9536679156283383,
+            "p2": 0.9536679156283383
+          },
+          {
+            "id": "l023",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9597022489983302,
+            "p2": 0.9597022489983302
+          },
+          {
+            "id": "l024",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.765540633874799,
+            "p2": 0.765540633874799
+          },
+          {
+            "id": "l025",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.943740022272231,
+            "p2": 0.943740022272231
+          },
+          {
+            "id": "l026",
+            "category": "lasting_fact",
+            "label": true,
+            "p1": 0.9089304379982193,
+            "p2": 0.9089304379982193
+          },
+          {
+            "id": "l027",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9928848210229428,
+            "p2": 0.9928848210229428
+          },
+          {
+            "id": "l028",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9671899595383162,
+            "p2": 0.9671899595383162
+          },
+          {
+            "id": "l029",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.974848962461162,
+            "p2": 0.974848962461162
+          },
+          {
+            "id": "l030",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9841966461484931,
+            "p2": 0.9841966461484931
+          },
+          {
+            "id": "l031",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9853103811963674,
+            "p2": 0.9853103811963674
+          },
+          {
+            "id": "l032",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9237647442724883,
+            "p2": 0.9237647442724883
+          },
+          {
+            "id": "l033",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9859853943822205,
+            "p2": 0.9859853943822205
+          },
+          {
+            "id": "l034",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.7874390018853032,
+            "p2": 0.7874390018853032
+          },
+          {
+            "id": "l035",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9552432323897251,
+            "p2": 0.9552432323897251
+          },
+          {
+            "id": "l036",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.8187458258062368,
+            "p2": 0.8187458258062368
+          },
+          {
+            "id": "l037",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9626812281424126,
+            "p2": 0.9626812281424126
+          },
+          {
+            "id": "l038",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.8316219218700855,
+            "p2": 0.8316219218700855
+          },
+          {
+            "id": "l039",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9826327878130345,
+            "p2": 0.9826327878130345
+          },
+          {
+            "id": "l040",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.8835424564703122,
+            "p2": 0.8835424564703122
+          },
+          {
+            "id": "l041",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.6243844086882661,
+            "p2": 0.6243844086882661
+          },
+          {
+            "id": "l042",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9154467316478722,
+            "p2": 0.9154467316478722
+          },
+          {
+            "id": "l043",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.6965932554480693,
+            "p2": 0.6965932554480693
+          },
+          {
+            "id": "l044",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9218569109945812,
+            "p2": 0.9218569109945812
+          },
+          {
+            "id": "l045",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9904854912648511,
+            "p2": 0.9904854912648511
+          },
+          {
+            "id": "l046",
+            "category": "lasting_rule",
+            "label": true,
+            "p1": 0.9405533064855366,
+            "p2": 0.9405533064855366
+          },
+          {
+            "id": "l047",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.003979453693068187,
+            "p2": 0.003979453693068187
+          },
+          {
+            "id": "l048",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.07736380364648868,
+            "p2": 0.07736380364648868
+          },
+          {
+            "id": "l049",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.004513978343178493,
+            "p2": 0.004513978343178493
+          },
+          {
+            "id": "l050",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.002749647781121721,
+            "p2": 0.002749647781121721
+          },
+          {
+            "id": "l051",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.008868065638778082,
+            "p2": 0.008868065638778082
+          },
+          {
+            "id": "l052",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.1688123950546513,
+            "p2": 0.1688123950546513
+          },
+          {
+            "id": "l053",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.07718362744544202,
+            "p2": 0.07718362744544202
+          },
+          {
+            "id": "l054",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.12451190028290446,
+            "p2": 0.12451190028290446
+          },
+          {
+            "id": "l055",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.03778131574245521,
+            "p2": 0.03778131574245521
+          },
+          {
+            "id": "l056",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.12759862470427247,
+            "p2": 0.12759862470427247
+          },
+          {
+            "id": "l057",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.1868729130528355,
+            "p2": 0.1868729130528355
+          },
+          {
+            "id": "l058",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.018146237402157143,
+            "p2": 0.018146237402157143
+          },
+          {
+            "id": "l059",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.07864617138441965,
+            "p2": 0.07864617138441965
+          },
+          {
+            "id": "l060",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.11214957042087108,
+            "p2": 0.11214957042087108
+          },
+          {
+            "id": "l061",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.025162637837193393,
+            "p2": 0.025162637837193393
+          },
+          {
+            "id": "l062",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.009081302569211365,
+            "p2": 0.009081302569211365
+          },
+          {
+            "id": "l063",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.10969277194191898,
+            "p2": 0.10969277194191898
+          },
+          {
+            "id": "l064",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.14352324610819084,
+            "p2": 0.14352324610819084
+          },
+          {
+            "id": "l065",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.15393765654359376,
+            "p2": 0.15393765654359376
+          },
+          {
+            "id": "l066",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.1422149278712848,
+            "p2": 0.1422149278712848
+          },
+          {
+            "id": "l067",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.009962977222740785,
+            "p2": 0.009962977222740785
+          },
+          {
+            "id": "l068",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.005079387220097103,
+            "p2": 0.005079387220097103
+          },
+          {
+            "id": "l069",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.17307088285805677,
+            "p2": 0.17307088285805677
+          },
+          {
+            "id": "l070",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.14836169804870097,
+            "p2": 0.14836169804870097
+          },
+          {
+            "id": "l071",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.1576856150114208,
+            "p2": 0.1576856150114208
+          },
+          {
+            "id": "l072",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.18541402572283597,
+            "p2": 0.18541402572283597
+          },
+          {
+            "id": "l073",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.03189752001755599,
+            "p2": 0.03189752001755599
+          },
+          {
+            "id": "l074",
+            "category": "session_remark",
+            "label": false,
+            "p1": 0.0895626920871185,
+            "p2": 0.0895626920871185
+          },
+          {
+            "id": "l075",
+            "category": "durability_edge",
+            "label": true,
+            "p1": 0.5355697803054256,
+            "p2": 0.5355697803054256
+          },
+          {
+            "id": "l076",
+            "category": "durability_edge",
+            "label": false,
+            "p1": 0.08526959647617677,
+            "p2": 0.08526959647617677
+          },
+          {
+            "id": "l077",
+            "category": "durability_edge",
+            "label": false,
+            "p1": 0.11212492798312942,
+            "p2": 0.11212492798312942
+          },
+          {
+            "id": "l078",
+            "category": "durability_edge",
+            "label": true,
+            "p1": 0.9847928168154371,
+            "p2": 0.9847928168154371
+          },
+          {
+            "id": "l079",
+            "category": "durability_edge",
+            "label": true,
+            "p1": 0.9303407691068255,
+            "p2": 0.9303407691068255
+          },
+          {
+            "id": "l080",
+            "category": "durability_edge",
+            "label": false,
+            "p1": 0.2403526243538039,
+            "p2": 0.2403526243538039
+          }
+        ]
+      }
+    }
+  },
+  "scope": "Fictional public seed pairs; not independent fresh holdouts or multilingual qualification.",
+  "containment": {
+    "network_policy": "macOS sandbox-exec denies all outbound networking except localhost",
+    "external_https_probe": "curl https://example.com failed to resolve inside the OS sandbox",
+    "proxy_settings": "HTTP_PROXY, HTTPS_PROXY and ALL_PROXY deliberately pointed to unused loopback port 9",
+    "cloud_setting": "inherited OLLAMA_NO_CLOUD=0; managed child overrides it to 1",
+    "weights": "real downloaded GGUF and actual pinned Ollama runtime; no mocked inference"
+  }
+}

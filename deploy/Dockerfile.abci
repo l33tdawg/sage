@@ -2,7 +2,7 @@
 # Multi-stage build: compile Go binary, copy to minimal Alpine
 
 # ── Shared source ─────────────────────────────
-FROM golang:1.25.13-alpine AS source
+FROM golang:1.26.8-alpine AS source
 
 RUN apk add --no-cache git
 

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 11.19.0
+  version: 11.23.15
   description: |-
     (Sovereign) Agent Governed Experience — network REST API for memory
     submission, validation, and query.
@@ -381,6 +381,32 @@ components:
             domain, and content. Reusing a key with a different canonical
             payload returns 409. Use a fresh explicit key only to intentionally
             create another occurrence with identical content and domain.
+        evidence_id:
+          type: string
+          description: >-
+            Claims evidence this agent uploaded with POST /v1/memory/evidence,
+            once and before it expires, for the optional memory gate. Only this
+            random id is in the signed body; the evidence text is kept on the
+            receiving node and never enters a transaction. Not accepted for
+            tasks.
+
+    UploadEvidenceRequest:
+      type: object
+      required:
+        - evidence
+      properties:
+        evidence:
+          type: string
+          maxLength: 32768
+          description: Source text the memory is based on (at most 32 KiB).
+
+    UploadEvidenceResponse:
+      type: object
+      properties:
+        evidence_id:
+          type: string
+        expires_in_seconds:
+          type: integer
 
     MemoryQueryRequest:
       type: object
@@ -1956,6 +1982,10 @@ components:
           minLength: 1
           maxLength: 256
           description: Caller-scoped token binding one exact ordered claimed batch for response-loss replay.
+        claimant_session_id:
+          type: string
+          maxLength: 128
+          description: Opaque runtime claimant identity. Empty retains legacy compatibility behavior.
         limit:
           type: integer
           minimum: 1
@@ -1964,7 +1994,7 @@ components:
 
     MessageItem:
       type: object
-      required: [message_id, from_agent, payload, status, created_at, expires_at, authority, trust, security_notice]
+      required: [message_id, from_agent, payload, status, created_at, expires_at, authority, trust, security_notice, claim_revision]
       properties:
         message_id:
           type: string
@@ -2001,6 +2031,14 @@ components:
           const: agent_untrusted
         security_notice:
           type: string
+        claimant_session_id:
+          type: string
+          maxLength: 128
+        claim_revision:
+          type: integer
+          format: uint64
+          minimum: 0
+          description: Current ownership revision; copy it with the session fence for explicit handoff.
 
     MessageReceiveResponse:
       type: object
@@ -2018,7 +2056,7 @@ components:
 
     ClaimedElsewhereItem:
       type: object
-      required: [message_id, claimant_session_id, created_at, expires_at, foreign]
+      required: [message_id, claimant_session_id, claim_revision, created_at, expires_at, foreign]
       description: >-
         Passive exact-recipient recovery metadata for one still-actionable claim
         held by another runtime. Sender, provider, chain ID, intent, payload, and
@@ -2031,6 +2069,11 @@ components:
           minLength: 1
           maxLength: 128
           description: Current compare-and-swap source fence for deliberate handoff.
+        claim_revision:
+          type: integer
+          format: uint64
+          minimum: 0
+          description: Current compare-and-swap revision fence. Age alone never authorizes takeover.
         created_at:
           type: string
           format: date-time
@@ -2066,6 +2109,68 @@ components:
         next_cursor:
           type: string
           description: Opaque exclusive continuation, present only when truncated is true.
+
+    MessageHandoffRequest:
+      type: object
+      required: [from_session_id, to_session_id]
+      properties:
+        from_session_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        to_session_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        from_revision:
+          type: integer
+          format: uint64
+          minimum: 0
+          default: 0
+          description: >-
+            Current clients must copy the exact claim_revision from passive
+            history. Omission defaults to revision 0 only for pre-v11.19.5 REST
+            compatibility and conflicts after any ownership transfer.
+
+    MessageHandoffResponse:
+      type: object
+      required: [message_id, claimant_session_id, claim_revision, idempotent_replay]
+      properties:
+        message_id:
+          type: string
+        claimant_session_id:
+          type: string
+        claim_revision:
+          type: integer
+          format: uint64
+          minimum: 0
+        idempotent_replay:
+          type: boolean
+
+    InboxActivityState:
+      type: object
+      required: [version, epoch, seq]
+      additionalProperties: false
+      properties:
+        version:
+          type: integer
+          const: 1
+        epoch:
+          type: string
+          minLength: 32
+          maxLength: 32
+          pattern: '^[0-9a-f]{32}$'
+          description: >-
+            Opaque payload-free database-incarnation fence. Stable across
+            process restart and backup restore; different for a fresh database.
+        seq:
+          type: integer
+          format: uint64
+          minimum: 0
+      description: >-
+        Exact three-field payload-free task/reply coordination state; never
+        unfinished-work or Stop authority. Compare epoch before seq so a
+        preserved cursor cannot suppress cues after database reinitialization.
 
     MessageReplyRequest:
       type: object
@@ -3046,6 +3151,54 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /v1/memory/evidence:
+    post:
+      operationId: uploadMemoryEvidence
+      summary: Upload node-local evidence for a memory this agent will submit.
+      description: >-
+        Stores the evidence on this node only (encrypted like memory content
+        when the vault is on) for the optional memory gate's evidence check,
+        and returns an id to pass as evidence_id on /v1/memory/submit. Nothing
+        is broadcast. An agent may hold at most 64 unclaimed uploads; each
+        expires after an hour.
+      tags:
+        - Memory
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadEvidenceRequest"
+      responses:
+        "201":
+          description: Evidence stored; claim it with evidence_id.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadEvidenceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Above app-v23, the caller is not an active ordinary agent (Root is not an agent).
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "429":
+          description: Too much unclaimed evidence for this agent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "501":
+          description: This node's store does not keep evidence.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+
   /v1/memory/pre-validate:
     post:
       operationId: preValidateMemory
@@ -3501,10 +3654,13 @@ paths:
       summary: Retrieve bounded readable domains for the authenticated agent.
       description: >-
         Returns only current caller-authorized domain identifiers derived from
-        the caller's own home/provenance, direct grants, and local Access
-        Groups. Candidates are re-authorized against live policy. The result is
-        bounded and may be truncated; it is not a global domain roster or a
-        complete expansion of read-all/ancestor authority.
+        the caller's current owned-domain index and home/provenance, direct
+        grants, and the bounded current owned-domain indexes of active local
+        Access Group peers. This includes transferred domains that were never
+        authored by their current owner. Candidates are re-authorized against
+        live policy. The result is bounded and may be truncated; it is not a
+        global domain roster or a complete expansion of read-all/ancestor
+        authority.
       tags:
         - Agent
       responses:
@@ -4991,6 +5147,34 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /v1/inbox/activity-state:
+    get:
+      operationId: inboxActivityState
+      summary: Read the exact caller's payload-free task/reply activity sequence.
+      description: >-
+        Requires a fresh nonce-bound exact-agent signature and has no request
+        payload or agent selector. Returns exactly version, epoch, and seq. The
+        opaque 32-character database-incarnation epoch survives restart and
+        backup restore but changes for a fresh database. Fresh task assignments
+        and replies advance this nonblocking coordination hint; it
+        neither claims content nor changes the v1 message-wake/Stop contract.
+      tags: [Messages]
+      responses:
+        "200":
+          description: Exact-caller payload-free activity state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InboxActivityState"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   # -- Canonical local Messages ------------------------------------------
   /v1/messages:
     post:
@@ -5123,6 +5307,52 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /v1/messages/{message_id}/handoff:
+    put:
+      operationId: messageHandoff
+      summary: Explicitly transfer one claim through a revisioned compare-and-swap fence.
+      description: >-
+        Requires the exact recipient's fresh nonce-bound signature plus the
+        current claimant session and revision returned by passive history.
+        New MCP clients always send the revision; omitted from_revision defaults
+        to 0 only for pre-v11.19.5 REST compatibility. Successful transfer
+        always returns the incremented claim_revision. Stale, concurrent, and
+        A-to-B-to-A delayed requests conflict; omission therefore cannot move a
+        previously transferred claim, and claim age never authorizes an
+        automatic steal.
+      tags: [Messages]
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageHandoffRequest"
+      responses:
+        "200":
+          description: Claim transferred or exact idempotent replay returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageHandoffResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
 
   /v1/messages/{message_id}/reply:
     post:

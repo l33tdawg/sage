@@ -79,6 +79,8 @@ build/
 desktop/sage-shell/target/
 desktop/sage-shell/gen/
 desktop/sage-shell/binaries/
+# SwiftPM build output for the native macOS Cerebrum app (v12)
+desktop/SAGECerebrumNative/.build/
 .eggs/
 *.egg
 .venv/
@@ -88,6 +90,8 @@ venv/
 tests/
 !desktop/SAGECerebrumNative/Tests/
 !desktop/SAGECerebrumNative/Tests/**
+!sdk/python/tests/
+!sdk/python/tests/*.py
 
 # Protobuf generated
 internal/proto/sagepb/*.go
@@ -114,7 +118,9 @@ AGENTS.md
 # (whitepapers, comms, arxiv, medium, figures) but allow the public docs.
 # NOTE: the landing site (index.html etc.) now lives on the gh-pages branch.
 docs/*
+!docs/diagrams/
 !docs/README.md
+!docs/brand/
 !docs/ARCHITECTURE.md
 !docs/GETTING_STARTED.md
 !docs/ADMIN_BOOTSTRAP.md
@@ -134,6 +140,9 @@ docs/*
 !docs/native-app-daemon-contract.md
 !docs/native-shell-quality-gates.md
 !docs/v12-native-product-status.md
+!docs/v12-stable-convergence.md
+!docs/v12-native-transport-qualification.md
+!docs/v12-native-session-qualification.md
 !docs/v12-native-capability-ledger.md
 !docs/v12-native-acceptance-ledger.md
 !docs/v12-native-acceptance-ledger.schema.json
@@ -153,6 +162,7 @@ scratchpad/
 # Node.js (Playwright e2e tests)
 node_modules/
 package-lock.json
+!/package-lock.json
 test-results/
 playwright-report/
 
@@ -201,3 +211,5 @@ integrations/levelup/paper4/
 # substituted in, so a tracked copy is both machine-specific and a credential
 # path in a public repo.
 .claude/hooks/
+
+!docs/v12-native-bootstrap-qualification.md

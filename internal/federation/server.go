@@ -227,10 +227,14 @@ func (m *Manager) peerAuth(next http.Handler) http.Handler {
 				bodyLimit = maxLinkedMessageResolveBytes
 			}
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit)
-		body, err := io.ReadAll(r.Body)
+		body, err := readFederationBody(w, r, bodyLimit)
 		if err != nil {
-			httpError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			status, message := federationBodyError(err)
+			if status != http.StatusRequestEntityTooLarge {
+				m.logger.Warn().Err(err).Str("peer", peerChain).Str("path", r.URL.Path).
+					Msg("federation request body could not be read")
+			}
+			httpError(w, status, message)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -487,6 +491,9 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 		caps = append(caps, CapabilitySync)
 		caps = append(caps, CapabilityFederatedPipeline)
 		caps = append(caps, CapabilityFederatedPipelineContactLookup)
+		if m.postV23ForNextTx != nil && m.postV23ForNextTx() {
+			caps = append(caps, CapabilityNodeMessaging)
+		}
 	}
 	policy, err := m.getPeerRBACPolicyForAgreement(r.Context(), agreement)
 	if err != nil {
@@ -515,7 +522,11 @@ func (m *Manager) handleStatus(w http.ResponseWriter, r *http.Request) {
 		effectivePolicy.Domains = mergePeerRBACReadDomains(effectivePolicy.Domains, derivedDomains)
 		peerRBACGrant = peerRBACGrantFromPolicy(&effectivePolicy)
 		if !clientRequestsPipeContactLookup(r) {
-			pipeContacts, err = m.buildPipeContactStatusGrant(r.Context(), peer, policy)
+			mode := ""
+			if m.postV23ForNextTx != nil && m.postV23ForNextTx() && clientHasCapability(r, CapabilityNodeMessaging) {
+				mode = NodeMessageAuthorizationMode
+			}
+			pipeContacts, err = m.buildPipeContactStatusGrant(r.Context(), peer, policy, mode)
 			if err != nil {
 				releaseSnapshot()
 				m.logger.Error().Err(err).Str("peer", peer.ChainID).Msg("federation status pipe contact projection failed")
@@ -649,8 +660,12 @@ func (m *Manager) handleQueryAvailability(w http.ResponseWriter, r *http.Request
 }
 
 func clientRequestsPipeContactLookup(r *http.Request) bool {
+	return clientHasCapability(r, CapabilityFederatedPipelineContactLookup)
+}
+
+func clientHasCapability(r *http.Request, requested string) bool {
 	for _, capability := range strings.Split(r.Header.Get(HeaderClientCapabilities), ",") {
-		if strings.TrimSpace(capability) == CapabilityFederatedPipelineContactLookup {
+		if strings.TrimSpace(capability) == requested {
 			return true
 		}
 	}
@@ -722,7 +737,16 @@ func (m *Manager) handlePipeContactLookup(w http.ResponseWriter, r *http.Request
 	}
 	req.Target = strings.TrimSpace(req.Target)
 	req.Name = strings.TrimSpace(req.Name)
-	if (req.Target == "") == (req.Name == "") || len(req.Target) > 512 || len(req.Name) > 512 {
+	if req.AuthorizationMode != "" && req.AuthorizationMode != NodeMessageAuthorizationMode {
+		httpError(w, http.StatusBadRequest, "unsupported contact authorization mode")
+		return
+	}
+	if req.List {
+		if req.AuthorizationMode != NodeMessageAuthorizationMode || req.Target != "" || req.Name != "" || (req.After != "" && !validNodeCursorShape(req.After)) {
+			httpError(w, http.StatusBadRequest, "invalid node directory page")
+			return
+		}
+	} else if req.After != "" || (req.Target == "") == (req.Name == "") || len(req.Target) > 512 || len(req.Name) > 512 {
 		httpError(w, http.StatusBadRequest, "provide exactly one valid contact selector")
 		return
 	}
@@ -817,6 +841,11 @@ func (m *Manager) handlePipeContactLookup(w http.ResponseWriter, r *http.Request
 	}
 	grant, total, err := m.buildPipeContactLookupGrant(r.Context(), peer, policy, req, prefetchedNameCandidateIDs)
 	if err != nil {
+		if errors.Is(err, errNodeContactCursor) {
+			releaseSnapshot()
+			httpError(w, http.StatusBadRequest, errNodeContactCursor.Error())
+			return
+		}
 		m.logger.Error().Err(err).Str("peer", peer.ChainID).Msg("federation pipe contact lookup projection failed")
 		releaseSnapshot()
 		httpError(w, http.StatusInternalServerError, "pipe contact lookup failed")
@@ -901,7 +930,7 @@ func boundedPipeContactLookupResponse(grant *PipeContactGrant, total int) (*Pipe
 			bounded.Contacts = candidate.Contacts
 		}
 	}
-	if total > 0 && len(bounded.Contacts) == 0 {
+	if len(grant.Contacts) > 0 && len(bounded.Contacts) == 0 {
 		return nil, fmt.Errorf("one pipe contact exceeds the lookup response limit")
 	}
 	return &PipeContactLookupResponse{
@@ -1299,4 +1328,40 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func httpError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+// errFederationBodyTooLarge is a size verdict: the peer sent more bytes than
+// this route accepts, and re-sending the same bytes cannot succeed.
+var errFederationBodyTooLarge = errors.New("request body too large")
+
+// readFederationBody reads a peer request body under the route's byte cap and
+// separates the two conditions io.ReadAll otherwise collapses. A body that
+// exceeded the cap reports *http.MaxBytesError; anything else — a truncated
+// upload, a mid-body disconnect, a stream reset — is a transport condition that
+// says nothing about the request's size.
+//
+// The distinction is load-bearing for delivery, not cosmetic: the sender's
+// outbox classifies this route's 413 as a peer refusal of the bytes, and a
+// previous build turned every read failure into one, so a single aborted upload
+// permanently stranded an otherwise deliverable message.
+func readFederationBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err == nil {
+		return body, nil
+	}
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		return nil, errFederationBodyTooLarge
+	}
+	return nil, fmt.Errorf("read request body: %w", err)
+}
+
+// federationBodyError answers the peer for a failed body read. Only a genuine
+// overflow is 413; anything else is a read failure on this node, which the peer
+// must stay free to retry rather than read as a permanent refusal.
+func federationBodyError(err error) (int, string) {
+	if errors.Is(err, errFederationBodyTooLarge) {
+		return http.StatusRequestEntityTooLarge, "request body too large"
+	}
+	return http.StatusInternalServerError, "request body could not be read"
 }

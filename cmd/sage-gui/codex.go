@@ -31,6 +31,9 @@ func runCodexInstall() error {
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
 	}
+	if guardErr := errIfInstallTargetsHome(projectDir); guardErr != nil {
+		return guardErr
+	}
 
 	binPath, err := os.Executable()
 	if err != nil {

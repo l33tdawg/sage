@@ -1,0 +1,39 @@
+SAGE social covers — 2026-10-03
+Generated using the built-in image_gen tool.
+Final Facebook export: sage-facebook-cover.png, 851 x 315.
+Final LinkedIn company Page export: sage-linkedin-page-cover.png, 1512 x 256.
+Master artwork is preserved under masters/.
+Native sips was used only for final platform crop and pixel sizing.
+LinkedIn Page dimensions verified from https://www.linkedin.com/help/linkedin/answer/a570368 (1512 x 256, max 3 MB, checked 2026-10-03).
+
+FACEBOOK FINAL GENERATION PROMPT
+Use case: ads-marketing
+Asset type: finished Facebook Page cover image for SAGE.
+Primary request: Create a striking, refined cover for SAGE, the open-source Sovereign Agent Governed Experience project, whose product is persistent memory for AI agents. Render a complete finished cover at 1702 x 630 pixels (851:315 aspect ratio), edge-to-edge. No mockup.
+Scene/backdrop: very dark plum-black #06020e fading into #110b22, subtle atmospheric depth. A beautiful luminous three-dimensional brain-shaped connectome made from fine lavender filaments and tiny nodes occupies the right third. The neural structure evokes stored experiences and durable intelligence. Delicate translucent layered curves and a few branching connections sweep from the brain through the backdrop. Controlled light, premium art direction, generous negative space, crisp finish.
+Style/medium: sophisticated editorial technology brand artwork; restrained cinematic 3D neural sculpture combined with exceptionally clean typesetting.
+Color palette: SAGE's established deep violet and lavender: #a78bfa, #c4b5fd, #7c3aed, off-white #ede8f7. A very small amount of #2dd4bf may accent a few nodes. Preserve a dark, elegant surface.
+Composition/framing: wide social header. Text block in the middle-left starting about 27% across the canvas, brain centered about 71% across. Keep all essential text and the main visible brain structure in the center 65% of the width. Keep the bottom-left quiet for Facebook's profile image overlap; top and bottom have breathing room. Visual must remain clean at small social-header scale.
+Text (verbatim): "SAGE" as the large main wordmark, in bold modern geometric sans serif, slightly spaced letters, pale lavender-white. Directly beneath it, smaller but comfortably readable: "Persistent memory for AI agents."
+Constraints: Only these two text elements, spell exactly. Large wordmark, concise single-line subtitle, clear hierarchy. No version numbers, website URL, additional slogan, call-to-action, watermark, Facebook interface, robots, people, generic circuit boards or stock technology clutter. This is SAGE's brand cover, so the neural motif and violet identity should feel coherent with its existing CEREBRUM brain aesthetic.
+
+LINKEDIN INITIAL ADAPTATION PROMPT
+Use case: ads-marketing
+Asset type: finished ultra-wide LinkedIn COMPANY PAGE cover for SAGE, not a personal profile.
+Primary request: Adapt the supplied Facebook SAGE cover into a matching LinkedIn company Page banner. Preserve its typography, correct text, plum-black/lavender palette, beautiful luminous brain-shaped connectome and fine atmospheric filaments. Redesign the composition for a much thinner, wider cover. Output an edge-to-edge 3024 x 512 pixel image, aspect ratio 1512:256 (approximately 5.91:1).
+Input image: supplied SAGE Facebook cover is the visual identity and artwork reference. Keep the same brand aesthetic and neural sculpture language.
+Composition: restrained slim panoramic header with dark negative space. Leave the leftmost 21% quiet for the company's avatar. Place the clean text block near 32% of the full canvas width, with the luminous neural brain near 72%. The text block and brain should fit comfortably within the middle 76% of the width and middle 78% of the height, with generous breathing room. Fit a complete brain form to the slim strip, with fine filaments extending horizontally. Keep letter proportions natural. Do not vertically squash the Facebook cover.
+Text (verbatim): "SAGE" as a bold, large modern geometric sans-serif pale lavender-white wordmark. Directly beneath: "Persistent memory for AI agents." as a smaller readable single-line subtitle.
+Style: elegant, confident, high-end technology brand cover. Spectacular but controlled neural detail, exceptionally clear typography. The banner should hold up at a small visible height.
+Constraints: preserve those two exact text elements and the existing SAGE identity. No new slogans, extra text, version number, URL, platform interface, border, mockup, people, robot, or watermark. Use a genuinely wide horizontal banner canvas and fill it edge to edge.
+
+LINKEDIN FINAL REFINEMENT PROMPT
+Use case: ads-marketing
+Asset type: SAGE LinkedIn company Page cover, production crop preparation.
+Primary request: Refine the supplied matching SAGE artwork so all essential elements fit inside a very shallow central horizontal strip. Keep a wide 3:1 overall canvas, but deliberately place ALL of the SAGE wordmark, subtitle, and complete brain sculpture WITHIN THE MIDDLE 46% OF IMAGE HEIGHT. The TOP 27% AND BOTTOM 27% are atmospheric dark background and faint filaments only, with NO text and NO part of the brain in these outer bands. The middle strip will be mechanically extracted into a 1512 x 256 ultra-wide LinkedIn cover. This must be a slim banner within the canvas, not a full-height composition.
+Input image: previous SAGE banner, preserve its typography and violet neural aesthetic.
+Exact composition: text begins at 32% of canvas width, large "SAGE" occupies approximately y=39% to 51% of full canvas height. Subtitle underneath occupies y=54% to 59%. A smaller complete brain sculpture centered at x=73%, y=49%, extending only from y=29% to y=68% (maximum height 39% of overall canvas). Horizontal filaments flow outward through the center strip. Leftmost 23% stays dark and quiet.
+Text (verbatim): "SAGE" and "Persistent memory for AI agents." Preserve these strings perfectly, no new copy.
+Preserve: plum-black background #06020e; pale lavender-white wordmark; luminous lavender neural brain with tiny teal accents; clean geometric sans serif letterforms, original design language and high image quality.
+Change only the scale and vertical footprint of the text and brain for the shallow company Page banner. Keep their natural proportions. Elegant, legible, high-end. No divider lines marking the strip, no crop marks, no border, no interface, no extra text, no watermark. Fill entire canvas with seamless dark atmosphere.
+

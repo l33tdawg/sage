@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 
 	"github.com/l33tdawg/sage/internal/embedding"
+	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -45,6 +47,50 @@ func (e *errReranker) Rerank(_ context.Context, _ string, _ []string) ([]embeddi
 type errRerankUpstream struct{ msg string }
 
 func (e errRerankUpstream) Error() string { return e.msg }
+
+type scoredReranker struct{ scores []embedding.RerankResult }
+
+func (r scoredReranker) Rerank(context.Context, string, []string) ([]embedding.RerankResult, error) {
+	return r.scores, nil
+}
+
+func TestApplyRerankerMalformedScoresPreserveRRFTopK(t *testing.T) {
+	candidates := []*memory.MemoryRecord{
+		{MemoryID: "rrf-first", Content: "first", ConfidenceScore: 0.85},
+		{MemoryID: "rrf-second", Content: "second", ConfidenceScore: 0.80},
+		{MemoryID: "rrf-third", Content: "third", ConfidenceScore: 0.75},
+		{MemoryID: "rrf-fourth", Content: "fourth", ConfidenceScore: 0.70},
+	}
+	valid := []embedding.RerankResult{
+		{Index: 3, Score: 4}, {Index: 2, Score: 3},
+		{Index: 1, Score: 2}, {Index: 0, Score: 1},
+	}
+	tests := []struct {
+		name   string
+		scores []embedding.RerankResult
+	}{
+		{"empty", nil},
+		{"partial", valid[:2]},
+		{"too many", append(append([]embedding.RerankResult(nil), valid...), valid[0])},
+		{"duplicate", []embedding.RerankResult{{Index: 3, Score: 4}, {Index: 2, Score: 3}, {Index: 1, Score: 2}, {Index: 3, Score: 1}}},
+		{"negative index", []embedding.RerankResult{{Index: -1, Score: 4}, {Index: 2, Score: 3}, {Index: 1, Score: 2}, {Index: 0, Score: 1}}},
+		{"index beyond pool", []embedding.RerankResult{{Index: 4, Score: 4}, {Index: 2, Score: 3}, {Index: 1, Score: 2}, {Index: 0, Score: 1}}},
+		{"nan", []embedding.RerankResult{{Index: 3, Score: math.NaN()}, {Index: 2, Score: 3}, {Index: 1, Score: 2}, {Index: 0, Score: 1}}},
+		{"positive infinity", []embedding.RerankResult{{Index: 3, Score: math.Inf(1)}, {Index: 2, Score: 3}, {Index: 1, Score: 2}, {Index: 0, Score: 1}}},
+		{"negative infinity", []embedding.RerankResult{{Index: 3, Score: math.Inf(-1)}, {Index: 2, Score: 3}, {Index: 1, Score: 2}, {Index: 0, Score: 1}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := (&SQLiteStore{}).applyReranker(context.Background(), "query", candidates, 3, scoredReranker{tt.scores})
+			require.NoError(t, err)
+			require.Equal(t, candidates[:3], got, "malformed scores must not remove or reorder healthy RRF results")
+		})
+	}
+	got, err := (&SQLiteStore{}).applyReranker(context.Background(), "query", candidates, 3, scoredReranker{valid})
+	require.NoError(t, err)
+	require.Equal(t, []*memory.MemoryRecord{candidates[3], candidates[2], candidates[1]}, got,
+		"a complete finite score set must still rerank, including scores outside [0,1]")
+}
 
 func TestSearchHybrid_RerankerReordersTopK(t *testing.T) {
 	s := newTestStore(t)

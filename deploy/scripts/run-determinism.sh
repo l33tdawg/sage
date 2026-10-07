@@ -18,6 +18,14 @@
 #     NOT run `make down-clean`.
 #
 # Set DET_SHORT=1 to skip the slow fork-activation phase (epoch-boundary phase only).
+#
+# For the app-v28 ladder run (DET_TEST=TestAppHashDeterminism_AppV28Activation):
+#   DET_BLOCK_TIME=300ms  devnet block time (default 3s). The 200-block
+#     consensus activation floor is NOT overridable — it is a governance rule —
+#     but block time is a devnet knob, and the ladder walks app-v2..app-v27 one
+#     rung at a time, so at the default 3s the run is ~4.5h and at 300ms ~25min.
+#     Every validator carries the same value, so AppHash agreement is unaffected.
+#   DET_TIMEOUT=5400s     go test ceiling (default 1800s); the ladder needs more.
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -30,11 +38,18 @@ COMPOSE=(docker compose -p "${PROJECT}"
 
 cleanup() {
   echo "--- tearing down ${PROJECT} ---"
-  "${COMPOSE[@]}" down -v --remove-orphans || true
+  # The password is required at interpolation time even for `down`; without it
+  # the teardown aborts and every container and volume of the run is left
+  # behind. It is the same throwaway value `up` used, never a real secret.
+  POSTGRES_PASSWORD=ci_test_password "${COMPOSE[@]}" down -v --remove-orphans || true
 }
 trap cleanup EXIT
 
 echo "--- regenerating a fresh 4-node testnet genesis (app_version 0) ---"
+# SAGE_TESTNET_TIMEOUT_COMMIT is the devnet's block time knob (init-testnet.sh).
+# Default 3s keeps every existing harness byte-identical.
+export SAGE_TESTNET_TIMEOUT_COMMIT="${DET_BLOCK_TIME:-3s}"
+echo "--- devnet block time: ${SAGE_TESTNET_TIMEOUT_COMMIT} ---"
 bash deploy/init-testnet.sh
 
 # Build the two shared images ONCE (docker-compose.det.yml resets the per-service
@@ -101,7 +116,7 @@ SAGE_TEST_API0=http://localhost:18090 SAGE_TEST_API1=http://localhost:18091 \
 SAGE_TEST_API2=http://localhost:18092 SAGE_TEST_API3=http://localhost:18093 \
 SAGE_TEST_RPC0=http://localhost:36657 SAGE_TEST_RPC1=http://localhost:36757 \
 SAGE_TEST_RPC2=http://localhost:36857 SAGE_TEST_RPC3=http://localhost:36957 \
-  go test ./test/integration/ -run "${DET_TEST}" \
-  -tags=integration -count=1 -v -timeout 1800s $SHORT_FLAG
+go test ./test/integration/ -run "${DET_TEST}" \
+  -tags=integration -count=1 -v -timeout "${DET_TIMEOUT:-1800s}" $SHORT_FLAG
 
 echo "=== DETERMINISM RUN PASSED: AppHash byte-identical across all 4 nodes ==="

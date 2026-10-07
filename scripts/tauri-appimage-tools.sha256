@@ -1,9 +1,16 @@
 # SHA-256 allowlist for the exact helper filenames tauri-bundler 2.9.4 reads
 # from ${XDG_CACHE_HOME:-$HOME/.cache}/tauri. URLs may move or be overwritten
-# upstream; the pinned digest is the authority. linuxdeploy's second digest is
-# its deterministic post-download form after Tauri zeros bytes 8..10.
+# upstream; the pinned digest is the authority. The two linuxdeploy plugins are
+# fetched from a commit-pinned ref rather than master, so upstream cannot move
+# the bytes under a green build and stall every PR on a checksum_mismatch.
+# linuxdeploy's second digest is its deterministic post-download form after
+# Tauri zeros bytes 8..10.
+# The appimage plugin's continuous asset is rebuilt monthly. Its digest below
+# was verified against GitHub asset 602435573 and the 2026-10-01 upstream build:
+# https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/actions/runs/36815339264
+# Source: 536b068787179ea901964bd7dabc7bf61e4941c3. Future changes fail closed.
 f30140a43a0a59e46db21bdefdf749b9e9f2c6946e92afabbacf98b8ae73fb4f|AppRun-x86_64|https://github.com/tauri-apps/binary-releases/releases/download/apprun-old/AppRun-x86_64
 e762bea85c8eb0d4b3508d46e5c1f037f717d0f9303ae3b4aafc8b04991fa1ef,20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1|linuxdeploy-x86_64.AppImage|https://github.com/tauri-apps/binary-releases/releases/download/linuxdeploy/linuxdeploy-x86_64.AppImage
-cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a|linuxdeploy-plugin-gtk.sh|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
-c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94|linuxdeploy-plugin-gstreamer.sh|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/master/linuxdeploy-plugin-gstreamer.sh
-a45d3e227bc7f397e9cf6bfa4c9507494efa2293357b6e86690a3de2ca992e79|linuxdeploy-plugin-appimage.AppImage|https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage
+7804c9eef13e59bf2783aad9882ef9db8f3f3f9e8d631874b1d348d550a3693f|linuxdeploy-plugin-gtk.sh|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gtk/dda522bce37387f1b853d9095713bfaa924c8423/linuxdeploy-plugin-gtk.sh
+c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94|linuxdeploy-plugin-gstreamer.sh|https://raw.githubusercontent.com/tauri-apps/linuxdeploy-plugin-gstreamer/2a2e67491c32995a3f279ad0ecbe77abd512b42a/linuxdeploy-plugin-gstreamer.sh
+49d6a17160675a6bd1781699aae6bdf7692d98552e02a3671d2183d10547842e|linuxdeploy-plugin-appimage.AppImage|https://github.com/linuxdeploy/linuxdeploy-plugin-appimage/releases/download/continuous/linuxdeploy-plugin-appimage-x86_64.AppImage

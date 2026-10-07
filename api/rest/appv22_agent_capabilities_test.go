@@ -198,6 +198,11 @@ func TestAppV22FederatedInboxRemainsEnabledUnlessExplicitlyDenied(t *testing.T) 
 	assert.True(t, srv.callerCanReachFederatedPipeTarget(context.Background(), callerID, target),
 		"the companion preset must support cross-network inbox messaging")
 	assert.True(t, srv.callerMayUseFederatedPipe(callerID))
+	nodeTarget := *target
+	nodeTarget.AuthorizationMode = federation.NodeMessageAuthorizationMode
+	nodeTarget.Domains = nil
+	assert.True(t, srv.callerCanReachFederatedPipeTarget(context.Background(), callerID, &nodeTarget),
+		"trusted-node messaging needs no memory domain intersection")
 
 	require.NoError(t, badger.SetAgentPermissionWithCapabilities(
 		callerID, 1, "[]", "", "", "",
@@ -206,6 +211,8 @@ func TestAppV22FederatedInboxRemainsEnabledUnlessExplicitlyDenied(t *testing.T) 
 	assert.False(t, srv.callerCanReachFederatedPipeTarget(context.Background(), callerID, target),
 		"operators retain a separate kill switch for federated inbox messaging")
 	assert.False(t, srv.callerMayUseFederatedPipe(callerID))
+	assert.False(t, srv.callerCanReachFederatedPipeTarget(context.Background(), callerID, &nodeTarget),
+		"domain-free messaging must preserve the same hard messaging block")
 	assert.False(t, srv.callerMayUseFederatedPipe("unknown-agent"),
 		"post-v22 recipient discovery must fail closed without consensus agent state")
 }

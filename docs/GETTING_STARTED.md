@@ -14,7 +14,7 @@ And because SAGE uses real consensus infrastructure (not just a JSON file), your
 
 ## Quick Install
 
-### From Source (Go 1.25.13+)
+### From Source (Go 1.26.8+)
 
 ```bash
 git clone https://github.com/l33tdawg/sage.git
@@ -27,7 +27,7 @@ sudo mv sage-gui /usr/local/bin/  # or add to your PATH
 
 ```bash
 sage-gui version
-# sage-gui v11.19.0
+# sage-gui v11.23.15
 ```
 
 ---
@@ -139,6 +139,20 @@ Prefer to bring your own? You can still point SAGE at any external TEI-compatibl
 
 ---
 
+## Optional memory-quality judge
+
+v11.23.14 adds a managed local judge to the experimental memory gate. It is
+**off by default**. On a personal SQLite node, set
+`SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v15` in the node's environment before
+starting it. SAGE downloads and verifies the pinned model in the background;
+memories wait for review while the judge is unavailable. The current managed
+adapter judges every domain; Hunch's include/exempt settings apply only to the
+Hunch service adapter.
+
+Review held memories in **Settings → Memory gate**. An operator decision still
+has to pass the built-in voter checks. Read the [memory-gate guide](reference/write-gate.md)
+for setup, evidence uploads, and the qualification limits before enabling it.
+
 ## Connect an AI tool
 
 The dashboard's **Connect an AI tool** flow (in the onboarding wizard, and on the Settings > Connection tab) writes the config for you. It first asks the one question that matters - is the tool on **this** computer, or **another** one - and then branches into three flows:
@@ -197,7 +211,7 @@ sage-gui setup
 
 ### 3. Start using it
 
-Just chat normally. SAGE v11.19.0 advertises 33 MCP tools. The core workflow is:
+Just chat normally. SAGE v11.23.15 advertises 35 MCP tools. The core workflow is:
 
 | Tool | What it does |
 |------|-------------|
@@ -226,6 +240,24 @@ corroboration tools complete the advertised set. See the authoritative
 [`reference/mcp-tools.md`](reference/mcp-tools.md). Deprecated `sage_pipe*`
 compatibility aliases remain callable for older clients but are intentionally
 absent from tool discovery.
+
+Message claims belong to a runtime identity, not merely to the agent key.
+`sage_inbox` reports `claimant_identity_mode` and includes `claim_revision` in
+claim coordination metadata. A takeover is always explicit: first decide that
+the prior claimant is gone, then pass its exact `claimant_session_id` and
+`claim_revision` to `sage_message_handoff`. SAGE does not auto-steal claims
+because they are old. Stdio, Streamable HTTP, and SSE each reuse a durable
+transport-scoped claimant identity when safe; corrupt identity state fails
+closed, while a genuinely concurrent runtime receives its own ephemeral fence.
+
+Claude Code and Codex hooks also compare the signed, payload-free inbox activity
+`{version,epoch,seq}` state. The opaque 32-character database-incarnation epoch
+survives restart and backup restore but changes with a fresh database, so a
+preserved host cursor cannot suppress new activity after reinitialization. A
+fresh assignment or reply can therefore be surfaced at the next
+prompt even when it is not unfinished message work. This does not wake an
+already-idle task, and replies/tasks never make the Stop hook block: message
+wake remains the separate exact `{version,seq,pending}` unfinished-work state.
 
 ### First Time: Inception
 

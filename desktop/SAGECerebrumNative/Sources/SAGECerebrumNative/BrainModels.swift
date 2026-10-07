@@ -554,12 +554,3 @@ struct RelatedMemory: Decodable, Equatable, Hashable, Identifiable, Sendable {
         case memoryType = "memory_type"
     }
 }
-
-private enum RFC3339Timestamp {
-    static func parse(_ value: String) -> Date? {
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractional.date(from: value) { return date }
-        return ISO8601DateFormatter().date(from: value)
-    }
-}

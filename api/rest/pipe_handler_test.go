@@ -871,6 +871,23 @@ func TestHandlePipeResult_ForeignWorkNeverAutoJournals(t *testing.T) {
 	assert.NotContains(t, ownedStatus.Body.String(), "foreign result must stay transient")
 	assert.NotContains(t, ownedStatus.Body.String(), `"workflow_status"`)
 
+	require.NoError(t, memStore.RecordPipelineTransportFailure(ctx, response.ReplyEventID,
+		"peer rejected the signed reply", time.Now(), true))
+	failedReplay := requestResult(body)
+	require.Equal(t, http.StatusOK, failedReplay.Code, failedReplay.Body.String())
+	var failedResponse map[string]any
+	require.NoError(t, json.Unmarshal(failedReplay.Body.Bytes(), &failedResponse))
+	require.Equal(t, response.ReplyEventID, failedResponse["reply_event_id"])
+	require.Equal(t, true, failedResponse["idempotent_replay"])
+	require.Equal(t, "failed", failedResponse["reply_status"])
+	require.Equal(t, "failed", failedResponse["transport_status"])
+	require.Equal(t, "peer rejected the signed reply", failedResponse["last_error"])
+	require.Contains(t, failedResponse["security_notice"], "Untrusted")
+	failedStatus := replyStatusRequest(recipient, response.ReplyEventID)
+	require.Contains(t, failedStatus.Body.String(), `"reply_status":"failed"`)
+	require.Contains(t, failedStatus.Body.String(), `"last_error":"peer rejected the signed reply"`)
+	require.NotContains(t, failedStatus.Body.String(), "foreign result must stay transient")
+
 	absentStatus := replyStatusRequest(foreignAgent, "missing-reply-event")
 	foreignStatus := replyStatusRequest(foreignAgent, response.ReplyEventID)
 	require.Equal(t, http.StatusNotFound, foreignStatus.Code)
@@ -1046,6 +1063,10 @@ func (s *contendedInboxStore) ClaimPipeline(context.Context, string, string) err
 	return nil
 }
 
+func (s *contendedInboxStore) ClaimExactLocalMessageWithSession(context.Context, string, string, string) error {
+	return s.ClaimPipeline(context.Background(), "contended", "winner")
+}
+
 func TestHandlePipeInboxReturnsOnlyCASWinner(t *testing.T) {
 	baseServer, sqliteStore := newPipeServer(t)
 	contended := &contendedInboxStore{SQLiteStore: sqliteStore, release: make(chan struct{})}
@@ -1085,6 +1106,79 @@ func TestHandlePipeInboxReturnsOnlyCASWinner(t *testing.T) {
 		total += got.response.Count
 	}
 	require.Equal(t, 1, total, "only the successful compare-and-swap claimant may receive the work")
+}
+
+func TestHandlePipeInboxExactLocalClaimAlwaysCreatesSessionReceipt(t *testing.T) {
+	s, sqlite := newPipeServer(t)
+	addMessageAgent(t, sqlite, "alice")
+	addMessageAgent(t, sqlite, "bob")
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, sqlite.InsertPipeline(t.Context(), &store.PipelineMessage{
+		PipeID: "pipe-exact-receipt", FromAgent: "alice", ToAgent: "bob", Payload: "work",
+		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+
+	rr := httptest.NewRecorder()
+	pipeRouterAs(s, "bob").ServeHTTP(rr, httptest.NewRequest(http.MethodGet,
+		"/v1/pipe/inbox?claimant_session_id=session-b", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var response struct {
+		Items []store.PipelineMessage `json:"items"`
+		Count int                     `json:"count"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &response))
+	require.Equal(t, 1, response.Count)
+	require.Len(t, response.Items, 1)
+	require.Equal(t, "session-b", response.Items[0].ClaimedSessionID)
+
+	own, total, err := sqlite.GetOwnClaimedUnfinishedMessages(t.Context(), "bob", "session-b", 20)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, own, 1, "pipe compatibility claim must be recoverable by the exact session")
+}
+
+func TestHandlePipeClaimExactLocalAlwaysCreatesSessionReceipt(t *testing.T) {
+	s, sqlite := newPipeServer(t)
+	addMessageAgent(t, sqlite, "alice")
+	addMessageAgent(t, sqlite, "bob")
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, sqlite.InsertPipeline(t.Context(), &store.PipelineMessage{
+		PipeID: "pipe-explicit-receipt", FromAgent: "alice", ToAgent: "bob", Payload: "work",
+		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+
+	rr := httptest.NewRecorder()
+	pipeRouterAs(s, "bob").ServeHTTP(rr, httptest.NewRequest(http.MethodPut,
+		"/v1/pipe/pipe-explicit-receipt/claim?claimant_session_id=session-b", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), `"claim_revision":0`)
+
+	own, total, err := sqlite.GetOwnClaimedUnfinishedMessages(t.Context(), "bob", "session-b", 20)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, own, 1, "explicit compatibility claim must be recoverable without waiting for restart migration")
+}
+
+func TestHandlePipeClaimPreservesOperatorContractWithRecoveryFence(t *testing.T) {
+	s, sqlite := newPipeServer(t)
+	s.nodeOperatorID = "operator"
+	addMessageAgent(t, sqlite, "alice")
+	addMessageAgent(t, sqlite, "bob")
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	require.NoError(t, sqlite.InsertPipeline(t.Context(), &store.PipelineMessage{
+		PipeID: "pipe-operator-receipt", FromAgent: "alice", ToAgent: "bob", Payload: "work",
+		Status: "pending", CreatedAt: now, ExpiresAt: now.Add(time.Hour),
+	}))
+
+	rr := httptest.NewRecorder()
+	pipeRouterAs(s, "operator").ServeHTTP(rr, httptest.NewRequest(http.MethodPut,
+		"/v1/pipe/pipe-operator-receipt/claim?claimant_session_id=operator-session", nil))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	own, total, err := sqlite.GetOwnClaimedUnfinishedMessages(t.Context(), "operator", "operator-session", 20)
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, own, 1)
+	require.Equal(t, "bob", own[0].ToAgent)
 }
 
 func TestEmptyPipelineCollectionsEncodeAsArrays(t *testing.T) {

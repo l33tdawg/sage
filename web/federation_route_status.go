@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"strings"
 
@@ -60,6 +61,21 @@ func federationDashboardFailureState(err error, route federation.RouteDiagnostic
 		strings.Contains(message, "no p2p dialer"),
 		strings.Contains(message, "route bundle") && strings.Contains(message, "missing"):
 		return "route_bundle_missing"
+	// A deadline or a mid-handshake close is a transport verdict, not a
+	// statement about the relay. These are evaluated BEFORE the relay case
+	// below: a relayed path that is merely slow used to be reported as "Secure
+	// relay unavailable", which sends the operator to inspect a relay that is
+	// in fact working.
+	case errors.Is(err, context.DeadlineExceeded),
+		strings.Contains(message, "deadline exceeded"),
+		strings.Contains(message, "context deadline"):
+		return "timeout"
+	case strings.Contains(message, "handshake"),
+		strings.Contains(message, "eof"),
+		strings.Contains(message, "connection reset"),
+		strings.Contains(message, "stream reset"),
+		strings.Contains(message, "broken pipe"):
+		return "handshake_failed"
 	case strings.Contains(message, "relay") && (strings.Contains(message, "unavailable") || strings.Contains(message, "failed")):
 		return "relay_unavailable"
 	case strings.Contains(message, "direct") && (strings.Contains(message, "stale") || strings.Contains(message, "unavailable")):

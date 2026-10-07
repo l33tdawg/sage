@@ -19,10 +19,32 @@ import (
 )
 
 const (
-	PipeEventVersion        = 1
-	pipeEventResultLifetime = 24 * time.Hour
-	maxPipeProofBytes       = 1 << 20
+	PipeEventVersion = 1
+	// PipeEventResultLifetime is how long after its signed proof a federated reply
+	// stays admissible. Sender and destination both derive it from the proof
+	// timestamp and compare instants, so a change here is a wire change: every
+	// node has to accept the new value before any node sends it.
+	PipeEventResultLifetime = 7 * 24 * time.Hour
+	// legacyPipeEventResultLifetime is the window shipped through v11.19.x. A
+	// destination keeps admitting it so a peer that has not adopted the longer
+	// window can still return the result of work this node sent. Nothing outside
+	// this pair is ever accepted or sent.
+	legacyPipeEventResultLifetime = 24 * time.Hour
+	maxPipeProofBytes             = 1 << 20
+	// receiptEvidenceGrace bounds how far past a message's own expiry a peer may
+	// still present claim/read evidence for it. Deliberately independent of
+	// PipeEventResultLifetime: widening the reply window must not widen the window
+	// in which late evidence about a message is believable.
+	receiptEvidenceGrace = 24 * time.Hour
 )
+
+// acceptedResultLifetime reports whether expires is exactly a reply window this
+// node is allowed to honour: the current one, or the legacy value a peer that
+// upgrades on its own schedule may still stamp.
+func acceptedResultLifetime(created, expires time.Time) bool {
+	return expires.Equal(created.Add(PipeEventResultLifetime)) ||
+		expires.Equal(created.Add(legacyPipeEventResultLifetime))
+}
 
 var (
 	ErrFederatedPipeSuspended = errors.New("federated pipeline delivery is temporarily suspended")
@@ -88,9 +110,12 @@ type signedPipeSendRequest struct {
 }
 
 type signedPipeResultRequest struct {
-	Result        string `json:"result"`
-	SourcePipeID  string `json:"source_pipe_id"`
-	SourceChainID string `json:"source_chain_id"`
+	// The completing node enforces this local claim fence before queuing the
+	// signed reply. Peers preserve it in the proof, but it grants no remote authority.
+	ClaimantSessionID string `json:"claimant_session_id,omitempty"`
+	Result            string `json:"result"`
+	SourcePipeID      string `json:"source_pipe_id"`
+	SourceChainID     string `json:"source_chain_id"`
 }
 
 // PipelineProofHash is the stable replay identity for an already-verified
@@ -206,7 +231,7 @@ func (m *Manager) authorizeInboundPipeContact(ctx context.Context, peer *peerIde
 	if err != nil {
 		return nil, err
 	}
-	grant, err := m.buildPipeContactGrantForCandidates(ctx, boundPeer, policy, agents, []string{event.TargetAgentID}, false, nil, true)
+	grant, err := m.buildPipeContactGrantForCandidates(ctx, boundPeer, policy, agents, []string{event.TargetAgentID}, false, nil, true, event.AuthorizationMode)
 	if err != nil {
 		return nil, err
 	}
@@ -403,10 +428,10 @@ func prevalidatePipeEventAgentProof(event *PipeEvent) error {
 			return errors.New("signed result request does not match the pipeline event")
 		}
 		created := time.Unix(event.Proof.Timestamp, 0).UTC()
-		expires := created.Add(pipeEventResultLifetime)
 		now := time.Now().UTC()
-		if !event.CreatedAt.Equal(created) || !event.ExpiresAt.Equal(expires) ||
-			now.After(expires) || created.After(now.Add(maxTimestampSkew)) {
+		if !event.CreatedAt.Equal(created) ||
+			!acceptedResultLifetime(created, event.ExpiresAt) ||
+			now.After(event.ExpiresAt) || created.After(now.Add(maxTimestampSkew)) {
 			return errors.New("signed pipeline result lifetime is invalid or expired")
 		}
 	default:
@@ -442,7 +467,7 @@ func (m *Manager) handlePipeEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch event.AuthorizationMode {
-	case "":
+	case "", NodeMessageAuthorizationMode:
 		if event.LinkedRelation != nil {
 			httpError(w, http.StatusBadRequest, "pipeline authorization binding is invalid")
 			return
@@ -467,6 +492,13 @@ func (m *Manager) handlePipeEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := prevalidatePipeEventAgentProof(&event); err != nil {
+		// The caller keeps getting one opaque refusal so this route cannot be used
+		// as an oracle about its own proofs, but the operator still needs to know
+		// why a peer's reply was refused. Without this line the only record of a
+		// rejection is the sender's generic "invalid pipeline agent proof", which
+		// is not attributable to a cause from either side.
+		m.logger.Warn().Err(err).Str("peer", peer.ChainID).Str("kind", event.Kind).
+			Str("event_id", event.EventID).Msg("federated pipeline agent proof rejected")
 		httpError(w, http.StatusBadRequest, "invalid pipeline agent proof")
 		return
 	}
@@ -520,11 +552,12 @@ func (m *Manager) handlePipeEvent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var localPipeID string
+	var wakeSeq uint64
 	var duplicate bool
 	var err error
 	switch event.Kind {
 	case "send":
-		localPipeID, duplicate, err = m.admitPipeSend(r.Context(), ss, peer, &event)
+		localPipeID, duplicate, wakeSeq, err = m.admitPipeSend(r.Context(), ss, peer, &event)
 	case "result":
 		localPipeID, duplicate, err = m.applyPipeResult(r.Context(), ss, peer, &event)
 	default:
@@ -562,6 +595,7 @@ func (m *Manager) handlePipeEvent(w http.ResponseWriter, r *http.Request) {
 	unlock()
 	locksHeld = false
 	if event.Kind == "send" && !duplicate {
+		m.notifyMessageWake(event.TargetAgentID, wakeSeq)
 		m.notifyAdmittedMessage(event.TargetAgentID, AgentMessageNotification{
 			MessageID: localPipeID, FromAgent: event.SourceAgentID, CreatedAt: event.CreatedAt,
 		})
@@ -585,10 +619,10 @@ func (m *Manager) notifyAdmittedMessage(targetAgentID string, notification Agent
 	}()
 }
 
-func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity, event *PipeEvent) (string, bool, error) {
+func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity, event *PipeEvent) (string, bool, uint64, error) {
 	if event.OriginEventID != "" || event.SourcePipeID != "" || event.Payload == "" || event.Result != "" ||
 		event.TargetAgentID == "" {
-		return "", false, fmt.Errorf("send event shape is invalid")
+		return "", false, 0, fmt.Errorf("send event shape is invalid")
 	}
 	var contact *PipeContact
 	var err error
@@ -598,15 +632,15 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 		contact, err = m.authorizeInboundPipeContact(ctx, peer, event)
 	}
 	if err != nil {
-		return "", false, err
+		return "", false, 0, err
 	}
 	method, path, body, err := verifyPipelineAgentProof(event.Proof)
 	if err != nil || method != http.MethodPost || path != "/v1/pipe/send" {
-		return "", false, fmt.Errorf("send proof does not authorize the pipe endpoint: %w", err)
+		return "", false, 0, fmt.Errorf("send proof does not authorize the pipe endpoint: %w", err)
 	}
 	var signed signedPipeSendRequest
 	if decodeErr := decodeStrictPipeJSON(body, &signed); decodeErr != nil {
-		return "", false, fmt.Errorf("decode signed pipe send: %w", decodeErr)
+		return "", false, 0, fmt.Errorf("decode signed pipe send: %w", decodeErr)
 	}
 	targetMatches := signed.ToProvider == "" &&
 		signed.ToAgent == event.TargetAgentID &&
@@ -616,17 +650,17 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 		targetMatches = targetMatches && contact.AgentID == event.TargetAgentID
 	}
 	if signed.Payload != event.Payload || signed.Intent != event.Intent || !targetMatches {
-		return "", false, fmt.Errorf("signed send request does not match the pipeline event")
+		return "", false, 0, fmt.Errorf("signed send request does not match the pipeline event")
 	}
 	created := time.Unix(event.Proof.Timestamp, 0).UTC()
 	expires := created.Add(normalizedPipeTTL(signed.TTLMinutes))
 	now := time.Now().UTC()
 	if !event.CreatedAt.Equal(created) || !event.ExpiresAt.Equal(expires) || now.After(expires) || created.After(now.Add(maxTimestampSkew)) {
-		return "", false, fmt.Errorf("signed pipeline lifetime is invalid or expired")
+		return "", false, 0, fmt.Errorf("signed pipeline lifetime is invalid or expired")
 	}
 	localID, err := newImportedPipeID()
 	if err != nil {
-		return "", false, err
+		return "", false, 0, err
 	}
 	msg := &store.PipelineMessage{
 		PipeID: localID, FromAgent: event.SourceAgentID, ToAgent: event.TargetAgentID,
@@ -642,23 +676,23 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 	if event.LinkedRelation != nil {
 		msg.FederationLinkedRelation, err = json.Marshal(event.LinkedRelation)
 		if err != nil {
-			return "", false, ErrFederatedPipeInvalid
+			return "", false, 0, ErrFederatedPipeInvalid
 		}
 	}
 	switch event.ReceiptProtocolVersion {
 	case 0:
 		if event.ReceiptContentDigest != "" {
-			return "", false, fmt.Errorf("legacy send cannot carry receipt-v2 evidence")
+			return "", false, 0, fmt.Errorf("legacy send cannot carry receipt-v2 evidence")
 		}
 	case PipeReceiptVersion:
 		if m.postV26ForNextTx == nil || !m.postV26ForNextTx() ||
 			event.ReceiptContentDigest != pipeReceiptContentDigest(
 				event.EventID, event.SourceChainID, event.DestinationChainID, msg,
 			) {
-			return "", false, fmt.Errorf("receipt-v2 negotiation or content binding is invalid")
+			return "", false, 0, fmt.Errorf("receipt-v2 negotiation or content binding is invalid")
 		}
 	default:
-		return "", false, fmt.Errorf("unsupported receipt protocol version")
+		return "", false, 0, fmt.Errorf("unsupported receipt protocol version")
 	}
 	proofHash := PipelineProofHash(event.SourceChainID, event.Kind, event.Proof)
 	contentHash := pipeEventContentHash(event)
@@ -671,7 +705,8 @@ func (m *Manager) admitPipeSend(ctx context.Context, ss *store.SQLiteStore, peer
 		EventKind: event.Kind, RemotePipeID: event.EventID, ContentHash: contentHash[:], ProofHash: proofHash[:],
 		LocalPipeID: localID, Outcome: "accepted", ExpiresAt: expires.Add(maxTimestampSkew),
 	}
-	return ss.AdmitFederatedPipeline(ctx, msg, dedup)
+	id, duplicate, err := ss.AdmitFederatedPipeline(ctx, msg, dedup)
+	return id, duplicate, msg.WakeSeq, err
 }
 
 func (m *Manager) applyPipeResult(ctx context.Context, ss *store.SQLiteStore, peer *peerIdentity, event *PipeEvent) (string, bool, error) {
@@ -699,9 +734,9 @@ func (m *Manager) applyPipeResult(ctx context.Context, ss *store.SQLiteStore, pe
 		return "", false, fmt.Errorf("signed result request does not match the pipeline event")
 	}
 	created := time.Unix(event.Proof.Timestamp, 0).UTC()
-	expires := created.Add(pipeEventResultLifetime)
 	now := time.Now().UTC()
-	if !event.CreatedAt.Equal(created) || !event.ExpiresAt.Equal(expires) || now.After(expires) || created.After(now.Add(maxTimestampSkew)) {
+	if !event.CreatedAt.Equal(created) || !acceptedResultLifetime(created, event.ExpiresAt) ||
+		now.After(event.ExpiresAt) || created.After(now.Add(maxTimestampSkew)) {
 		return "", false, fmt.Errorf("signed pipeline result lifetime is invalid or expired")
 	}
 	sendEvent, err := ss.GetPipelineTransport(ctx, event.OriginEventID)
@@ -729,7 +764,7 @@ func (m *Manager) applyPipeResult(ctx context.Context, ss *store.SQLiteStore, pe
 		LinkedRelationDigest: linkedMessageRelationDigest(event.LinkedRelation),
 		SourceAgentID:        event.SourceAgentID, TargetAgentID: event.TargetAgentID,
 		EventKind: event.Kind, RemotePipeID: event.EventID, ContentHash: contentHash[:], ProofHash: proofHash[:],
-		LocalPipeID: sendEvent.PipeID, Outcome: "completed", ExpiresAt: expires.Add(maxTimestampSkew),
+		LocalPipeID: sendEvent.PipeID, Outcome: "completed", ExpiresAt: event.ExpiresAt.Add(maxTimestampSkew),
 	}
 	duplicate, err := ss.ApplyFederatedPipelineResult(ctx, sendEvent.PipeID, event.Result, dedup)
 	return sendEvent.PipeID, duplicate, err
@@ -755,4 +790,20 @@ func (m *Manager) PushPipeEvent(ctx context.Context, remoteChainID string, event
 		return nil, fmt.Errorf("peer %s returned invalid pipeline status %q", remoteChainID, out.Status)
 	}
 	return &out, nil
+}
+
+// SetMessageWakeNotifier attaches the REST durable wake bus during boot, before
+// serving requests. This is separate from the legacy HTTP-MCP metadata bridge.
+func (m *Manager) SetMessageWakeNotifier(notify func(string, uint64)) {
+	m.messageWakeNotifier = notify
+}
+
+func (m *Manager) notifyMessageWake(agentID string, seq uint64) {
+	if m.messageWakeNotifier == nil || agentID == "" || seq == 0 {
+		return
+	}
+	// Notification failure must not reinterpret a committed admission. A fresh
+	// connection reads the durable sequence even if this acceleration is lost.
+	defer func() { _ = recover() }()
+	m.messageWakeNotifier(agentID, seq)
 }

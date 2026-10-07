@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, v12-beta]
     tags-ignore: ['v*']
   pull_request:
-    branches: [main]
+    branches: [main, v12-beta]
 
 permissions:
   contents: read
@@ -43,8 +43,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          # Deliberately go-version-file, NOT go-version: '1.25'. A floating
-          # '1.25' resolves to the newest patch release, which would scan a
+          # Deliberately go-version-file, NOT go-version: '1.26'. A floating
+          # '1.26' resolves to the newest patch release, which would scan a
           # toolchain nobody is required to build with and hide the real
           # question. Scanning the version go.mod actually mandates is what
           # makes this job catch the floor drifting behind the stdlib fixes.
@@ -59,38 +59,98 @@ jobs:
           cd natter
           govulncheck ./...
 
-  test:
-    name: Test
+  # THE SUITE AND THE RACE CHECKS ARE INDEPENDENT, AND BOTH ARE SLOW. They used
+  # to be four sequential steps inside one 40-minute job, which made the JOB
+  # BUDGET the thing that failed rather than either suite: the plain suite takes
+  # 8-17 minutes depending on the runner and the race checks take ~23, so a slow
+  # suite run left the race step no room and it was cancelled at 40m00s (twice in
+  # one day, once on main and once on a PR). Parallel jobs give each suite its own
+  # budget and cut the wall clock to the longer of the two.
+  #
+  # `test` below is the FAN-IN, and it is what keeps the required "Test" status
+  # context meaningful: it fails when either suite fails, so branch protection
+  # still sees exactly one gate for both. Do not rename it without updating the
+  # required status checks on main.
+  test-suite:
+    name: Test Suite
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
+      # -timeout 30m, not 20m: internal/abci has crossed 20 minutes on a slow
+      # runner with a goroutine dump full of sqlite fsync and badger compaction,
+      # which is a package making progress, not a deadlock. Reporting it as hung
+      # failed a release-prep run. The job budget still bounds a genuine hang.
       - name: Run complete test suite
-        run: go test ./... -v -count=1 -timeout 20m
+        run: go test ./... -v -count=1 -timeout 30m
+
+  # ONE PACKAGE GROUP PER RUNNER. All eight race binaries used to share a single
+  # 4-core runner, where they competed for the same cores: on main (run
+  # 36101755840) internal/federation crossed its 25-minute per-package timeout
+  # and reported a package that was still making progress as hung -- the same
+  # package run alone under -race finishes in ~8.6 minutes, and every test in the
+  # dump was inside its own body, not blocked. -timeout 30m matches the plain
+  # suite's documented reasoning (a slow package is not a deadlock) and the job
+  # budget still bounds a genuine hang. The `test` fan-in is unchanged: it stays
+  # the single required "Test" context and fails when any group fails.
+  test-race:
+    name: Race Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: federation
+            packages: ./internal/federation
+          - group: messaging-p2p
+            packages: ./internal/mcp ./internal/p2p
+          - group: storage-snapshot
+            packages: ./internal/store ./internal/snapshot
+          - group: tx-statesync-rest
+            packages: ./internal/statesync ./internal/tx ./api/rest
+          - group: app-and-shell
+            packages: ''
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
       - name: Race-check shared-state boundaries
+        if: matrix.packages != ''
         run: >-
-          go test -race -count=1 -timeout 25m
-          ./api/rest
-          ./internal/store
-          ./internal/federation
-          ./internal/mcp
-          ./internal/p2p
-          ./internal/snapshot
-          ./internal/statesync
-          ./internal/tx
+          go test -race -count=1 -timeout 30m
+          ${{ matrix.packages }}
       - name: Race-check app and UI concurrency regressions
+        if: matrix.packages == ''
         run: >-
           go test -race -count=1 -timeout 5m
           -run 'Race|Concurrent|TOCTOU|Linear'
           ./internal/abci ./web
       - name: Run natter tests
+        if: matrix.packages == ''
         run: |
           cd natter
           go test ./... -v -count=1 -race
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [test-suite, test-race]
+    if: always()
+    steps:
+      - name: Both test suites passed
+        run: |
+          echo "test-suite: ${{ needs.test-suite.result }}"
+          echo "test-race:  ${{ needs.test-race.result }}"
+          test "${{ needs.test-suite.result }}" = "success"
+          test "${{ needs.test-race.result }}" = "success"
 
   v119-fault-gates:
     name: Consensus Fault Gates
@@ -118,13 +178,31 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
+          cache: npm
+      - run: npm ci
       - run: npm test
+      - name: Install Chromium for serverless fixtures
+        run: npx playwright install --with-deps chromium
+      - name: Federation browser fixtures (9 tests; no running node)
+        run: npm run test:e2e:fixtures
+
+  benchmark-protocol:
+    name: Benchmark Protocol (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: pip install -r bench/requirements-test.txt
+      - run: python -m unittest discover -s bench -p 'test_*.py' -v
 
   build:
     name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [lint, vulncheck, test, frontend-static, v119-fault-gates]
+    needs: [lint, vulncheck, test, frontend-static, benchmark-protocol, v119-fault-gates]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -141,6 +219,8 @@ jobs:
     timeout-minutes: 20
     env:
       POSTGRES_PASSWORD: ci_test_password
+      COMPOSE_PROJECT_NAME: sage-ci-byzantine
+      SAGE_BYZANTINE_NETWORK: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -151,19 +231,19 @@ jobs:
         run: bash deploy/init-testnet.sh
       - name: Start 4-validator network
         run: |
-          docker compose -f deploy/docker-compose.yml up -d --build
-          echo "Waiting for network to stabilize..."
-          # Poll REST API health endpoints until all 4 ABCI nodes are ready
+          docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.byzantine.yml up -d --build
+          echo "Waiting for all four Comet validators to commit blocks..."
+          # REST health alone does not establish a reachable, voting network.
           for i in $(seq 1 60); do
             ALL_UP=true
-            for port in 8080 8081 8082 8083; do
-              if ! curl -sf "http://localhost:${port}/health" > /dev/null 2>&1; then
+            for port in 26657 26757 26857 26957; do
+              if ! curl -sf --max-time 3 "http://127.0.0.1:${port}/status" | jq -e '.result.sync_info.latest_block_height | tonumber > 0' > /dev/null; then
                 ALL_UP=false
                 break
               fi
             done
             if [ "$ALL_UP" = true ]; then
-              echo "All 4 ABCI nodes healthy"
+              echo "All 4 Comet validators reachable with positive block heights"
               break
             fi
             echo "Waiting for nodes... (attempt $i/60)"
@@ -171,14 +251,14 @@ jobs:
           done
           if [ "$ALL_UP" != true ]; then
             echo "Nodes failed to start in time"
-            docker compose -f deploy/docker-compose.yml logs --tail=50
+            docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.byzantine.yml logs --tail=50
             exit 1
           fi
       - name: Run Byzantine fault tests
-        run: go test ./test/byzantine/... -v -count=1 -timeout 120s -tags=byzantine
+        run: go test ./test/byzantine/... -v -count=1 -timeout 5m -tags=byzantine
       - name: Stop network
         if: always()
-        run: docker compose -f deploy/docker-compose.yml down -v --remove-orphans
+        run: docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.byzantine.yml down -v --remove-orphans
 
   sdk-test:
     name: Python SDK Tests

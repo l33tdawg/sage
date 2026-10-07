@@ -468,7 +468,10 @@ func (r *BootStateSyncRuntime) activatePreparedBundleAuthorized(
 	}
 	if !statesync.SupportsAppVersion(expectedAppVersion) {
 		r.setBootStateSyncPhaseLocked(BootStateSyncFailed)
-		return errors.New("state sync activation requires supported app version 20, 21, 22, 23, 24, 25, 26, or 27")
+		return fmt.Errorf(
+			"state sync activation requires supported app version %s",
+			statesync.SupportedAppVersionList(),
+		)
 	}
 	if expectedHeight < r.bundle.expectedHeight ||
 		(expectedHeight == r.bundle.expectedHeight && !bytes.Equal(expectedHash, r.bundle.expectedHash)) ||

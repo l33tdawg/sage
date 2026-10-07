@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.19.0. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.23.15. Cite file:line when behavior is non-obvious. -->
 
 # SAGE Local Engines and First-Run Setup Reference (v11)
 
@@ -12,6 +12,13 @@ onboarding is a per-node UI flag, recall tuning is a per-node preference, and th
 `embedding_provider` stamp is an off-chain column on the SQLite mirror. None of it
 touches chain state. Normal memory submission (which does reach consensus) is
 documented in [`rest-api.md`](rest-api.md) and [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md).
+
+The reranker ships off by default (`internal/embedding/reranker_test.go`,
+`TestResolveRerankerConfig_DefaultsOff`). Its relevance and latency depend on
+the model, query and candidate set. The committed historical benchmark changed
+query expansion and reranking together and does not establish the reranker's
+isolated effect. See [benchmark evidence and the comparison plan](../../bench/REPRODUCIBILITY.md)
+before drawing quality or performance conclusions.
 
 All endpoints below live on the **dashboard listener** and normally use the
 dashboard's cookie/session auth (`authMiddleware`), not the Ed25519 signed-request
@@ -131,17 +138,23 @@ tools read: `recall_top_k` and `recall_min_confidence`. Routes at
 
 ### `GET /v1/dashboard/settings/recall`
 
-Returns the current values (`handleGetRecallSettings`, `web/handler.go:5333`).
+Returns the current values (`handleGetRecallSettings`, `web/handler.go:5339-5385`).
 
 **Response** (HTTP 200): `{"top_k": 5, "min_confidence": 70}`
 
-Defaults when unset: `top_k` = 5 (`web/handler.go:2451`), `min_confidence` = 70
-(percent; `web/handler.go:2458`). The 70% default catches observations (0.80+)
-and inferences (0.60+), not just facts.
+Defaults when unset: `top_k` = 5, `min_confidence` = 70 percent
+(`web/handler.go`, `handleGetRecallSettings`). The 70% floor admits facts and
+observations whose effective confidence remains at least 0.70; it excludes
+the base 0.60 inference tier and observations that have decayed below 0.70.
+The query floor applies before the top-K trim. `sage_recall` discloses the
+applied `confidence_floor`; a caller may explicitly lower `min_confidence`
+to inspect lower-confidence results within the same authorization scope
+(`api/rest/memory_handler.go`, `setFilterInfo`; `internal/mcp/tools.go`,
+`confidenceFloorDisclosure`; `internal/store/sqlite.go`, `QuerySimilar`).
 
 ### `POST /v1/dashboard/settings/recall`
 
-Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:5366`).
+Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:5407-5460`).
 
 **Request:** `{"top_k": 10, "min_confidence": 75}`
 **Response** (HTTP 200): `{"ok": true, "top_k": 10, "min_confidence": 75}`
@@ -380,7 +393,7 @@ means the feature is unavailable on this node and every endpoint returns
 > not treated as an incompatibility, so a good install is never blocked on an ambiguous signal.
 
 **Auth:** these routes carry `authMiddleware` **plus** a strict same-origin gate
-(`wizardSecurityGate`, `web/handler.go:1789-1802`, `web/handler.go:741`). Because setup
+(`wizardSecurityGate`, `web/handler.go:1850-1869`, `web/handler.go:764`). Because setup
 downloads and `chmod`s a binary and spawns `llama-server` as a subprocess, the same
 gate the ChatGPT / federation / network-join wizards use rejects any request whose
 `Origin` / `Sec-Fetch-Site` is not local, independent of cookie or session state - a
@@ -481,7 +494,7 @@ downloads the pinned OpenAI `tunnel-client` if needed, writes the profile, start
 the client in the background, and surfaces the final connector URL. Routes are
 registered by `RegisterChatGPTTunnelRoutes` (`web/chatgpt_tunnel_handler.go:30-35`)
 inside the same `wizardSecurityGate` group as the ChatGPT wizard
-(`web/handler.go:1789-1802`).
+(`web/handler.go:1850-1869`).
 
 **Auth:** these routes carry dashboard auth plus the strict same-origin wizard gate.
 They download a binary and spawn a subprocess, so a cross-origin browser tab must
@@ -647,7 +660,7 @@ any TEI-compatible server) with no SAGE-specific adapter; llama.cpp is the diale
 
 Each memory record carries an `embedding_provider` string recording **which embedder**
 produced its vector - distinct from `provider`, which is the submitting agent's LLM
-identity (`internal/memory/model.go:49-52`). The default legacy-compatible spaces are
+identity (`internal/memory/model.go:65-68`). The default legacy-compatible spaces are
 `ollama` (`nomic-embed-text`, 768 dimensions) and `hash` (768 dimensions); other
 model/dimension combinations use `provider:model:dimension` (or
 `provider:dimension`) via `embedding.SpaceID` (`internal/embedding/provider.go:53`).
@@ -657,7 +670,7 @@ admit only the exact active stamp (`internal/store/store.go:74-77`,
 `internal/store/sqlite.go:1370-1385`).
 
 **Why it is stamped at insert (v11 fix):** the off-chain record is stamped at insert
-time via `SupplementaryData.EmbeddingProvider` (`internal/memory/model.go:92-96`).
+time via `SupplementaryData.EmbeddingProvider` (`internal/memory/model.go:119-123`).
 Without it, every new memory would land at `embedding_provider = ''` and the dashboard
 would forever count it as "needs re-embed" even though its vector is already semantic
 (v11.0.2 release behavior).

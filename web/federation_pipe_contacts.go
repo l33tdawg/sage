@@ -23,6 +23,11 @@ type federationPipeContactTargetDriver interface {
 	LocalPipeContactsForAgent(context.Context, string, string) (*federation.PipeContactGrant, error)
 }
 
+type federationNodeContactDriver interface {
+	LocalNodeContacts(context.Context, string, string) (*federation.PipeContactGrant, error)
+	ListRemoteNodeContacts(context.Context, string, *federation.StatusResponse, string) (*federation.PipeContactLookupResponse, error)
+}
+
 // handleFedPipeContactsGet keeps CEREBRUM administrative: it returns the
 // local contacts this operator may enable for inbound requests and the peer's
 // read-only advertised contacts. It never sends or claims pipeline work.
@@ -69,6 +74,15 @@ func (h *DashboardHandler) handleFedPipeContactsGet(w http.ResponseWriter, r *ht
 		return
 	}
 	remote := (*federation.PipeContactGrant)(nil)
+	localNodes := (*federation.PipeContactGrant)(nil)
+	nodeDriver, supportsNodes := h.Federation.(federationNodeContactDriver)
+	if supportsNodes && requestedAgentID == "" {
+		localNodes, err = nodeDriver.LocalNodeContacts(r.Context(), chain, r.URL.Query().Get("local_cursor"))
+		if err != nil {
+			fedWriteErr(w, http.StatusConflict, "The agent directory changed. Refresh this connection.")
+			return
+		}
+	}
 	remoteKnown := false
 	if r.URL.Query().Get("live") != "0" {
 		ctx, cancel := context.WithTimeout(r.Context(), fedStatusTimeout)
@@ -76,11 +90,24 @@ func (h *DashboardHandler) handleFedPipeContactsGet(w http.ResponseWriter, r *ht
 		if status, statusErr := h.Federation.PeerStatus(ctx, chain); statusErr == nil && status != nil && status.PipeContacts != nil {
 			remote = status.PipeContacts
 			remoteKnown = true
+			if after := r.URL.Query().Get("remote_cursor"); after != "" {
+				if !supportsNodes {
+					fedWriteErr(w, http.StatusNotImplemented, "Update SAGE to browse more agents.")
+					return
+				}
+				page, pageErr := nodeDriver.ListRemoteNodeContacts(ctx, chain, status, after)
+				if pageErr != nil {
+					fedWriteErr(w, http.StatusBadGateway, "Could not load the next agent page. Retry when the peer is reachable.")
+					return
+				}
+				remote = page.Grant
+			}
 		}
 	}
 	fedWriteJSON(w, http.StatusOK, map[string]any{
 		"remote_chain_id":               chain,
 		"local_contacts":                local,
+		"local_node_contacts":           localNodes,
 		"remote_contacts":               remote,
 		"remote_known":                  remoteKnown,
 		"agent_owned_shareable_domains": ownedShareableDomains,

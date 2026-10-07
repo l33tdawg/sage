@@ -62,7 +62,7 @@ jobs:
         run: make test-cometbft-patch
 
   real-comet-chaos:
-    name: App-v27 real Comet/ABCI crash, partition, and state-sync gate
+    name: App-v28 real Comet/ABCI crash, partition, and state-sync gate
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # Independent of app-multiprocess: no needs.app-multiprocess.* reference
@@ -76,7 +76,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Test collision-safe source identity framing
         run: python3 deploy/scripts/v11.9-source-id-test.py
       - name: Compute exact v11.9 fixture source identity
@@ -89,7 +89,7 @@ jobs:
           fi
           echo "value=$source_id" >> "$GITHUB_OUTPUT"
       - name: Build cached ABCI image from this commit
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/Dockerfile.abci
@@ -102,7 +102,7 @@ jobs:
           cache-from: type=gha,scope=v119-chaos-abci
           cache-to: type=gha,mode=max,scope=v119-chaos-abci
       - name: Build cached CometBFT image
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: deploy/Dockerfile.node

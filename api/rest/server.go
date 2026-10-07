@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -38,6 +39,8 @@ import (
 type EventCallback func(eventType, memoryID, domain, content string, data any)
 
 type Server struct {
+	privateMedia atomic.Pointer[store.PrivateMediaStore]
+
 	router      chi.Router
 	cometbftRPC string
 	store       store.MemoryStore
@@ -60,7 +63,8 @@ type Server struct {
 	messageNotifier               func(AgentMessageNotification)
 	messageWakeMu                 sync.Mutex
 	messageWake                   *messageWakeBroker
-	messageWakeHeartbeat          time.Duration   // zero uses the production default; tests may shorten it
+	messageWakeHeartbeat          time.Duration // zero uses the production default; tests may shorten it
+	messageStorage                messageStorageBinding
 	suppCache                     SuppCacheWriter // Bridges off-chain data (embeddings) to ABCI for consensus-first writes
 	mempool                       *mempoolSampler // TTL-cached CometBFT mempool depth for backpressure signals
 	taskIdempotencyMu             sync.Mutex
@@ -484,6 +488,9 @@ func (s *Server) SetAppV23RootKeyResolver(
 // Root and non-Admin principals retain their normal envelopes. Consensus is
 // still authoritative; this broker is only the usable local proof producer.
 func (s *Server) signTx(parsed *tx.ParsedTx) error {
+	if len(s.signingKey) != ed25519.PrivateKeySize {
+		return fmt.Errorf("validator signing key is unavailable")
+	}
 	if err := s.embedAppV23LocalElevation(parsed); err != nil {
 		return err
 	}
@@ -632,12 +639,13 @@ func (s *Server) SetValidatorSigningKey(key ed25519.PrivateKey) error {
 	return nil
 }
 
-// DisableValidatorSigningKey explicitly closes the governance gateway. The
+// DisableValidatorSigningKey removes this server's validator signing key. The
 // embedding runtimes call this before attempting authoritative key injection,
 // preventing NewServer's legacy VALIDATOR_KEY_FILE fallback from remaining
 // enabled when an explicit --home/--validator-key-file load fails.
 func (s *Server) DisableValidatorSigningKey() {
 	s.validatorSigningKeyConfigured = false
+	s.signingKey = nil
 }
 
 // SetFederation wires the v11 federation transport. Must be called before the
@@ -645,6 +653,9 @@ func (s *Server) DisableValidatorSigningKey() {
 // every federation surface disabled.
 func (s *Server) SetFederation(f FederationService) {
 	s.federation = f
+	if source, ok := f.(interface{ SetMessageWakeNotifier(func(string, uint64)) }); ok {
+		source.SetMessageWakeNotifier(s.publishMessageWake)
+	}
 }
 
 // SetNodeOperatorID records the hex-encoded ed25519 public key that
@@ -697,6 +708,9 @@ func (s *Server) setupRouter() chi.Router {
 	r := chi.NewRouter()
 
 	// Global middleware
+	r.Use(messageStorageNoStore)
+	r.Use(workflowJournalNoStore)
+	r.Use(privateMediaNoStore)
 	r.Use(middleware.RequestLogger)
 	r.Use(middleware.RateLimitMiddleware())
 	corsOrigins := []string{"*"}
@@ -730,6 +744,7 @@ func (s *Server) setupRouter() chi.Router {
 
 		// Memory endpoints
 		r.Post("/v1/memory/submit", s.handleSubmitMemory)
+		r.Post("/v1/memory/evidence", s.handleUploadEvidence)
 		r.Post("/v1/memory/query", s.handleQueryMemory)
 		r.Post("/v1/memory/search", s.handleSearchMemory)
 		r.Post("/v1/memory/hybrid", s.handleHybridSearchMemory)
@@ -741,6 +756,7 @@ func (s *Server) setupRouter() chi.Router {
 		r.Post("/v1/memory/{memory_id}/corroborate", s.handleCorroborateMemory)
 		r.Put("/v1/memory/{memory_id}/task-status", s.handleUpdateTaskStatus)
 		r.Post("/v1/memory/link", s.handleLinkMemories)
+		r.Post("/v1/memory/links", s.handleGetLinksAmong)
 		r.Get("/v1/memory/tasks", s.handleGetOpenTasks)
 		r.Get("/v1/memory/list", s.handleListMemoriesAuth)
 		r.Get("/v1/memory/timeline", s.handleTimelineAuth)
@@ -846,8 +862,15 @@ func (s *Server) setupRouter() chi.Router {
 		r.Group(func(r chi.Router) {
 			r.Use(s.appV23PipelineAgentBoundary)
 			r.Post("/v1/messages", s.handleMessageSend)
+			r.Get("/v1/messages/storage", s.handleMessageStorageStatus)
+			r.Get("/v1/workflows", s.handleListWorkflowJournal)
+			r.Get("/v1/workflows/{uuid}", s.handleGetWorkflowJournal)
+			r.Put("/v1/workflows/{uuid}", s.handlePutWorkflowJournal)
+			r.Get("/v1/private-media/{uuid}", s.handleGetPrivateMedia)
+			r.Put("/v1/private-media/{uuid}", s.handlePutPrivateMedia)
 			r.Get("/v1/messages/wake", s.handleMessageWake)
 			r.Get("/v1/messages/wake-state", s.handleMessageWakeState)
+			r.Get("/v1/inbox/activity-state", s.handleInboxActivityState)
 			r.Get("/v1/messages/claimed-elsewhere", s.handleMessagesClaimedElsewhere)
 			r.Get("/v1/messages/own-claimed-unfinished", s.handleOwnClaimedUnfinishedMessages)
 			r.Post("/v1/messages/receive", s.handleMessagesReceive)
@@ -1126,32 +1149,32 @@ func (s *Server) StartTLS(addr string, tlsConfig *tls.Config) error {
 }
 
 const (
-	defaultEmbeddingHTTPTimeout = 30 * time.Second
-	restWriteTimeoutHeadroom    = 15 * time.Second
-	maxRESTWriteTimeout         = 10 * time.Minute
+	restReadTimeout          = 15 * time.Second
+	restWriteTimeoutHeadroom = 30 * time.Second
+	maxRESTWriteTimeout      = 10 * time.Minute
 )
 
-// embeddingAwareWriteTimeout keeps the outer REST writer alive longer than a
-// configured CPU embedding request. Without this, http.Server's historical
-// 15-second ceiling can discard a valid 30/60/120-second embed response. The
-// upper bound prevents an accidental duration such as 24h from turning every
-// response writer into an effectively unbounded resource reservation.
-func embeddingAwareWriteTimeout() time.Duration {
-	raw := strings.TrimSpace(os.Getenv("SAGE_EMBEDDING_TIMEOUT"))
-	if raw == "" {
-		raw = strings.TrimSpace(os.Getenv("SAGE_EMBED_TIMEOUT"))
-	}
-	embedTimeout := defaultEmbeddingHTTPTimeout
-	if raw != "" {
-		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
-			embedTimeout = parsed
+// restWriteTimeout covers the sequential submit lifecycle: embedding (including
+// retries), nonce-lease acquisition, consensus confirmation, then bounded
+// projection/tag bookkeeping and response delivery. A write deadline does not
+// cancel the detached authorized transaction: expiring it early discards a valid
+// acknowledgment and leaves the caller unable to distinguish success from
+// failure. Keep the existing resource cap, checking each addition for overflow.
+func restWriteTimeout() time.Duration {
+	var total time.Duration
+	for _, budget := range []time.Duration{
+		restReadTimeout,
+		embedding.HTTPCallBudget(),
+		tx.DefaultNonceLeaseMaxWait,
+		broadcastTxCommitTimeout(),
+		restWriteTimeoutHeadroom,
+	} {
+		if budget >= maxRESTWriteTimeout-total {
+			return maxRESTWriteTimeout
 		}
+		total += budget
 	}
-	writeTimeout := embedTimeout + restWriteTimeoutHeadroom
-	if writeTimeout > maxRESTWriteTimeout || writeTimeout < embedTimeout {
-		return maxRESTWriteTimeout
-	}
-	return writeTimeout
+	return total
 }
 
 func (s *Server) newHTTPServer(addr string, tlsConfig *tls.Config) *http.Server {
@@ -1159,8 +1182,8 @@ func (s *Server) newHTTPServer(addr string, tlsConfig *tls.Config) *http.Server 
 		Addr:         addr,
 		Handler:      s.router,
 		TLSConfig:    tlsConfig,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: embeddingAwareWriteTimeout(),
+		ReadTimeout:  restReadTimeout,
+		WriteTimeout: restWriteTimeout(),
 		IdleTimeout:  60 * time.Second,
 	}
 }

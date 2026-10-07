@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,20 +12,24 @@ import (
 	"strings"
 )
 
+var errDurableClaimantIdentityBusy = errors.New("durable claimant identity is owned by a live concurrent runtime")
+
 type durableClaimantIdentity struct {
 	Version           int    `json:"version"`
 	AgentID           string `json:"agent_id"`
 	Provider          string `json:"provider"`
 	Project           string `json:"project"`
+	TransportScope    string `json:"transport_scope,omitempty"`
 	ClaimantSessionID string `json:"claimant_session_id"`
 }
 
-// acquireDurableClaimantIdentity gives the primary stdio runtime for one
-// (agent, provider, project) tuple a claimant identity that survives ordinary
-// process restarts. The OS lock is the liveness fence: a concurrent runtime
-// cannot reuse the durable identity and must keep its independently generated
-// session ID, preserving one-handler and CAS-handoff semantics.
-func acquireDurableClaimantIdentity(agentID, provider, project string) (string, io.Closer, error) {
+// acquireDurableClaimantIdentity gives the primary runtime for one stable scope
+// a claimant identity that survives ordinary process restarts. Empty
+// transportScope preserves the historical stdio path; HTTP callers add their
+// server-derived bearer scope. The OS lock is the liveness fence. Contention is
+// distinct from storage failure because only a live competitor may safely make
+// this runtime use an independent ephemeral identity.
+func acquireDurableClaimantIdentity(agentID, provider, project, transportScope string) (string, io.Closer, error) {
 	home := strings.TrimSpace(os.Getenv("SAGE_HOME"))
 	if home == "" {
 		userHome, err := os.UserHomeDir()
@@ -33,7 +38,11 @@ func acquireDurableClaimantIdentity(agentID, provider, project string) (string, 
 		}
 		home = filepath.Join(userHome, ".sage")
 	}
-	scope := sha256.Sum256([]byte(agentID + "\x00" + provider + "\x00" + project))
+	scopeInput := agentID + "\x00" + provider + "\x00" + project
+	if transportScope != "" {
+		scopeInput += "\x00" + transportScope
+	}
+	scope := sha256.Sum256([]byte(scopeInput))
 	dir := filepath.Join(home, "runtime", "mcp-claimants")
 	if err := os.MkdirAll(dir, 0700); err != nil { //nolint:gosec // operator-selected SAGE_HOME, scope leaf is a local hash
 		return "", nil, fmt.Errorf("create claimant identity directory: %w", err)
@@ -44,16 +53,22 @@ func acquireDurableClaimantIdentity(agentID, provider, project string) (string, 
 		return "", nil, err
 	}
 	if !acquired {
-		return "", nil, fmt.Errorf("durable claimant identity is owned by a live concurrent runtime")
+		return "", nil, errDurableClaimantIdentityBusy
 	}
 
 	identityPath := filepath.Join(dir, base+".json")
 	if raw, readErr := os.ReadFile(identityPath); readErr == nil { //nolint:gosec // private path under SAGE_HOME
 		var saved durableClaimantIdentity
 		if json.Unmarshal(raw, &saved) == nil && saved.Version == 1 && saved.AgentID == agentID &&
-			saved.Provider == provider && saved.Project == project && validMCPClaimantSessionID(saved.ClaimantSessionID) {
+			saved.Provider == provider && saved.Project == project && saved.TransportScope == transportScope &&
+			validMCPClaimantSessionID(saved.ClaimantSessionID) {
 			return saved.ClaimantSessionID, lease, nil
 		}
+		_ = lease.Close()
+		return "", nil, fmt.Errorf("durable claimant identity is corrupt or does not match its scope")
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		_ = lease.Close()
+		return "", nil, fmt.Errorf("read durable claimant identity: %w", readErr)
 	}
 
 	id := newMCPClaimantSessionID()
@@ -62,7 +77,8 @@ func acquireDurableClaimantIdentity(agentID, provider, project string) (string, 
 		return "", nil, fmt.Errorf("generate durable claimant identity")
 	}
 	record := durableClaimantIdentity{
-		Version: 1, AgentID: agentID, Provider: provider, Project: project, ClaimantSessionID: id,
+		Version: 1, AgentID: agentID, Provider: provider, Project: project,
+		TransportScope: transportScope, ClaimantSessionID: id,
 	}
 	raw, err := json.Marshal(record)
 	if err != nil {
@@ -98,6 +114,13 @@ func acquireDurableClaimantIdentity(agentID, provider, project string) (string, 
 	if renameErr := os.Rename(tmpPath, identityPath); renameErr != nil { //nolint:gosec // both paths are fixed children of the private claimant directory
 		_ = lease.Close()
 		return "", nil, fmt.Errorf("persist claimant identity: %w", renameErr)
+	}
+	// Sync the directory entry as well as the file contents where the platform
+	// supports it. Without this Unix fence, a crash after rename can lose an
+	// identity that this process already acknowledged.
+	if syncErr := syncClaimantIdentityDirectory(dir); syncErr != nil {
+		_ = lease.Close()
+		return "", nil, syncErr
 	}
 	return id, lease, nil
 }

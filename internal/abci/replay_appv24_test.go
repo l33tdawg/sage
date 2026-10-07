@@ -16,7 +16,7 @@ import (
 
 func TestAppV24ConstantsAndStrictForkBoundary(t *testing.T) {
 	require.Equal(t, tx.CanonicalUpgradeName(24), appV24UpgradeName)
-	require.Equal(t, uint64(27), MaxSupportedAppVersion())
+	require.Equal(t, uint64(28), MaxSupportedAppVersion())
 
 	app := setupTestApp(t)
 	app.appV24AppliedHeight = 50

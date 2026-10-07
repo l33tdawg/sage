@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,14 +21,25 @@ import (
 
 // capturedTxs records the decoded vote txs a stub CometBFT RPC receives.
 type capturedTxs struct {
-	mu  sync.Mutex
-	txs []*tx.ParsedTx
+	mu     sync.Mutex
+	txs    []*tx.ParsedTx
+	hashes map[string]bool
 }
 
-func (c *capturedTxs) add(parsed *tx.ParsedTx) {
+func (c *capturedTxs) add(parsed *tx.ParsedTx, hash string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.txs = append(c.txs, parsed)
+	if c.hashes == nil {
+		c.hashes = make(map[string]bool)
+	}
+	c.hashes[hash] = true
+}
+
+func (c *capturedTxs) hasHash(hash string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hashes[hash]
 }
 
 func (c *capturedTxs) all() []*tx.ParsedTx {
@@ -36,11 +48,31 @@ func (c *capturedTxs) all() []*tx.ParsedTx {
 	return append([]*tx.ParsedTx(nil), c.txs...)
 }
 
-// captureServer stands in for CometBFT's /broadcast_tx_sync, decoding each
-// broadcast vote tx so the test can assert on it.
+// captureServer commits each decoded broadcast in the mock. Its /tx route
+// proves only captured hashes, including when cancellation hides the reply.
 func captureServer(t *testing.T, cap *capturedTxs) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return httptest.NewServer(captureHandler(t, cap))
+}
+
+func captureHandler(t *testing.T, cap *capturedTxs) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tx":
+			hash := strings.ToUpper(strings.TrimPrefix(r.URL.Query().Get("hash"), "0x"))
+			if cap.hasHash(hash) {
+				_, _ = fmt.Fprintf(w, `{"result":{"hash":%q,"height":"1","tx_result":{"code":0}}}`, hash)
+			} else {
+				_, _ = fmt.Fprintf(w, `{"error":{"code":-32603,"message":"Internal error","data":%q}}`, "tx ("+hash+") not found")
+			}
+			return
+		case "/broadcast_tx_sync", "/broadcast_tx_commit":
+		default:
+			t.Errorf("unexpected Comet RPC path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
 		q := strings.TrimPrefix(r.URL.Query().Get("tx"), "0x")
 		raw, err := hex.DecodeString(q)
 		if err != nil {
@@ -52,10 +84,15 @@ func captureServer(t *testing.T, cap *capturedTxs) *httptest.Server {
 			t.Errorf("decode tx: %v", err)
 			return
 		}
-		cap.add(parsed)
 		hash := tx.CometTxHash(raw)
-		_, _ = w.Write([]byte(`{"result":{"code":0,"hash":"` + strings.ToUpper(hex.EncodeToString(hash[:])) + `"}}`))
-	}))
+		hashHex := strings.ToUpper(hex.EncodeToString(hash[:]))
+		cap.add(parsed, hashHex)
+		if r.URL.Path == "/broadcast_tx_commit" {
+			_, _ = fmt.Fprintf(w, `{"result":{"hash":%q,"height":"1","check_tx":{"code":0},"tx_result":{"code":0}}}`, hashHex)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"result":{"code":0,"hash":%q}}`, hashHex)
+	})
 }
 
 func unavailableAdmissionServer(requests *atomic.Int64) *httptest.Server {
@@ -84,7 +121,7 @@ func (f *fakeStore) GetPendingByDomainPage(_ context.Context, _ string, limit, o
 	end := min(len(f.pending), offset+limit)
 	return f.pending[offset:end], nil
 }
-func (f *fakeStore) FindByContentHash(_ context.Context, h string) (bool, error) {
+func (f *fakeStore) FindByContentHash(_ context.Context, h, _ string) (bool, error) {
 	return f.dups[h], nil
 }
 func (f *fakeStore) OldestProposedCreatedAt(_ context.Context) (time.Time, bool, error) {
