@@ -1,6 +1,6 @@
 # v12 native product status
 
-**Baseline status date:** 2026-08-24 · **Latest native evidence:** 2026-10-06
+**Baseline status date:** 2026-08-24 · **Latest native evidence:** 2026-10-08
 
 **August product baseline:** SAGE v11.19.0 / app-v27
 
@@ -27,10 +27,15 @@ of the earlier sections' open items. The Swift daemon guard still accepts
 v11.10–11.19 / v12.0 beta, and the native product baseline has not advanced.
 
 PR #417 integrates its Brain command/focus changes with this beta state.
-Its October 5 runtime evidence applies to the recorded older head; the combined
-candidate requires fresh CI. Source integration does not establish installed
-release, physical keyboard/HID, audible VoiceOver, signing or notarization
-acceptance.
+Integrated head `39d090b5` passed 107 Swift tests and all 21 packaged v5
+app-scene assertions in [CI run 37657293088](https://github.com/l33tdawg/sage/actions/runs/37657293088).
+The separate full web race suite exhausted its 20-minute package budget while
+still populating SQLite fixtures, so the follow-on CI repair gives that complete
+suite a separate 30-minute budget and retains independent transport/session gates.
+Fresh CI must qualify that follow-on head before merge. October 5 external AX
+evidence remains bound to its older source. These results do not establish
+installed release, physical keyboard/HID, audible VoiceOver, signing or
+notarization acceptance.
 
 ## Stable parity audit — 2026-10-05
 

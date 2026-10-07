@@ -27,6 +27,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native-security:
+    name: Native identity and bootstrap authorization
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Verify native identity and bootstrap authorization
+        run: |
+          mkdir -p dist/v12-native/bootstrap-validation
+          set -o pipefail
+          # After 745 top-level web tests passed, the full race suite exhausted
+          # 20 minutes while still populating a SQLite fixture. Preserve every
+          # test with a 30-minute package budget and separate compile headroom.
+          CGO_ENABLED=1 go test -timeout 30m -race -json ./internal/nativeidentity ./internal/nativebootstrap ./internal/shellcontrol ./web > dist/v12-native/bootstrap-validation/go-security.jsonl
+          CGO_ENABLED=0 go test ./internal/nativeidentity
+          go vet ./internal/nativeidentity ./internal/nativebootstrap ./internal/shellcontrol
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: sage-v12-native-security-${{ github.sha }}
+          path: dist/v12-native/bootstrap-validation/
+          if-no-files-found: error
+          retention-days: 14
+
+  # Qualification consumes no security-job output; both remain independent gates.
   qualify:
     name: Real Swift transport, encrypted AppSession and governed app-v28 beta daemon
     runs-on: macos-15
@@ -47,13 +79,6 @@ jobs:
           test -d "${DEVELOPER_DIR}"
           xcodebuild -version
           swift --version
-      - name: Verify native identity and bootstrap authorization
-        run: |
-          mkdir -p dist/v12-native/bootstrap-validation
-          set -o pipefail
-          CGO_ENABLED=1 go test -timeout 20m -race -json ./internal/nativeidentity ./internal/nativebootstrap ./internal/shellcontrol ./web > dist/v12-native/bootstrap-validation/go-security.jsonl
-          CGO_ENABLED=0 go test ./internal/nativeidentity
-          go vet ./internal/nativeidentity ./internal/nativebootstrap ./internal/shellcontrol
       - name: Exercise shipping transport over real sockets and URLSession
         run: bash scripts/v12-native-transport-qualification.sh
       - name: Exercise production AppSession login, lock and daemon restart
@@ -77,6 +102,5 @@ jobs:
           path: |
             dist/v12-native/transport-validation/
             dist/v12-native/session-validation/
-            dist/v12-native/bootstrap-validation/
           if-no-files-found: error
           retention-days: 14
