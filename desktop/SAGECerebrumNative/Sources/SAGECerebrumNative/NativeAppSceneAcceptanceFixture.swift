@@ -375,9 +375,13 @@ private final class NativeAppSceneAcceptanceRunner {
         brainMenuLifecycleSnapshots.append(try brainMenuSnapshot(stage: "list-focused", mainMenu: mainMenu))
         let brainInspectorItem = try uniqueMenuItem(in: mainMenu, parent: "View", title: "Show Inspector", key: "i", modifiers: [.control, .command])
         try dispatch(brainInspectorItem)
-        try await wait("production Brain inspector action and exact close-button first responder") {
+        try await wait("production Brain inspector action, ready menu and exact close-button first responder") {
             self.restoreCapturedKeyWindow()
-            guard let snapshot = NativeAppSceneBrainBridge.shared.snapshot(),
+            self.update(menu: mainMenu)
+            // Preview events can finish a scheduled refresh after focus settles.
+            // Capture the ready menu contract only after production reenables it.
+            guard self.brainMenusReflectState(mainMenu: mainMenu),
+                  let snapshot = NativeAppSceneBrainBridge.shared.snapshot(),
                   NSApp.isActive,
                   self.window.isKeyWindow,
                   snapshot.selectedMemoryID == selectedMemoryID,
@@ -400,8 +404,10 @@ private final class NativeAppSceneAcceptanceRunner {
         brainMenuLifecycleSnapshots.append(try brainMenuSnapshot(stage: "inspector-open", mainMenu: mainMenu))
         let selectedMemoryIDBeforeDismissal = brainInspectorSnapshot.selectedMemoryID ?? ""
         brainInspectorClose.performClick(nil)
-        try await wait("Brain inspector button dismissal and exact mounted table focus restoration") {
+        try await wait("Brain inspector button dismissal, ready menu and exact mounted table focus restoration") {
             self.restoreCapturedKeyWindow()
+            self.update(menu: mainMenu)
+            guard self.brainMenusReflectState(mainMenu: mainMenu) else { return false }
             let currentCloseControls = self.identifiedControls(
                 identifier: "brain-inspector-close",
                 type: NSButton.self
@@ -455,9 +461,13 @@ private final class NativeAppSceneAcceptanceRunner {
         )
 
         restoreCapturedKeyWindow()
-        try await wait("captured window restored as application key window") {
+        try await wait("captured window restored as application key window with ready Brain menu") {
             self.restoreCapturedKeyWindow()
-            return NSApp.isActive && self.window.isKeyWindow
+            self.update(menu: mainMenu)
+            guard let table = self.uniqueIdentifiedControl(identifier: "brain-memory-table", type: NSTableView.self) else { return false }
+            return NSApp.isActive && self.window.isKeyWindow && self.window.firstResponder === table &&
+                table.numberOfSelectedRows == 1 && table.selectedRow == 0 &&
+                self.brainMenusReflectState(mainMenu: mainMenu)
         }
         update(menu: mainMenu)
         brainMenuLifecycleSnapshots.append(try brainMenuSnapshot(stage: "inspector-dismissed", mainMenu: mainMenu))
