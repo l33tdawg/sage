@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	sageabci "github.com/l33tdawg/sage/internal/abci"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/web"
 )
@@ -38,6 +39,13 @@ func main() {
 		printUsage()
 		os.Exit(1)
 	}
+	if handleCommandHelp(os.Args[1:]) {
+		return
+	}
+	if err := validateSimpleCommandArgs(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
 	if optionalCommandHandler != nil {
 		handled, optionalErr := optionalCommandHandler(os.Args[1:])
 		if handled {
@@ -51,6 +59,14 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "init-lantern-private":
+		err = runLanternFreshInit(os.Args[2:])
+	case "check-lantern-private-config":
+		if len(os.Args) != 2 || os.Getenv("SAGE_LANTERN_PRIVATE_LISTENERS") != "1" {
+			err = fmt.Errorf("lantern private listener policy required")
+		} else {
+			_, err = LoadConfig()
+		}
 	case "serve":
 		var lock *instanceLock
 		lock, err = acquireInstanceLock(SageHome())
@@ -123,6 +139,8 @@ func main() {
 		}
 	case "hook":
 		err = runHook()
+	case "nevercompact":
+		err = runNeverCompact(os.Args[2:])
 	case "codex":
 		if len(os.Args) > 2 && os.Args[2] == "install" {
 			err = runCodexInstall()
@@ -181,8 +199,10 @@ func main() {
 		err = runCertStatus()
 	case "mcp-token":
 		err = runMCPToken()
+	case "fence":
+		err = runFence()
 	case "version":
-		fmt.Printf("sage-gui %s (commit %s, built %s)\n", version, commit, date)
+		fmt.Printf("sage-gui %s (commit %s, built %s, max-app-v%d, auto-vote-v%d)\n", version, commit, date, sageabci.MaxCompiledAppVersion(), sageabci.MaxSupportedAppVersion())
 	case "help", "--help", "-h":
 		printUsage()
 	default:
@@ -264,6 +284,8 @@ Commands:
   serve     Start the SAGE personal node (CometBFT + REST + Dashboard)
   mcp       Run as MCP server (stdio, for Claude Desktop / ChatGPT)
   setup     Run first-time setup wizard
+  init-lantern-private --owner-approved-companion-bootstrap unit-a|unit-b
+            Native fresh-only Lantern identities; no services or public enrollment
   seed      Seed memories from a text/JSON file (bootstrap your AI's brain)
   export    Export memories to a .vault file (optionally encrypted)
   import    Import memories from a .vault file
@@ -281,6 +303,7 @@ Commands:
   pair          Join a SAGE network on your LAN as a non-validator peer (sage-gui pair <token>)
   cert-status   Show TLS certificate status and expiry
   mcp-token     Manage HTTP MCP bearer tokens (create | list | revoke)
+  fence     Inspect or settle a held signer fence (list | abandon)
   status    Show node status
   version   Print version
 

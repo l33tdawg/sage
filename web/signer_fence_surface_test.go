@@ -512,6 +512,26 @@ func TestSignerFenceHealthHidesIdentifiersFromUnauthenticatedCallers(t *testing.
 	for _, field := range []string{"signer", "tx_hash", "held_seconds", "attempts", "cause"} {
 		assert.Contains(t, row, field, "the operator surface omits %q, which triage needs", field)
 	}
+	// The nonce crosses the wire as a decimal STRING. It is a nanosecond
+	// allocation, so it exceeds JavaScript's safe integer range and a JSON
+	// number would reach the dashboard silently rounded — and the dashboard is
+	// where it gets compared against the chain's committed nonce.
+	nonce, hasNonce := row["nonce"]
+	require.True(t, hasNonce, "a fence raised by a signed broadcast must report its nonce")
+	nonceText, isString := nonce.(string)
+	require.True(t, isString, "the nonce must be a string so the dashboard cannot round it, got %T", nonce)
+	_, parseErr := strconv.ParseUint(nonceText, 10, 64)
+	require.NoError(t, parseErr, "the nonce must be decimal: %q", nonceText)
+	// The resolution class is what turns "a key is held" into an actionable
+	// answer: this fence was raised by a live indeterminate broadcast, so the
+	// node holds its bytes and reconciliation will keep re-submitting them. A
+	// caller that cannot tell this from a restored fence ends up waiting for a
+	// self-heal that was never going to come — the reported failure this field
+	// exists to end.
+	assert.Equal(t, "reconciling", row["resolution"],
+		"a live fence must report that reconciliation can still settle it")
+	assert.Contains(t, public["explanation"], "re-submitting",
+		"the public explanation must name the route out of a live fence")
 
 	// Everything on this surface has already been sanitized by internal/tx. The
 	// assertion that matters is the one that would catch a regression there
@@ -520,6 +540,72 @@ func TestSignerFenceHealthHidesIdentifiersFromUnauthenticatedCallers(t *testing.
 	require.NoError(t, err)
 	assert.NotContains(t, string(rendered), "broadcast_tx_commit?tx=0x",
 		"the status surface carries a broadcast URL, which contains the signed transaction")
+
+	// A fence that has ENDED stays visible to the operator. The held-fence block
+	// is empty by then, so the last resolution is the only trace the dashboard
+	// has — and lifting it must not hand the public tier the signer identity
+	// through the new field.
+	var fenced tx.FencedSigner
+	for _, candidate := range tx.FencedSigners() {
+		if candidate.SignerPubKeyHex == agentIDForKey(key) {
+			fenced = candidate
+			break
+		}
+	}
+	require.NotEmpty(t, fenced.SignerPubKeyHex, "the fixture fence disappeared before it could be lifted")
+	require.True(t, fenced.HasNonce, "a fence raised by a signed broadcast must carry a nonce")
+	require.NoError(t, tx.LiftFenceWithProof(context.Background(), agentIDForKey(key), tx.FenceLiftProof{
+		Kind:            "superseded",
+		SignerPubKeyHex: agentIDForKey(key),
+		Nonce:           fenced.Nonce,
+		HasNonce:        true,
+		CommittedNonce:  fenced.Nonce + 1,
+		Detail:          "test proof",
+	}))
+
+	resolved := signerFenceHealth(true)
+	assert.Equal(t, 0, resolved["active"], "the lift must clear the held-fence count")
+	last, ok := resolved["last_resolution"].(map[string]any)
+	require.True(t, ok, "a resolved fence must stay visible on the operator surface")
+	assert.Equal(t, "superseded", last["mode"])
+	assert.Equal(t, fenced.SignerPubKeyPrefix, last["signer"])
+	assert.NotContains(t, signerFenceHealth(false), "last_resolution",
+		"the public status surface must not learn which signer resolved")
+}
+
+// TestSignerFenceRoutesNamesTheRouteOutOfEachClass pins the sentence the status
+// surface shows for a RESTORED fence — the one whose signed bytes did not
+// survive the process. Reporting "reconciliation is re-submitting the identical
+// bytes" there is a false promise, and it is precisely what agents reported
+// back as a self-heal that never fires: the node was reading the chain for a
+// proof, not re-submitting anything.
+func TestSignerFenceRoutesNamesTheRouteOutOfEachClass(t *testing.T) {
+	restored := signerFenceRoutes([]tx.FencedSigner{
+		{Resolution: "proof_or_operator"},
+	})
+	assert.Contains(t, restored, "did not survive",
+		"a restored fence must say its bytes are gone")
+	assert.Contains(t, restored, "operator abandon",
+		"a restored fence must name the operator route")
+	assert.NotContains(t, restored, "re-submitting",
+		"a restored fence must never be described as re-submitting anything")
+
+	live := signerFenceRoutes([]tx.FencedSigner{{Resolution: "reconciling"}})
+	assert.Contains(t, live, "re-submitting",
+		"a live fence must say reconciliation is still pushing its bytes")
+
+	mixed := signerFenceRoutes([]tx.FencedSigner{
+		{Resolution: "reconciling"},
+		{Resolution: "proof_or_operator"},
+	})
+	assert.Contains(t, mixed, "re-submitting")
+	assert.Contains(t, mixed, "did not survive")
+
+	// An unclassified cause must not be advertised as self-healing: the safe
+	// reading of "we cannot say how this ends" is that it may need an operator.
+	unknown := signerFenceRoutes([]tx.FencedSigner{{Resolution: "unknown"}})
+	assert.Contains(t, unknown, "did not survive")
+	assert.NotContains(t, unknown, "re-submitting")
 }
 
 // TestManualRestartAdviceRefusesToAdviseARestartWhileFenced pins the central

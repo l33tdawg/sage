@@ -93,6 +93,71 @@ func TestLadderAcceptsChainThatHasNotClimbedYet(t *testing.T) {
 	}
 }
 
+func TestStoppedUpgradeGovernanceGuardUsesCompatibilityInsteadOfPresence(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    *sageabci.UpgradeGovernanceStatus
+		wantError bool
+		marker    string
+	}{
+		{
+			name: "clear",
+			status: &sageabci.UpgradeGovernanceStatus{
+				CurrentAppVersion: 27,
+			},
+			marker: "VERDICT      : COMPATIBLE",
+		},
+		{
+			name: "pending plan",
+			status: &sageabci.UpgradeGovernanceStatus{
+				CurrentAppVersion: 26,
+				PendingPlan: &sageabci.UpgradeGovernancePendingPlan{
+					Name: "app-v27", TargetAppVersion: 27, ActivationHeight: 900,
+				},
+			},
+			marker: "VERDICT      : COMPATIBLE",
+		},
+		{
+			name: "active upgrade ballot",
+			status: &sageabci.UpgradeGovernanceStatus{
+				CurrentAppVersion: 26,
+				ActiveProposal: &sageabci.UpgradeGovernanceActiveProposal{
+					ProposalID: "proposal-27", Operation: "upgrade", TargetID: "app-v27",
+					OperationCode: 5, Status: "voting", TargetAppVersion: uint64Pointer(27),
+				},
+			},
+			marker: "target app-v27",
+		},
+		{
+			name: "unsupported pending plan",
+			status: &sageabci.UpgradeGovernanceStatus{
+				CurrentAppVersion: 27,
+				PendingPlan: &sageabci.UpgradeGovernancePendingPlan{
+					Name: "app-v29", TargetAppVersion: 29, ActivationHeight: 900,
+				},
+			},
+			wantError: true,
+			marker:    "VERDICT      : INCOMPATIBLE",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var compatibilityErr error
+			output := capturePreflightStdout(t, func() {
+				compatibilityErr = printStoppedUpgradeGovernanceStatus(tt.status, sageabci.MaxSupportedAppVersion())
+			})
+			if (compatibilityErr != nil) != tt.wantError {
+				t.Fatalf("error = %v, wantError %v", compatibilityErr, tt.wantError)
+			}
+			if !strings.Contains(output, tt.marker) {
+				t.Fatalf("output missing %q:\n%s", tt.marker, output)
+			}
+		})
+	}
+}
+
+func uint64Pointer(value uint64) *uint64 { return &value }
+
 func TestInspectLadderAcceptsCompleteEvidence(t *testing.T) {
 	bs, _ := newPreflightStore(t)
 	seedLadder(t, bs, appV22LadderFloor, appV22LadderCeiling, nil)

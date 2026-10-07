@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"errors"
 	"net/http"
 	"regexp"
@@ -171,8 +172,16 @@ func (h *DashboardHandler) handleMemoryRelated(w http.ResponseWriter, r *http.Re
 
 	// 1. Chain: the parent memory (direct lineage).
 	if x.ParentHash != "" {
-		if p, pErr := h.store.GetMemory(ctx, x.ParentHash); pErr == nil {
-			bump(p, 6.0, "chain")
+		if parent, pErr := h.findMemoryParent(ctx, x.ParentHash); pErr == nil && parent != nil &&
+			!isCerebrumInternalMemoryDomain(parent.DomainTag) &&
+			(seeAll || parent.SubmittingAgent == "" || allowed[parent.SubmittingAgent]) {
+			// Lookup/load failures remain best-effort, like the other ranking
+			// signals. Never reflect a hidden parent's load error to the caller.
+			// A loaded, visible record still passes canonical validation in bump.
+			if p, loadErr := h.store.GetMemory(ctx, parent.MemoryID); loadErr == nil && p != nil &&
+				(parent.ContentHash == nil || bytes.Equal(parent.ContentHash, p.ContentHash)) {
+				bump(p, 6.0, "chain")
+			}
 		}
 	}
 

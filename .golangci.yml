@@ -47,3 +47,10 @@ linters:
           - errcheck
           - gosec
           - noctx
+      # Shadowing inside a test body is noise, matching this rule's existing
+      # tolerance for test-only error handling. The analyzer still runs over
+      # every production file.
+      - path: _test\.go
+        linters:
+          - govet
+        text: "shadow:"

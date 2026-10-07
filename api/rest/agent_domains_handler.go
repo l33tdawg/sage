@@ -129,6 +129,24 @@ func (s *Server) handleGetAgentReadableDomains(w http.ResponseWriter, r *http.Re
 		candidates[domain] = struct{}{}
 	}
 	add(enrollment.HomeDomain)
+	// The reverse owner index is the authoritative source for domains that the
+	// caller acquired after enrollment. In particular, a transferred historical
+	// domain may never have been authored by its current owner and therefore
+	// cannot be recovered from the SQL provenance hint below.
+	indexedOwned, indexedOwnedMore, indexedOwnedErr := s.badgerStore.ListOwnedDomainsPage(
+		agentID, "", callerReadableDomainLimit,
+	)
+	ownedFromIndex := indexedOwnedErr == nil
+	if indexedOwnedErr != nil {
+		truncated = true
+	} else {
+		for _, domain := range indexedOwned {
+			add(domain)
+		}
+		if indexedOwnedMore {
+			truncated = true
+		}
+	}
 	now := time.Now()
 	queryCtx, cancel := context.WithTimeout(r.Context(), callerAuthoredDomainQueryBudget)
 	defer cancel()
@@ -181,12 +199,24 @@ func (s *Server) handleGetAgentReadableDomains(w http.ResponseWriter, r *http.Re
 		truncated = true
 	}
 	if groups, groupsErr := s.badgerStore.ListAppV23AgentGroups(agentID); groupsErr == nil {
+		seenMembers := map[string]struct{}{agentID: {}}
+		scannedMembers := 0
+	groupScan:
 		for _, group := range groups {
 			for _, memberID := range group.Members {
 				if len(candidates) >= callerReadableDomainCandidateScan {
 					truncated = true
-					break
+					break groupScan
 				}
+				if _, seen := seenMembers[memberID]; seen {
+					continue
+				}
+				seenMembers[memberID] = struct{}{}
+				if scannedMembers == callerReadableDomainCandidateScan {
+					truncated = true
+					break groupScan
+				}
+				scannedMembers++
 				member, memberErr := s.badgerStore.GetAppV23Enrollment(memberID)
 				if memberErr != nil {
 					truncated = true
@@ -194,10 +224,26 @@ func (s *Server) handleGetAgentReadableDomains(w http.ResponseWriter, r *http.Re
 				}
 				if member != nil && member.Active {
 					add(member.HomeDomain)
+					remaining := callerReadableDomainCandidateScan - len(candidates)
+					if remaining == 0 {
+						truncated = true
+						break groupScan
+					}
+					pageLimit := min(remaining, callerReadableDomainLimit)
+					ownedDomains, more, ownedErr := s.badgerStore.ListOwnedDomainsPage(
+						memberID, "", pageLimit,
+					)
+					if ownedErr != nil {
+						truncated = true
+						continue
+					}
+					for _, domain := range ownedDomains {
+						add(domain)
+					}
+					if more {
+						truncated = true
+					}
 				}
-			}
-			if len(candidates) >= callerReadableDomainCandidateScan {
-				break
 			}
 		}
 	} else {
@@ -242,13 +288,8 @@ func (s *Server) handleGetAgentReadableDomains(w http.ResponseWriter, r *http.Re
 	sort.Strings(remaining)
 	ordered = append(ordered, remaining...)
 	owned := make([]string, 0, min(len(ordered), callerReadableDomainLimit))
-	ownedFromIndex := false
-	if indexed, more, indexErr := s.badgerStore.ListOwnedDomainsPage(agentID, "", callerReadableDomainLimit); indexErr == nil {
-		owned = indexed
-		ownedFromIndex = true
-		if more {
-			truncated = true
-		}
+	if ownedFromIndex {
+		owned = indexedOwned
 	}
 	readable := make([]string, 0, min(len(ordered), callerReadableDomainLimit))
 	writable := make([]string, 0, min(len(ordered), callerReadableDomainLimit))

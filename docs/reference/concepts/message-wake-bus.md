@@ -2,14 +2,14 @@ Reconciled against the Wake Bus implementation on this branch. Cite file + symbo
 
 # Message Wake Bus
 
-The Wake Bus is a payload-free, exact-recipient hint that canonical local inbox
-work was durably inserted. It lets a long-running supervisor sleep between
+The Wake Bus is a payload-free, exact-recipient hint that local or inbound
+federated inbox work was durably inserted. It lets a long-running supervisor sleep between
 inbox polls without turning an in-memory notification into delivery, read,
 claim, presence, or workflow evidence.
 
 ## Durable sequence
 
-The canonical `POST /v1/messages` path uses `SendLocalMessage` (`internal/store/messages.go:297-375`)
+The canonical `POST /v1/messages` path uses `SendLocalMessage` (`internal/store/messages.go:324-402`)
 to insert the pending `msg-*` row,
 caller-scoped idempotency binding, and the recipient's next
 `message_wake_state.seq` in one SQLite transaction. A fresh recipient begins at
@@ -18,15 +18,21 @@ advance the sequence. A rollback advances nothing.
 
 The deprecated `POST /v1/pipe/send` route now preserves the same wake invariant
 for exact local recipients. A request carrying `idempotency_key` uses the keyed
-`SendLocalMessage` (`internal/store/messages.go:297-375`) path. An unkeyed request uses
-`AdmitLocalMessage` (`internal/store/messages.go:376-412`), which inserts the row and allocates the
+`SendLocalMessage` (`internal/store/messages.go:324-402`) path. An unkeyed request uses
+`AdmitLocalMessage` (`internal/store/messages.go:403-439`), which inserts the row and allocates the
 sequence in one transaction without creating a replay mapping. After either
-fresh path commits, `handlePipeSend` (`api/rest/pipe_handler.go:641-1055`) publishes only the
+fresh path commits, `handlePipeSend` (`api/rest/pipe_handler.go:652-1066`) publishes only the
 returned process-local non-zero generation. A keyed replay loads
 the original row without `WakeSeq`, so it neither advances nor republishes the
-generation. Provider-only and federated rows have no exact local recipient and
-do not allocate an exact-recipient sequence. If the active backend cannot
-perform atomic canonical admission, an exact-local pipe send fails with HTTP
+generation. Provider-only and outbound federated rows do not allocate a local
+recipient sequence. Inbound federated sends do: `AdmitFederatedPipeline`
+(`internal/store/pipeline_transport.go`) inserts the message, transport dedup
+binding, and exact local recipient's next sequence in one transaction. Duplicate
+redelivery advances nothing. After commit and release of authorization locks,
+`handlePipeEvent` publishes the returned generation through the REST wake bus
+attached by `Server.SetFederation`. This is independent of the HTTP-MCP bridge.
+
+If the active backend cannot perform atomic canonical admission, an exact-local pipe send fails with HTTP
 501 before inserting anything rather than creating a row wake consumers cannot
 observe as new.
 
@@ -36,12 +42,12 @@ observe as new.
 {"seq": 42, "pending": true}
 ```
 
-`pending` is an exact-recipient `EXISTS` check for unfinished canonical local
+`pending` is an exact-recipient `EXISTS` check for unfinished exact-recipient local and inbound federated
 rows: both `pending` and `claimed` work count until completion or expiry. A
 claim therefore cannot make the wake surface say the recipient has nothing to
 handle merely because another runtime currently owns it. Reading wake state
 changes nothing, and claim/read/reply paths do not rewrite the admission
-sequence. On upgrade, a recipient that already has unfinished canonical work
+sequence. On upgrade, a recipient that already has unfinished local or inbound federated work
 receives baseline sequence 1, so restart does not strand that work behind
 `after_seq=0`.
 
@@ -84,6 +90,28 @@ without opening SSE or acquiring its exclusive consumer lease. It exists for
 short-lived host hooks that need a monotonic comparison but must not supersede,
 cancel, or compete with the long-running wake consumer.
 
+## Separate task and reply activity sequence
+
+`GET /v1/inbox/activity-state` is a fresh exact-signed, lease-free snapshot
+whose JSON contains exactly `version`, `epoch`, and `seq`. The opaque
+32-character `epoch` identifies the database incarnation. It survives process
+restart and backup restore with that database, while a fresh database generates
+a new value; clients compare epoch before seq so a preserved high cursor cannot
+suppress activity after reinitialization. The epoch carries no agent, message,
+task, or reply content. The per-agent sequence advances after a fresh task
+assignment notice is created and after a fresh local or federated reply is
+durably persisted. The activity increment shares the task/reply transaction, so
+a failed increment rolls that fresh write back instead of committing an event
+that the durable novelty surface cannot represent. Reads are passive. The
+activity state is coordination only, never delivery or workflow authority.
+
+This activity sequence is deliberately not the message wake sequence. It does
+not publish through `messageWakeBroker`, alter `pending`, or add a fourth field
+to the v1 `{version,seq,pending}` wake contract. Stop continues to inspect only
+unfinished message work. UserPromptSubmit may compare activity and ask the
+agent to call `sage_inbox` on the next prompt, but no hook can inject a turn
+after the host task is already idle.
+
 ## Broker and reconnect safety
 
 `api/rest/message_wake.go` (`messageWakeBroker`) is process-local acceleration
@@ -99,9 +127,11 @@ sequence and coalesces a slow client to the newest monotonic value. Per-write
 deadlines bound a client that stops reading. These are coordination controls,
 not evidence that the consumer is online or attended to an event.
 
-After receiving a wake, the supervisor still calls the canonical inbox
-operation (`sage_messages_receive` / `sage_inbox`) to claim work. Only those
-existing operations affect message lifecycle state.
+After receiving a wake, the supervisor calls the unified `sage_inbox` operation
+to claim exact, provider-addressed, or federated work. `sage_messages_receive`
+remains available for token-replay-safe exact-local batches; its deliberate
+federated-row exclusion is unchanged. Federated work is claimed via `sage_inbox`. Only those existing
+claim operations affect message lifecycle state.
 
 ## Separate from dashboard and MCP transport SSE
 
@@ -120,7 +150,7 @@ channel gate remains unverified. Enable it with `SAGE_CLAUDE_CHANNEL=1` only
 after confirming that delivery path. Codex is always refused because it cannot
 consume that method and must not occupy the exclusive wake lease. Other hosts
 remain off unless explicitly enabled
-(`claudeChannelEnabled`, `mcp.go:333`). Constructing an MCP `Server` never
+(`claudeChannelEnabled`, `mcp.go:407`). Constructing an MCP `Server` never
 advertises or emits the experimental protocol on its own; the executable still
 makes an explicit enablement call (`EnableRESTClaudeChannel`, `internal/mcp/claude_wake_source.go:85`)
 through `ConfigureClaudeChannel` (`internal/mcp/claude_channel.go:50`).
@@ -158,13 +188,13 @@ command hook for Claude Code and Codex that reads the signed, lease-free
 `/v1/messages/wake-state` snapshot as the verified continuation path. The check is on by default when
 `SAGE_PROVIDER=claude-code` or `SAGE_PROVIDER=codex`; legacy installed Stop
 hooks with no provider label also default on. Set `SAGE_STOP_NUDGE=0` (or another accepted false
-spelling) to opt out (`stopNudgeEnabled`, `cmd/sage-gui/hook.go:455`).
+spelling) to opt out (`stopNudgeEnabled`, `cmd/sage-gui/hook.go:701`).
 
 When the durable cursor has advanced and unfinished work exists, the hook emits
 Codex's documented top-level `{"decision":"block","reason":"..."}` result.
 The host converts that result into one continuation prompt for the same thread, so
 the agent calls the canonical inbox operation before the turn becomes idle
-(`runHookStopCheck`, `cmd/sage-gui/hook.go:471`). The check never acquires the
+(`runHookStopCheck`, `cmd/sage-gui/hook.go:717`). The check never acquires the
 SSE lease, never sees message content or sender, refuses `SubagentStop`, blocks
 at most once per newer cursor and session, and fails open on every error.
 

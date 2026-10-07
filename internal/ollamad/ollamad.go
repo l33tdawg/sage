@@ -261,20 +261,7 @@ func (m *Manager) Start(ctx context.Context) (string, error) {
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	cmd.SysProcAttr = sidecarSysProcAttr()
-	childEnv := make([]string, 0, len(os.Environ())+2)
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "SAGE_") ||
-			strings.HasPrefix(kv, "OLLAMA_HOST=") ||
-			strings.HasPrefix(kv, "OLLAMA_MODELS=") {
-			continue
-		}
-		childEnv = append(childEnv, kv)
-	}
-	childEnv = append(childEnv,
-		"OLLAMA_HOST=127.0.0.1:"+strconv.Itoa(m.port),
-		"OLLAMA_MODELS="+m.modelDir(),
-	)
-	cmd.Env = childEnv
+	cmd.Env = m.childEnv()
 	if err := cmd.Start(); err != nil {
 		_ = logf.Close()
 		return "", fmt.Errorf("start Ollama: %w", err)

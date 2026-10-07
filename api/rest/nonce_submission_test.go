@@ -3,6 +3,7 @@ package rest
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -146,7 +147,7 @@ func TestWriteConsensusTxErrorDistinguishesFenceAndRestartQuiesce(t *testing.T) 
 			err:        fmt.Errorf("await signer: %w", tx.ErrSignerFenced),
 			title:      "Signing key temporarily held",
 			detail:     "earlier transaction",
-			retryAfter: "1",
+			retryAfter: "15",
 		},
 		{
 			name:   "restart quiesce is not described as a fence",
@@ -166,4 +167,58 @@ func TestWriteConsensusTxErrorDistinguishesFenceAndRestartQuiesce(t *testing.T) 
 			require.False(t, strings.Contains(rr.Body.String(), "rejected"))
 		})
 	}
+}
+
+// TestSubmitConsensusTxRefusesImmediatelyWhileFenced pins the failure mode the
+// users reported: writes against a fenced node sat on the nonce lease until the
+// CALLER's deadline and arrived as a bare timeout, with no statement that
+// nothing had been sent. The refusal must be immediate, and when the fence is
+// inspectable the answer must say what the key is held on.
+func TestSubmitConsensusTxRefusesImmediatelyWhileFenced(t *testing.T) {
+	_, sk, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	pub, ok := sk.Public().(ed25519.PublicKey)
+	require.True(t, ok)
+	s := &Server{logger: zerolog.Nop(), signingKey: sk}
+
+	encoded := []byte("indeterminate-bytes-for-fast-refusal-test")
+	require.ErrorIs(t, tx.WithNonceLease(context.Background(), sk, func(uint64) error {
+		return tx.Indeterminate(errors.New("connection reset"), encoded,
+			func(context.Context, []byte) (tx.TxOutcome, error) {
+				return tx.TxOutcome{Verdict: tx.TxVerdictUnresolved}, nil
+			})
+	}), tx.ErrSubmitIndeterminate)
+	hash := tx.CometTxHash(encoded)
+	t.Cleanup(func() {
+		// Retire the fence through its own API so a failed assertion cannot leave
+		// it behind for sibling tests in this package.
+		_ = tx.LiftFenceWithProof(context.Background(), hex.EncodeToString(pub), tx.FenceLiftProof{
+			Kind:   "committed",
+			TxHash: strings.ToUpper(hex.EncodeToString(hash[:])),
+			Detail: "test teardown",
+		})
+	})
+
+	// A LONG deadline: if the fast path were missing, this call would sit here
+	// for its whole budget instead of refusing.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	start := time.Now()
+	stage, err := s.submitConsensusTx(ctx, nonceSubmissionTestTx("fenced-key"), func([]byte) error {
+		t.Fatal("a fenced signing key must never reach submit")
+		return nil
+	})
+	require.ErrorIs(t, err, tx.ErrSignerFenced)
+	require.Equal(t, consensusTxLease, stage)
+	require.Less(t, time.Since(start), 5*time.Second,
+		"the refusal must be immediate rather than waiting for the caller's deadline")
+
+	recorder := httptest.NewRecorder()
+	s.writeConsensusTxError(recorder, stage, "memory submit", err)
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	require.Equal(t, "15", recorder.Header().Get("Retry-After"))
+	require.Contains(t, recorder.Body.String(), "Nothing was signed or sent")
+	require.Contains(t, recorder.Body.String(), strings.ToUpper(hex.EncodeToString(hash[:])),
+		"the answer must name the transaction the key is held on")
+	require.Contains(t, recorder.Body.String(), "signer_fences")
 }

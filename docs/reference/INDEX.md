@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.19.0. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.23.15. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -22,6 +22,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`python-sdk.md`](python-sdk.md) | Every `SageClient` / `AsyncSageClient` method, signatures, and the REST endpoint each maps to. Package: `sage-agent-sdk`. |
 | [`mcp-tools.md`](mcp-tools.md) | Every `sage_*` MCP tool, parameters, and *when* to call it. Start here if you are an LLM agent with SAGE wired in. |
 | [`environment-variables.md`](environment-variables.md) | Every env var SAGE reads (`SAGE_HOME`, embeddings, hybrid recall, TLS, snapshots, …), with defaults and the `file:line` that consumes each. |
+| [`recall-backed-compaction.md`](recall-backed-compaction.md) | Capturing harness-evicted conversation turns as governed memories so a later session restores them verbatim: the `nevercompact` consent/enable/purge CLI, what is captured, the safety and idempotency guarantees, thread-scoped recall, retention/deletion, and the env knobs. |
 | [`cpu-only-embeddings.md`](cpu-only-embeddings.md) | Model/dimension pairing, CPU timeout sizing, Ollama and TEI/OpenAI-compatible deployment, plus the reproducible real-endpoint latency/request-count benchmark. |
 | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) | submit → proposed → committed/deprecated; node-local vs on-chain data; confidence decay; corroboration. |
 | [`concepts/message-reply-lifecycle.md`](concepts/message-reply-lifecycle.md) | send → claim → reply → **read the reply**. Which surface returns a reply body, why the exact original sender is the only reader, why `replied_by` (not the addressee) is the provenance of the untrusted content, why a reply is untrusted data and never inbound work, why the request payload never comes back through the reply path, and how `before` pages backward so no reply is stranded. Read this if a reply looks "invisible". |
@@ -30,12 +31,14 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) | Orgs, departments, agent clearance, cross-org federation, current fail-closed cross-chain Read/Copy policy, the five-gate query pipeline, and the app-v20 one-chain quorum-scope boundary. |
 | [`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md) | The local Access Group contract: explicit Read / Read+Write / Read+Write+Modify member authority, ownership-preserving join/leave semantics, CAS revisions, hard-deny intersections, and the app-v25 → app-v26 migration boundary. |
 | [`concepts/app-v27-lifecycle.md`](concepts/app-v27-lifecycle.md) | The current consensus boundary: static reserved shared-domain record-author challenge/reinstate authority with hard denials preserved, and omitted new-task `task_status` canonicalization to `planned`. |
+| [`concepts/app-v28-lifecycle.md`](concepts/app-v28-lifecycle.md) | The app-v28 design contract, **activated in v11.23.0**: the public-memory Merkle commitment and the consensus-side co-commit tombstone rule both land in one fork, the ceiling bump is what activates them, and the evidence that landed with it. |
 | [`app-v23-access-control-design.md`](app-v23-access-control-design.md) | The v11.16.0 contract for Root, Member/Manager/Admin roles, named security profiles, Access Groups, atomic enrollment, linked federated readers, app-v24 readiness and memory integrity, migration, replay, and state sync. |
 | [`app-v25-upgrade-recovery.md`](app-v25-upgrade-recovery.md) | The v11.16.2 strict App-v25 upgrade: immutable new-memory envelopes, automatic historical repair, local writer continuity, record-local quarantine, Root retry/deprecation controls, and readiness semantics. |
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
 | [`concepts/block-production-and-idle.md`](concepts/block-production-and-idle.md) | Why an idle chain mints **no** blocks (SAGE has no heartbeat), when a block *is* minted, and how to tell healthy-idle from actually-stuck. Read this before alarming on a frozen block height. |
 | [`concepts/voter-operations.md`](concepts/voter-operations.md) | How `proposed` memories become `committed` (the per-node auto-voter), how to *guarantee* auto-commit (`--require-voter` / `voter:` config), the stuck-memory alarm + triage, key safety, and the honest REST-vote caveat. |
-| [`concepts/signer-nonce-fence.md`](concepts/signer-nonce-fence.md) | Per-signing-key nonce ordering, the signer fence, and **the cross-restart residual v11.19.0 does not close**. Why only a proven fate lifts a fence, why re-submitting byte-identical bytes is the reconciliation engine, why a restart does **not** safely clear a fence (and vetoes itself while one is held), what is logged and what is deliberately never logged, and how to triage `ErrSignerFenced`. Read this if a signing key stops signing, or before claiming nonce inversion is "fixed". |
+| [`write-gate.md`](write-gate.md) | Optional, default-off memory-quality judging: loopback Hunch or a managed local judge, source-evidence uploads, cached verdicts, qualification limits, and the operator review queue. |
+| [`concepts/signer-nonce-fence.md`](concepts/signer-nonce-fence.md) | Per-signing-key nonce ordering and durable fence records across desktop and AMID restarts; chain-proven reconciliation, desktop operator recovery, and the limits when signed bytes are lost. Read this before restarting a fenced signer or claiming nonce inversion is "fixed". |
 | [`concepts/content-validation-gate.md`](concepts/content-validation-gate.md) | The optional Layer-2 content-validation gate (`outcome_class`-keyed reject hook) and the deployment **arming seam** — both the stateless `contentvalidator.SetProvider` and the context-aware `SetProviderWithContext` (exposes the on-chain `RoleResolver` for signer-authority checks) — enabling it without patching the cmd entrypoints. |
 | [`federation-and-brain-api.md`](federation-and-brain-api.md) | The v11 HTTP surface: trust-only JOIN over direct HTTPS or libp2p relay/NAT traversal; explicit pairwise agent exports with default borrowed Read of their owned trees and receiver-side narrowing; independent manual Read/Copy grants; receiver-controlled Copy subscriptions; authenticated agent messaging; and `/fed/v1/pipe/event`. Transport, peer policy, contacts, and pipeline work are off-consensus; tx-33/34 preserves agreement compatibility. The Write field/route remains reserved and fails closed. |
 | [`reranker-and-setup.md`](reranker-and-setup.md) | The v11 local-engine and setup surface: create-or-join/private-or-shared onboarding, Synaptic Ledger recovery acknowledgement, portable memory-backup boundaries, recall-tuning clamps, managed semantic memory setup (`/v1/dashboard/embeddings/*`, pinned Ollama runtime + readiness-gated model pull), the reranker config endpoint (`kind` field + verify-on-enable), the managed llama.cpp sidecar (`/v1/dashboard/reranker/setup/*`, pinned assets + sha256 + adopt-not-respawn), the TEI vs llama.cpp rerank dialects, and `embedding_provider` stamped at insert. Mostly off-consensus; imported memories re-enter the normal consensus lifecycle. |
@@ -47,12 +50,14 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | You want to… | Go to |
 |--------------|-------|
 | Upgrade an existing node to a newer release (incl. v10.x → v11) | [`../UPGRADING.md`](../UPGRADING.md) — v11.18.0 minimum, full backup/restore, preflight, the app-version ladder, governed legacy-lineage recovery, and app-v23 admin migration |
+| Upgrade without handling governance state manually | Use the desktop updater; it validates canonical `/upgrade/governance-status`, snapshots compatible in-flight state, and restarts automatically. `sage-gui upgrade status` is a technical diagnostic; see [`../UPGRADING.md`](../UPGRADING.md) |
 | Boot your memory at conversation start | **Boot sequence** below, then [`mcp-tools.md`](mcp-tools.md) |
 | Submit a memory with a clearance level | [`python-sdk.md`](python-sdk.md) `propose()` / [`rest-api.md`](rest-api.md) `POST /v1/memory/submit` |
 | Understand why another agent can't see your memory | [`concepts/clearance-classification.md`](concepts/clearance-classification.md) + [`concepts/rbac-orgs-federation.md`](concepts/rbac-orgs-federation.md) |
 | Sign a request correctly | **Request signing** below |
 | Know what "committed" actually means | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) |
 | Know if a memory will decay | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) |
+| Configure uncapped, consensus-safe memory cleanup | [`concepts/memory-cleanup.md`](concepts/memory-cleanup.md) |
 | Understand why your chain's block height isn't moving | [`concepts/block-production-and-idle.md`](concepts/block-production-and-idle.md) |
 | Make sure submitted memories actually get committed (not stuck at `proposed`) | [`concepts/voter-operations.md`](concepts/voter-operations.md) |
 | Work out why one signing key suddenly refuses everything with `ErrSignerFenced` (503), or why an update refuses to restart | [`concepts/signer-nonce-fence.md`](concepts/signer-nonce-fence.md) — and do **not** restart to clear it; that is the action that loses the transaction |
@@ -206,7 +211,7 @@ are recorded here because agents may have cached them.
   `sage_message_replies`, or `sage_message_history(folder="outbox")` for the
   untruncated text.
 
-## Related docs (reconciled through v11.19.0)
+## Related docs (reconciled through v11.23.15)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 

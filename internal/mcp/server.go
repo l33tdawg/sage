@@ -97,7 +97,11 @@ type Server struct {
 
 	conversationMu sync.Mutex
 	conversations  map[string]*conversationState
-	claimantLease  io.Closer
+	// Streamable HTTP conversations are bearer-scoped and can otherwise retain
+	// one durable claimant lease per credential forever. These bounds apply only
+	// to idle stream: states; stdio, SSE, and in-flight requests are never pruned.
+	streamConversationTTL   time.Duration
+	streamConversationLimit int
 
 	// Cached recall settings from dashboard preferences.
 	recallTopK     int
@@ -128,19 +132,35 @@ type Server struct {
 }
 
 type conversationState struct {
-	inceptionMu       sync.Mutex
-	inceptionChecked  bool
-	autoInceptionMsg  string
-	lastUsed          time.Time
-	claimantSessionID string
+	inceptionMu          sync.Mutex
+	inceptionChecked     bool
+	autoInceptionMsg     string
+	lastUsed             time.Time
+	claimantSessionID    string
+	claimantIdentityMode string
+	claimantIdentityErr  error
+	claimantLease        io.Closer
+	activeUses           int
 }
 
+const (
+	defaultStreamConversationTTL   = 30 * time.Minute
+	defaultStreamConversationLimit = 256
+)
+
 type conversationIDContextKey struct{}
+type claimantDurableScopeContextKey struct{}
 
 // WithConversationID scopes auto-inception to one MCP client/session. Stdio
 // callers naturally use the empty/default conversation.
 func WithConversationID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, conversationIDContextKey{}, id)
+}
+
+// withClaimantDurableScope attaches a stable server-derived transport scope.
+// Never populate it from an arbitrary client-supplied session header.
+func withClaimantDurableScope(ctx context.Context, scope string) context.Context {
+	return context.WithValue(ctx, claimantDurableScopeContextKey{}, scope)
 }
 
 func (s *Server) conversation(ctx context.Context) *conversationState {
@@ -154,18 +174,124 @@ func (s *Server) conversation(ctx context.Context) *conversationState {
 		state.lastUsed = time.Now()
 		return state
 	}
-	claimantSessionID := newMCPClaimantSessionID()
+	return s.newConversationStateLocked(ctx, id, time.Now())
+}
+
+func (s *Server) newConversationStateLocked(ctx context.Context, id string, now time.Time) *conversationState {
+	state := &conversationState{lastUsed: now, claimantSessionID: newMCPClaimantSessionID(), claimantIdentityMode: "ephemeral"}
 	if id == "stdio" {
 		if inherited := trustedHandoffClaimantSessionID(); inherited != "" {
-			claimantSessionID = inherited
-		} else if durableID, lease, err := acquireDurableClaimantIdentity(s.agentID, s.provider, s.project); err == nil {
-			claimantSessionID = durableID
-			s.claimantLease = lease
+			state.claimantSessionID = inherited
+			state.claimantIdentityMode = "inherited"
+		} else {
+			s.acquireConversationClaimantIdentity(state, s.agentID, "")
 		}
+	} else if durableScope, _ := ctx.Value(claimantDurableScopeContextKey{}).(string); durableScope != "" {
+		s.acquireConversationClaimantIdentity(state, s.effectiveAgentID(ctx), durableScope)
 	}
-	state := &conversationState{lastUsed: time.Now(), claimantSessionID: claimantSessionID}
 	s.conversations[id] = state
 	return state
+}
+
+// beginStreamConversationUse admits one streamable HTTP dispatch and pins its
+// conversation state until the returned function runs. It prunes expired idle
+// stream states first, then evicts the least-recently-used idle stream state
+// when needed to preserve the hard cap. If every slot is in flight, admission
+// fails instead of evicting a claimant lease that is still fencing a request.
+func (s *Server) beginStreamConversationUse(ctx context.Context) (func(), bool) {
+	id, _ := ctx.Value(conversationIDContextKey{}).(string)
+	if !strings.HasPrefix(id, "stream:") {
+		return func() {}, true
+	}
+	now := time.Now()
+	s.conversationMu.Lock()
+	s.pruneIdleStreamConversationsLocked(now, false)
+	state := s.conversations[id]
+	if state == nil {
+		if s.streamConversationCountLocked() >= s.streamConversationLimit {
+			s.pruneIdleStreamConversationsLocked(now, true)
+		}
+		if s.streamConversationCountLocked() >= s.streamConversationLimit {
+			s.conversationMu.Unlock()
+			return nil, false
+		}
+		state = s.newConversationStateLocked(ctx, id, now)
+	}
+	state.activeUses++
+	state.lastUsed = now
+	s.conversationMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.conversationMu.Lock()
+			if current := s.conversations[id]; current == state {
+				if current.activeUses > 0 {
+					current.activeUses--
+				}
+				current.lastUsed = time.Now()
+			}
+			s.conversationMu.Unlock()
+		})
+	}, true
+}
+
+func (s *Server) streamConversationCountLocked() int {
+	count := 0
+	for id := range s.conversations {
+		if strings.HasPrefix(id, "stream:") {
+			count++
+		}
+	}
+	return count
+}
+
+// pruneIdleStreamConversationsLocked removes every expired idle stream state.
+// When needSlot is true and the cap is still full, it additionally removes one
+// LRU idle state. Closing the lease while holding conversationMu prevents a new
+// state for the same durable scope from racing the old lease's release.
+func (s *Server) pruneIdleStreamConversationsLocked(now time.Time, needSlot bool) {
+	var oldestID string
+	var oldestTime time.Time
+	for id, state := range s.conversations {
+		if !strings.HasPrefix(id, "stream:") || state == nil || state.activeUses != 0 {
+			continue
+		}
+		if s.streamConversationTTL > 0 && now.Sub(state.lastUsed) >= s.streamConversationTTL {
+			s.deleteConversationLocked(id, state)
+			continue
+		}
+		if oldestID == "" || state.lastUsed.Before(oldestTime) {
+			oldestID, oldestTime = id, state.lastUsed
+		}
+	}
+	if needSlot && s.streamConversationCountLocked() >= s.streamConversationLimit && oldestID != "" {
+		s.deleteConversationLocked(oldestID, s.conversations[oldestID])
+	}
+}
+
+func (s *Server) deleteConversationLocked(id string, state *conversationState) {
+	delete(s.conversations, id)
+	if state != nil && state.claimantLease != nil {
+		_ = state.claimantLease.Close()
+		state.claimantLease = nil
+	}
+}
+
+func (s *Server) acquireConversationClaimantIdentity(state *conversationState, agentID, durableScope string) {
+	durableID, lease, err := acquireDurableClaimantIdentity(agentID, s.provider, s.project, durableScope)
+	switch {
+	case err == nil:
+		state.claimantSessionID = durableID
+		state.claimantIdentityMode = "durable"
+		state.claimantLease = lease
+	case errors.Is(err, errDurableClaimantIdentityBusy):
+		state.claimantIdentityMode = "concurrent_ephemeral"
+	default:
+		state.claimantSessionID = ""
+		state.claimantIdentityMode = "unavailable"
+		state.claimantIdentityErr = err
+	}
 }
 
 func trustedHandoffClaimantSessionID() string {
@@ -190,10 +316,15 @@ func (s *Server) currentStdioClaimantSessionID() string {
 
 func (s *Server) closeClaimantLease() {
 	s.conversationMu.Lock()
-	lease := s.claimantLease
-	s.claimantLease = nil
+	leases := make([]io.Closer, 0, len(s.conversations))
+	for _, state := range s.conversations {
+		if state != nil && state.claimantLease != nil {
+			leases = append(leases, state.claimantLease)
+			state.claimantLease = nil
+		}
+	}
 	s.conversationMu.Unlock()
-	if lease != nil {
+	for _, lease := range leases {
 		_ = lease.Close()
 	}
 }
@@ -207,11 +338,23 @@ func newMCPClaimantSessionID() string {
 }
 
 func (s *Server) claimantSessionID(ctx context.Context) (string, error) {
-	id := s.conversation(ctx).claimantSessionID
+	state := s.conversation(ctx)
+	id := state.claimantSessionID
 	if id == "" {
+		if state.claimantIdentityErr != nil {
+			return "", fmt.Errorf("establish durable MCP claimant session identity: %w", state.claimantIdentityErr)
+		}
 		return "", errors.New("could not establish MCP claimant session identity")
 	}
 	return id, nil
+}
+
+func (s *Server) claimantIdentityStatus(ctx context.Context) (string, string) {
+	state := s.conversation(ctx)
+	if state.claimantIdentityErr != nil {
+		return state.claimantIdentityMode, state.claimantIdentityErr.Error()
+	}
+	return state.claimantIdentityMode, ""
 }
 
 // ForgetConversation releases state for a transport session that has closed.
@@ -220,8 +363,12 @@ func (s *Server) ForgetConversation(id string) {
 		return
 	}
 	s.conversationMu.Lock()
+	state := s.conversations[id]
 	delete(s.conversations, id)
 	s.conversationMu.Unlock()
+	if state != nil && state.claimantLease != nil {
+		_ = state.claimantLease.Close()
+	}
 }
 
 // NewServer creates a new MCP server instance.
@@ -233,15 +380,17 @@ func NewServer(baseURL string, agentKey ed25519.PrivateKey) *Server {
 	}
 	pub, _ := agentKey.Public().(ed25519.PublicKey) //nolint:errcheck
 	s := &Server{
-		baseURL:             baseURL,
-		agentKey:            agentKey,
-		agentID:             hex.EncodeToString(pub),
-		provider:            os.Getenv("SAGE_PROVIDER"),
-		httpClient:          mcpHTTPClient(baseURL),
-		sendProbeTimeout:    3 * time.Second,
-		version:             "dev",
-		conversations:       make(map[string]*conversationState),
-		federatedAgentCache: make(map[string]federatedAgentCacheEntry),
+		baseURL:                 baseURL,
+		agentKey:                agentKey,
+		agentID:                 hex.EncodeToString(pub),
+		provider:                os.Getenv("SAGE_PROVIDER"),
+		httpClient:              mcpHTTPClient(baseURL),
+		sendProbeTimeout:        3 * time.Second,
+		version:                 "dev",
+		conversations:           make(map[string]*conversationState),
+		streamConversationTTL:   defaultStreamConversationTTL,
+		streamConversationLimit: defaultStreamConversationLimit,
+		federatedAgentCache:     make(map[string]federatedAgentCacheEntry),
 	}
 	s.tools = s.registerTools()
 	return s
@@ -288,9 +437,22 @@ func (s *Server) requireBoundFederatedCaller(ctx context.Context) error {
 
 // Run starts the stdio MCP server loop.
 func (s *Server) Run(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	stdin, stdout, stderr := os.Stdin, os.Stdout, os.Stderr
+	parentPID := os.Getppid()
+	parent, err := newMCPParentProcess(parentPID)
+	if err != nil {
+		cancel()
+		return fmt.Errorf("SAGE MCP: establish launching parent watch: %w", err)
+	}
+	stopParentWatch := startMCPParentWatch(parent, cancel, func() { _ = stdin.Close() }, os.Exit, mcpParentPollInterval, mcpParentExitGrace)
+	// Registered first so this remains armed through every potentially blocking
+	// cleanup, including the stdio writer, host channel and claimant lease.
+	defer stopParentWatch()
+	defer cancel()
 	defer s.closeClaimantLease()
-	reader := bufio.NewReaderSize(os.Stdin, 64<<10)
-	out := newStdioOutbound(ctx, os.Stdout)
+	reader := bufio.NewReaderSize(stdin, 64<<10)
+	out := newStdioOutbound(ctx, stdout)
 	var channelCancel context.CancelFunc
 	var channelDone chan struct{}
 	stopChannel := func() {
@@ -307,6 +469,8 @@ func (s *Server) Run(ctx context.Context) error {
 		out.Close()
 	}
 	defer shutdown()
+	calls := newStdioRequests(ctx, out)
+	defer calls.Close()
 	startChannel := func() {
 		if channelCancel != nil {
 			return
@@ -325,7 +489,7 @@ func (s *Server) Run(ctx context.Context) error {
 		os.Getenv(mcpRuntimeHandoffEnv),
 		os.Getenv(mcpRuntimeHandoffParentEnv),
 		os.Getenv(mcpRuntimeHandoffInitializedEnv),
-		os.Getppid(),
+		parentPID,
 	)
 	if lifecycle.takeToolsChangedNotification() {
 		if err := out.WriteJSON(ctx, mcpToolsChangedNotification()); err != nil {
@@ -333,9 +497,17 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		line, readErr := readMCPFrame(reader, maxMCPFrameBytes)
+		// A disconnected client's descendant may still write buffered frames.
+		// Cancellation must win before admitting any work or starting a handoff.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if errors.Is(readErr, io.EOF) {
-			return nil
+			return calls.Wait()
 		}
 		if errors.Is(readErr, errMCPFrameTooLarge) {
 			if err := writeMCPError(ctx, out, nil, -32600, "Request too large"); err != nil {
@@ -361,17 +533,23 @@ func (s *Server) Run(ctx context.Context) error {
 				// designed to expose.
 				return fmt.Errorf("SAGE MCP: installed executable became unavailable during runtime handoff")
 			}
-			fmt.Fprintf(os.Stderr, "SAGE MCP: installed executable changed; handing the pending request to the upgraded runtime\n")
+			fmt.Fprintf(stderr, "SAGE MCP: installed executable changed; handing the pending request to the upgraded runtime\n")
 			// No old-runtime goroutine may retain stdout after the replacement owns
 			// it. Stop the optional channel first, then drain/stop the sole writer.
+			if err := calls.Wait(); err != nil {
+				return err
+			}
 			shutdown()
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			// Pass the buffered reader, not raw os.Stdin: ReadSlice may already
 			// have pulled bytes from following frames into reader's buffer.
 			handoffEnv := os.Environ()
 			if claimantSessionID := s.currentStdioClaimantSessionID(); claimantSessionID != "" {
 				handoffEnv = withMCPEnvironment(handoffEnv, mcpRuntimeHandoffClaimantEnv, claimantSessionID)
 			}
-			started, err := handoffMCPProcess(ctx, executable.path, os.Args[1:], line, reader, os.Stdout, os.Stderr, handoffEnv, lifecycle.initialized)
+			started, err := handoffMCPProcess(ctx, executable.path, os.Args[1:], line, reader, stdout, stderr, handoffEnv, lifecycle.initialized)
 			if started {
 				// Once the replacement owns stdin the current runtime must never
 				// execute the replayed frame, even if the child later exits with an
@@ -393,7 +571,16 @@ func (s *Server) Run(ctx context.Context) error {
 			continue
 		}
 
-		resp := s.DispatchJSONRPC(ctx, &req)
+		if req.Method == "notifications/cancelled" {
+			calls.Cancel(req.Params)
+			continue
+		}
+		var resp *jsonRPCResponse
+		if req.Method == "tools/call" && req.ID != nil {
+			resp = calls.Start(req, s)
+		} else {
+			resp = s.DispatchJSONRPC(ctx, &req)
+		}
 		if resp != nil {
 			if err := out.WriteJSON(ctx, resp); err != nil {
 				return fmt.Errorf("SAGE MCP: write response: %w", err)
@@ -907,7 +1094,7 @@ func (s *Server) sendPreparedSignedRequest(ctx context.Context, prepared *prepar
 	if prepared == nil {
 		return nil, fmt.Errorf("prepared signed request is nil")
 	}
-	req, err := http.NewRequestWithContext(ctx, prepared.method, s.baseURL+prepared.path, bytes.NewReader(prepared.body))
+	req, err := http.NewRequestWithContext(ctx, prepared.method, s.baseURL+prepared.path, bytes.NewReader(prepared.body)) // #nosec G704 -- authority is the operator-configured SAGE endpoint; tool handlers supply API paths, never a replacement origin.
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
@@ -917,7 +1104,7 @@ func (s *Server) sendPreparedSignedRequest(ctx context.Context, prepared *prepar
 	req.Header.Set("X-Timestamp", prepared.timestamp)
 	req.Header.Set("X-Nonce", prepared.nonce)
 
-	return s.httpClient.Do(req)
+	return s.httpClient.Do(req) // #nosec G704 -- signed requests target the same operator-configured SAGE endpoint constructed above.
 }
 
 // signedRequest makes an authenticated HTTP request to the SAGE REST API.

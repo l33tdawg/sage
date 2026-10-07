@@ -78,6 +78,31 @@ func TestMatchRemotePipeCandidatesRequiresExactQualifiedIdentity(t *testing.T) {
 		"short agent prefixes are accepted only inside a peer-qualified handle")
 }
 
+type nonSQLitePipeMemoryStore struct{ store.MemoryStore }
+
+func TestResolveRemotePipeTargetMissingLocalStoreIsNotPeerUnsupported(t *testing.T) {
+	for _, backend := range []string{"missing", "non-SQLite"} {
+		t.Run(backend, func(t *testing.T) {
+			m, ss, _, _ := newRemotePipeCacheTestBinding(t)
+			m.memStore = nil
+			if backend == "non-SQLite" {
+				m.memStore = &nonSQLitePipeMemoryStore{ss}
+			}
+			_, err := m.ResolveRemotePipeTarget(context.Background(), strings.Repeat("ab", 32)+"@chain-cache-peer")
+			require.ErrorIs(t, err, ErrRemotePipeLocalStoreUnavailable)
+			require.NotErrorIs(t, err, ErrRemotePipePeerUnsupported,
+				"missing local storage says nothing about the remote peer's capabilities")
+		})
+	}
+}
+
+func TestFindRemotePipeContactsUnsupportedPeerRemainsDistinct(t *testing.T) {
+	m, _, agreement, _ := newRemotePipeCacheTestBinding(t)
+	_, err := m.findRemotePipeContactsWithStatus(context.Background(), agreement, &StatusResponse{}, "Mynah", 20)
+	require.ErrorIs(t, err, ErrRemotePipePeerUnsupported)
+	require.NotErrorIs(t, err, ErrRemotePipeLocalStoreUnavailable)
+}
+
 func TestMatchRemotePipeCandidatesAcceptsRegisteredNameButReturnsCanonicalRoute(t *testing.T) {
 	agentID := strings.Repeat("c", 64)
 	candidate := remotePipeCandidate{

@@ -258,6 +258,35 @@ def test_submit_response_preserves_app_v23_durability_fields():
     assert response.idempotent_replay is True
 
 
+def test_submit_response_models_an_indeterminate_outcome():
+    """A sent-but-unobserved write is neither a commit nor a failure.
+
+    It carries no memory_id (nothing is confirmed) and does carry the hash of
+    the transaction that may still commit, so the model must accept it instead
+    of raising — the caller's next move is to reconcile by tx_hash, never to
+    resubmit.
+    """
+    from sage_sdk.models import MemorySubmitResponse
+
+    response = MemorySubmitResponse.model_validate(
+        {
+            "status": "indeterminate",
+            "tx_hash": "AABBCCDD",
+            "nonce": 1789468101758619000,
+            "committed": False,
+            "retryable": False,
+            "message": "Do not resubmit: look the transaction up by tx_hash.",
+        }
+    )
+
+    assert response.status == "indeterminate"
+    assert response.memory_id is None
+    assert response.tx_hash == "AABBCCDD"
+    assert response.nonce == 1789468101758619000
+    assert response.committed is False
+    assert response.retryable is False
+
+
 def test_list_response_preserves_authorization_safe_pagination(sample_memory):
     from sage_sdk.models import MemoryListResponse
 

@@ -39,6 +39,21 @@ fi
 AMID_UID="${AMID_UID:-100}"
 AMID_GID="${AMID_GID:-101}"
 
+# How long each CometBFT node keeps a /broadcast_tx_commit caller waiting for
+# the transaction to be included in a block.
+#
+# Upstream defaults this to 10s, which is close enough to a loaded cluster's
+# block cadence to expire BEFORE the block lands: the tx then commits minutes
+# later while the caller is told the broadcast failed. SAGE's own client-side
+# wait (SAGE_TX_COMMIT_TIMEOUT_MS, default 60s) is deliberately longer and never
+# gets to speak if the node answers first.
+#
+# Keep this strictly BELOW that client wait, so the node — which knows whether
+# it admitted the bytes and can name the transaction hash — is always the party
+# that answers. Raising this above SAGE_TX_COMMIT_TIMEOUT_MS inverts that: every
+# slow block becomes a client-side deadline with no verdict attached.
+BROADCAST_TX_COMMIT_TIMEOUT="${BROADCAST_TX_COMMIT_TIMEOUT:-45s}"
+
 echo "==> Generating ${NUM_VALIDATORS}-node testnet configuration..."
 
 # Clean existing configs
@@ -83,7 +98,7 @@ elif [ "${HOST_COMETBFT_VERSION}" != "${COMETBFT_VERSION#v}" ]; then
     # instead of leaking through as a confusing "cometbft: not found" from the
     # testnet call below. The build's stderr is intentionally NOT suppressed.
     docker run --rm -v "${GENESIS_DIR}:/genesis" \
-        golang:1.25.13-alpine sh -c '
+        golang:1.26.8-alpine sh -c '
         set -e
         apk add --no-cache git make >/dev/null 2>&1
         git clone --branch v'"${COMETBFT_VERSION#v}"' --depth 1 https://github.com/cometbft/cometbft.git /tmp/cometbft 2>/dev/null
@@ -145,7 +160,20 @@ for i in $(seq 0 $((NUM_VALIDATORS - 1))); do
     sed -i.bak 's/allow_duplicate_ip = false/allow_duplicate_ip = true/' "$CONFIG"
 
     # Set block time
-    sed -i.bak 's/timeout_commit = ".*"/timeout_commit = "3s"/' "$CONFIG"
+    # Block time is a DEVNET knob, not a consensus rule: every validator in this
+    # throwaway network carries the same value, so AppHash agreement is unaffected.
+    # A long ladder climb (app-v8..app-v27 activates one rung at a time, each with
+    # a 200-block floor) is ~4.5h at the 3s default; a harness that has to walk
+    # the ladder sets SAGE_TESTNET_TIMEOUT_COMMIT, e.g. 300ms, and the same climb
+    # takes ~25 min. Never used by production nodes.
+    sed -i.bak "s/timeout_commit = \".*\"/timeout_commit = \"${SAGE_TESTNET_TIMEOUT_COMMIT:-3s}\"/" "$CONFIG"
+
+    # How long a /broadcast_tx_commit caller waits for inclusion before the node
+    # answers with its own error. Left at upstream's 10s this expires before a
+    # loaded cluster's block lands, so an accepted transaction is reported to
+    # its caller as a failure. Set explicitly rather than inherited, and keep it
+    # below SAGE_TX_COMMIT_TIMEOUT_MS (60s default) — see the variable's comment.
+    sed -i.bak "s|timeout_broadcast_tx_commit = \".*\"|timeout_broadcast_tx_commit = \"${BROADCAST_TX_COMMIT_TIMEOUT}\"|" "$CONFIG"
 
     # App-v20 transition hygiene. The application can deterministically drain
     # bounded stale invalid transactions, but official split-Comet deployments

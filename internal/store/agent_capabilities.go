@@ -18,7 +18,9 @@ const (
 	// owned by another agent even when a level-2 grant exists.
 	AgentCapabilityDenyForeignDomainWrite
 	// AgentCapabilityDenyFederatedPipe preserves local pipeline notes while
-	// refusing recipient discovery and delivery to another SAGE.
+	// refusing remote-recipient lookup and delivery to another SAGE. Visibility
+	// to peers in negotiated node messaging is controlled separately by the
+	// connection's agent exposure policy.
 	AgentCapabilityDenyFederatedPipe
 )
 

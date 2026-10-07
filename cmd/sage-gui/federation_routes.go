@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,8 +21,16 @@ import (
 
 const (
 	federationP2PCandidateTimeout = 2 * time.Second
-	maxFederationDirectRoutes     = 4
-	maxFederationRelayRoutes      = totp.MaxEnrollmentRouteCount - maxFederationDirectRoutes
+	// A relayed candidate gets its own budget. Reaching a peer through Circuit
+	// Relay v2 costs the dialer->relay leg, the relay->peer leg and the relay's
+	// own handshake before the inner federation TLS handshake starts, so a
+	// cross-region relay can legitimately need several round trips at ~300ms
+	// each. Judging that with the direct 2s budget is what made a healthy but
+	// slow relay look unreachable: every attempt aborted mid-handshake and the
+	// peer's node (running the same default) reported "Secure relay unavailable".
+	federationRelayCandidateTimeout = 8 * time.Second
+	maxFederationDirectRoutes       = 4
+	maxFederationRelayRoutes        = totp.MaxEnrollmentRouteCount - maxFederationDirectRoutes
 )
 
 func localFederationRouteBundle(transport *sagep2p.Transport) (federation.JoinP2PBundle, error) {
@@ -121,6 +131,21 @@ type p2pDialOutcome struct {
 // dialFederationP2PRoutes prefers direct P2P addresses, starts relay fallback
 // after a short head start, and bounds every stale/blackholed candidate. The
 // returned stream is still authenticated by federation mTLS before HTTP sends.
+// federationCandidateBudget reads an optional per-candidate budget override.
+// An absent or invalid value falls back to the built-in default so a typo can
+// never disable the bound entirely.
+func federationCandidateBudget(key string, fallback time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		return fallback
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 func dialFederationP2PRoutes(ctx context.Context, transport *sagep2p.Transport, targets []string, authenticate federation.PeerRouteAuthenticator) (federation.PeerRouteDialResult, bool, error) {
 	return dialFederationP2PRouteTargets(ctx, targets, transport.DialContext, authenticate)
 }
@@ -157,9 +182,16 @@ func dialFederationP2PRouteTargets(ctx context.Context, targets []string, dial f
 					return
 				}
 			}
-			attemptCtx, attemptCancel := context.WithTimeout(raceCtx, federationP2PCandidateTimeout)
+			var candidateTimeout time.Duration
+			if strings.Contains(target, "/p2p-circuit/") {
+				candidateTimeout = federationCandidateBudget("SAGE_FED_RELAY_CANDIDATE_TIMEOUT_MS", federationRelayCandidateTimeout)
+			} else {
+				candidateTimeout = federationCandidateBudget("SAGE_FED_DIRECT_CANDIDATE_TIMEOUT_MS", federationP2PCandidateTimeout)
+			}
+			attemptCtx, attemptCancel := context.WithTimeout(raceCtx, candidateTimeout)
 			defer attemptCancel()
 			start := time.Now()
+			complete := federation.BeginPeerRouteAttempt(attemptCtx, kind, target)
 			conn, err := dial(attemptCtx, target)
 			selectedTarget := target
 			if actualTarget, limited, ok := sagep2p.InspectConnectionRoute(conn); ok {
@@ -176,6 +208,7 @@ func dialFederationP2PRouteTargets(ctx context.Context, targets []string, dial f
 			if authenticate != nil {
 				result, err = authenticate(attemptCtx, result, err)
 			}
+			complete(err)
 			outcomes <- p2pDialOutcome{result: result, err: err}
 		}()
 	}

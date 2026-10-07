@@ -20,6 +20,7 @@ older foundation record where the meaning of “fully native” was unresolved.
 | Connect your whole SAGE to another network (federation join) | [`FEDERATION.md`](FEDERATION.md) |
 | Read + navigate the CEREBRUM brain view (MRI, node encoding, train of thought) | [`BRAIN.md`](BRAIN.md) |
 | Bootstrap an admin / org / clearance setup | [`ADMIN_BOOTSTRAP.md`](ADMIN_BOOTSTRAP.md) |
+| Enable the optional memory-quality judge or attach source evidence | [`reference/write-gate.md`](reference/write-gate.md) — off by default; held memories require operator review |
 | Configure lifecycle hooks | [`HOOKS.md`](HOOKS.md) |
 | Review the native desktop architecture | [`native-cerebrum-macos-v12-adr.md`](native-cerebrum-macos-v12-adr.md), [`desktop-shell-decision.md`](desktop-shell-decision.md), [`native-app-daemon-contract.md`](native-app-daemon-contract.md), [`native-shell-quality-gates.md`](native-shell-quality-gates.md), [`v12-native-capability-ledger.md`](v12-native-capability-ledger.md), [`v12-native-acceptance-ledger.md`](v12-native-acceptance-ledger.md), [`v12-native-milestone-review.md`](v12-native-milestone-review.md) |
 
@@ -32,6 +33,7 @@ The code-verified source of truth. When it disagrees with anything else, it wins
 - [`reference/rest-api.md`](reference/rest-api.md) — every HTTP endpoint
 - [`reference/python-sdk.md`](reference/python-sdk.md) — full `SageClient` / `AsyncSageClient` surface (package `sage-agent-sdk`)
 - [`reference/mcp-tools.md`](reference/mcp-tools.md) — every `sage_*` MCP tool + the boot sequence
+- [`reference/write-gate.md`](reference/write-gate.md) — optional local judging, evidence, and operator review
 - [`reference/concepts/`](reference/concepts/) — memory lifecycle, clearance & classification, RBAC/orgs/federation, consensus/confidence/decay
 
 Each file carries a `Verified against … (commit …)` header. **Never document a feature that isn't in the code yet.**
@@ -41,4 +43,4 @@ Each file carries a `Verified against … (commit …)` header. **Never document
 ## Conventions
 
 - `docs/` is public, curated documentation. Internal drafts (whitepapers, announcements, figures) are kept out of version control via `.gitignore`.
-- The machine-readable OpenAPI spec lives at [`../api/openapi.yaml`](../api/openapi.yaml) and is kept in sync with `reference/rest-api.md`.
+- The machine-readable OpenAPI spec lives at [`../api/openapi.yaml`](../api/openapi.yaml) but has known drift; verify endpoint contracts in `reference/rest-api.md` before generating a client (see [`reference/INDEX.md`](reference/INDEX.md)).

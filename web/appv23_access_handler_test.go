@@ -335,6 +335,86 @@ func TestAppV23PolicyApprovalGeneratesNamedRandomHomeDomainWhenBlank(t *testing.
 	))
 }
 
+func TestAppV26PolicyReapprovalReclaimsExactRetiredHomeFromRoot(t *testing.T) {
+	fixture := newAppV23AccessFixture(t)
+	_, pendingKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	pendingID := agentIDForKey(pendingKey)
+	require.NoError(t, fixture.badger.RegisterAgentWithCapabilities(
+		pendingID, "Returning local agent", store.AppV23RoleMember, "", "claude-desktop", "", 2,
+		store.DefaultSelfRegisteredAgentCapabilities,
+	))
+	const retiredHome = "local-returning-agent"
+	require.NoError(t, fixture.badger.ApproveAppV23LocalAgent(
+		store.AppV23LocalEnrollment{
+			AgentID: pendingID, ApprovedBy: fixture.rootID, RootGeneration: 1,
+			Profile: store.AppV23ProfileStandard, HomeDomain: retiredHome,
+			Clearance: 1, Capabilities: 0, Active: true, UpdatedHeight: 3,
+		}, store.AppV23RoleMember, 0, 0,
+	))
+	require.NoError(t, fixture.badger.ApproveAppV23LocalAgent(
+		store.AppV23LocalEnrollment{
+			AgentID: pendingID, ApprovedBy: fixture.rootID, RootGeneration: 1,
+			Profile: store.AppV23ProfileStandard, HomeDomain: retiredHome,
+			Clearance: 1, Capabilities: 0, Active: false, UpdatedHeight: 4,
+			RetireOwnedDomainsToRoot: true,
+		}, store.AppV23RoleMember, 1, 1,
+	))
+	root, err := fixture.badger.GetAppV23Root()
+	require.NoError(t, err)
+	owner, err := fixture.badger.GetDomainOwner(retiredHome)
+	require.NoError(t, err)
+	require.Equal(t, root.PrincipalID, owner)
+
+	var captured *tx.ParsedTx
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, decodeErr := hex.DecodeString(strings.TrimPrefix(r.URL.Query().Get("tx"), "0x"))
+		require.NoError(t, decodeErr)
+		captured, decodeErr = tx.DecodeTx(raw)
+		require.NoError(t, decodeErr)
+		approval := captured.LocalAgentApprove
+		require.NotNil(t, approval)
+		require.NoError(t, fixture.badger.ApproveAppV23LocalAgent(
+			store.AppV23LocalEnrollment{
+				AgentID: approval.AgentID, ApprovedBy: fixture.rootID, RootGeneration: 1,
+				Profile: approval.Profile, HomeDomain: approval.HomeDomain,
+				ExpectedHomeDomainOwner: approval.ExpectedHomeDomainOwner,
+				TransferHomeDomain:      approval.TransferHomeDomain,
+				Clearance:               approval.Clearance, Capabilities: store.AgentCapabilities(approval.Capabilities),
+				Active: approval.Active, UpdatedHeight: 5,
+			}, approval.Role, approval.ExpectedRevision, approval.ExpectedRoleRevision,
+		))
+		writeCommitOKAt(w, r, 5, "")
+	}))
+	defer rpc.Close()
+
+	h := appV23AccessTestHandler(fixture, rpc.URL, map[string]ed25519.PrivateKey{pendingID: pendingKey})
+	req := appV23AccessRequest(t, http.MethodPut, "/policy", "id", pendingID, map[string]any{
+		"role": "member", "profile": "standard", "home_domain": retiredHome,
+		"clearance": 1, "capabilities": 0,
+	})
+	req = appV23AccessAs(req, fixture.rootID)
+	rec := httptest.NewRecorder()
+	h.handleAppV23AgentPolicy().ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotNil(t, captured)
+	require.NotNil(t, captured.LocalAgentApprove)
+	approval := captured.LocalAgentApprove
+	require.True(t, approval.TransferHomeDomain)
+	require.Equal(t, root.PrincipalID, approval.ExpectedHomeDomainOwner)
+	require.Equal(t, uint64(2), approval.ExpectedRevision)
+	require.Equal(t, uint64(2), approval.ExpectedRoleRevision)
+	require.True(t, ed25519.Verify(
+		pendingKey.Public().(ed25519.PublicKey),
+		tx.LocalAgentApprovalSignBytes(fixture.rootID, approval),
+		approval.TargetSignature,
+	))
+	owner, err = fixture.badger.GetDomainOwner(retiredHome)
+	require.NoError(t, err)
+	require.Equal(t, pendingID, owner)
+}
+
 func TestAppV26RootDisplayRenameBroadcastsOnlyMutableLabel(t *testing.T) {
 	fixture := newAppV23AccessFixture(t)
 	require.NoError(t, fixture.badger.UpdateAgentMeta(

@@ -60,6 +60,45 @@ func memoryReassignLogFingerprint(agentID string) string {
 	return hex.EncodeToString(digest[:12])
 }
 
+// appV23OperatorHandlerPair returns the app-v23 access-control pair: the
+// consensus-authoritative state read that exposes role and enrollment
+// revisions, and the atomic policy write that is the only producer of
+// TxTypeAgentRoleChange.
+func (h *DashboardHandler) appV23OperatorHandlerPair(agentStore store.AgentStore) (get, put http.HandlerFunc) {
+	return h.handleAppV23AccessState(agentStore), h.handleAppV23AgentPolicy()
+}
+
+// registerAppV23OperatorRoutes mounts the pair on the CEREBRUM dashboard
+// router, whose enclosing group already runs authMiddleware over every request.
+func (h *DashboardHandler) registerAppV23OperatorRoutes(r chi.Router, agentStore store.AgentStore) {
+	get, put := h.appV23OperatorHandlerPair(agentStore)
+	r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/network/access", get)
+	r.With(h.cerebrumOperatorGate).Put("/v1/dashboard/network/access/agents/{id}/policy", put)
+}
+
+// RegisterAmidOperatorRoutes mounts exactly that pair on an amid REST router.
+// An amid-only validator fleet has no CEREBRUM SPA: its operator reaches these
+// routes with a request signed by the current Root or an active same-machine
+// Admin, and the broker key configured on the node countersigns a promoted
+// Admin's action. It is the same pair CEREBRUM serves — same handlers, same
+// gate, same transaction — and nothing else from the dashboard router is
+// exposed.
+//
+// authMiddleware is required here because the amid mount has no equivalent of
+// CEREBRUM's enclosing group: it verifies a signed request exactly once and
+// binds the authenticated principal to the context, so the operator gate and
+// the handler resolve the same actor. Without it both would verify the same
+// signature and the dashboard replay fence would reject the second check.
+func (h *DashboardHandler) RegisterAmidOperatorRoutes(r chi.Router) {
+	agentStore, ok := h.store.(AgentStoreProvider)
+	if !ok {
+		return
+	}
+	get, put := h.appV23OperatorHandlerPair(agentStore)
+	r.With(h.authMiddleware, h.cerebrumOperatorGate).Get("/v1/dashboard/network/access", get)
+	r.With(h.authMiddleware, h.cerebrumOperatorGate).Put("/v1/dashboard/network/access/agents/{id}/policy", put)
+}
+
 // RegisterNetworkRoutes registers all /v1/dashboard/network/ routes.
 func (h *DashboardHandler) RegisterNetworkRoutes(r chi.Router) {
 	agentStore, ok := h.store.(AgentStoreProvider)
@@ -93,8 +132,7 @@ func (h *DashboardHandler) RegisterNetworkRoutes(r chi.Router) {
 	r.With(h.cerebrumOperatorGate).
 		Get("/v1/dashboard/network/agents/{id}/domains", h.handleAgentDomains(agentStore))
 	r.Post("/v1/dashboard/network/reassign-domain-ownership", h.handleReassignDomainOwnership(agentStore))
-	r.With(h.cerebrumOperatorGate).Get("/v1/dashboard/network/access", h.handleAppV23AccessState(agentStore))
-	r.With(h.cerebrumOperatorGate).Put("/v1/dashboard/network/access/agents/{id}/policy", h.handleAppV23AgentPolicy())
+	h.registerAppV23OperatorRoutes(r, agentStore)
 	r.With(h.cerebrumOperatorGate).Put("/v1/dashboard/network/access/agents/{id}/name", h.handleAppV26AgentDisplayName())
 	r.With(h.cerebrumOperatorGate).Put("/v1/dashboard/network/access/groups/{groupID}", h.handleAppV23AccessGroupPut())
 	r.With(h.cerebrumOperatorGate).Delete("/v1/dashboard/network/access/groups/{groupID}", h.handleAppV23AccessGroupDelete())
@@ -820,12 +858,36 @@ func (h *DashboardHandler) handleRemoveAgent(agentStore store.AgentStore) http.H
 			return
 		}
 		if agent.MemoryCount > 0 && r.URL.Query().Get("force") != "true" {
-			writeJSONResp(w, http.StatusConflict, map[string]any{
-				"ok": false, "code": "agent_has_memories", "error": "Agent has memories.",
-				"memory_count": agent.MemoryCount,
-				"message":      "Use ?force=true to deactivate it while preserving original memory attribution.",
+			// AgentEntry.MemoryCount deliberately includes deprecated audit history,
+			// while the recovery panel and the operator's remediation workflow show
+			// only active records. Reusing the all-history count here made a fully
+			// deprecated identity impossible to reject: the UI truthfully showed
+			// zero records left to deprecate, but this gate could never reach zero.
+			// Count with the same shared "active" lifecycle filter before blocking.
+			memoryStore, ok := agentStore.(store.MemoryStore)
+			if !ok {
+				writeAppV23AccessError(w, http.StatusServiceUnavailable, "memory_state_unavailable",
+					"Active memory ownership could not be verified; the agent was left unchanged.")
+				return
+			}
+			_, activeMemoryCount, countErr := memoryStore.ListMemories(r.Context(), store.ListOptions{
+				SubmittingAgent: id,
+				Status:          "active",
+				Limit:           1,
 			})
-			return
+			if countErr != nil {
+				writeAppV23AccessError(w, http.StatusServiceUnavailable, "memory_state_unavailable",
+					"Active memory ownership could not be verified; the agent was left unchanged.")
+				return
+			}
+			if activeMemoryCount > 0 {
+				writeJSONResp(w, http.StatusConflict, map[string]any{
+					"ok": false, "code": "agent_has_memories", "error": "Agent has active memories.",
+					"memory_count": activeMemoryCount,
+					"message":      "Deprecate the active memories, transfer their domains, or use ?force=true while preserving original attribution.",
+				})
+				return
+			}
 		}
 		if enrollment == nil {
 			// Directory-only / historical records have never held an active

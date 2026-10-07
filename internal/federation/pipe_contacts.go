@@ -47,7 +47,7 @@ type pipeContactCapabilityOverlay struct {
 // Modern callers request compact status and use targeted lookup instead; this
 // keeps an old peer from forcing full local roster × policy evaluation under
 // the federation snapshot leases.
-func (m *Manager) buildPipeContactStatusGrant(ctx context.Context, peer *peerIdentity, policy *store.PeerRBACPolicy) (*PipeContactGrant, error) {
+func (m *Manager) buildPipeContactStatusGrant(ctx context.Context, peer *peerIdentity, policy *store.PeerRBACPolicy, modes ...string) (*PipeContactGrant, error) {
 	if policy == nil {
 		return nil, nil
 	}
@@ -61,18 +61,28 @@ func (m *Manager) buildPipeContactStatusGrant(ctx context.Context, peer *peerIde
 	if ss == nil || m.badger == nil {
 		return nil, fmt.Errorf("pipe contacts require SQLite and consensus domain state")
 	}
+	if len(modes) > 0 && modes[0] == NodeMessageAuthorizationMode {
+		return m.buildNodeContactPage(ctx, peer, policy, "", maxPipeContactStatusCandidates)
+	}
 	agents, err := ss.ListPipeContactStatusCandidates(ctx, maxPipeContactStatusCandidates)
 	if err != nil {
 		return nil, fmt.Errorf("list bounded local agents for pipe contacts: %w", err)
 	}
-	return m.buildPipeContactGrantForCandidates(ctx, peer, policy, agents, nil, true, nil, true)
+	return m.buildPipeContactGrantForCandidates(ctx, peer, policy, agents, nil, true, nil, true, modes...)
 }
 
 // buildPipeContactGrantForCandidates is the common projection builder. Status
 // supplies the complete local roster for legacy compatibility. Targeted lookup
 // supplies a short selector-derived candidate list and does not automatically
 // add every owner, because doing so would leak nonmatching contacts.
-func (m *Manager) buildPipeContactGrantForCandidates(ctx context.Context, peer *peerIdentity, policy *store.PeerRBACPolicy, agents []*store.AgentEntry, candidateIDs []string, includeOwners bool, handleOverrides map[string]string, selectedAcceptances bool) (*PipeContactGrant, error) {
+func (m *Manager) buildPipeContactGrantForCandidates(ctx context.Context, peer *peerIdentity, policy *store.PeerRBACPolicy, agents []*store.AgentEntry, candidateIDs []string, includeOwners bool, handleOverrides map[string]string, selectedAcceptances bool, modes ...string) (*PipeContactGrant, error) {
+	mode := ""
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
+	if mode != "" && mode != NodeMessageAuthorizationMode {
+		return nil, errors.New("unsupported contact authorization mode")
+	}
 	if policy == nil {
 		return nil, nil
 	}
@@ -196,10 +206,51 @@ func (m *Manager) buildPipeContactGrantForCandidates(ctx context.Context, peer *
 		capabilityCache[agentID] = overlay
 		return overlay, nil
 	}
-	// Manual domain-only PeerRBAC remains readable but never exposes its owner as
-	// a federated identity. Contacts are derived only from explicit agent exports
-	// and each exported agent's current owned-domain tree.
-	effectiveDomains, exportErr := m.effectiveAgentExportDomainPermissions(ctx, peer, policy)
+	// Legacy contacts require explicit exports, never just manual domain Read.
+	// Negotiated node messaging instead projects ordinary-agent membership with
+	// no domain authority, leaving all memory grants independent.
+	var effectiveDomains []store.PeerRBACDomainPermission
+	var exportErr error
+	if mode == NodeMessageAuthorizationMode {
+		if !postV23 {
+			return nil, errors.New("node messaging requires canonical ordinary-agent standing")
+		}
+		// Metadata-only membership: neither domain ownership nor memory Read is
+		// a prerequisite. Resolve each selected agent's current canonical
+		// standing, then apply this connection's operator-chosen discovery
+		// policy. An agent that refuses federated delivery is still advertised
+		// with accepting=false by design, so the peer can see that the agent
+		// exists without being promised a route; only the operator's discovery
+		// policy removes an agent from listing and search.
+		exposureGate, exposureErr := m.agentExposureGate(ctx, peer, policy)
+		if exposureErr != nil {
+			return nil, exposureErr
+		}
+		for agentID := range agentByID {
+			if !isCanonicalAgentID(agentID) {
+				continue
+			}
+			eligible, eligibilityErr := ordinaryEligible(agentID)
+			if eligibilityErr != nil {
+				return nil, eligibilityErr
+			}
+			if !eligible {
+				continue
+			}
+			if exposureGate != nil {
+				visible, visibleErr := exposureGate(agentID)
+				if visibleErr != nil {
+					return nil, visibleErr
+				}
+				if !visible {
+					continue
+				}
+			}
+			byAgent[agentID] = &pipeContactAggregate{agentID: agentID, domains: []PipeContactDomain{}}
+		}
+	} else {
+		effectiveDomains, exportErr = m.effectiveAgentExportDomainPermissions(ctx, peer, policy)
+	}
 	if exportErr != nil {
 		return nil, fmt.Errorf("resolve explicit federated agent domains: %w", exportErr)
 	}
@@ -320,10 +371,11 @@ func (m *Manager) buildPipeContactGrantForCandidates(ctx context.Context, peer *
 		})
 
 		contact := PipeContact{
-			AgentID:   agentID,
-			Available: false,
-			Accepting: false,
-			Domains:   agg.domains,
+			AuthorizationMode: mode,
+			AgentID:           agentID,
+			Available:         false,
+			Accepting:         false,
+			Domains:           agg.domains,
 		}
 		if agent := agentByID[agentID]; agent != nil {
 			name := agent.Name
@@ -436,6 +488,17 @@ func (m *Manager) buildPipeContactLookupGrant(ctx context.Context, peer *peerIde
 	if ss == nil {
 		return nil, 0, fmt.Errorf("pipe contacts require SQLite")
 	}
+	if req.List {
+		grant, err := m.buildNodeContactPage(ctx, peer, policy, req.After, req.Limit)
+		if err != nil {
+			return nil, 0, err
+		}
+		total := len(grant.Contacts)
+		if grant.NextCursor != "" {
+			total++
+		}
+		return grant, total, nil
+	}
 	var (
 		agents          []*store.AgentEntry
 		candidateIDs    []string
@@ -483,7 +546,7 @@ func (m *Manager) buildPipeContactLookupGrant(ctx context.Context, peer *peerIde
 	if err != nil {
 		return nil, 0, fmt.Errorf("find pipe contact candidates: %w", err)
 	}
-	grant, err := m.buildPipeContactGrantForCandidates(ctx, peer, policy, agents, candidateIDs, false, handleOverrides, true)
+	grant, err := m.buildPipeContactGrantForCandidates(ctx, peer, policy, agents, candidateIDs, false, handleOverrides, true, req.AuthorizationMode)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -564,23 +627,29 @@ func (m *Manager) pipeContactAgreementID(peer *peerIdentity, policy *store.PeerR
 // under a freshly re-derived contact.
 func (m *Manager) pipeContactID(peer *peerIdentity, policy *store.PeerRBACPolicy, contact PipeContact) (string, error) {
 	input := struct {
-		Version       int                   `json:"version"`
-		LocalChainID  string                `json:"local_chain_id"`
-		PeerChainID   string                `json:"peer_chain_id"`
-		PeerAgentID   string                `json:"peer_agent_id"`
-		PolicyEpoch   string                `json:"policy_epoch"`
-		RemoteCAPin   string                `json:"remote_ca_pin"`
-		PolicyVersion int                   `json:"policy_version"`
-		PolicyRev     int64                 `json:"policy_revision"`
-		Agreement     *store.CrossFedRecord `json:"agreement"`
-		AgentID       string                `json:"agent_id"`
-		Domains       []PipeContactDomain   `json:"domains"`
+		Version           int                   `json:"version"`
+		LocalChainID      string                `json:"local_chain_id"`
+		PeerChainID       string                `json:"peer_chain_id"`
+		PeerAgentID       string                `json:"peer_agent_id"`
+		PolicyEpoch       string                `json:"policy_epoch"`
+		RemoteCAPin       string                `json:"remote_ca_pin"`
+		PolicyVersion     int                   `json:"policy_version"`
+		PolicyRev         int64                 `json:"policy_revision"`
+		Agreement         *store.CrossFedRecord `json:"agreement"`
+		AgentID           string                `json:"agent_id"`
+		Domains           []PipeContactDomain   `json:"domains"`
+		AuthorizationMode string                `json:"authorization_mode,omitempty"`
 	}{
 		Version: PipeContactVersion, LocalChainID: m.localChainID,
 		PeerChainID: peer.ChainID, PeerAgentID: peer.AgentID,
 		PolicyEpoch: policy.PolicyEpoch, RemoteCAPin: policy.RemoteCAPin,
 		PolicyVersion: policy.PolicyVersion, PolicyRev: policy.Revision,
 		Agreement: peer.Agreement, AgentID: contact.AgentID, Domains: contact.Domains,
+		AuthorizationMode: contact.AuthorizationMode,
+	}
+	if contact.AuthorizationMode == NodeMessageAuthorizationMode {
+		// Editing memory sharing must not invalidate unrelated messages.
+		input.PolicyRev = 0
 	}
 	encoded, err := json.Marshal(input)
 	if err != nil {
@@ -610,7 +679,7 @@ func (m *Manager) LocalPipeContactsForAgent(ctx context.Context, remoteChainID, 
 	return m.localPipeContacts(ctx, remoteChainID, localAgentID)
 }
 
-func (m *Manager) localPipeContacts(ctx context.Context, remoteChainID, selectedAgentID string) (*PipeContactGrant, error) {
+func (m *Manager) localPipeContacts(ctx context.Context, remoteChainID, selectedAgentID string, nodePage ...string) (*PipeContactGrant, error) {
 	ss := m.syncStore()
 	if ss == nil {
 		return nil, fmt.Errorf("pipe contacts require the SQLite store backend")
@@ -636,6 +705,9 @@ func (m *Manager) localPipeContacts(ctx context.Context, remoteChainID, selected
 		return nil, fmt.Errorf("connection has no exact peer RBAC snapshot")
 	}
 	peer := &peerIdentity{ChainID: remoteChainID, AgentID: policy.PeerAgentID, Agreement: agreement}
+	if len(nodePage) == 2 && nodePage[0] == NodeMessageAuthorizationMode {
+		return m.buildNodeContactPage(ctx, peer, policy, nodePage[1], maxPipeContactStatusCandidates)
+	}
 	agents, err := ss.ListPipeContactStatusCandidates(ctx, maxPipeContactStatusCandidates)
 	if err != nil {
 		return nil, fmt.Errorf("list bounded local agents for pipe contacts: %w", err)

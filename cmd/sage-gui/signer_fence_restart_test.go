@@ -203,6 +203,94 @@ func TestDrainTimeRecheckFailsClosedWhileSigningIsBusy(t *testing.T) {
 	}
 }
 
+// TestOrdinaryShutdownDrainQuiescesAndNeverResumes pins both halves of the
+// ordinary-exit drain: it stops new allocations, and it does NOT resume them,
+// because the process is leaving.
+func TestOrdinaryShutdownDrainQuiescesAndNeverResumes(t *testing.T) {
+	t.Cleanup(func() { tx.QuiesceSigningForRestart()() })
+
+	if err := drainSigningForOrdinaryShutdown(2 * time.Second); err != nil {
+		t.Fatalf("an idle node failed its own shutdown drain: %v", err)
+	}
+	err := tx.WithNonceLease(context.Background(), restartTestSigningKey(t), func(uint64) error {
+		t.Error("a transaction was signed into an ordinary shutdown")
+		return nil
+	})
+	if !errors.Is(err, tx.ErrSigningQuiesced) {
+		t.Fatalf("got %v, want ErrSigningQuiesced after the ordinary-shutdown drain", err)
+	}
+}
+
+// TestOrdinaryShutdownDrainWaitsForInFlightSigning covers the case the drain
+// exists for: a submission already inside a nonce lease is given its window
+// instead of being severed by the listener force-close.
+func TestOrdinaryShutdownDrainWaitsForInFlightSigning(t *testing.T) {
+	t.Cleanup(func() { tx.QuiesceSigningForRestart()() })
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan struct{})
+	go func() {
+		defer close(holderDone)
+		_ = tx.WithNonceLease(context.Background(), restartTestSigningKey(t), func(uint64) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		close(release)
+	}()
+
+	start := time.Now()
+	err := drainSigningForOrdinaryShutdown(10 * time.Second)
+	elapsed := time.Since(start)
+	<-holderDone
+
+	if err != nil {
+		t.Fatalf("the drain did not wait for an in-flight submission to finish: %v", err)
+	}
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("the drain reported idle after %s while a submission was still inside its lease", elapsed)
+	}
+}
+
+// TestOrdinaryShutdownDrainFailsClosedOnAStuckSubmission is the other half of
+// the contract: a submission that outlasts the budget must not hold the exit
+// open. The caller gets an error to log and proceeds — fail closed, with the
+// durable intent carrying the fence across the restart.
+func TestOrdinaryShutdownDrainFailsClosedOnAStuckSubmission(t *testing.T) {
+	t.Cleanup(func() { tx.QuiesceSigningForRestart()() })
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	holderDone := make(chan struct{})
+	go func() {
+		defer close(holderDone)
+		_ = tx.WithNonceLease(context.Background(), restartTestSigningKey(t), func(uint64) error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	<-entered
+
+	start := time.Now()
+	err := drainSigningForOrdinaryShutdown(200 * time.Millisecond)
+	elapsed := time.Since(start)
+	close(release)
+	<-holderDone
+
+	if err == nil {
+		t.Fatal("a submission that outlasted the budget was reported as idle; the exit would claim a drain it never had")
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("the drain burned %s past its 200ms budget; an operator-ordered exit must not hang", elapsed)
+	}
+}
+
 // TestDrainTimeRecheckCommitsWithSigningStillQuiesced covers the commit side:
 // a clean re-check runs the drain preparation's commit and leaves signing
 // QUIESCED — the process is now going away, and a transaction signed into the

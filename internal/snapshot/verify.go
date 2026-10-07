@@ -47,6 +47,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/l33tdawg/sage/internal/consensuskeys"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/vault"
 )
 
@@ -222,25 +223,53 @@ func VerifyWithOptions(dir string, opts VerifyOptions) error {
 		}
 		// The manifest's AppHash was computed under whichever consensus hash
 		// rule was in force when the snapshot was taken: legacy (all keys),
-		// app-v12 (whole state: prefix excluded), or app-v13 (the three
-		// SaveState bookkeeping keys excluded). The manifest carries no rule
-		// marker — pre-10.5.1 manifests predate the rules entirely — so the
-		// proof accepts a match under ANY rule. Still a strong proof: each
-		// candidate is a full-keyspace digest of the restored DB; an
-		// adversarial or corrupt backup matches none of them.
+		// app-v12 (whole state: prefix excluded), app-v13 (the three
+		// SaveState bookkeeping keys excluded), or app-v28 (the app-v13 digest
+		// of the state WITHOUT the public-memory index nodes, composed with the
+		// sparse index root). The manifest carries no rule marker —
+		// pre-10.5.1 manifests predate the rules entirely — so the proof
+		// accepts a match under ANY rule. Still a strong proof: each candidate
+		// is a full-keyspace digest of the restored DB; an adversarial or
+		// corrupt backup matches none of them.
 		var candidates [][]byte
+		ruleLabel := "legacy/app-v12/app-v13"
 		if opts.AppHashComputer != nil {
 			got, replayErr := replayBadgerAndHash(badgerSrc, opts.AppHashComputer)
 			if replayErr != nil {
 				return fmt.Errorf("verify: badger replay: %w", replayErr)
 			}
 			candidates = [][]byte{got}
+			ruleLabel = "supplied AppHashComputer"
 		} else {
-			all, replayErr := replayBadgerAndHash(badgerSrc, computeAppHashAllRulesStandalone)
+			replayErr := withRestoredBadger(badgerSrc, func(restored string) error {
+				all, hashErr := computeAppHashAllRulesStandalone(restored)
+				if hashErr != nil {
+					return hashErr
+				}
+				candidates = splitConcatenatedHashes(all)
+				// app-v28 REPLACED the app-v13 rule, so a snapshot taken by a
+				// v28-active chain carries a digest the three older eras cannot
+				// produce. Read it through internal/store instead of deriving
+				// the rule here: the state-sync path already refused every v28
+				// provider once by keeping its own copy of the rule, and a
+				// second copy in the proof path is how this one went stale.
+				composite, compositeErr := appV28CompositeAppHash(restored)
+				switch {
+				case compositeErr == nil:
+					candidates = append(candidates, composite)
+					ruleLabel = "legacy/app-v12/app-v13/app-v28"
+				case errors.Is(compositeErr, store.ErrPublicMemoryIndex):
+					// The restored state carries no public-memory commitment,
+					// so the chain never activated app-v28 and that rule cannot
+					// be the one the manifest recorded.
+				default:
+					return fmt.Errorf("app-v28 composite AppHash: %w", compositeErr)
+				}
+				return nil
+			})
 			if replayErr != nil {
 				return fmt.Errorf("verify: badger replay: %w", replayErr)
 			}
-			candidates = splitConcatenatedHashes(all)
 		}
 		matched := false
 		for _, c := range candidates {
@@ -250,7 +279,7 @@ func VerifyWithOptions(dir string, opts VerifyOptions) error {
 			}
 		}
 		if !matched {
-			return fmt.Errorf("verify: AppHash mismatch under every hash rule (legacy/app-v12/app-v13): want %x", m.AppHash)
+			return fmt.Errorf("verify: AppHash mismatch under every hash rule (%s): want %x", ruleLabel, m.AppHash)
 		}
 	}
 
@@ -631,13 +660,15 @@ func sqliteIntegrityCheck(path string) error {
 	return nil
 }
 
-// replayBadgerAndHash loads a badger.backup file into a fresh DB under
-// t.TempDir()-style directory and hashes the result. The DB is closed
-// and removed before return.
-func replayBadgerAndHash(backupPath string, hasher AppHashComputer) ([]byte, error) {
+// withRestoredBadger loads a badger.backup file into a fresh DB under a
+// t.TempDir()-style directory and hands the restored directory to fn. The DB is
+// closed, and the directory removed, before return — so fn may open the
+// directory itself (read-only) if it needs more than one digest of the same
+// restored bytes.
+func withRestoredBadger(backupPath string, fn func(badgerDir string) error) error {
 	tmp, err := os.MkdirTemp("", "sage-snapshot-verify-badger-*")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
 
@@ -645,22 +676,38 @@ func replayBadgerAndHash(backupPath string, hasher AppHashComputer) ([]byte, err
 	opts.Logger = nil
 	db, err := badger.Open(opts)
 	if err != nil {
-		return nil, fmt.Errorf("open tmp badger: %w", err)
+		return fmt.Errorf("open tmp badger: %w", err)
 	}
 	in, err := os.Open(backupPath) //nolint:gosec // backupPath is dir-derived
 	if err != nil {
 		_ = db.Close()
-		return nil, err
+		return err
 	}
 	defer func() { _ = in.Close() }()
 	if loadErr := db.Load(in, 16); loadErr != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("load backup: %w", loadErr)
+		return fmt.Errorf("load backup: %w", loadErr)
 	}
 	if closeErr := db.Close(); closeErr != nil {
-		return nil, fmt.Errorf("close tmp badger: %w", closeErr)
+		return fmt.Errorf("close tmp badger: %w", closeErr)
 	}
-	return hasher(tmp)
+	return fn(tmp)
+}
+
+// replayBadgerAndHash loads a badger.backup file into a fresh DB under a
+// t.TempDir()-style directory and hashes the result. The DB is closed
+// and removed before return.
+func replayBadgerAndHash(backupPath string, hasher AppHashComputer) ([]byte, error) {
+	var digest []byte
+	err := withRestoredBadger(backupPath, func(restored string) error {
+		var hashErr error
+		digest, hashErr = hasher(restored)
+		return hashErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return digest, nil
 }
 
 // computeAppHashStandalone walks a freshly-opened BadgerDB and emits

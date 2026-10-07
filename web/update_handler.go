@@ -275,6 +275,33 @@ func diskBinaryVersion(ctx context.Context, binPath string) string {
 	return parseVersionOutput(string(out))
 }
 
+// diskBinaryMaxSupportedAppVersion asks the exact replacement executable for
+// its consensus compatibility ceiling. A release version alone cannot prove
+// this property, so missing or malformed capability output fails closed.
+func diskBinaryMaxSupportedAppVersion(ctx context.Context, binPath string) (uint64, error) {
+	if _, err := requireUpdateBinaryFile(binPath, "compatibility probe binary"); err != nil {
+		return 0, err
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(probeCtx, binPath, "version").Output() //nolint:gosec
+	if err != nil {
+		return 0, fmt.Errorf("run replacement compatibility probe: %w", err)
+	}
+	for _, field := range strings.Fields(string(out)) {
+		field = strings.Trim(field, "(),")
+		if !strings.HasPrefix(field, "max-app-v") {
+			continue
+		}
+		value, parseErr := strconv.ParseUint(strings.TrimPrefix(field, "max-app-v"), 10, 64)
+		if parseErr != nil || value == 0 {
+			return 0, fmt.Errorf("replacement binary reported invalid app-version ceiling %q", field)
+		}
+		return value, nil
+	}
+	return 0, errors.New("replacement binary did not report its max supported app version")
+}
+
 // parseVersionOutput extracts the version from sage-gui's version line,
 // e.g. "sage-gui v10.4.4 (commit abc1234, built 2026-06-11)".
 // Returns "" if the output doesn't look like that.
@@ -514,35 +541,41 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 	}
 	h.sendUpdateProgress("verify", "done", "Checksum verified")
 
-	// A verified release archive is not enough to authorize mutation of the
-	// installed executable. First prove that the exact current chain state and
-	// running binary form a coherent, restorable rollback bundle. This runs
-	// before the vault backup and before either platform installer touches the
-	// app/binary. Missing production wiring fails closed.
-	h.sendUpdateProgress("snapshot", "active", "Creating and verifying a complete pre-update recovery snapshot...")
+	// A verified archive is not enough to authorize mutation. The exact candidate
+	// executable must first report its consensus ceiling; that ceiling, canonical
+	// governance, and the committed snapshot tuple are then proven under one
+	// uninterrupted application read fence.
 	if h.PrepareVersionTransition == nil || h.PrepareRestartDrain == nil {
 		h.sendUpdateProgress("snapshot", "error", "Update safety snapshot is unavailable; the installed app was not changed")
 		return
 	}
-	drainCtx, cancelDrain := context.WithTimeout(ctx, 15*time.Second)
-	_, abortDrain, drainErr := h.PrepareRestartDrain(drainCtx)
-	cancelDrain()
-	if drainErr != nil {
-		h.sendUpdateProgress("snapshot", "error", "A current snapshot is still finishing; retry the update without interrupting SAGE: "+drainErr.Error())
-		return
+	prepareCandidate := func(candidatePath string) (func(), error) {
+		replacementMaxAppVersion, capabilityErr := diskBinaryMaxSupportedAppVersion(ctx, candidatePath)
+		if capabilityErr != nil {
+			return nil, fmt.Errorf("verify replacement binary compatibility: %w", capabilityErr)
+		}
+		h.sendUpdateProgress("snapshot", "active", "Creating and verifying a complete pre-update recovery snapshot...")
+		drainCtx, cancelDrain := context.WithTimeout(ctx, 15*time.Second)
+		_, abortDrain, drainErr := h.PrepareRestartDrain(drainCtx)
+		cancelDrain()
+		if drainErr != nil {
+			return nil, fmt.Errorf("a current snapshot is still finishing: %w", drainErr)
+		}
+		transitionRelease, snapshotErr := h.PrepareVersionTransition(ctx, expectedVersion, replacementMaxAppVersion)
+		if snapshotErr != nil {
+			abortDrain()
+			return nil, snapshotErr
+		}
+		if transitionRelease == nil {
+			abortDrain()
+			return nil, errors.New("could not hold the verified recovery boundary")
+		}
+		h.sendUpdateProgress("snapshot", "done", "Complete recovery snapshot verified")
+		return func() {
+			transitionRelease()
+			abortDrain()
+		}, nil
 	}
-	defer abortDrain()
-	transitionRelease, snapshotErr := h.PrepareVersionTransition(ctx, expectedVersion)
-	if snapshotErr != nil {
-		h.sendUpdateProgress("snapshot", "error", "Could not verify the pre-update recovery snapshot; the installed app was not changed: "+snapshotErr.Error())
-		return
-	}
-	if transitionRelease == nil {
-		h.sendUpdateProgress("snapshot", "error", "Could not hold the verified recovery boundary; the installed app was not changed")
-		return
-	}
-	defer transitionRelease()
-	h.sendUpdateProgress("snapshot", "done", "Complete recovery snapshot verified")
 
 	// Protect the irreplaceable vault key before either the app-bundle or
 	// standalone-binary installer touches the current installation.
@@ -558,8 +591,8 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 	if runtime.GOOS == "darwin" {
 		_ = archiveTmp.Close()
 		h.sendUpdateProgress("extract", "active", "Opening signed SAGE app update...")
-		stagedVersion, installErr := installDarwinAppUpdate(ctx, archiveTmp.Name(), execPath, expectedVersion) //nolint:staticcheck // !darwin stub is unreachable behind runtime.GOOS
-		if installErr != nil {                                                                                 //nolint:staticcheck // the !darwin build-tag stub always errors, but this runtime branch is Darwin-only
+		stagedVersion, installErr := installDarwinAppUpdate(ctx, archiveTmp.Name(), execPath, expectedVersion, prepareCandidate) //nolint:staticcheck // !darwin stub is unreachable behind runtime.GOOS
+		if installErr != nil {                                                                                                   //nolint:staticcheck // the !darwin build-tag stub always errors, but this runtime branch is Darwin-only
 			h.sendUpdateProgress("install", "error", installErrorMessage("Failed to install signed app update", installErr, downloadURL))
 			return
 		}
@@ -596,6 +629,12 @@ func (h *DashboardHandler) performUpdate(ctx context.Context, downloadURL, check
 		))
 		return
 	}
+	transitionRelease, snapshotErr := prepareCandidate(newBinary)
+	if snapshotErr != nil {
+		h.sendUpdateProgress("snapshot", "error", "Could not verify the replacement and pre-update recovery snapshot; the installed app was not changed: "+snapshotErr.Error())
+		return
+	}
+	defer transitionRelease()
 
 	// Step 4: Install
 	h.sendUpdateProgress("install", "active", "Installing new binary...")
@@ -1156,12 +1195,14 @@ func (h *DashboardHandler) handleRestart(w http.ResponseWriter, r *http.Request)
 	}
 	// Checked BEFORE the in-process-restart capability branch, because that
 	// branch's answer is "fully quit SAGE and open it again" — an instruction to
-	// do by hand the exact thing the signer fence exists to prevent. A restart
-	// while a key is fenced discards the only record that a transaction may still
-	// be in flight; the allocator then re-seeds from the highest COMMITTED nonce,
-	// which is below it, and the next transaction overtakes it into a Code 4
-	// rejection nobody can trace. cmd/sage-gui vetoes the coordinated path;
-	// this stops us TELLING an operator to take the manual one.
+	// do by hand the exact thing the signer fence exists to prevent. The veto
+	// fires only for a fence whose durable record cannot be confirmed: with the
+	// record on disk the restart re-raises the fence, so it cannot re-seed past
+	// an in-flight nonce, while WITHOUT it the allocator seeds from the highest
+	// COMMITTED nonce — below the abandoned one — and the next transaction
+	// overtakes it into a Code 4 rejection nobody can trace. cmd/sage-gui vetoes
+	// the coordinated path; this stops us TELLING an operator to take the
+	// manual one, which would discard the record the same way.
 	//
 	// It reads the fence state directly rather than through a hook: there is
 	// nothing here that can be left unwired, so there is no degraded mode to fail
@@ -1187,10 +1228,17 @@ func (h *DashboardHandler) handleRestart(w http.ResponseWriter, r *http.Request)
 	// boundary, create a synchronous verified snapshot whose binary is pinned to
 	// the current process. Ordinary same-version setting restarts remain cheap.
 	diskVersion := ""
+	diskExecPath := h.ExecPath
 	if h.ExecPath != "" {
 		diskVersion = diskBinaryVersion(r.Context(), h.ExecPath)
 	} else {
-		diskVersion = runningBinaryDiskVersion(r.Context())
+		if currentExecPath, execErr := os.Executable(); execErr == nil {
+			if resolved, resolveErr := filepath.EvalSymlinks(currentExecPath); resolveErr == nil {
+				currentExecPath = resolved
+			}
+			diskExecPath = currentExecPath
+			diskVersion = diskBinaryVersion(r.Context(), diskExecPath)
+		}
 	}
 	if diskVersion == "" {
 		writeError(w, http.StatusServiceUnavailable, "SAGE could not verify the installed binary version; restart was not requested")
@@ -1218,7 +1266,12 @@ func (h *DashboardHandler) handleRestart(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusServiceUnavailable, "SAGE cannot verify a pre-update recovery snapshot; restart was not requested")
 			return
 		}
-		release, err := h.PrepareVersionTransition(r.Context(), diskVersion)
+		replacementMaxAppVersion, capabilityErr := diskBinaryMaxSupportedAppVersion(r.Context(), diskExecPath)
+		if capabilityErr != nil {
+			writeError(w, http.StatusServiceUnavailable, "SAGE could not verify the installed replacement binary capability; restart was not requested: "+capabilityErr.Error())
+			return
+		}
+		release, err := h.PrepareVersionTransition(r.Context(), diskVersion, replacementMaxAppVersion)
 		if err != nil {
 			writeError(w, http.StatusServiceUnavailable, "SAGE could not verify a pre-update recovery snapshot; restart was not requested: "+err.Error())
 			return

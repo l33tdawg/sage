@@ -94,6 +94,31 @@ func TestCanonicalWorkspaceRootFailsClosedWhenGitProbeTimesOut(t *testing.T) {
 		"identity resolution must fail closed promptly when Git stalls")
 }
 
+func TestCanonicalWorkspaceRootRejectsFilesystemRootWithoutGit(t *testing.T) {
+	root := string(filepath.Separator)
+	probed := false
+
+	resolved, err := canonicalWorkspaceRootWithProbe(root, func(context.Context, string) ([]byte, error) {
+		probed = true
+		return nil, exec.ErrNotFound
+	})
+
+	require.ErrorContains(t, err, "refusing broad workspace identity root")
+	require.Empty(t, resolved)
+	require.False(t, probed, "a filesystem-root workspace must fail before Git probing or identity generation")
+}
+
+func TestResolveImplicitWorkspaceIdentityRejectsFilesystemRoot(t *testing.T) {
+	keyPath, provider, project, err := resolveImplicitWorkspaceIdentity(
+		t.TempDir(), string(filepath.Separator), "codex", "",
+	)
+
+	require.ErrorContains(t, err, "refusing broad workspace identity root")
+	require.Empty(t, keyPath)
+	require.Equal(t, "codex", provider)
+	require.Empty(t, project)
+}
+
 func TestPrimaryWorkspaceMCPEnvPreservesPinnedProviderIdentity(t *testing.T) {
 	root := t.TempDir()
 	key := filepath.Join(t.TempDir(), "agent.key")
@@ -134,4 +159,77 @@ func TestProviderProjectAgentDirSeparatesProvidersInOneCheckout(t *testing.T) {
 	require.Contains(t, claudePath, "tii-sage-claude-code-")
 	require.Contains(t, codexPath, "tii-sage-codex-")
 	require.Equal(t, claudePath, providerProjectAgentDir(home, project, "CLAUDE-CODE"), "provider spelling must not fork an identity")
+}
+
+func writeCodexProjectConfig(t *testing.T, root, identityPath string) {
+	t.Helper()
+	configPath := filepath.Join(root, ".codex", "config.toml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o755))
+	require.NoError(t, os.WriteFile(configPath, []byte(codexSageConfigBlockWithIdentity(
+		configPath, "/Applications/SAGE.app/Contents/MacOS/sage-gui", t.TempDir(), "codex", identityPath,
+	)), 0o600))
+}
+
+// A Codex session that resolves a checkout must inherit the pin written in that
+// checkout's .codex/config.toml. Reading only .mcp.json (Claude Code) made every
+// such session mint a second, hashed agent id for the same repository, so one
+// checkout showed up as two agents with the same name.
+func TestResolveImplicitWorkspaceIdentityInheritsCodexProjectPin(t *testing.T) {
+	root := t.TempDir()
+	key := filepath.Join(t.TempDir(), "agent.key")
+	writeCodexProjectConfig(t, root, key)
+	home := t.TempDir()
+
+	inherited, provider, project, err := resolveImplicitWorkspaceIdentity(home, root, "codex", "")
+	require.NoError(t, err)
+	require.Equal(t, key, inherited)
+	require.Equal(t, "codex", provider)
+	require.Equal(t, filepath.Base(root), project)
+
+	// Lifecycle hooks carry no provider of their own and must land on the same
+	// signer as the MCP session in this checkout.
+	hookKey, hookProvider, _, err := resolveImplicitWorkspaceIdentity(home, root, "", "")
+	require.NoError(t, err)
+	require.Equal(t, key, hookKey)
+	require.Equal(t, "codex", hookProvider)
+}
+
+// One checkout can pin both a Claude Code signer (.mcp.json) and a Codex signer
+// (.codex/config.toml). Each caller must get the pin that owns its provider, and
+// a provider-less caller keeps the historical Claude-first preference.
+func TestResolveImplicitWorkspaceIdentitySelectsPinByProvider(t *testing.T) {
+	root := t.TempDir()
+	claudeKey := filepath.Join(t.TempDir(), "claude.key")
+	codexKey := filepath.Join(t.TempDir(), "codex.key")
+	raw, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"sage": map[string]any{"env": map[string]any{
+		"SAGE_PROVIDER": "claude-code", "SAGE_IDENTITY_PATH": claudeKey,
+	}}}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".mcp.json"), raw, 0o600))
+	writeCodexProjectConfig(t, root, codexKey)
+	home := t.TempDir()
+
+	codexResolved, _, _, err := resolveImplicitWorkspaceIdentity(home, root, "codex", "")
+	require.NoError(t, err)
+	require.Equal(t, codexKey, codexResolved, "a Codex session must inherit the Codex project pin")
+
+	claudeResolved, _, _, err := resolveImplicitWorkspaceIdentity(home, root, "claude-code", "")
+	require.NoError(t, err)
+	require.Equal(t, claudeKey, claudeResolved)
+
+	neutral, neutralProvider, _, err := resolveImplicitWorkspaceIdentity(home, root, "", "")
+	require.NoError(t, err)
+	require.Equal(t, claudeKey, neutral, "provider-less callers keep the historical Claude-first preference")
+	require.Equal(t, "claude-code", neutralProvider)
+}
+
+func TestResolveImplicitWorkspaceIdentityFailsClosedOnInvalidCodexConfig(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".codex"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, ".codex", "config.toml"), []byte("[mcp_servers.sage\nunterminated = "), 0o600,
+	))
+
+	_, _, _, err := resolveImplicitWorkspaceIdentity(t.TempDir(), root, "codex", "")
+	require.ErrorContains(t, err, "invalid TOML")
 }

@@ -8,22 +8,33 @@ COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS  = -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
+# Local builds target THIS machine, not whatever architecture the `go` toolchain
+# happens to be. An Intel toolchain on Apple silicon defaults GOARCH to amd64, so
+# a plain `go build` silently emits binaries that die with "bad CPU type in
+# executable" on the machine that produced them. Override BUILD_GOOS/BUILD_GOARCH
+# (or set them in the environment) for a deliberate cross build.
+HOST_OS      := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+HOST_MACHINE := $(shell uname -m)
+BUILD_GOOS   ?= $(HOST_OS)
+BUILD_GOARCH ?= $(if $(filter arm64 aarch64,$(HOST_MACHINE)),arm64,$(if $(filter x86_64 amd64,$(HOST_MACHINE)),amd64,$(HOST_MACHINE)))
+GOBUILD       = GOOS=$(BUILD_GOOS) GOARCH=$(BUILD_GOARCH) go build
+
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build the ABCI application binary
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/amid
+	$(GOBUILD) -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/amid
 
 build-all: ## Build all binaries (amid, sage-gui, sage-cli)
-	go build -ldflags "$(LDFLAGS)" -o bin/amid ./cmd/amid
-	go build -ldflags "$(LDFLAGS)" -o bin/sage-gui ./cmd/sage-gui
-	go build -ldflags "$(LDFLAGS)" -o bin/sage-cli ./cmd/sage-cli
+	$(GOBUILD) -ldflags "$(LDFLAGS)" -o bin/amid ./cmd/amid
+	$(GOBUILD) -ldflags "$(LDFLAGS)" -o bin/sage-gui ./cmd/sage-gui
+	$(GOBUILD) -ldflags "$(LDFLAGS)" -o bin/sage-cli ./cmd/sage-cli
 
 test: ## Run unit tests
 	go test ./... -v -count=1 -race -timeout 30m
 
 test-cometbft-patch: ## Run the local CometBFT state-sync hardening regression
-	cd third_party/cometbft && go test ./statesync ./blocksync ./node ./state ./store -run '^(TestReceiveOversizedSnapshotWithoutActiveSyncDoesNotPanic|TestStateSyncSealAbort.*|TestStateSyncBootstrapRestart.*|TestOfflineStateSyncHeight.*|TestLoadStateFromDBOrGenesisDocProviderCachesOnlyGenesisBeforeStateSync|TestRecoverStateSyncGenesisDocDBResidue.*|TestStateSyncGenesisDocDBResidue.*|TestPersistStateSyncBootstrap.*|TestCompleteStateSyncBootstrap.*|TestBootstrapAtomicallyPersistsEffectiveStateSyncHeight|TestStateSyncBootstrapComplete.*|TestRecoverIncompleteStateSyncBootstrap.*)$$' -count=1 -race
+	cd third_party/cometbft && go test ./statesync ./blocksync ./node ./state ./store -run '^(TestReceiveOversizedSnapshotWithoutActiveSyncDoesNotPanic|TestStateSyncSealAbort.*|TestStateSyncBootstrapRestart.*|TestBlockSyncQuorumBlockingPowerRoundsUp|TestOfflineStateSyncHeight.*|TestLoadStateFromDBOrGenesisDocProviderCachesOnlyGenesisBeforeStateSync|TestRecoverStateSyncGenesisDocDBResidue.*|TestStateSyncGenesisDocDBResidue.*|TestPersistStateSyncBootstrap.*|TestCompleteStateSyncBootstrap.*|TestBootstrapAtomicallyPersistsEffectiveStateSyncHeight|TestStateSyncBootstrapComplete.*|TestRecoverIncompleteStateSyncBootstrap.*)$$' -count=1 -race
 
 lint: ## Run linter
 	golangci-lint run ./...
@@ -89,28 +100,21 @@ benchmark-k6: ## Run k6 load test (requires pre-configured auth bypass or k6 Ed2
 	k6 run test/benchmark/load.js
 
 bench-longmemeval-smoke: ## Smoke-test the LongMemEval-S harness against a running SAGE node (5 questions)
-	pip install -q -r bench/longmemeval/requirements.txt && PYTHONUNBUFFERED=1 python3 bench/longmemeval/run.py --limit 5
+	pip install -q -r bench/longmemeval/requirements.txt && PYTHONUNBUFFERED=1 python3 bench/longmemeval/run.py --limit 5 $(BENCH_ARGS)
 
-bench-longmemeval: ## Run full LongMemEval-S benchmark - slow (hours); writes bench/results/longmemeval-<sha>.json
-	pip install -q -r bench/longmemeval/requirements.txt && PYTHONUNBUFFERED=1 python3 bench/longmemeval/run.py
+bench-longmemeval: ## Run full LongMemEval-S benchmark - slow (hours); writes bench/results/longmemeval-<sha>-<run>.json
+	pip install -q -r bench/longmemeval/requirements.txt && PYTHONUNBUFFERED=1 python3 bench/longmemeval/run.py $(BENCH_ARGS)
 
-bench-locomo-fetch: ## Download the LoCoMo dataset from snap-research/locomo if not already present
-	@mkdir -p bench/locomo/data && \
-	if [ ! -s bench/locomo/data/locomo10.json ]; then \
-		echo "fetching locomo10.json from snap-research/locomo..."; \
-		curl -fsSL -o bench/locomo/data/locomo10.json \
-			https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json; \
-	else \
-		echo "bench/locomo/data/locomo10.json already present, skipping fetch"; \
-	fi
+bench-locomo-fetch: ## Fetch LoCoMo at explicit LOCOMO_DATA_REVISION; validate cached source/hash receipt
+	python3 bench/fetch_locomo.py
 
 bench-locomo-smoke: bench-locomo-fetch ## Smoke-test the LoCoMo harness against a running SAGE node (5 questions)
 	pip install -q -r bench/locomo/requirements.txt && \
-		LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json PYTHONUNBUFFERED=1 python3 bench/locomo/run.py --limit 5
+		LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json PYTHONUNBUFFERED=1 python3 bench/locomo/run.py --limit 5 $(BENCH_ARGS)
 
-bench-locomo: bench-locomo-fetch ## Run full LoCoMo benchmark; writes bench/results/locomo-<sha>.json
+bench-locomo: bench-locomo-fetch ## Run full LoCoMo benchmark; writes bench/results/locomo-<sha>-<run>.json
 	pip install -q -r bench/locomo/requirements.txt && \
-		LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json PYTHONUNBUFFERED=1 python3 bench/locomo/run.py
+		LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json PYTHONUNBUFFERED=1 python3 bench/locomo/run.py $(BENCH_ARGS)
 
 sdk-test: ## Run Python SDK tests
 	cd sdk/python && pip install -e ".[dev]" && pytest -v

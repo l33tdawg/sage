@@ -66,6 +66,26 @@ func TestQuerySimilar_DecayFloor(t *testing.T) {
 	assert.NotContains(t, ids, "aged", "aged memory decayed below the floor must be dropped by the store")
 	assert.Contains(t, ids, "fresh")
 	assert.Contains(t, ids, "boosted", "corroboration-boosted memory above the decayed floor must survive")
+
+	// The drop must be COUNTED, not just performed: without the count a caller
+	// cannot distinguish "nothing matched" from "matching records were hidden by
+	// the floor", which is the silence that made a tag-reachable memory look
+	// unwritten to the recall path. Deleting the count fails here.
+	var dropped int
+	_, err = s.QuerySimilar(ctx, emb, QueryOptions{
+		TopK: 10, DecayFloor: 0.70, DecayNow: now, DecayFloorDropped: &dropped,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, dropped, "the aged record the floor removed must be reported to the caller")
+
+	// And a query whose floor removed nothing reports zero rather than staying
+	// silent, so an empty result can be trusted as genuinely empty.
+	none := 0
+	_, err = s.QuerySimilar(ctx, emb, QueryOptions{
+		TopK: 10, DecayFloor: 0.10, DecayNow: now, DecayFloorDropped: &none,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, none)
 }
 
 // TestQuerySimilar_DecayFloor_FillsTopK proves the store drops sub-floor records

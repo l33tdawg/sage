@@ -36,6 +36,24 @@ func TestClaudeChannelRequiresExplicitCapableHostOptIn(t *testing.T) {
 	}
 }
 
+func TestErrIfInstallTargetsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Refuses when the install target is the home directory itself: a
+	// project-scoped install there pollutes the user-global config with
+	// ${CLAUDE_PROJECT_DIR}-relative hooks that break in every project.
+	err := errIfInstallTargetsHome(home)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "home directory")
+
+	// Refuses regardless of a trailing separator or otherwise uncleaned path.
+	assert.Error(t, errIfInstallTargetsHome(home+string(os.PathSeparator)))
+
+	// Allows a normal project directory.
+	assert.NoError(t, errIfInstallTargetsHome(t.TempDir()))
+}
+
 func TestInstallClaudeMD_CreateNew(t *testing.T) {
 	projectDir := t.TempDir()
 	err := installClaudeMD(projectDir)
@@ -152,7 +170,7 @@ func TestUserPromptHookModeBehavior(t *testing.T) {
 	}{
 		{name: "full", mode: "full", wantPointer: true, wantTurn: true},
 		{name: "bookend", mode: "bookend", wantPointer: true, wantTurn: false},
-		{name: "on-demand", mode: "on-demand", wantPointer: false, wantTurn: false},
+		{name: "on-demand", mode: "on-demand", wantPointer: true, wantTurn: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -188,8 +206,8 @@ func TestUserPromptHookReportsInboxProbeFailure(t *testing.T) {
 }
 
 func TestHookScripts_OnDemandModeCheck(t *testing.T) {
-	// All speaking scripts must honor on-demand mode by exiting/suppressing
-	// output. The Stop script is silent unconditionally so it's exempt.
+	// Memory automation honors on-demand mode. UserPromptSubmit still speaks
+	// when coordination changed, independently of memory cadence.
 	for _, s := range []string{
 		sageSessionStartTemplate,
 		sageSessionEndTemplate,

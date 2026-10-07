@@ -65,6 +65,10 @@ func main() {
 		if err != nil || !rolledBack {
 			return
 		}
+		// Deliberately not exec.CommandContext: this launcher must outlive the
+		// caller, which is exiting precisely so the bundle can be replaced.
+		// Binding it to a context would kill the relaunch mid-update.
+		//nolint:noctx // must outlive the caller, which is exiting to let the bundle be replaced
 		_ = exec.Command("/usr/bin/open", bundle).Start() // #nosec G204 -- fixed launcher and derived app path
 		return
 	}

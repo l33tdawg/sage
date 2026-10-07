@@ -64,6 +64,47 @@ type sseSession struct {
 	out     chan []byte // serialized JSON-RPC payloads, written to the SSE stream
 	done    chan struct{}
 	created time.Time
+
+	requestMu      sync.Mutex
+	activeRequests int
+	closing        bool
+	drained        chan struct{}
+	drainedClosed  bool
+}
+
+func (s *sseSession) beginRequest() bool {
+	s.requestMu.Lock()
+	defer s.requestMu.Unlock()
+	if s.closing {
+		return false
+	}
+	s.activeRequests++
+	return true
+}
+
+func (s *sseSession) endRequest() {
+	s.requestMu.Lock()
+	s.activeRequests--
+	if s.closing && s.activeRequests == 0 && !s.drainedClosed {
+		close(s.drained)
+		s.drainedClosed = true
+	}
+	s.requestMu.Unlock()
+}
+
+func (s *sseSession) beginClose() <-chan struct{} {
+	s.requestMu.Lock()
+	if !s.closing {
+		s.closing = true
+		close(s.done)
+	}
+	if s.activeRequests == 0 && !s.drainedClosed {
+		close(s.drained)
+		s.drainedClosed = true
+	}
+	drained := s.drained
+	s.requestMu.Unlock()
+	return drained
 }
 
 // AgentMessageNotification is the metadata-only additive JSON-RPC
@@ -88,6 +129,7 @@ func (r *SSESessionRegistry) register(id, agentID, bearer string) *sseSession {
 		out:     make(chan []byte, 16),
 		done:    make(chan struct{}),
 		created: time.Now(),
+		drained: make(chan struct{}),
 	}
 	r.mu.Lock()
 	if r.closed || len(r.sessions) >= maxSSESessions {
@@ -142,12 +184,23 @@ func (r *SSESessionRegistry) lookup(id string) *sseSession {
 	return r.sessions[id]
 }
 
+func (r *SSESessionRegistry) beginRequest(id string) *sseSession {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	sess := r.sessions[id]
+	if sess == nil || !sess.beginRequest() {
+		return nil
+	}
+	return sess
+}
+
 func (r *SSESessionRegistry) unregister(id string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if sess, ok := r.sessions[id]; ok {
-		close(sess.done)
-		delete(r.sessions, id)
+	sess := r.sessions[id]
+	delete(r.sessions, id)
+	r.mu.Unlock()
+	if sess != nil {
+		_ = sess.beginClose()
 	}
 }
 
@@ -156,7 +209,7 @@ func (r *SSESessionRegistry) closeAll() {
 	defer r.mu.Unlock()
 	r.closed = true
 	for id, sess := range r.sessions {
-		close(sess.done)
+		_ = sess.beginClose()
 		delete(r.sessions, id)
 	}
 }
@@ -329,8 +382,14 @@ func (t *HTTPTransport) HandleSSE(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"too many active MCP sessions"}`, http.StatusServiceUnavailable)
 		return
 	}
-	defer t.sessions.unregister(sessionID)
-	defer t.server.ForgetConversation("sse:" + sessionID)
+	defer func() {
+		t.sessions.unregister(sessionID)
+		// Do not release the claimant lease while a paired POST is still using
+		// this conversation. Otherwise a reconnect can reuse the durable identity
+		// concurrently with the old request it was meant to fence out.
+		<-sess.beginClose()
+		t.server.ForgetConversation("sse:" + sessionID)
+	}()
 
 	// SSE response headers.
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -384,11 +443,12 @@ func (t *HTTPTransport) HandleSSEMessages(w http.ResponseWriter, r *http.Request
 		http.Error(w, `{"error":"missing sessionId"}`, http.StatusBadRequest)
 		return
 	}
-	sess := t.sessions.lookup(sessionID)
+	sess := t.sessions.beginRequest(sessionID)
 	if sess == nil {
 		http.Error(w, `{"error":"unknown sessionId"}`, http.StatusNotFound)
 		return
 	}
+	defer sess.endRequest()
 
 	// SSE sessions are bound to the bearer that opened them. A different
 	// bearer-authed caller cannot inject messages into another stream.
@@ -412,6 +472,9 @@ func (t *HTTPTransport) HandleSSEMessages(w http.ResponseWriter, r *http.Request
 	ctx, cancel := context.WithTimeout(admittedCtx, 60*time.Second)
 	defer cancel()
 	ctx = WithConversationID(ctx, "sse:"+sessionID)
+	if sess.bearer != "" {
+		ctx = withClaimantDurableScope(ctx, "http-sse:"+sess.bearer)
+	}
 	resp := t.server.DispatchJSONRPC(ctx, &req)
 	if resp == nil {
 		// Notification — no response on the SSE stream, just acknowledge.
@@ -477,6 +540,15 @@ func (t *HTTPTransport) HandleStreamable(w http.ResponseWriter, r *http.Request)
 	// server-generated session ID above.
 	conversationID := "stream:" + ctxBearerFingerprint(r.Context())
 	ctx = WithConversationID(ctx, conversationID)
+	if fingerprint := ctxBearerFingerprint(r.Context()); fingerprint != "" {
+		ctx = withClaimantDurableScope(ctx, "http-stream:"+fingerprint)
+	}
+	releaseConversation, conversationAdmitted := t.server.beginStreamConversationUse(ctx)
+	if !conversationAdmitted {
+		http.Error(w, `{"error":"too many active streamable MCP conversations"}`, http.StatusServiceUnavailable)
+		return
+	}
+	defer releaseConversation()
 	resp := t.server.DispatchJSONRPC(ctx, &req)
 	if resp == nil {
 		w.WriteHeader(http.StatusAccepted)

@@ -322,7 +322,7 @@ func (bcR *Reactor) localNodeBlocksTheChain(state sm.State) bool {
 		return false
 	}
 	total := state.Validators.TotalVotingPower()
-	return val.VotingPower >= total/3
+	return val.VotingPower >= (total+2)/3
 }
 
 // Handle messages from the poolReactor telling the reactor what to do.

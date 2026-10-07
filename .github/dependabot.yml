@@ -24,6 +24,13 @@ updates:
       natter-go-deps:
         patterns:
           - "*"
+    ignore:
+      # Natter uses the same pre-v1 go-libp2p module as the root graph. Avoid
+      # Dependabot's unrelated legacy v6.0.23+incompatible line while keeping
+      # real v0.x updates visible.
+      - dependency-name: github.com/libp2p/go-libp2p
+        versions:
+          - ">= 1.0.0"
 
   - package-ecosystem: npm
     directory: /

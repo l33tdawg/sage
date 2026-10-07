@@ -15,7 +15,12 @@ const (
 	pipeDeliveryTimeout  = 20 * time.Second
 	pipeRetryBase        = 5 * time.Second
 	pipeRetryMax         = 2 * time.Minute
-	pipeDrainLimit       = 4
+	// One drain pass now covers a backlog rather than a hand's width of it. The
+	// concurrency below still bounds how many dials are in flight at once, so a
+	// larger limit changes how much of a connectivity window is USED, not how hard
+	// the node hits a peer: a peer that flaps hands out windows of seconds to
+	// minutes, and a four-row limit spent them one hand at a time.
+	pipeDrainLimit = 16
 	pipeDrainConcurrency = 4
 )
 
@@ -217,6 +222,18 @@ func (m *Manager) deliverPipelineEvent(parent context.Context, ss *store.SQLiteS
 		m.recordPipelineDeliveryError(ss, outbox, err, terminal, retryFloor)
 		return
 	}
+	if event.Kind == "result" {
+		// The destination answers every proof problem with the same opaque 400, so
+		// attribute our own envelope problems here instead of learning about them
+		// as an unattributable delivery failure. Log-only: a destination on an older
+		// build may still accept what this build would refuse, and dropping the
+		// reply would lose work rather than report anything.
+		if proofErr := resultEnvelopeProofProblem(event); proofErr != nil {
+			m.logger.Warn().Err(proofErr).Str("event_id", outbox.EventID).
+				Str("pipe_id", outbox.PipeID).Str("peer", outbox.RemoteChainID).
+				Msg("outbound result envelope fails this node's own destination checks")
+		}
+	}
 	push := m.pipeEventPushFn
 	if push == nil {
 		push = m.PushPipeEvent
@@ -306,13 +323,17 @@ func (m *Manager) deliverPipelineEvent(parent context.Context, ss *store.SQLiteS
 		err = deliver()
 	}
 	if err == nil {
-		if deliveryRecorded {
-			return
+		if !deliveryRecorded {
+			if markErr := ss.MarkPipelineTransportDelivered(context.Background(), outbox.EventID); markErr != nil {
+				m.logger.Warn().Err(markErr).Str("event_id", outbox.EventID).Msg("pipeline transport delivery was not recorded")
+				return
+			}
 		}
-		if markErr := ss.MarkPipelineTransportDelivered(context.Background(), outbox.EventID); markErr != nil {
-			m.logger.Warn().Err(markErr).Str("event_id", outbox.EventID).Msg("pipeline transport delivery was not recorded")
-			return
-		}
+		// This delivery proves the peer answered, so the rest of its backlog must
+		// not keep sleeping in backoff through the same window. See
+		// WakePipelineTransportForPeer for the failure shape this closes: a peer
+		// that flaps gets short windows, and a sleeping queue misses them.
+		m.wakePeerBacklog(ss, outbox.RemoteChainID)
 		if outbox.EventKind == "send" && outbox.ReceiptProtocolVersion == PipeReceiptVersion {
 			binding := store.FederatedReceiptBinding{
 				MessageID: outbox.EventID, LocalPipeID: outbox.PipeID,
@@ -334,16 +355,75 @@ func (m *Manager) deliverPipelineEvent(parent context.Context, ss *store.SQLiteS
 	retryFloor := time.Duration(0)
 	var httpErr *pipeEventHTTPError
 	if errors.As(err, &httpErr) {
-		switch httpErr.Status {
-		case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound,
-			http.StatusConflict, http.StatusGone, http.StatusRequestEntityTooLarge,
-			http.StatusUnprocessableEntity:
-			terminal = true
-		case http.StatusNotImplemented:
-			retryFloor = time.Hour
+		// A destination older than the current reply window refuses an otherwise
+		// valid reply exactly once per proof. Narrow this row to the legacy window
+		// and retry: the proof is unchanged, so the destination's replay identity
+		// is unchanged too, and a second refusal is terminal below because the row
+		// no longer offers anything to downgrade.
+		if httpErr.Status == http.StatusBadRequest && outbox.EventKind == "result" {
+			downgraded, downgradeErr := ss.DowngradeFederatedResultLifetime(context.Background(), outbox.EventID)
+			if downgradeErr != nil {
+				m.logger.Warn().Err(downgradeErr).Str("event_id", outbox.EventID).
+					Msg("result reply-window downgrade was not recorded")
+			} else if downgraded {
+				m.logger.Warn().Str("event_id", outbox.EventID).Str("peer", outbox.RemoteChainID).
+					Msg("destination refused the signed reply; retrying with the legacy reply window")
+				m.recordPipelineDeliveryError(ss, outbox, err, false, 0)
+				return
+			}
 		}
+		terminal, retryFloor = pipelineHTTPFailureVerdict(httpErr.Status)
 	}
 	m.recordPipelineDeliveryError(ss, outbox, err, terminal, retryFloor)
+}
+
+// wakePeerBacklog makes a peer's other queued events due immediately, now that a
+// delivery has just proved that peer reachable.
+func (m *Manager) wakePeerBacklog(ss *store.SQLiteStore, remoteChainID string) {
+	if remoteChainID == "" {
+		return
+	}
+	woken, err := ss.WakePipelineTransportForPeer(context.Background(), remoteChainID, time.Now().UTC())
+	if err != nil {
+		m.logger.Warn().Err(err).Str("peer", remoteChainID).
+			Msg("pipeline backlog wake failed; queued events keep their existing retry schedule")
+		return
+	}
+	if woken > 0 {
+		m.logger.Debug().Str("peer", remoteChainID).Int64("woken", woken).
+			Msg("peer answered, so its queued events were made due rather than left in backoff")
+	}
+}
+
+// pipelineHTTPFailureVerdict maps a peer's HTTP status onto this node's retry
+// policy for the event that produced it.
+//
+// A 4xx normally means the peer understood the request and refused it, so
+// re-sending identical bytes is pointless and the event is terminal. Two
+// statuses are exceptions because what they report is a property of the peer's
+// current build or of the connection, not of the bytes:
+//
+//   - 501 Not Implemented — the peer predates the route or feature, and becomes
+//     able to serve it on upgrade.
+//   - 413 Request Entity Too Large — the peer's per-route body cap is a
+//     build-time constant that moves when the peer upgrades, and a peer can also
+//     emit it from a failed body read rather than a real overflow (see
+//     readFederationBody). Treating it as permanent stranded a message the peer
+//     accepted unchanged seventy minutes later, so it retries on an hourly floor
+//     and the row stays visible as pending until it delivers or expires.
+//
+// The floor applies to the next attempt only: expirePipelineTransport still
+// bounds the row, and a durable-until-handled row that never fits is reported as
+// pending-with-reason rather than as a silent failure.
+func pipelineHTTPFailureVerdict(status int) (terminal bool, retryFloor time.Duration) {
+	switch status {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound,
+		http.StatusConflict, http.StatusGone, http.StatusUnprocessableEntity:
+		return true, 0
+	case http.StatusNotImplemented, http.StatusRequestEntityTooLarge:
+		return false, time.Hour
+	}
+	return false, 0
 }
 
 func (m *Manager) recordPipelineDeliveryError(ss *store.SQLiteStore, event *store.PipelineTransportOutbox, deliveryErr error, terminal bool, retryFloor time.Duration) {
@@ -354,6 +434,16 @@ func (m *Manager) recordPipelineDeliveryError(ss *store.SQLiteStore, event *stor
 	if time.Now().UTC().Add(delay).After(event.ExpiresAt) {
 		terminal = true
 	}
+	// The failure itself is the operator's only record of why an event is late;
+	// recording it silently is what made the stranded 413 unreconstructable.
+	failureLog := m.logger.Debug()
+	if terminal {
+		failureLog = m.logger.Warn()
+	}
+	failureLog.Err(deliveryErr).Str("event_id", event.EventID).Str("pipe_id", event.PipeID).
+		Str("peer", event.RemoteChainID).Str("kind", event.EventKind).
+		Int("attempts", event.Attempts).Bool("terminal", terminal).
+		Dur("retry_in", delay).Msg("pipeline transport delivery failed")
 	if err := ss.RecordPipelineTransportFailure(context.Background(), event.EventID, deliveryErr.Error(), time.Now().UTC().Add(delay), terminal); err != nil {
 		m.logger.Warn().Err(err).Str("event_id", event.EventID).Msg("pipeline transport failure was not recorded")
 	}
@@ -483,7 +573,9 @@ func (m *Manager) buildPipelineEvent(ctx context.Context, ss *store.SQLiteStore,
 		} else {
 			resolve := m.pipeTargetResolveFn
 			if resolve == nil {
-				resolve = m.resolveRemotePipeTargetLive
+				resolve = func(ctx context.Context, address string) (*RemotePipeTarget, error) {
+					return m.resolveRemotePipeTarget(ctx, address, false, outbox.AuthorizationMode)
+				}
 			}
 			target, resolveErr = resolve(ctx, msg.ToAgent+"@"+msg.DestinationChainID)
 		}
@@ -522,10 +614,63 @@ func (m *Manager) buildPipelineEvent(ctx context.Context, ss *store.SQLiteStore,
 		}
 		event.OriginEventID = msg.SourcePipeID
 		event.SourcePipeID = msg.PipeID
+		// The destination re-derives this envelope's lifetime from the signed
+		// proof and admits nothing else, so take the wire values from the proof
+		// rather than from the retained outbox row. The row's own expires_at is
+		// the local retry deadline and may legitimately have been re-stamped by a
+		// retention migration; letting that value reach the peer is exactly how an
+		// already-completed reply turns into a permanent "invalid pipeline agent
+		// proof" (400) instead of a delivery.
+		created, expires := resultEnvelopeLifetime(outbox.Proof, outbox.ExpiresAt)
+		if !event.CreatedAt.Equal(created) || !event.ExpiresAt.Equal(expires) {
+			m.logger.Warn().Str("event_id", outbox.EventID).Str("pipe_id", outbox.PipeID).
+				Time("stored_created_at", event.CreatedAt).Time("stored_expires_at", event.ExpiresAt).
+				Msg("result transport row lifetime does not match its signed proof; sending the protocol lifetime")
+		}
+		event.CreatedAt, event.ExpiresAt = created, expires
 	default:
 		return nil, true, fmt.Errorf("unsupported pipeline outbox kind %q", outbox.EventKind)
 	}
 	return event, false, nil
+}
+
+// resultEnvelopeLifetime is the only lifetime a destination accepts for a result
+// event (prevalidatePipeEventAgentProof and applyPipeResult both demand
+// created == proof.Timestamp and an expires that is exactly a supported reply
+// window). Deriving it from the signed proof keeps both sides in agreement by
+// construction, whatever the local retention state is.
+//
+// A row that already carries one of the supported windows keeps its value: that
+// is how the one-shot downgrade to the legacy window, for destinations older
+// than the current one, reaches the wire. Any other stored value — a retention
+// re-stamp, for instance — is replaced by the current window.
+func resultEnvelopeLifetime(proof store.PipelineAgentProof, stored time.Time) (created, expires time.Time) {
+	created = time.Unix(proof.Timestamp, 0).UTC()
+	if acceptedResultLifetime(created, stored) {
+		return created, stored
+	}
+	return created, created.Add(PipeEventResultLifetime)
+}
+
+// resultEnvelopeProofProblem reports why a destination could refuse this result
+// envelope's proof. The result bytes are attached only at push time, so they are
+// deliberately not part of this check.
+func resultEnvelopeProofProblem(event *PipeEvent) error {
+	method, path, body, err := verifyPipelineAgentProof(event.Proof)
+	if err != nil {
+		return err
+	}
+	if method != http.MethodPut || path != "/v1/pipe/"+event.SourcePipeID+"/result" {
+		return fmt.Errorf("result proof does not authorize %s %s", method, path)
+	}
+	var signed signedPipeResultRequest
+	if err := decodeStrictPipeJSON(body, &signed); err != nil {
+		return fmt.Errorf("decode signed pipe result: %w", err)
+	}
+	if signed.SourcePipeID != event.OriginEventID || signed.SourceChainID != event.SourceChainID {
+		return errors.New("signed result request does not bind this origin and chain")
+	}
+	return nil
 }
 
 func (m *Manager) sourceMayUseFederatedPipe(agentID string) bool {

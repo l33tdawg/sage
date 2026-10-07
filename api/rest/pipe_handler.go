@@ -67,6 +67,10 @@ type providerMessageSessionClaimer interface {
 	ClaimProviderMessageWithSession(context.Context, string, string, string) error
 }
 
+type exactLocalMessageSessionClaimer interface {
+	ClaimExactLocalMessageWithSession(context.Context, string, string, string) error
+}
+
 type providerMessageSessionVerifier interface {
 	VerifyProviderMessageClaimSession(context.Context, string, string, string) error
 	LookupProviderMessageReplyReplay(context.Context, string, string, string, string) (bool, string, error)
@@ -121,6 +125,9 @@ func (s *Server) callerCanReachFederatedPipeTarget(ctx context.Context, callerID
 		default:
 			return false
 		}
+	}
+	if target.AuthorizationMode == federation.NodeMessageAuthorizationMode {
+		return target.LinkedRelation == nil && len(target.Domains) == 0
 	}
 	if target.AuthorizationMode != "" || target.LinkedRelation != nil {
 		return false
@@ -637,6 +644,10 @@ const (
 	pipelineCompleteActivitySummary = "[Pipeline] Local agent pipeline completed. Details omitted from the activity stream."
 )
 
+func unknownLocalPipeTargetDetail(target string) string {
+	return fmt.Sprintf("No active local provider or agent name matches %q. POST /v1/pipe/resolve with an exact local agent ID or saved name/provider field, or a federated handle/address; then sign the returned to_agent and, for federation, source_chain_id and destination_chain_id. MCP clients can use sage_find_agent or sage_directory for an exact address. Direct to_provider sends use a shared provider inbox claimable by any matching active agent; arbitrary provider aliases are not inferred.", target)
+}
+
 // handlePipeSend creates a pipeline message addressed to another agent/provider.
 func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -731,7 +742,7 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("no visible federated agent matches %q", qualifiedTarget))
 				return
 			}
-		} else if remoteTarget.AuthorizationMode != "" || remoteTarget.LinkedRelation != nil {
+		} else if (remoteTarget.AuthorizationMode != "" && remoteTarget.AuthorizationMode != federation.NodeMessageAuthorizationMode) || remoteTarget.LinkedRelation != nil {
 			writeProblem(w, http.StatusNotFound, "Unknown target",
 				fmt.Sprintf("no visible federated agent matches %q", qualifiedTarget))
 			return
@@ -820,7 +831,7 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 						}
 						if isRoot {
 							writeProblem(w, http.StatusNotFound, "Unknown target",
-								fmt.Sprintf("no registered local agent named %q; resolve federated targets before sending", req.ToProvider))
+								unknownLocalPipeTargetDetail(req.ToProvider))
 							return
 						}
 						active, activeErr := s.appV23ActiveOrdinaryAgent(agent.AgentID)
@@ -831,7 +842,7 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 						}
 						if !active {
 							writeProblem(w, http.StatusNotFound, "Unknown target",
-								fmt.Sprintf("no registered local agent named %q; resolve federated targets before sending", req.ToProvider))
+								unknownLocalPipeTargetDetail(req.ToProvider))
 							return
 						}
 						// Resolve name → agent_id for direct delivery.
@@ -839,7 +850,7 @@ func (s *Server) handlePipeSend(w http.ResponseWriter, r *http.Request) {
 						req.ToProvider = ""
 					} else {
 						writeProblem(w, http.StatusNotFound, "Unknown target",
-							fmt.Sprintf("no registered local agent named %q; resolve federated targets before sending", req.ToProvider))
+							unknownLocalPipeTargetDetail(req.ToProvider))
 						return
 					}
 				}
@@ -1072,6 +1083,8 @@ func (s *Server) writeRemotePipeTargetError(w http.ResponseWriter, err error) {
 		writeProblem(w, http.StatusConflict, "Federated agent unavailable", "That agent or connection is currently paused or unavailable.")
 	case errors.Is(err, federation.ErrRemotePipeTargetNotAccepting):
 		writeProblem(w, http.StatusForbidden, "Federated agent is not accepting work", "The receiving SAGE has not enabled work requests for that agent.")
+	case errors.Is(err, federation.ErrRemotePipeLocalStoreUnavailable):
+		writeProblem(w, http.StatusServiceUnavailable, "Local federated pipeline unavailable", "This SAGE's local federated pipeline storage is unavailable.")
 	case errors.Is(err, federation.ErrRemotePipePeerUnsupported):
 		writeProblem(w, http.StatusNotImplemented, "Peer update required", "The receiving SAGE does not support federated pipeline delivery.")
 	case errors.Is(err, federation.ErrRemotePipeResolutionIncomplete):
@@ -1150,8 +1163,17 @@ func (s *Server) handlePipeInbox(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			item.ClaimedSessionID = providerClaimSessionID
-		} else if err := pipeStore.ClaimPipeline(r.Context(), item.PipeID, agentID); err != nil {
-			continue
+		} else {
+			exactSessionID := claimantSessionID
+			if exactSessionID == "" {
+				exactSessionID = "legacy"
+			}
+			sessionClaimer, ok := s.store.(exactLocalMessageSessionClaimer)
+			if !ok || sessionClaimer.ClaimExactLocalMessageWithSession(r.Context(), agentID, item.PipeID, exactSessionID) != nil {
+				continue
+			}
+			item.ClaimedSessionID = exactSessionID
+			item.ClaimRevision = 0
 		}
 		item.Status = "claimed"
 		item.ClaimedBy = agentID
@@ -1269,6 +1291,10 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 	agentID := middleware.ContextAgentID(r.Context())
 	claimantSessionID := strings.TrimSpace(r.URL.Query().Get("claimant_session_id"))
 	boundClaimantSessionID := ""
+	if len(claimantSessionID) > store.MaxMessageClaimantSessionBytes {
+		writeProblem(w, http.StatusBadRequest, "Invalid claimant session", "claimant_session_id is too long")
+		return
+	}
 
 	pipeStore, ok := s.store.(store.PipelineStore)
 	if !ok {
@@ -1287,7 +1313,7 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if msg.SourceChainID != "" {
-		if claimantSessionID == "" || len(claimantSessionID) > store.MaxMessageClaimantSessionBytes {
+		if claimantSessionID == "" {
 			writeProblem(w, http.StatusBadRequest, "Invalid claimant session", "claimant_session_id is required and bounded for a federated claim")
 			return
 		}
@@ -1307,6 +1333,7 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusConflict, "Federated pipeline suspended", "The connection, sharing grant, owner, or work-request permission changed.")
 			return
 		}
+		boundClaimantSessionID = claimantSessionID
 	} else if msg.ToAgent == "" && msg.ToProvider != "" {
 		boundClaimantSessionID = claimantSessionID
 		if boundClaimantSessionID == "" {
@@ -1317,9 +1344,16 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 			writeProblem(w, http.StatusConflict, "Claim failed", "The provider-addressed message could not be session-bound.")
 			return
 		}
-	} else if err := pipeStore.ClaimPipeline(r.Context(), pipeID, agentID); err != nil {
-		writeProblem(w, http.StatusConflict, "Claim failed", err.Error())
-		return
+	} else {
+		boundClaimantSessionID = claimantSessionID
+		if boundClaimantSessionID == "" {
+			boundClaimantSessionID = "legacy"
+		}
+		sessionClaimer, ok := s.store.(exactLocalMessageSessionClaimer)
+		if !ok || sessionClaimer.ClaimExactLocalMessageWithSession(r.Context(), agentID, pipeID, boundClaimantSessionID) != nil {
+			writeProblem(w, http.StatusConflict, "Claim failed", "The exact-recipient message could not be session-bound.")
+			return
+		}
 	}
 
 	response := map[string]any{
@@ -1328,6 +1362,7 @@ func (s *Server) handlePipeClaim(w http.ResponseWriter, r *http.Request) {
 	}
 	if boundClaimantSessionID != "" {
 		response["claimant_session_id"] = boundClaimantSessionID
+		response["claim_revision"] = uint64(0)
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -1726,10 +1761,13 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if replayed {
-			writeJSON(w, http.StatusOK, map[string]any{
+			response := map[string]any{
 				"status": "completed", "journal_id": "", "journaled": false,
-				"reply_event_id": replyEventID, "reply_status": "queued", "idempotent_replay": true,
-			})
+				"reply_event_id": replyEventID, "idempotent_replay": true,
+			}
+			if s.addFederatedReplyTransportStatus(w, r, replyEventID, response) {
+				writeJSON(w, http.StatusOK, response)
+			}
 			return
 		}
 		if time.Now().UTC().After(msg.ExpiresAt) {
@@ -1807,7 +1845,9 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 			AuthorizationMode: msg.FederationAuthorizationMode,
 			LinkedRelation:    append([]byte(nil), msg.FederationLinkedRelation...),
 			TargetAgentID:     msg.FromAgent, Proof: transportProof, CreatedAt: created,
-			ExpiresAt: created.Add(24 * time.Hour),
+			// The durable outbox deadline is the reply window itself. The delivery
+			// loop narrows it once if the destination predates this value.
+			ExpiresAt: created.Add(federation.PipeEventResultLifetime),
 		}
 		authorizer := s.federation.(federatedPipeAdmissionAuthorizer)
 		completeErr = authorizer.WithAuthorizedImportedPipe(r.Context(), msg, func() error {
@@ -1872,8 +1912,10 @@ func (s *Server) handlePipeResult(w http.ResponseWriter, r *http.Request) {
 	}
 	if replyEventID != "" {
 		response["reply_event_id"] = replyEventID
-		response["reply_status"] = "queued"
 		response["idempotent_replay"] = idempotentReplay
+		if !s.addFederatedReplyTransportStatus(w, r, replyEventID, response) {
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, response)
 }

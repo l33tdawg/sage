@@ -43,12 +43,13 @@ type SQLiteStore struct {
 	vault                 atomic.Pointer[vault.Vault] // nil = no encryption; hot-swapped when CEREBRUM unlocks
 	vaultExpected         atomic.Bool                 // true = encryption should be active; reject writes if vault nil
 	vaultGeneration       *atomic.Uint64              // shared by tx clones; defeats lock/unlock ABA in audited snapshot tokens
-	decryptWarnOnce       sync.Once                   // gates the one-time decryption failure warning
-	writeMu               sync.Mutex                  // serializes ALL writes to prevent SQLITE_BUSY
-	syncPolicyGate        *sync.RWMutex               // shared with tx clones; linearizes consent vs egress
-	syncOriginGate        *sync.RWMutex               // shared with tx clones; linearizes copy provenance vs re-forward scans
-	agentContactGate      *sync.RWMutex               // shared with tx clones; linearizes advertised agent identity/availability
-	agentContactWriteHeld bool                        // true only on a RunInAgentContactTx-scoped clone
+	vaultPublicationMu    sync.RWMutex
+	decryptWarnOnce       sync.Once     // gates the one-time decryption failure warning
+	writeMu               sync.Mutex    // serializes ALL writes to prevent SQLITE_BUSY
+	syncPolicyGate        *sync.RWMutex // shared with tx clones; linearizes consent vs egress
+	syncOriginGate        *sync.RWMutex // shared with tx clones; linearizes copy provenance vs re-forward scans
+	agentContactGate      *sync.RWMutex // shared with tx clones; linearizes advertised agent identity/availability
+	agentContactWriteHeld bool          // true only on a RunInAgentContactTx-scoped clone
 	// federationAuthorizationMutationHook publishes/cancels the bounded
 	// per-peer linked delivery lease before a local consent, guest-link, or
 	// agent-availability mutation. Empty chain means the mutation can affect
@@ -116,9 +117,31 @@ const encPrefix = "enc::"
 // in internal/mcp/tools.go which detects this marker substring.
 const ErrTextSearchVaultEncryptedMsg = "text search unavailable: content is vault-encrypted; this node is in semantic-only mode"
 
-// SetVault attaches an encryption vault to the store.
-// When set, memory content is encrypted on write and decrypted on read.
+// SetVault attaches (or detaches) an encryption vault without changing whether
+// encryption is expected. Use SetVaultExpected to change that requirement alone,
+// or ActivateVault to publish both atomically.
 func (s *SQLiteStore) SetVault(v *vault.Vault) {
+	s.vaultPublicationMu.Lock()
+	defer s.vaultPublicationMu.Unlock()
+	s.storeVaultLocked(v)
+}
+
+// ActivateVault publishes an unlocked vault and marks encryption as expected in
+// one publication-lock section: the requirement first, then the vault, so no
+// reader can observe an attached vault on a store that does not yet require
+// encryption. Unlock and enable paths for a serving projection must use this
+// instead of calling SetVaultExpected and SetVault separately. A nil vault
+// leaves encryption expected, which is the fail-closed locked state.
+func (s *SQLiteStore) ActivateVault(v *vault.Vault) {
+	s.vaultPublicationMu.Lock()
+	defer s.vaultPublicationMu.Unlock()
+	s.vaultExpected.Store(true)
+	s.storeVaultLocked(v)
+}
+
+// storeVaultLocked swaps the vault pointer and ticks the generation counter.
+// Callers must hold vaultPublicationMu.
+func (s *SQLiteStore) storeVaultLocked(v *vault.Vault) {
 	s.vault.Store(v)
 	if s.vaultGeneration != nil {
 		s.vaultGeneration.Add(1)
@@ -167,6 +190,8 @@ func (s *SQLiteStore) VaultActive() bool {
 // VaultExpected marks that encryption should be active. When true and the vault
 // is nil (locked), writes are rejected rather than silently going plaintext.
 func (s *SQLiteStore) SetVaultExpected(expected bool) {
+	s.vaultPublicationMu.Lock()
+	defer s.vaultPublicationMu.Unlock()
 	changed := s.vaultExpected.Swap(expected) != expected
 	if changed && s.vaultGeneration != nil {
 		s.vaultGeneration.Add(1)
@@ -266,8 +291,9 @@ func (s *SQLiteStore) decryptEmbedding(data []byte) ([]byte, error) {
 	return decrypted, nil
 }
 
-// NewSQLiteStore creates a new SQLite-backed store.
-func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
+// openSQLiteDB applies and verifies the durability policy shared by serving
+// projections and the node-local signer-fence ledger.
+func openSQLiteDB(ctx context.Context, dbPath string) (*sql.DB, error) {
 	// modernc.org/sqlite uses `_pragma=name(value)` syntax. The older
 	// `_name=value` form (mattn/go-sqlite3) is silently ignored, which
 	// means prior deployments ran in rollback-journal mode with a zero
@@ -276,7 +302,7 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 	dsn := dbPath +
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(15000)" +
-		"&_pragma=synchronous(NORMAL)" +
+		"&_pragma=synchronous(FULL)" +
 		"&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -294,13 +320,36 @@ func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
 	for _, p := range []string{
 		"PRAGMA journal_mode=WAL",
 		"PRAGMA busy_timeout=15000",
-		"PRAGMA synchronous=NORMAL",
+		"PRAGMA synchronous=FULL",
 		"PRAGMA foreign_keys=ON",
 	} {
 		if _, pragErr := db.ExecContext(ctx, p); pragErr != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("apply %s: %w", p, pragErr)
 		}
+	}
+	var journalMode string
+	var synchronous int
+	if err := db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("verify journal mode: %w", err)
+	}
+	if err := db.QueryRowContext(ctx, "PRAGMA synchronous").Scan(&synchronous); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("verify synchronous mode: %w", err)
+	}
+	if synchronous != 2 || (journalMode != "wal" && dbPath != ":memory:") {
+		_ = db.Close()
+		return nil, errors.New("SQLite durability configuration unavailable")
+	}
+	return db, nil
+}
+
+// NewSQLiteStore creates a new SQLite-backed store.
+func NewSQLiteStore(ctx context.Context, dbPath string) (*SQLiteStore, error) {
+	db, err := openSQLiteDB(ctx, dbPath)
+	if err != nil {
+		return nil, err
 	}
 
 	s := &SQLiteStore{
@@ -332,7 +381,8 @@ var defaultDomainSeeds = []struct {
 
 // RequirePristineStateSyncProjection rejects every application-owned row in a
 // receiving node's off-chain database except the exact canonical domain seeds
-// installed by initSchema. State sync rebuilds canonical scoped content by
+// and singleton zero-state/schema-incarnation metadata installed by initSchema.
+// State sync rebuilds canonical scoped content by
 // upsert; allowing any other pre-existing row would preserve stale local
 // memories, identities, policy, credentials, or federation state that the
 // trusted AppHash did not authorize. FTS5 shadow tables are internal storage;
@@ -398,6 +448,12 @@ func (s *SQLiteStore) RequirePristineStateSyncProjection(ctx context.Context) er
 				`SELECT singleton, revision FROM graph_projection_revision`,
 			).Scan(&id, &revision); err != nil || id != 1 || revision != 0 {
 				return errors.New("state sync receiving requires a pristine graph projection revision")
+			}
+			continue
+		}
+		if table == "inbox_activity_meta" {
+			if _, err := s.GetInboxActivityEpoch(ctx); err != nil {
+				return errors.New("state sync receiving requires a pristine inbox activity database incarnation")
 			}
 			continue
 		}
@@ -474,6 +530,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		ON memories(domain_tag, status, memory_id)
 		WHERE status IN ('committed','challenged');
 	CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at);
+	-- Serves the voter's dedup lookup (FindByContentHash), evaluated once per
+	-- pending memory on a 2s poll. NOT partial: the predicate spans every
+	-- non-proposed status, so a committed-only partial index cannot serve it.
+	CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash);
 	-- Serves the CEREBRUM agent-as-lobe read: each agent's top memories by
 	-- confidence (WHERE submitting_agent = ? ORDER BY confidence_score DESC).
 	-- Composite so the per-agent seek is index-satisfiable (equality on the leading
@@ -825,6 +885,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	s.migrateTaskPickup(ctx)
 	s.migrateTaskStatusUpdatedAt(ctx)
 	s.migrateTaskBoardPosition(ctx)
+	if err := s.migrateWriteGate(ctx); err != nil {
+		return err
+	}
 	if err := s.migrateTaskAssignmentNotifications(ctx); err != nil {
 		return fmt.Errorf("migrate task assignment notifications: %w", err)
 	}
@@ -837,6 +900,16 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// Migration: add app-v17 two-phase-challenge columns (disputed_height/quorum).
 	// MUST also run AFTER migrateTaskSupport for the same reason.
 	s.migrateDisputed(ctx)
+
+	// Migration: the durable shadow of an unproven submission, so a restart
+	// re-raises a signer fence instead of re-seeding the nonce allocator past
+	// the abandoned transaction.
+	if err := s.migrateSignerFenceIntent(ctx); err != nil {
+		// Fatal rather than ignored, unlike the column migrations above: without
+		// this table the node silently loses the fence across a restart, which
+		// is the exact failure it exists to prevent.
+		return fmt.Errorf("migrate signer fence intent: %w", err)
+	}
 
 	// Schema migrations — add columns to network_agents that didn't exist in earlier versions.
 	agentMigrations := []string{
@@ -874,11 +947,51 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	if err := s.migrateMessages(ctx); err != nil {
 		return fmt.Errorf("migrate canonical messages: %w", err)
 	}
+	if err := s.migrateWorkflowJournal(ctx); err != nil {
+		return fmt.Errorf("migrate workflow journal: %w", err)
+	}
+	if err := s.migratePrivateMedia(ctx); err != nil {
+		return fmt.Errorf("migrate private media: %w", err)
+	}
+	if err := s.migrateFederatedAgentExposure(ctx); err != nil {
+		return fmt.Errorf("migrate federated agent exposure: %w", err)
+	}
 	s.migratePipelineTransport(ctx)
+	// Extend retention for pending canonical SENDS that v11.17.8 stamped with the
+	// old pipeline TTL (ttl_minutes is documented as 0 durable, else 1-1440), so an
+	// upgrade does not drop work the peer never received.
+	//
+	// Two details here are load-bearing. The predicate must name the event kind:
+	// a destination re-derives a RESULT event's lifetime from the signed proof as
+	// exactly a supported reply window (7 days, or the legacy 24 hours) and rejects every other
+	// value as "invalid pipeline agent proof", while an imported federated message
+	// carries a receiver-local id of the form msg-fed-… that also matched 'msg-%'.
+	// And the value must be spelled '+36500 days': a destination recomputes a
+	// durable send as store.CanonicalMessageLifetime (100*365*24h) and compares the
+	// instants for equality, so SQLite's calendar '+100 years' (36524 days) landed
+	// 24 days off the sentinel and made every retry invalid — defeating the very
+	// rescue it performed.
+	//
+	// expires_at doubles as the retry deadline, so an over-extended row also loses
+	// its give-up path (ListPendingPipelineTransport, recordPipelineDeliveryError,
+	// PurgeExpiredPipelineTransport): it retries until it happens to reach the peer
+	// and collect the permanent 400.
 	if _, err := s.writeExecContext(ctx, `UPDATE pipeline_transport_outbox
-		SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ',created_at,'+100 years')
-		WHERE pipe_id LIKE 'msg-%' AND state='pending'`); err != nil {
+		SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ',created_at,'+36500 days')
+		WHERE event_kind='send' AND pipe_id LIKE 'msg-%' AND state='pending'`); err != nil {
 		return fmt.Errorf("extend canonical message transport retention: %w", err)
+	}
+	// Repair rows an earlier build already extended through that over-broad
+	// predicate: restore a supported reply window so a pending reply is
+	// deliverable again, and so an aged one terminalizes through the ordinary
+	// expiry sweep instead of retrying forever. The window here is the current
+	// federation.PipeEventResultLifetime (7 days); a destination older than that
+	// value is handled at delivery time by the one-shot downgrade.
+	if _, err := s.writeExecContext(ctx, `UPDATE pipeline_transport_outbox
+		SET expires_at=strftime('%Y-%m-%dT%H:%M:%fZ',created_at,'+168 hours')
+		WHERE event_kind='result' AND state='pending'
+		  AND strftime('%s',expires_at)>strftime('%s',created_at,'+168 hours')`); err != nil {
+		return fmt.Errorf("restore foreign result transport retention: %w", err)
 	}
 	if err := s.migratePipelineV23SecurityColumns(ctx); err != nil {
 		return fmt.Errorf("migrate pipeline v23 authorization columns: %w", err)
@@ -1423,6 +1536,7 @@ func (s *SQLiteStore) migrateTaskSupport(ctx context.Context) {
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_provider ON memories(provider)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_task_status ON memories(task_status) WHERE task_status != ''`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_submitting_agent ON memories(submitting_agent, confidence_score)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_memories_content_hash ON memories(content_hash)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_corroborations_memory_order ON corroborations(memory_id, created_at, agent_id, id)`)
 }
 
@@ -1937,7 +2051,7 @@ func (s *SQLiteStore) GetMemory(ctx context.Context, memoryID string) (*memory.M
 		&st, &parentHash, &createdAt, &committedAt, &deprecatedAt, &taskStatus, &r.Assignee)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("memory not found: %s", memoryID)
+			return nil, fmt.Errorf("%w: %s", ErrMemoryNotFound, memoryID)
 		}
 		return nil, fmt.Errorf("get memory: %w", err)
 	}
@@ -2126,7 +2240,11 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		if cErr != nil {
 			return nil, fmt.Errorf("query similar decay floor: %w", cErr)
 		}
-		ordered = applyDecayFloor(ordered, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
+		var dropped int
+		ordered, dropped = applyDecayFloor(ordered, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
+		if opts.DecayFloorDropped != nil {
+			*opts.DecayFloorDropped += dropped
+		}
 	}
 	ordered, err = applyCandidateFilters(
 		ordered, opts.CandidateBatchFilter, opts.CandidateFilter,
@@ -2301,7 +2419,11 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 			if cErr != nil {
 				return nil, fmt.Errorf("search by text decay floor: %w", cErr)
 			}
-			page = applyDecayFloor(page, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
+			var dropped int
+			page, dropped = applyDecayFloor(page, opts.DecayFloor, opts.DecayNow, counts, opts.IncludeDisputed)
+			if opts.DecayFloorDropped != nil {
+				*opts.DecayFloorDropped += dropped
+			}
 		}
 		return applyCandidateFilters(
 			page, opts.CandidateBatchFilter, opts.CandidateFilter,
@@ -2492,9 +2614,23 @@ func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidate
 	}
 
 	scored, err := reranker.Rerank(ctx, query, texts)
-	if err != nil || len(scored) == 0 {
-		// Best-effort: if the reranker is unreachable or returns nothing
-		// useful, surface the RRF ordering rather than fail the whole recall.
+	validScores := err == nil && len(scored) == len(candidates)
+	seen := make([]bool, len(candidates))
+	for _, r := range scored {
+		if !validScores {
+			break
+		}
+		if r.Index < 0 || r.Index >= len(candidates) || seen[r.Index] ||
+			math.IsNaN(r.Score) || math.IsInf(r.Score, 0) {
+			validScores = false
+			break
+		}
+		seen[r.Index] = true
+	}
+	if !validScores {
+		// A reranker must score every candidate exactly once with a finite
+		// score. Reject the whole malformed response before changing the
+		// healthy RRF ordering, rather than dropping unscored candidates.
 		if len(candidates) > topK {
 			candidates = candidates[:topK]
 		}
@@ -2507,19 +2643,8 @@ func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidate
 	sort.SliceStable(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
 
 	out := make([]*memory.MemoryRecord, 0, topK)
-	seen := make(map[int]struct{}, len(scored))
-	for _, r := range scored {
-		if r.Index < 0 || r.Index >= len(candidates) {
-			continue
-		}
-		if _, dup := seen[r.Index]; dup {
-			continue
-		}
-		seen[r.Index] = struct{}{}
+	for _, r := range scored[:topK] {
 		out = append(out, candidates[r.Index])
-		if len(out) >= topK {
-			break
-		}
 	}
 	return out, nil
 }
@@ -4963,25 +5088,34 @@ func (s *SQLiteStore) UpdateRedeployLog(ctx context.Context, id int64, status, e
 	return err
 }
 
-// FindByContentHash checks if a committed memory with this content hash exists.
-// The contentHash parameter is the hex-encoded SHA-256 hash of the content.
+// FindByContentHash reports whether a DIFFERENT memory that has left
+// status='proposed' already carries this content hash (hex-encoded SHA-256).
 //
-// The predicate MUST be committed-only. The voter's dedupCheck runs while the
-// candidate memory is itself sitting in this table with status='proposed', so the
-// previous predicate (status != 'deprecated') matched the candidate's OWN row —
-// every per-node vote became a self-inflicted "duplicate content" reject. On a
-// single-validator chain that reject was unanimous, so every memory was
-// deprecated on arrival (and on legacy multi-validator sets it wedged memories at
-// proposed). See RepairSelfDupRejected for the recovery path.
-func (s *SQLiteStore) FindByContentHash(ctx context.Context, contentHash string) (bool, error) {
+// Both halves of the predicate are load-bearing. The candidate's own row must
+// never match itself: the voter's dedupCheck runs while the candidate is itself
+// sitting in this table with status='proposed', and the pre-v10.1.0 predicate
+// matched that row, so every per-node vote became a self-inflicted "duplicate
+// content" reject — on a single-validator chain, unanimous, which deprecated
+// every memory on arrival (see RepairSelfDupRejected). And OTHER proposed rows
+// are not duplicates either: counting them would make two concurrent identical
+// submissions reject each other, leaving the content with no surviving row and
+// a rejected hash that blocks every later attempt to submit those bytes.
+//
+// Every post-proposal status counts. Committed/validated/challenged rows are
+// live copies; challenged and deprecated rows are the sticky half — identical
+// bytes must not re-enter through a fresh memory id after a rejection. A
+// genuine correction carries new content, hence a different hash, and stays
+// submittable.
+func (s *SQLiteStore) FindByContentHash(ctx context.Context, contentHash, excludeMemoryID string) (bool, error) {
 	hashBytes, err := hex.DecodeString(contentHash)
 	if err != nil {
 		return false, fmt.Errorf("decode content hash: %w", err)
 	}
 	var count int
 	err = s.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM memories WHERE content_hash = ? AND status = 'committed'`,
-		hashBytes).Scan(&count)
+		`SELECT COUNT(*) FROM memories
+		  WHERE content_hash = ? AND memory_id != ? AND status != 'proposed'`,
+		hashBytes, excludeMemoryID).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -4994,11 +5128,16 @@ func (s *SQLiteStore) FindByContentHash(ctx context.Context, contentHash string)
 // chain that unanimous reject deprecated it on arrival.
 //
 // A memory qualifies ONLY when its recorded vote history is exactly one vote —
-// selfID rejecting with the dedupCheck rationale — and it was never challenged.
-// That fingerprint cannot match legitimately deprecated memories: quorum
-// rejections on real multi-validator sets carry multiple votes, challenge
-// deprecations carry a challenges row, and the legacy 4-archetype era always
-// recorded 4 votes per memory.
+// selfID rejecting with the dedupCheck rationale — it was never challenged, and
+// NO other row shares its content hash. That fingerprint cannot match
+// legitimately deprecated memories: quorum rejections on real multi-validator
+// sets carry multiple votes, challenge deprecations carry a challenges row, the
+// legacy 4-archetype era always recorded 4 votes per memory, and a genuine
+// duplicate rejection always has the twin row it was rejected against. That
+// last clause matters now that the dedup predicate is no longer committed-only:
+// without it, every restart would resurrect genuine duplicate rejections (their
+// fingerprint is otherwise identical) and the widened lookup would re-reject
+// them, churning deprecated ↔ proposed forever.
 //
 // For each candidate, flipChain (the caller's chain-state flip, e.g. badger
 // status + vote-key cleanup) runs FIRST; only on its success does the mirror row
@@ -5016,7 +5155,10 @@ func (s *SQLiteStore) RepairSelfDupRejected(ctx context.Context, selfID string, 
 		  AND NOT EXISTS (SELECT 1 FROM validation_votes v2
 		              WHERE v2.memory_id = m.memory_id AND NOT (v2.validator_id = ?
 		                AND v2.decision = 'reject' AND v2.rationale LIKE 'duplicate content%'))
-		  AND NOT EXISTS (SELECT 1 FROM challenges c WHERE c.memory_id = m.memory_id)`,
+		  AND NOT EXISTS (SELECT 1 FROM challenges c WHERE c.memory_id = m.memory_id)
+		  AND NOT EXISTS (SELECT 1 FROM memories m2
+		              WHERE m2.content_hash = m.content_hash
+		                AND m2.memory_id != m.memory_id)`,
 		selfID, selfID)
 	if err != nil {
 		return 0, fmt.Errorf("repair self-dup-rejected: scan candidates: %w", err)
@@ -5243,6 +5385,13 @@ func (s *SQLiteStore) runInTx(ctx context.Context, contactMutation bool, fn func
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	if err := fn(s.transactionClone(tx, contactMutation)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *SQLiteStore) transactionClone(tx *sql.Tx, contactMutation bool) *SQLiteStore {
 	txStore := &SQLiteStore{
 		conn: tx, dbPath: s.dbPath,
 		vaultGeneration: s.vaultGeneration,
@@ -5253,10 +5402,7 @@ func (s *SQLiteStore) runInTx(ctx context.Context, contactMutation bool, fn func
 	}
 	txStore.vault.Store(s.vault.Load())
 	txStore.vaultExpected.Store(s.vaultExpected.Load())
-	if err := fn(txStore); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return txStore
 }
 
 // --- Preferences ---
@@ -5297,62 +5443,6 @@ func (s *SQLiteStore) GetAllPreferences(ctx context.Context) (map[string]string,
 		prefs[k] = v
 	}
 	return prefs, rows.Err()
-}
-
-// GetCleanupCandidates returns memories eligible for auto-deprecation.
-// It finds: (1) observations older than ttlDays, (2) memories with computed confidence below threshold.
-func (s *SQLiteStore) GetCleanupCandidates(ctx context.Context, observationTTLDays int, sessionTTLDays int, staleThreshold float64) ([]*memory.MemoryRecord, error) {
-	// Find non-deprecated observations and low-confidence memories
-	rows, err := s.conn.QueryContext(ctx,
-		`SELECT memory_id, submitting_agent, content, content_hash, embedding, embedding_hash,
-			memory_type, domain_tag, provider, confidence_score, status, parent_hash, created_at, committed_at, deprecated_at, COALESCE(task_status, '')
-		FROM memories
-		WHERE status NOT IN ('deprecated')
-		AND (
-			(memory_type = 'observation' AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ? || ' days'))
-			OR (memory_type = 'observation' AND domain_tag = 'session-context' AND created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ? || ' days'))
-		)
-		ORDER BY created_at ASC
-		LIMIT 500`,
-		fmt.Sprintf("-%d", observationTTLDays),
-		fmt.Sprintf("-%d", sessionTTLDays))
-	if err != nil {
-		return nil, fmt.Errorf("query cleanup candidates: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-
-	records := make([]*memory.MemoryRecord, 0)
-	for rows.Next() {
-		rec, err := s.scanMemoryRow(rows)
-		if err != nil {
-			return nil, err
-		}
-		records = append(records, rec)
-	}
-	return records, rows.Err()
-}
-
-// DeprecateMemories batch-deprecates memories by IDs.
-func (s *SQLiteStore) DeprecateMemories(ctx context.Context, memoryIDs []string) (int, error) {
-	if len(memoryIDs) == 0 {
-		return 0, nil
-	}
-	placeholders := make([]string, len(memoryIDs))
-	args := make([]any, len(memoryIDs))
-	for i, id := range memoryIDs {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	query := fmt.Sprintf(
-		`UPDATE memories SET status = 'deprecated', deprecated_at = strftime('%%Y-%%m-%%dT%%H:%%M:%%fZ', 'now')
-		WHERE memory_id IN (%s) AND status != 'deprecated'`,
-		strings.Join(placeholders, ","))
-	result, err := s.writeExecContext(ctx, query, args...)
-	if err != nil {
-		return 0, fmt.Errorf("deprecate memories: %w", err)
-	}
-	n, _ := result.RowsAffected()
-	return int(n), nil
 }
 
 // ResolveChallengedMemories sweeps LEGACY stale "challenged" rows to "deprecated"
@@ -5468,8 +5558,14 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, tas
 
 // LinkMemories creates a link between two memories.
 func (s *SQLiteStore) LinkMemories(ctx context.Context, sourceID, targetID, linkType string) error {
+	// A pair (source, target) holds one relationship (that is the primary key).
+	// Re-linking an existing pair UPDATES its type rather than silently dropping the
+	// new type: `ON CONFLICT DO NOTHING` discarded the second write with no error, so
+	// re-typing a relationship (e.g. related -> supersedes) vanished. This is an
+	// authorization-gated, idempotent upsert — last write wins.
 	_, err := s.writeExecContext(ctx,
-		`INSERT INTO memory_links (source_id, target_id, link_type) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+		`INSERT INTO memory_links (source_id, target_id, link_type) VALUES (?, ?, ?)
+		 ON CONFLICT(source_id, target_id) DO UPDATE SET link_type = excluded.link_type`,
 		sourceID, targetID, linkType)
 	if err != nil {
 		return fmt.Errorf("link memories: %w", err)
@@ -5610,7 +5706,11 @@ func (s *SQLiteStore) GetOpenTasks(ctx context.Context, domain string, provider 
 		query += ` AND (provider = ? OR provider = '')`
 		args = append(args, provider)
 	}
-	query += ` ORDER BY created_at DESC LIMIT 500`
+	// memory_id is the tiebreaker, not decoration: created_at has second
+	// resolution, so a burst of tasks created in the same second would otherwise
+	// come back in an unstable order and any offset-based paging over that list
+	// could skip or repeat rows between pages.
+	query += ` ORDER BY created_at DESC, memory_id ASC LIMIT 500`
 
 	rows, err := s.conn.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -6040,6 +6140,11 @@ func (s *SQLiteStore) AssignTaskAndNotify(ctx context.Context, memoryID, assigne
 		inserted, _ := insertResult.RowsAffected()
 		notificationCreated = inserted == 1
 	}
+	if notificationCreated {
+		if _, err := s.AdvanceInboxActivity(ctx, assignee); err != nil {
+			return nil, fmt.Errorf("advance task inbox activity: %w", err)
+		}
+	}
 
 	return &TaskAssignmentResult{
 		Changed: changed, Assignee: assignee, AssignmentVersion: version, TaskStatus: taskStatus,
@@ -6419,6 +6524,8 @@ func (s *SQLiteStore) migratePipeline(ctx context.Context) {
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_destination ON pipeline_messages(destination_chain_id, status)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_source ON pipeline_messages(source_chain_id, source_pipe_id)`)
 	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_source_status ON pipeline_messages(source_chain_id, status)`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_federation_activity ON pipeline_messages(created_at) WHERE source_chain_id != ''`)
+	_, _ = s.writeExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_pipe_federation_reply_activity ON pipeline_messages(completed_at) WHERE destination_chain_id != '' AND status = 'completed'`)
 	// Partial covering index for the CEREBRUM connectome aggregation
 	// (GetPipeSynapses). The general idx_pipe_* indexes are all (col, status)
 	// and cannot serve a GROUP BY on the agent pair, so without this the
@@ -6668,7 +6775,7 @@ func (s *SQLiteStore) GetInboxHistory(ctx context.Context, agentID, provider str
 		`SELECT p.pipe_id, p.from_agent, p.from_provider, p.to_agent, p.to_provider, p.intent, p.payload,
 		        COALESCE(result, ''), status, created_at, COALESCE(claimed_by, ''), claimed_at, completed_at, expires_at, COALESCE(journal_id, ''),
 		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision,
-		        federation_authorization_mode, federation_linked_relation, COALESCE(r.claimant_session_id, '')
+		        federation_authorization_mode, federation_linked_relation, COALESCE(r.claimant_session_id, ''), COALESCE(r.claim_revision, 0)
 		 FROM pipeline_messages p
 		 LEFT JOIN message_fetch_receipts r ON r.message_id=p.pipe_id AND r.receiver_agent_id=?
 		 WHERE p.destination_chain_id = ''
@@ -6692,7 +6799,7 @@ func (s *SQLiteStore) GetInboxHistory(ctx context.Context, agentID, provider str
 			&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &m.ClaimedBy, &claimedAt, &completedAt,
 			&expiresAt, &m.JournalID, &m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID,
 			&m.FederationPolicyEpoch, &m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision,
-			&m.FederationAuthorizationMode, &m.FederationLinkedRelation, &m.ClaimedSessionID); err != nil {
+			&m.FederationAuthorizationMode, &m.FederationLinkedRelation, &m.ClaimedSessionID, &m.ClaimRevision); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = parseTime(createdAt)
@@ -6781,6 +6888,16 @@ func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, agentID, res
 	if len(result) > MaxPipeContentBytes {
 		return ErrPipeResultTooLarge
 	}
+	if s.db != nil {
+		return s.RunInTx(ctx, func(tx OffchainStore) error {
+			return tx.(*SQLiteStore).CompletePipeline(ctx, pipeID, agentID, result, journalID)
+		})
+	}
+	var sender, sourceChain, destinationChain string
+	if err := s.conn.QueryRowContext(ctx, `SELECT from_agent,source_chain_id,destination_chain_id
+		FROM pipeline_messages WHERE pipe_id=?`, pipeID).Scan(&sender, &sourceChain, &destinationChain); err != nil {
+		return err
+	}
 	encryptedResult, err := s.encryptContent(result)
 	if err != nil {
 		return fmt.Errorf("encrypt pipeline result: %w", err)
@@ -6796,6 +6913,14 @@ func (s *SQLiteStore) CompletePipeline(ctx context.Context, pipeID, agentID, res
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("pipeline message %s not available for completion by %s (must be claimed by this agent first)", pipeID, agentID)
+	}
+	// Only fresh completion of a wholly local request is sender-visible inbox
+	// activity here. Federated results landing home advance in their dedicated
+	// authenticated transaction; imported requests target a remote sender.
+	if sender != "" && sourceChain == "" && destinationChain == "" {
+		if _, err := s.AdvanceInboxActivity(ctx, sender); err != nil {
+			return fmt.Errorf("advance reply inbox activity: %w", err)
+		}
 	}
 	return nil
 }

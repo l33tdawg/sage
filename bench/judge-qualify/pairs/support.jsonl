@@ -1,0 +1,126 @@
+{"id":"s001","category":"support_direct","memory":"The staging database listens on port 6432.","evidence":"Staging database configuration sets port 6432.","label":true}
+{"id":"s002","category":"support_direct","memory":"Deploys to production require two approvals.","evidence":"Production deploy policy: two approvals are required.","label":true}
+{"id":"s003","category":"support_direct","memory":"The nightly backup job runs at 02:15 UTC.","evidence":"Backup schedule: nightly job at 02:15 UTC.","label":true}
+{"id":"s004","category":"support_direct","memory":"Sara Osei owns the billing service.","evidence":"Service ownership record: billing is owned by Sara Osei.","label":true}
+{"id":"s005","category":"support_direct","memory":"The vault master key rotates every 90 days.","evidence":"Key management policy: master key rotation every 90 days.","label":true}
+{"id":"s006","category":"support_direct","memory":"The API gateway rate-limits unauthenticated requests at 60 per minute.","evidence":"Gateway configuration: unauthenticated rate limit 60 requests per minute.","label":true}
+{"id":"s007","category":"support_direct","memory":"The incident channel is #ops-incidents.","evidence":"Team convention: incidents are coordinated in #ops-incidents.","label":true}
+{"id":"s008","category":"support_direct","memory":"The build image is pinned to Go 1.22.5.","evidence":"Dockerfile line 1: FROM golang:1.22.5.","label":true}
+{"id":"s009","category":"support_direct","memory":"The East region is primary for customer data.","evidence":"Architecture decision record: customer data primary region is East.","label":true}
+{"id":"s010","category":"support_direct","memory":"The p95 latency for search is 240 ms.","evidence":"Latency dashboard, last 30 days: search p95 is 240 ms.","label":true}
+{"id":"s011","category":"support_direct","memory":"The user's timezone is Asia/Kuala_Lumpur.","evidence":"User profile: timezone Asia/Kuala_Lumpur.","label":true}
+{"id":"s012","category":"support_direct","memory":"The office coffee machine is on the third floor.","evidence":"Office directory: coffee machine, third floor.","label":true}
+{"id":"s013","category":"support_direct","memory":"The vendor contract renews on 2027-03-01.","evidence":"Contract calendar: vendor contract renewal 2027-03-01.","label":true}
+{"id":"s014","category":"support_direct","memory":"The database failover runbook lives at runbooks/db-failover.md.","evidence":"Documentation index: runbooks/db-failover.md.","label":true}
+{"id":"s015","category":"support_direct","memory":"Staging sends no customer PII to third parties.","evidence":"Staging data policy: third-party payloads exclude customer PII.","label":true}
+{"id":"s016","category":"support_direct","memory":"The queue-depth alert threshold is 5000 messages.","evidence":"Alert configuration: queue_depth above 5000 fires.","label":true}
+{"id":"s017","category":"support_direct","memory":"Marcus Chen starts on 2026-10-05.","evidence":"Onboarding schedule: Marcus Chen begins 2026-10-05.","label":true}
+{"id":"s018","category":"support_direct","memory":"The web frontend is served from the edge CDN.","evidence":"Deployment topology: frontend is served by the edge CDN.","label":true}
+{"id":"s019","category":"support_direct","memory":"The demo account password rotates on the first of each month.","evidence":"Operations calendar: demo credential rotation, monthly on the first.","label":true}
+{"id":"s020","category":"support_direct","memory":"The team uses trunk-based development.","evidence":"Engineering handbook: trunk-based development is the standard.","label":true}
+{"id":"s021","category":"support_direct","memory":"The billing exporter runs on the analytics cluster.","evidence":"Job placement list: billing-exporter runs on the analytics cluster.","label":true}
+{"id":"s022","category":"support_direct","memory":"The lab router runs firmware 7.4.2.","evidence":"Lab inventory: router firmware 7.4.2.","label":true}
+{"id":"s023","category":"support_direct","memory":"The primary on-call rotation changes weekly.","evidence":"On-call policy: rotations change every week.","label":true}
+{"id":"s024","category":"support_direct","memory":"The dataset refresh completes by 04:00 UTC.","evidence":"Pipeline SLA: refresh completes by 04:00 UTC.","label":true}
+{"id":"s025","category":"support_attributed","memory":"At the last inspection, the alarm was disabled.","evidence":"Inspection report 2026-08-14: alarm disabled at the panel.","label":true}
+{"id":"s026","category":"support_attributed","memory":"According to the operator, the north gate closes at 22:00.","evidence":"Operator statement 2026-09-02: the north gate closes at 22:00.","label":true}
+{"id":"s027","category":"support_attributed","memory":"As of the September audit, the fire extinguishers were serviced.","evidence":"September 2026 audit record: fire extinguishers serviced.","label":true}
+{"id":"s028","category":"support_attributed","memory":"The vendor reportedly ships replacements within five days.","evidence":"Vendor email: replacements ship within five days.","label":true}
+{"id":"s029","category":"support_attributed","memory":"In 2024 the company used a different domain registrar.","evidence":"Historical record: the 2024 domain registrar was Namecheap.","label":true}
+{"id":"s030","category":"support_attributed","memory":"The operator believes the sensor is miscalibrated.","evidence":"Operator note: I think the sensor is miscalibrated.","label":true}
+{"id":"s031","category":"support_attributed","memory":"The maintenance window was scheduled for Sunday 01:00 UTC.","evidence":"Change request CR-118: maintenance window Sunday 01:00 UTC.","label":true}
+{"id":"s032","category":"support_attributed","memory":"According to the finance team, Q3 closes on 2026-09-30.","evidence":"Finance memo: Q3 close on 2026-09-30.","label":true}
+{"id":"s033","category":"support_attributed","memory":"At the last failover test, the failover took 42 seconds.","evidence":"Failover test log 2026-07-19: failover completed in 42 seconds.","label":true}
+{"id":"s034","category":"support_attributed","memory":"The audit found two unpatched hosts.","evidence":"Audit finding: two hosts unpatched.","label":true}
+{"id":"s035","category":"support_attributed","memory":"The user said the deadline is Friday.","evidence":"User message: the deadline is Friday.","label":true}
+{"id":"s036","category":"support_attributed","memory":"The monitoring vendor's notice said the outage lasted 31 minutes.","evidence":"Vendor status notice: outage duration 31 minutes.","label":true}
+{"id":"s037","category":"trap_earlier_time","memory":"The alarm is disabled.","evidence":"At the last inspection, the alarm was disabled.","label":false}
+{"id":"s038","category":"trap_earlier_time","memory":"The staging database listens on port 6432.","evidence":"The staging database listened on port 6432 at the last audit.","label":false}
+{"id":"s039","category":"trap_earlier_time","memory":"The CTO is Aisha Rahman.","evidence":"In 2024 the CTO was Aisha Rahman.","label":false}
+{"id":"s040","category":"trap_earlier_time","memory":"The office lease runs until 2030.","evidence":"When it was signed in 2019, the lease ran until 2029.","label":false}
+{"id":"s041","category":"trap_earlier_time","memory":"The lab router runs firmware 7.4.2.","evidence":"The lab router was on 7.4.2 before the June upgrade.","label":false}
+{"id":"s042","category":"trap_earlier_time","memory":"On-call rotations are weekly.","evidence":"On-call rotations were weekly before the January change.","label":false}
+{"id":"s043","category":"trap_earlier_time","memory":"The backup target is the west bucket.","evidence":"The backup target was the west bucket until the March migration.","label":false}
+{"id":"s044","category":"trap_earlier_time","memory":"The API requires an API key.","evidence":"The API required an API key before OAuth was introduced.","label":false}
+{"id":"s045","category":"trap_earlier_time","memory":"The queue-depth alert threshold is 5000 messages.","evidence":"The threshold was 5000 before it was raised last quarter.","label":false}
+{"id":"s046","category":"trap_earlier_time","memory":"The vendor ships replacements within five days.","evidence":"The vendor used to ship replacements within five days.","label":false}
+{"id":"s047","category":"trap_earlier_time","memory":"The wifi password is on the whiteboard.","evidence":"The wifi password was on the whiteboard last month.","label":false}
+{"id":"s048","category":"trap_earlier_time","memory":"The demo account password rotates monthly.","evidence":"When the demo account was created, its password rotated monthly.","label":false}
+{"id":"s049","category":"trap_earlier_time","memory":"The build uses Go 1.22.5.","evidence":"The build used Go 1.22.5 before the toolchain update.","label":false}
+{"id":"s050","category":"trap_earlier_time","memory":"The East region is primary for customer data.","evidence":"East was the primary region until the failover drill.","label":false}
+{"id":"s051","category":"trap_earlier_time","memory":"The team uses trunk-based development.","evidence":"The team adopted trunk-based development in 2023 and later returned to release branches.","label":false}
+{"id":"s052","category":"trap_earlier_time","memory":"The sensor reports every 30 seconds.","evidence":"The sensor reported every 30 seconds before the firmware update.","label":false}
+{"id":"s053","category":"trap_earlier_time","memory":"The fire extinguishers are serviced.","evidence":"The extinguishers were serviced in 2025.","label":false}
+{"id":"s054","category":"trap_earlier_time","memory":"The contract renews on 2027-03-01.","evidence":"Under the 2024 agreement the renewal was 2027-03-01; it has since been renegotiated.","label":false}
+{"id":"s055","category":"trap_reported","memory":"The alarm is disabled.","evidence":"Reportedly, the alarm is disabled.","label":false}
+{"id":"s056","category":"trap_reported","memory":"The staging database listens on port 6432.","evidence":"A contractor said the staging database listens on port 6432.","label":false}
+{"id":"s057","category":"trap_reported","memory":"The outage lasted 31 minutes.","evidence":"Customers reported the outage lasted 31 minutes.","label":false}
+{"id":"s058","category":"trap_reported","memory":"The north gate closes at 22:00.","evidence":"A neighbor claims the north gate closes at 22:00.","label":false}
+{"id":"s059","category":"trap_reported","memory":"The database migration is complete.","evidence":"The vendor says the database migration is complete.","label":false}
+{"id":"s060","category":"trap_reported","memory":"The main branch is protected.","evidence":"The onboarding doc claims the main branch is protected.","label":false}
+{"id":"s061","category":"trap_reported","memory":"The p95 latency for search is 240 ms.","evidence":"A conference talk said our search p95 is 240 ms.","label":false}
+{"id":"s062","category":"trap_reported","memory":"The office will close on 2026-12-24.","evidence":"An anonymous note says the office will close on 2026-12-24.","label":false}
+{"id":"s063","category":"trap_reported","memory":"The demo account password rotates monthly.","evidence":"The sales deck states the demo password rotates monthly.","label":false}
+{"id":"s064","category":"trap_reported","memory":"Two hosts are unpatched.","evidence":"A scan summary mentions two unpatched hosts; nobody has verified the finding.","label":false}
+{"id":"s065","category":"trap_reported","memory":"The billing exporter runs on the analytics cluster.","evidence":"Someone in chat said the billing exporter runs on the analytics cluster.","label":false}
+{"id":"s066","category":"trap_reported","memory":"Marcus Chen starts on 2026-10-05.","evidence":"Marcus mentioned in passing that he starts on 2026-10-05.","label":false}
+{"id":"s067","category":"trap_reported","memory":"The vault master key rotates every 90 days.","evidence":"The old wiki page says the master key rotates every 90 days.","label":false}
+{"id":"s068","category":"trap_reported","memory":"The north datacenter has redundant power.","evidence":"The vendor brochure says the north datacenter has redundant power.","label":false}
+{"id":"s069","category":"trap_reported","memory":"The failover took 42 seconds.","evidence":"A social media post said the failover took 42 seconds.","label":false}
+{"id":"s070","category":"trap_reported","memory":"The web frontend is served from the edge CDN.","evidence":"An unmaintained README says the frontend is served from the edge CDN.","label":false}
+{"id":"s071","category":"trap_reported","memory":"The quarterly close is on 2026-09-30.","evidence":"Office rumour puts the quarterly close on 2026-09-30.","label":false}
+{"id":"s072","category":"trap_reported","memory":"The lab router runs firmware 7.4.2.","evidence":"The router's own web page claims 7.4.2, but the page is cached from last year.","label":false}
+{"id":"s073","category":"trap_weaker","memory":"The service handles 10000 requests per second.","evidence":"The service handled 10000 requests per second once, in a load test.","label":false}
+{"id":"s074","category":"trap_weaker","memory":"All deploys require two approvals.","evidence":"Some deploys require two approvals.","label":false}
+{"id":"s075","category":"trap_weaker","memory":"The queue is always drained within five minutes.","evidence":"The queue is usually drained within five minutes.","label":false}
+{"id":"s076","category":"trap_weaker","memory":"The error has been fixed.","evidence":"The error might be fixed.","label":false}
+{"id":"s077","category":"trap_weaker","memory":"The migration will finish today.","evidence":"The migration may finish today.","label":false}
+{"id":"s078","category":"trap_weaker","memory":"The build is reproducible.","evidence":"The build aimed to be reproducible.","label":false}
+{"id":"s079","category":"trap_weaker","memory":"The vendor guarantees five-day shipping.","evidence":"The vendor hopes to ship within five days.","label":false}
+{"id":"s080","category":"trap_weaker","memory":"The API version is deprecated.","evidence":"The API version is being considered for deprecation.","label":false}
+{"id":"s081","category":"trap_weaker","memory":"The sensor is accurate to within one percent.","evidence":"The sensor is rated to within one percent under ideal conditions.","label":false}
+{"id":"s082","category":"trap_weaker","memory":"The team agreed on the new roadmap.","evidence":"Part of the team discussed the new roadmap.","label":false}
+{"id":"s083","category":"trap_weaker","memory":"The failover is automated.","evidence":"The failover could be automated.","label":false}
+{"id":"s084","category":"trap_weaker","memory":"The budget is approved.","evidence":"The budget is awaiting approval.","label":false}
+{"id":"s085","category":"trap_weaker","memory":"The cluster uses autoscaling.","evidence":"The cluster can use autoscaling when it is enabled.","label":false}
+{"id":"s086","category":"trap_weaker","memory":"The incident is closed.","evidence":"The incident is nearly closed.","label":false}
+{"id":"s087","category":"trap_different","memory":"The staging database listens on port 6432.","evidence":"The production database listens on port 6432.","label":false}
+{"id":"s088","category":"trap_different","memory":"Sara Osei owns the billing service.","evidence":"Sara Osei owns the search service.","label":false}
+{"id":"s089","category":"trap_different","memory":"The East region is primary for customer data.","evidence":"The East region is the disaster-recovery site.","label":false}
+{"id":"s090","category":"trap_different","memory":"The office is in Kuala Lumpur.","evidence":"The new office is in Penang.","label":false}
+{"id":"s091","category":"trap_different","memory":"The backup runs at 02:15 UTC.","evidence":"The restore drill runs at 02:15 UTC.","label":false}
+{"id":"s092","category":"trap_different","memory":"Order A-104 was refunded.","evidence":"Order A-105 was refunded.","label":false}
+{"id":"s093","category":"trap_different","memory":"The north gate closes at 22:00.","evidence":"The south gate closes at 22:00.","label":false}
+{"id":"s094","category":"trap_different","memory":"The billing exporter runs on the analytics cluster.","evidence":"The billing exporter runs in the analytics namespace on the batch cluster.","label":false}
+{"id":"s095","category":"trap_different","memory":"Go 1.22.5 is pinned for the API build.","evidence":"Go 1.22.5 is pinned for the CLI build.","label":false}
+{"id":"s096","category":"trap_different","memory":"The fire drill is in October.","evidence":"The flood drill is in October.","label":false}
+{"id":"s097","category":"trap_different","memory":"The demo account password rotates monthly.","evidence":"The root password rotates monthly.","label":false}
+{"id":"s098","category":"trap_different","memory":"Marcus Chen starts on 2026-10-05.","evidence":"Priya Nair starts on 2026-10-05.","label":false}
+{"id":"s099","category":"trap_different","memory":"The queue-depth alert threshold is 5000.","evidence":"The disk-usage alert threshold is 5000.","label":false}
+{"id":"s100","category":"trap_different","memory":"The vault master key rotates every 90 days.","evidence":"The code-signing key rotates every 90 days.","label":false}
+{"id":"s101","category":"trap_different","memory":"The vendor contract renews on 2027-03-01.","evidence":"The office lease renews on 2027-03-01.","label":false}
+{"id":"s102","category":"trap_different","memory":"The primary on-call rotation is weekly.","evidence":"The security on-call rotation is weekly.","label":false}
+{"id":"s103","category":"trap_contradiction","memory":"The alarm is disabled.","evidence":"The alarm is enabled.","label":false}
+{"id":"s104","category":"trap_contradiction","memory":"Deploys require two approvals.","evidence":"Deploys require no approvals.","label":false}
+{"id":"s105","category":"trap_contradiction","memory":"The queue drains within five minutes.","evidence":"The queue routinely backs up for hours.","label":false}
+{"id":"s106","category":"trap_contradiction","memory":"The migration is complete.","evidence":"The migration has not started.","label":false}
+{"id":"s107","category":"trap_contradiction","memory":"The service is single-tenant.","evidence":"The service is multi-tenant.","label":false}
+{"id":"s108","category":"trap_contradiction","memory":"The rollout is paused.","evidence":"The rollout resumed this morning.","label":false}
+{"id":"s109","category":"trap_contradiction","memory":"The master key rotates every 90 days.","evidence":"The master key has not rotated in two years.","label":false}
+{"id":"s110","category":"trap_contradiction","memory":"The main branch is protected.","evidence":"Direct pushes to main are allowed.","label":false}
+{"id":"s111","category":"trap_contradiction","memory":"The vendor ships to our region within five days.","evidence":"The vendor stopped shipping to our region.","label":false}
+{"id":"s112","category":"trap_contradiction","memory":"The budget is approved.","evidence":"The budget was rejected.","label":false}
+{"id":"s113","category":"trap_contradiction","memory":"The host is patched.","evidence":"The host is two years behind on patches.","label":false}
+{"id":"s114","category":"trap_contradiction","memory":"The north gate closes at 22:00.","evidence":"The north gate no longer closes at all.","label":false}
+{"id":"s115","category":"trap_unrelated","memory":"The staging database listens on port 6432.","evidence":"The canteen serves lunch at noon.","label":false}
+{"id":"s116","category":"trap_unrelated","memory":"Deploys require two approvals.","evidence":"The fire drill is scheduled for October.","label":false}
+{"id":"s117","category":"trap_unrelated","memory":"Sara Osei owns the billing service.","evidence":"The lab router runs firmware 7.4.2.","label":false}
+{"id":"s118","category":"trap_unrelated","memory":"The backup runs at 02:15 UTC.","evidence":"The office plants are watered on Fridays.","label":false}
+{"id":"s119","category":"trap_unrelated","memory":"The vault master key rotates every 90 days.","evidence":"The conference room seats twelve people.","label":false}
+{"id":"s120","category":"trap_unrelated","memory":"The queue-depth alert threshold is 5000.","evidence":"Parking permits expire in March.","label":false}
+{"id":"s121","category":"trap_unrelated","memory":"Marcus Chen starts on 2026-10-05.","evidence":"The espresso machine needs descaling.","label":false}
+{"id":"s122","category":"trap_unrelated","memory":"The gateway rate limit is 60 per minute.","evidence":"The quarterly newsletter goes out on Tuesdays.","label":false}
+{"id":"s123","category":"trap_unrelated","memory":"The East region is primary for customer data.","evidence":"The team lunch is on Thursdays.","label":false}
+{"id":"s124","category":"trap_unrelated","memory":"Go 1.22.5 is pinned for the build.","evidence":"The office dog is named Biscuit.","label":false}
+{"id":"s125","category":"trap_unrelated","memory":"On-call rotations are weekly.","evidence":"The fire exit is at the north end of the building.","label":false}
+{"id":"s126","category":"trap_unrelated","memory":"The demo account password rotates monthly.","evidence":"Recycling is collected on Wednesdays.","label":false}

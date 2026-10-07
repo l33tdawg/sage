@@ -478,6 +478,9 @@ func TestGetCompletedForSenderReturnsFederatedReplyLandedHome(t *testing.T) {
 		})
 	require.NoError(t, err)
 	require.False(t, duplicate)
+	activitySeq, err := s.GetInboxActivitySequence(ctx, replyVisibilitySender)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), activitySeq)
 
 	items, err := s.GetCompletedForSender(ctx, replyVisibilitySender, 10)
 	require.NoError(t, err)
@@ -492,4 +495,19 @@ func TestGetCompletedForSenderReturnsFederatedReplyLandedHome(t *testing.T) {
 	foreign, err := s.GetCompletedForSender(ctx, remoteAgent, 10)
 	require.NoError(t, err)
 	assert.Empty(t, foreign)
+	duplicate, err = s.ApplyFederatedPipelineResult(ctx, outbound.PipeID, replyVisibilityResult,
+		&PipelineTransportDedup{
+			RemoteChainID: "chain-peer", PolicyEpoch: outbound.FederationPolicyEpoch,
+			AgreementID: outbound.FederationAgreementID, ContactID: outbound.FederationContactID,
+			ContactRevision: outbound.FederationContactRevision,
+			SourceAgentID:   remoteAgent, TargetAgentID: replyVisibilitySender,
+			EventKind: "result", RemotePipeID: "remote-pipe-1",
+			ContentHash: contentHash[:], ProofHash: proofHash[:], LocalPipeID: outbound.PipeID,
+			Outcome: "accepted", ExpiresAt: now.Add(2 * time.Hour),
+		})
+	require.NoError(t, err)
+	require.True(t, duplicate)
+	activitySeq, err = s.GetInboxActivitySequence(ctx, replyVisibilitySender)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), activitySeq, "federated result replay must not manufacture activity")
 }

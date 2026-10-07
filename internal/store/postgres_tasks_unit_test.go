@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pashagolub/pgxmock/v4"
+	"github.com/pashagolub/pgxmock/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/memory"
@@ -48,6 +48,29 @@ func TestPostgresInsertMemoryPersistsTaskStatusWithoutReplayOverwrite(t *testing
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 	require.NoError(t, store.InsertMemory(context.Background(), record))
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPostgresInboxActivityClockIsPayloadFreeAndMonotonic(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	t.Cleanup(mock.Close)
+	store := &PostgresStore{db: mock}
+	mock.ExpectQuery(`INSERT INTO agent_inbox_activity`).WithArgs("agent-a").
+		WillReturnRows(pgxmock.NewRows([]string{"seq"}).AddRow(int64(7)))
+	seq, err := store.AdvanceInboxActivity(context.Background(), "agent-a")
+	require.NoError(t, err)
+	require.Equal(t, uint64(7), seq)
+	mock.ExpectQuery(`SELECT seq FROM agent_inbox_activity`).WithArgs("agent-a").
+		WillReturnRows(pgxmock.NewRows([]string{"seq"}).AddRow(int64(7)))
+	seq, err = store.GetInboxActivitySequence(context.Background(), "agent-a")
+	require.NoError(t, err)
+	require.Equal(t, uint64(7), seq)
+	mock.ExpectQuery(`SELECT epoch FROM inbox_activity_meta`).
+		WillReturnRows(pgxmock.NewRows([]string{"epoch"}).AddRow(strings.Repeat("e", 32)))
+	epoch, err := store.GetInboxActivityEpoch(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, strings.Repeat("e", 32), epoch)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 

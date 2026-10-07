@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,8 +21,16 @@ const (
 	// by the first internet state-sync format. Keep it as the v20 compatibility
 	// default for existing callers and ceremonies; a join authorization still
 	// pins one exact version for the whole session.
-	RequiredAppVersion        uint64 = 20
-	LatestSupportedAppVersion uint64 = 27
+	RequiredAppVersion uint64 = 20
+	// LatestSupportedAppVersion is the highest app protocol version this binary
+	// can serve or restore in a state-sync ceremony. It tracks the highest
+	// COMPILED fork gate, not the auto-vote readiness ceiling: a gate compiled
+	// ahead of its activation evidence (app-v28) still means a node carrying it
+	// can run the exact version it restores, which is the only question an
+	// authorization's exact-version pin asks. A joining node never sees a chain
+	// at a version its own binary cannot execute, because the receiver verifies
+	// the served bundle at that exact version.
+	LatestSupportedAppVersion uint64 = 28
 	cometNodeIDBytes                 = 20
 	maxJoinAuthorizationBytes        = 64 << 10
 )
@@ -35,11 +44,25 @@ var stateSyncChainIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 // authorization's exact version.
 func SupportsAppVersion(version uint64) bool {
 	switch version {
-	case RequiredAppVersion, 21, 22, 23, 24, 25, 26, LatestSupportedAppVersion:
+	case RequiredAppVersion, 21, 22, 23, 24, 25, 26, 27, LatestSupportedAppVersion:
 		return true
 	default:
 		return false
 	}
+}
+
+// SupportedAppVersionList renders the allowlist for operator-facing errors, so
+// a message can never drift from what SupportsAppVersion actually accepts.
+// Exported because the boot state-sync runtime reports the same fact.
+func SupportedAppVersionList() string {
+	versions := []string{strconv.FormatUint(RequiredAppVersion, 10)}
+	for version := RequiredAppVersion + 1; version <= LatestSupportedAppVersion; version++ {
+		versions = append(versions, strconv.FormatUint(version, 10))
+	}
+	if len(versions) < 3 {
+		return strings.Join(versions, ", ")
+	}
+	return strings.Join(versions[:len(versions)-1], ", ") + ", or " + versions[len(versions)-1]
 }
 
 // JoinAuthorizationConfig is a trusted, locally installed approval for one
@@ -424,7 +447,10 @@ func validateJoinAuthorization(config JoinAuthorizationConfig, now time.Time) (*
 		return nil, errors.New("state sync join authorization requires an Ed25519 validator public key")
 	}
 	if !SupportsAppVersion(config.AppVersion) {
-		return nil, errors.New("state sync join authorization requires a supported app version (20, 21, 22, 23, 24, 25, 26, or 27)")
+		return nil, fmt.Errorf(
+			"state sync join authorization requires a supported app version (%s)",
+			SupportedAppVersionList(),
+		)
 	}
 	if config.ExpiresAt.IsZero() || !now.Before(config.ExpiresAt) {
 		return nil, errors.New("state sync join authorization is expired")

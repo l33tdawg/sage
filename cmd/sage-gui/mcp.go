@@ -21,6 +21,7 @@ import (
 
 	"github.com/l33tdawg/sage/internal/mcp"
 	"github.com/l33tdawg/sage/web"
+	"github.com/pelletier/go-toml/v2"
 )
 
 // Hook scripts deployed by `sage-gui mcp install`. The session-start and
@@ -33,7 +34,7 @@ import (
 //
 //	full      — default; full automation (sage_inception, sage_turn nudges)
 //	bookend   — only sage_reflect reminders; no per-turn nudges
-//	on-demand — silent; user drives SAGE manually
+//	on-demand — memory automation is silent; coordination polling remains on
 const sageSessionStartTemplate = `#!/bin/bash
 # SAGE SessionStart hook — pre-fetch recent committed memories from the local
 # SAGE node and emit them as context. Falls back to a soft nudge if the node
@@ -87,18 +88,13 @@ const sagePreCompactScript = `#!/bin/bash
 # SAGE PreCompact hook — fires right before Claude Code compacts the
 # conversation. Compaction discards turn-level detail; this is the last
 # chance to crystallise what was learned this session.
-SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
-MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
-if [ "$MODE" = "on-demand" ]; then
-    exit 0
-fi
-echo "MANDATORY before compaction: Call sage_reflect with a concise summary of (dos, don'ts) from this session, then sage_remember for any durable facts you want to keep. Once the context compacts, the per-turn detail is gone — only what you've committed to SAGE will survive."
-`
-
-const sageUserPromptScript = `#!/bin/bash
-# SAGE UserPromptSubmit hook — fires when the user submits a new prompt.
-# Always surface payload-free coordination in automated modes. Memory cadence
-# remains mode-specific, but bookend must not hide newly delivered work.
+#
+# If recall-backed compaction is enabled (run: sage-gui nevercompact enable, or
+# set SAGE_NEVERCOMPACT=1 for headless/centrally-managed hosts), the evicted turns
+# are ALSO captured verbatim as governed memories so a later session can restore
+# them. Capture is DEFAULT-OFF, reads the PreCompact payload from stdin, is fully
+# silent, soft-fails, and never blocks compaction; the reflection nudge below
+# always fires regardless.
 SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
 MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
 SAGE_GUI_BIN="${SAGE_GUI_BIN:-__SAGE_GUI_BIN__}"
@@ -109,11 +105,27 @@ if [ "$MODE" = "on-demand" ]; then
     exit 0
 fi
 if [ -x "$SAGE_GUI_BIN" ]; then
+    "$SAGE_GUI_BIN" hook pre-compact >/dev/null 2>&1 || true
+fi
+echo "MANDATORY before compaction: Call sage_reflect with a concise summary of (dos, don'ts) from this session, then sage_remember for any durable facts you want to keep. Once the context compacts, the per-turn detail is gone — only what you've committed to SAGE will survive."
+`
+
+const sageUserPromptScript = `#!/bin/bash
+# SAGE UserPromptSubmit hook — fires when the user submits a new prompt.
+# Always surface payload-free coordination. Memory cadence remains mode-specific,
+# but neither bookend nor on-demand may hide newly delivered work.
+SAGE_HOME="${SAGE_HOME:-$HOME/.sage}"
+MODE=$(cat "$SAGE_HOME/memory_mode" 2>/dev/null || echo "full")
+SAGE_GUI_BIN="${SAGE_GUI_BIN:-__SAGE_GUI_BIN__}"
+SAGE_PROVIDER="__SAGE_PROVIDER__"
+SAGE_IDENTITY_PATH="__SAGE_IDENTITY_PATH__"
+export SAGE_PROVIDER SAGE_IDENTITY_PATH
+if [ -x "$SAGE_GUI_BIN" ]; then
     if ! "$SAGE_GUI_BIN" hook inbox-status 2>/dev/null; then
         echo "SAGE inbox check unavailable — do not treat this as zero messages. Call sage_inbox directly."
     fi
 fi
-if [ "$MODE" = "bookend" ]; then
+if [ "$MODE" = "bookend" ] || [ "$MODE" = "on-demand" ]; then
     exit 0
 fi
 echo "Reminder: call sage_turn early in your response with the topic + an observation of what just happened. Memories you don't store don't survive."
@@ -260,6 +272,14 @@ func canonicalWorkspaceRootWithProbe(projectDir string, probe func(context.Conte
 	if err != nil {
 		return "", err
 	}
+	// A filesystem root is not a project boundary. In particular, the Codex
+	// desktop app-server itself runs from `/`; accepting that cwd would reuse
+	// the retired global-codex signer and auto-register the misleading name
+	// `codex//` instead of the task's actual workspace identity. Fail before
+	// probing Git, reading project config, or generating any key material.
+	if filepath.Dir(clean) == clean {
+		return "", fmt.Errorf("refusing broad workspace identity root")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	out, gitErr := probe(ctx, clean)
@@ -324,6 +344,60 @@ func primaryWorkspaceMCPEnv(root string) (map[string]string, bool, error) {
 	return result, true, nil
 }
 
+// codexWorkspaceMCPEnv is the Codex counterpart of primaryWorkspaceMCPEnv: it
+// reads the SAGE env block from a checkout's .codex/config.toml. One checkout
+// can hold both files — .mcp.json pins the Claude Code signer and
+// .codex/config.toml pins the Codex one — so callers must select by provider
+// rather than by file precedence.
+func codexWorkspaceMCPEnv(root string) (map[string]string, bool, error) {
+	path := filepath.Join(root, ".codex", "config.toml")
+	raw, err := readBoundedConfig(path, 1<<20)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	var document map[string]any
+	if err := toml.Unmarshal(raw, &document); err != nil {
+		return nil, false, fmt.Errorf("project Codex config is invalid TOML; fix it so the workspace identity can resolve: %w", err)
+	}
+	servers, _ := document["mcp_servers"].(map[string]any)
+	sage, _ := servers["sage"].(map[string]any)
+	env, _ := sage["env"].(map[string]any)
+	if env == nil {
+		return nil, false, nil
+	}
+	result := map[string]string{}
+	for _, key := range []string{"SAGE_PROVIDER", "SAGE_PROJECT", "SAGE_IDENTITY_PATH"} {
+		if value, ok := env[key].(string); ok {
+			result[key] = value
+		}
+	}
+	return result, true, nil
+}
+
+// workspaceMCPEnvs returns every pinned SAGE env block a canonical workspace
+// root declares, Claude Code first and Codex second. Reading only .mcp.json
+// meant a Codex session that resolved this workspace never saw the checkout's
+// Codex pin and minted a second, hashed identity for the same repository.
+func workspaceMCPEnvs(root string) ([]map[string]string, error) {
+	var envs []map[string]string
+	for _, read := range []func(string) (map[string]string, bool, error){
+		primaryWorkspaceMCPEnv,
+		codexWorkspaceMCPEnv,
+	} {
+		env, found, err := read(root)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			envs = append(envs, env)
+		}
+	}
+	return envs, nil
+}
+
 // claudeChannelEnabled is an explicit adapter opt-in. The shipped Claude Code
 // host registers a notifications/claude/channel handler, but delivery from a
 // plain .mcp.json server through the host's plugin-scoped channel gate remains
@@ -365,21 +439,42 @@ func resolveImplicitWorkspaceIdentity(home, projectDir, provider, project string
 	if err != nil {
 		return "", provider, project, err
 	}
-	if primary, found, configErr := primaryWorkspaceMCPEnv(root); configErr != nil {
+	envs, configErr := workspaceMCPEnvs(root)
+	if configErr != nil {
 		return "", provider, project, configErr
-	} else if found {
-		primaryProvider := strings.TrimSpace(primary["SAGE_PROVIDER"])
-		if provider == "" {
-			provider = primaryProvider
+	}
+	// A checkout's pin lives in the config that owns it: .mcp.json for Claude
+	// Code, .codex/config.toml for Codex. Provider separation remains absolute —
+	// a Codex caller never adopts a Claude signer even when that is the only pin
+	// present — but a caller whose own provider matches a pin inherits it
+	// instead of minting a second agent id for the same repository.
+	for _, env := range envs {
+		envProvider := strings.TrimSpace(env["SAGE_PROVIDER"])
+		if envProvider == "" {
+			continue
 		}
-		// Provider separation remains absolute: a root's Claude signer must
-		// never collapse a Codex session onto the same key.
-		if strings.EqualFold(provider, primaryProvider) {
-			if key := strings.TrimSpace(primary["SAGE_IDENTITY_PATH"]); key != "" {
-				if project == "" {
-					project = strings.TrimSpace(primary["SAGE_PROJECT"])
-				}
-				return filepath.Clean(expandTilde(key)), provider, project, nil
+		if provider != "" && !strings.EqualFold(provider, envProvider) {
+			continue
+		}
+		key := strings.TrimSpace(env["SAGE_IDENTITY_PATH"])
+		if key == "" {
+			continue
+		}
+		if provider == "" {
+			provider = envProvider
+		}
+		if project == "" {
+			project = strings.TrimSpace(env["SAGE_PROJECT"])
+		}
+		return filepath.Clean(expandTilde(key)), provider, project, nil
+	}
+	// Lifecycle hooks carry no provider of their own; they adopt the project's
+	// provider so hooks and MCP calls authenticate as the same agent.
+	if provider == "" {
+		for _, env := range envs {
+			if envProvider := strings.TrimSpace(env["SAGE_PROVIDER"]); envProvider != "" {
+				provider = envProvider
+				break
 			}
 		}
 	}
@@ -486,6 +581,44 @@ func sanitizeDirName(name string) string {
 	return name
 }
 
+// errIfInstallTargetsHome refuses a project-scoped install that would land in the
+// user's home directory. runMCPInstall and runCodexInstall write their config under
+// the working directory (.claude/ or .codex/) and register hook commands with
+// ${CLAUDE_PROJECT_DIR}-relative paths. Run from $HOME, that config lands in the
+// user-global config directory, where ${CLAUDE_PROJECT_DIR} later resolves to
+// whichever project is open — so the hooks fail in every other project. Refuse
+// rather than write a guaranteed-broken install. Fails open when $HOME cannot be
+// resolved, so it never blocks a legitimate install.
+// installTargetsHome reports whether projectDir resolves to the user's home
+// directory — where a project-scoped .claude/.codex write would land in the
+// user-global config and its ${CLAUDE_PROJECT_DIR}-relative hooks would then break
+// in every project. Fails safe (false) when home cannot be resolved, so it never
+// blocks a legitimate install/heal.
+func installTargetsHome(projectDir string) bool {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false
+	}
+	projectAbs, projectErr := filepath.Abs(projectDir)
+	homeAbs, homeErr := filepath.Abs(home)
+	if projectErr != nil || homeErr != nil {
+		return false
+	}
+	return filepath.Clean(projectAbs) == filepath.Clean(homeAbs)
+}
+
+func errIfInstallTargetsHome(projectDir string) error {
+	if !installTargetsHome(projectDir) {
+		return nil
+	}
+	home, _ := os.UserHomeDir()
+	return fmt.Errorf(
+		"refusing to install into the home directory (%s): install writes a "+
+			"project-scoped config whose hooks are ${CLAUDE_PROJECT_DIR}-relative, "+
+			"which would land in the user-global config and break in every project; "+
+			"cd into a project directory and run install there", home)
+}
+
 // runMCPInstall creates a .mcp.json in the current directory so Claude Code
 // (or any MCP-compatible client) can connect to SAGE automatically.
 //
@@ -517,6 +650,9 @@ func runMCPInstall() error {
 	projectDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get working directory: %w", err)
+	}
+	if guardErr := errIfInstallTargetsHome(projectDir); guardErr != nil {
+		return guardErr
 	}
 
 	// Determine SAGE_HOME
@@ -1267,6 +1403,18 @@ func claimAgentIdentity(sageHome, token, keyPath string) error {
 //     __SAGE_GUI_BIN__ path (e.g. user upgraded sage-gui to a new location)
 //     get re-templated.
 func selfHealProject(projectDir, sageHome string, active ...string) {
+	// The stdio bridge auto-heals a project's .claude/.codex hooks on every
+	// startup. Skip it only when projectDir == $HOME: there <cwd>/.claude IS the
+	// user-global config directory, so the ${CLAUDE_PROJECT_DIR}-relative hooks
+	// land in it and then break in every OTHER project (the same hazard
+	// errIfInstallTargetsHome guards for `install`). CLAUDE_CONFIG_DIR is NOT a
+	// reason to skip: it overrides the user config dir, not project config, so
+	// projectDir/.claude/settings.json remains the correct, cwd-discovered
+	// project scope regardless. The bridge only needs to sign requests; `mcp
+	// install` remains the explicit, directory-aware way to (re)install hooks.
+	if installTargetsHome(projectDir) {
+		return
+	}
 	activeProvider, activeIdentityPath := "", ""
 	if len(active) > 0 {
 		activeProvider = active[0]

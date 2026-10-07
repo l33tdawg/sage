@@ -225,6 +225,7 @@ func TestBroadcastCometSyncScrubsRemoteSuppliedLog(t *testing.T) {
 			}
 			if got == nil {
 				t.Fatal("BroadcastCometSync returned no result")
+				return
 			}
 
 			wireHex, _ := observed.Load().(string)

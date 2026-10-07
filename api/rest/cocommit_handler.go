@@ -186,6 +186,32 @@ func (s *Server) handleCoCommitSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Tombstone guard. A co-commit is the one write path that never consults the
+	// voter: block inclusion is decisive (see processCoCommitSubmit), so the
+	// content-hash dedup that keeps a rejected memory's exact bytes out of the
+	// store is skipped entirely. Consult it here, at the local submission
+	// boundary, so a jointly-signed envelope cannot re-commit bytes the quorum
+	// already deprecated under a fresh memory id.
+	//
+	// The envelope's own SharedID is excluded: an idempotent re-send of the same
+	// co-commit must not be refused by the row it already wrote, and two copies
+	// of one agreement in flight stay submittable (the chain arbitrates the
+	// duplicate). The lookup is node-local over the serving projection and it
+	// fails open on a store error, matching the voter's dedupCheck and the MCP
+	// similarMemoryExists guard: a projection hiccup must not take the co-commit
+	// surface down.
+	if s.store != nil {
+		tombstoned, dupErr := s.store.FindByContentHash(r.Context(), hex.EncodeToString(contentHash), env.SharedID)
+		if dupErr != nil {
+			s.logger.Warn().Err(dupErr).Str("shared_id", env.SharedID).
+				Msg("co-commit tombstone lookup unavailable; allowing submit")
+		} else if tombstoned {
+			writeProblem(w, http.StatusConflict, "Tombstoned content",
+				"content_hash matches a different memory that has already left proposed (deprecated, challenged or committed). Identical bytes cannot re-enter under a new id — reinstate the original memory, or change the content.")
+			return
+		}
+	}
+
 	// Co-commit vectors obey the same provider invariant as ordinary submits.
 	// A caller-supplied vector may belong to a stale or foreign vector space, so
 	// regenerate from raw content with the node's active provider. Hash-only

@@ -135,3 +135,31 @@ disclosure one. If no replacement is needed, the removal path is
 `sage_remember(replaces_memory_id=...)`: it verifies the replacement is
 committed before challenging the old memory, so an interrupted correction may
 leave both records but never neither.
+
+The `dedup` check matches any **other** memory that has left `proposed` (validated,
+committed, challenged, or deprecated) carrying the same content hash. The candidate's
+own row is always excluded, and other still-`proposed` rows are ignored so two in-flight
+identical submissions cannot reject each other. Consequences: identical bytes are
+rejected again after a rejection or deprecation (sticky rejection — the removal path is
+`sage_forget`, and a corrected body must actually change the content to pass dedup), and
+a correction submitted via `sage_remember(replaces_memory_id=...)` therefore carries a
+new content hash.
+
+That check lives in the voter, so it only covers paths that vote. A co-commit
+(`POST /v1/cocommit/submit`) commits on block inclusion and never consults the
+voter. The REST submission guard checks the serving projection for another row
+with the same content hash that has left `proposed`, returning
+`409 Tombstoned content`. It excludes the envelope's own `SharedID`, and a
+projection lookup error still allows broadcast (`api/rest/cocommit_handler.go`,
+`handleCoCommitSubmit`).
+
+Before app-v28 activation, that REST guard is not a consensus rule: a directly
+broadcast co-commit bypasses it. After activation, from H+1, consensus also
+checks the canonical AppHash-covered reverse index and rejects matching content
+under another ID. The `SharedID` exclusion remains; a prior co-commit core has
+its own resubmission guard. A canonical lookup error refuses the transaction
+rather than treating the SQL guard's fail-open behavior as permission to commit
+(`internal/abci/app.go`, `processCoCommitSubmit`;
+`internal/store/cocommit_tombstone.go`, `CoCommitTombstoned`). Consensus reads no
+serving-projection state. See [app-v28 lifecycle](app-v28-lifecycle.md) for the
+activation, index promotion and replay boundary.

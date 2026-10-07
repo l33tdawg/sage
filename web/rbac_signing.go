@@ -553,12 +553,29 @@ func (h *DashboardHandler) signAndBroadcastCommitPrepared(
 	key ed25519.PrivateKey,
 	prepare func(*tx.ParsedTx) error,
 ) (string, int64, string, error) {
+	return h.signAndBroadcastCommitDurable(ctx, ptx, key, prepare, nil)
+}
+
+// beforeSend persists an exact-byte recovery intent inside the nonce lease.
+// A persistence failure is definitive and prevents any network submission.
+func (h *DashboardHandler) signAndBroadcastCommitDurable(
+	ctx context.Context, ptx *tx.ParsedTx, key ed25519.PrivateKey,
+	prepare func(*tx.ParsedTx) error, beforeSend func([]byte) error,
+) (string, int64, string, error) {
 	var (
 		hash   string
 		height int64
 		txLog  string
 		txErr  error
 	)
+	// Refuse IMMEDIATELY when the key is already fenced: the lease would park
+	// here until this request's deadline instead of answering, and the caller is
+	// an operator or an agent waiting on a response (see tx.FenceForSigner).
+	// Nothing is signed either way; this only decides how long they wait to be
+	// told, and the handlers already map ErrSignerFenced to 503 + Retry-After.
+	if _, fenced := tx.FenceForSigner(key); fenced {
+		return "", 0, "", tx.ErrSignerFenced
+	}
 	leaseErr := tx.WithNonceLease(ctx, key, func(nonce uint64) error {
 		ptx.Nonce = nonce
 		if ptx.Timestamp.IsZero() {
@@ -593,6 +610,12 @@ func (h *DashboardHandler) signAndBroadcastCommitPrepared(
 		if encErr != nil {
 			txErr = fmt.Errorf("encode tx: %w", encErr)
 			return txErr
+		}
+		if beforeSend != nil {
+			if persistErr := beforeSend(encoded); persistErr != nil {
+				txErr = fmt.Errorf("persist submission intent: %w", persistErr)
+				return txErr
+			}
 		}
 		hash, height, txLog, txErr = broadcastTxCommitWebContext(ctx, h.CometBFTRPC, key, encoded)
 		if isIndeterminateCommitError(txErr) {
@@ -649,6 +672,11 @@ func (h *DashboardHandler) signAndBroadcastCommitPrepared(
 // or hash-binding failure stays live and fences through WithNonceLease.
 func (h *DashboardHandler) signAndBroadcastSyncContext(ctx context.Context, ptx *tx.ParsedTx, key ed25519.PrivateKey) error {
 	var txErr error
+	// Same fast refusal as the durable commit path: a held fence must reach the
+	// handler's 503 mapping now, not after the request has already timed out.
+	if _, fenced := tx.FenceForSigner(key); fenced {
+		return tx.ErrSignerFenced
+	}
 	leaseErr := tx.WithNonceLease(ctx, key, func(nonce uint64) error {
 		ptx.Nonce = nonce
 		if ptx.Timestamp.IsZero() {
@@ -890,6 +918,16 @@ func signerFenceHealth(operator bool) map[string]any {
 		"active":             len(held),
 		"oldest_age_seconds": 0,
 	}
+	// The last resolution is reported BEFORE the empty check on purpose: its
+	// whole job is to keep a hold that ENDED visible once there is no held fence
+	// left to describe. Operator-only, like the per-fence rows: it names a signer
+	// and a transaction, and the public tier gets the count and the explanation
+	// only.
+	if operator {
+		if last, ok := tx.LastFenceResolution(); ok {
+			out["last_resolution"] = fenceResolutionRow(last)
+		}
+	}
 	if len(held) == 0 {
 		return out
 	}
@@ -898,9 +936,16 @@ func signerFenceHealth(operator bool) map[string]any {
 	// Said in the status payload as well as the log, because an operator looking
 	// at a stuck node needs to know the hold is deliberate — and must not be
 	// told to restart, which discards the fence and loses the transaction.
+	//
+	// The explanation NAMES THE ROUTE OUT of each held fence instead of
+	// describing one. An earlier revision said reconciliation was re-submitting
+	// the identical bytes for every fence, which is true only for a live one: a
+	// fence restored from durable intent has no bytes to re-submit and lifts on
+	// a proof or an operator decision. Callers read the blanket sentence as a
+	// promise that the node would clear itself, and reported the opposite
+	// symptom back as a broken self-heal.
 	out["explanation"] = "one or more signing keys are waiting for proof of an earlier submission's fate; " +
-		"nothing was signed or sent for the requests they refused, and reconciliation is re-submitting the " +
-		"identical bytes to force an answer"
+		"nothing was signed or sent for the requests they refused. " + signerFenceRoutes(held)
 	if !operator {
 		return out
 	}
@@ -908,20 +953,36 @@ func signerFenceHealth(operator bool) map[string]any {
 	signers := make([]map[string]any, 0, len(held))
 	for _, fence := range held {
 		row := map[string]any{
-			"signer":          fence.SignerPubKeyPrefix,
-			"tx_hash":         fence.TxHash,
-			"held_seconds":    int(fence.HeldFor.Round(time.Second).Seconds()),
-			"since":           fence.Since.UTC().Format(time.RFC3339),
-			"attempts":        fence.Attempts,
-			"cause":           fence.Cause,
-			"last_cause":      fence.LastCause,
-			"last_detail":     fence.LastDetail,
-			"signer_agent_id": fence.SignerPubKeyHex,
+			"signer": fence.SignerPubKeyPrefix,
+			// The full public key, because the prefix above is a DISPLAY form.
+			// It cannot be used as a request key: sending it to the lift or
+			// abandon route answers 404 "no signer fence is held", which reads
+			// like "your fence does not exist" rather than "you passed the
+			// truncated form". A field report lost several attempts to exactly
+			// that, and had to read the durable table to recover the key the
+			// status surface had already been given.
+			"signer_public_key": fence.SignerPubKeyHex,
+			"tx_hash":           fence.TxHash,
+			"held_seconds":      int(fence.HeldFor.Round(time.Second).Seconds()),
+			"since":             fence.Since.UTC().Format(time.RFC3339),
+			"attempts":          fence.Attempts,
+			"cause":             fence.Cause,
+			"resolution":        fence.Resolution,
+			"last_cause":        fence.LastCause,
+			"last_detail":       fence.LastDetail,
+			"signer_agent_id":   fence.SignerPubKeyHex,
 		}
 		if fence.HasNonce {
 			// The nonce is what makes a fence actionable: it can be compared
 			// against what the chain has committed for this signer.
-			row["nonce"] = fence.Nonce
+			//
+			// A STRING, not a number, because the comparison happens in the
+			// dashboard: SAGE nonces are nanosecond allocations and routinely
+			// exceed JavaScript's safe integer range (2^53), where JSON.parse
+			// silently rounds. A rounded nonce is worse than no nonce — the
+			// operator compares it against the chain's committed value and draws
+			// a wrong conclusion from the last digits being different.
+			row["nonce"] = strconv.FormatUint(fence.Nonce, 10)
 		}
 		if !fence.LastAttemptAt.IsZero() {
 			row["last_attempt_at"] = fence.LastAttemptAt.UTC().Format(time.RFC3339)
@@ -930,4 +991,56 @@ func signerFenceHealth(operator bool) map[string]any {
 	}
 	out["signers"] = signers
 	return out
+}
+
+// fenceResolutionRow renders the last fence outcome for the dashboard.
+func fenceResolutionRow(last tx.FenceResolution) map[string]any {
+	row := map[string]any{
+		"mode":         last.Mode,
+		"signer":       last.SignerPubKeyPrefix,
+		"tx_hash":      last.TxHash,
+		"held_seconds": int(last.HeldFor.Round(time.Second).Seconds()),
+		"at":           last.At.UTC().Format(time.RFC3339),
+		"detail":       last.Detail,
+	}
+	if last.HasNonce {
+		// A string for the same reason the held rows use one: the dashboard
+		// compares it against the chain, and JSON numbers round past 2^53.
+		row["nonce"] = strconv.FormatUint(last.Nonce, 10)
+	}
+	return row
+}
+
+// signerFenceRoutes renders what can still end each held fence, by resolution
+// class, and says what that means in one sentence. It never promises a route
+// the fence does not have.
+func signerFenceRoutes(held []tx.FencedSigner) string {
+	reconciling, proofOrOperator := 0, 0
+	for _, fence := range held {
+		switch fence.Resolution {
+		case "reconciling":
+			reconciling++
+		case "proof_or_operator":
+			proofOrOperator++
+		default:
+			// An unclassified cause is reported as needing an operator rather
+			// than as self-healing, because the safe reading of "we cannot say
+			// how this ends" is that it may not end on its own.
+			proofOrOperator++
+		}
+	}
+	switch {
+	case reconciling > 0 && proofOrOperator > 0:
+		return fmt.Sprintf("reconciliation is re-submitting the identical bytes for %d of them; %d "+
+			"restored from a previous process's durable intent did not survive with its signed bytes and lifts "+
+			"only on a proof read from the chain or on an explicit operator abandon "+
+			"(POST /v1/dashboard/signer-fence/abandon)", reconciling, proofOrOperator)
+	case proofOrOperator > 0:
+		return fmt.Sprintf("%d restored from a previous process's durable intent: the signed bytes did not "+
+			"survive, so reconciliation cannot re-submit them and this fence lifts only on a proof read from "+
+			"the chain or on an explicit operator abandon "+
+			"(POST /v1/dashboard/signer-fence/abandon)", proofOrOperator)
+	default:
+		return "reconciliation is re-submitting the identical bytes to force an answer"
+	}
 }

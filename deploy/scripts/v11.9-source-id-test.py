@@ -61,6 +61,9 @@ class SourceIdentityTests(unittest.TestCase):
         app_ceiling = re.search(
             r"^const maxSupportedAppVersion uint64 = (\d+)$", app, re.MULTILINE
         )
+        compiled_ceiling = re.search(
+            r"^const maxCompiledAppVersion uint64 = (\d+)$", app, re.MULTILINE
+        )
         state_sync_ceiling = re.search(
             r"^\s*LatestSupportedAppVersion uint64 = (\d+)$",
             state_sync,
@@ -71,10 +74,29 @@ class SourceIdentityTests(unittest.TestCase):
         self.assertIsNotNone(
             state_sync_ceiling, "state-sync authorization ceiling is not canonical"
         )
+        self.assertIsNotNone(
+            compiled_ceiling, "compiled app version ceiling is not canonical"
+        )
+        # The authorization ceiling follows what the binary can EXECUTE, and the
+        # acceptance gate follows what the auto-voter will do on its own. A gate
+        # compiled ahead of its activation evidence (app-v28 before its ceiling
+        # bump) therefore legitimately sits between the two: the gate never
+        # drives a version the binary cannot run, and the authorization accepts
+        # every version the binary can be asked to restore.
         self.assertEqual(
-            {gate_target.group(1), app_ceiling.group(1), state_sync_ceiling.group(1)},
-            {gate_target.group(1)},
-            "state-sync gate, app ceiling, and authorization ceiling must advance together",
+            compiled_ceiling.group(1),
+            state_sync_ceiling.group(1),
+            "the state-sync authorization ceiling must equal the highest compiled app version",
+        )
+        self.assertLessEqual(
+            int(gate_target.group(1)),
+            int(compiled_ceiling.group(1)),
+            "the state-sync acceptance gate must not drive a version this binary cannot run",
+        )
+        self.assertLessEqual(
+            int(app_ceiling.group(1)),
+            int(compiled_ceiling.group(1)),
+            "the auto-vote ceiling must not exceed the highest compiled app version",
         )
 
     def test_file_bytes_cannot_manufacture_another_tree_record(self):

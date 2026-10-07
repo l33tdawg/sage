@@ -95,7 +95,7 @@ func encodeAppV25LegacyAdoptionTx(t *testing.T, parsed *tx.ParsedTx) []byte {
 
 func TestAppV25ConstantsAndStrictForkBoundary(t *testing.T) {
 	require.Equal(t, tx.CanonicalUpgradeName(25), appV25UpgradeName)
-	require.Equal(t, uint64(27), MaxSupportedAppVersion())
+	require.Equal(t, uint64(28), MaxSupportedAppVersion())
 
 	app := setupTestApp(t)
 	app.appV25AppliedHeight = 50

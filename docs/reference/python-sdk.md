@@ -1,8 +1,8 @@
-Verified against SDK source for SAGE v11.19.0. Package: sage-agent-sdk.
+Verified against SDK source for SAGE v11.23.15. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.19.0
+**Package:** `sage-agent-sdk` **Version:** 11.23.15
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -98,9 +98,9 @@ governance actions require nonce-bound proof and reject legacy signing.
 
 ## Clients
 
-`SageClient` exposes 84 public operations and is synchronous (backed by
-`httpx.Client`). `AsyncSageClient` exposes the same 84 operations as
-coroutines, plus its async-only `close()` method, for 85 public methods total
+`SageClient` exposes 92 public operations and is synchronous (backed by
+`httpx.Client`). `AsyncSageClient` exposes the same 92 operations as
+coroutines, plus its async-only `close()` method, for 93 public methods total
 (backed by `httpx.AsyncClient`). Apart from that lifecycle method, async
 signatures match their sync counterparts — just `await` them.
 
@@ -112,6 +112,8 @@ SageClient(
     identity: AgentIdentity,
     timeout: float = 30.0,
     ca_cert: str | bool | None = None,
+    *,
+    trust_env: bool = True,
 )
 
 AsyncSageClient(
@@ -119,6 +121,8 @@ AsyncSageClient(
     identity: AgentIdentity,
     timeout: float = 30.0,
     ca_cert: str | bool | None = None,
+    *,
+    trust_env: bool = True,
 )
 ```
 
@@ -126,6 +130,11 @@ AsyncSageClient(
 - `None` (default) — system CA bundle
 - `"/path/to/ca.crt"` — custom CA for quorum TLS
 - `False` — disable TLS verification (dev only)
+
+`trust_env` is a strict boolean forwarded to HTTPX. It defaults to `True` for
+compatibility; explicitly use `False` when environment proxies must not route
+signed loopback requests or private payloads. This does not itself authenticate
+the endpoint or bind it to a chain.
 
 Both support context-manager usage. `SageClient` implements `__enter__`/`__exit__`; `AsyncSageClient` implements `__aenter__`/`__aexit__`.
 
@@ -190,6 +199,15 @@ response is already on-chain even though the governed memory lifecycle remains
   an intentional recurring occurrence.
 - App-v23 task creation rejects `knowledge_triples` and `linked_memories`;
   create links after the task receipt is confirmed.
+
+**Optional memory gate:** a transaction receipt may still have
+`status="proposed"` while node-local judging or operator review is pending.
+Inspect `get_memory(memory_id)` for the final lifecycle status. SDK v11.23.15
+has no evidence-upload helper or `propose(evidence_id=...)` argument; use
+MCP `sage_remember(evidence=...)` or the signed
+[REST evidence flow](rest-api.md#post-v1memoryevidence) when supplying source
+text (`sdk/python/src/sage_sdk/client.py`, `SageClient.propose`;
+`sdk/python/src/sage_sdk/async_client.py`, `AsyncSageClient.propose`).
 
 **Classification levels:**
 
@@ -684,8 +702,63 @@ domain_access_sample() -> AgentDomainAccessSample
 
 Signed `GET /v1/agent/me/domains`. Returns bounded `owned_domains`,
 `readable_domains`, and `writable_domains` policy samples plus `truncated`.
-Use it to choose an exact recall/write scope cheaply; use `owned_domains()`
-when the authoritative complete ownership set is required.
+The readable/write samples include re-authorized candidates from the bounded
+current owned-domain indexes of active local Access Group peers, including
+transferred domains that the peer never authored. Use it to choose an exact
+recall/write scope cheaply; use `owned_domains()` when the authoritative
+complete ownership set is required.
+
+---
+
+### Access policy (app-v23+)
+
+#### `get_access_state()`
+
+```python
+get_access_state() -> dict
+```
+
+`GET /v1/dashboard/network/access`
+
+Operator surface: the enrolled agents' role, profile and clearance as consensus
+holds them, plus the Access Group records and the revisions an update must be
+compared against. Read it to confirm a policy write landed rather than
+inferring the outcome from an agent's own view. Loopback-only, and it requires
+the current CEREBRUM control actor, so call it from the node host.
+
+#### `set_agent_access_policy()`
+
+```python
+set_agent_access_policy(
+    agent_id: str,
+    role: str,
+    profile: str,
+    clearance: int,
+    capabilities: int = 0,
+    home_domain: str | None = None,
+) -> dict
+```
+
+`PUT /v1/dashboard/network/access/agents/{id}/policy`
+
+Sets an agent's app-v23 **enrollment** policy. The enrollment clearance is the
+value the write gate reads: a memory whose classification exceeds it is refused
+at submission (`internal/abci/app.go`), and an org or department membership
+clearance does not feed that gate — raising membership alone leaves a
+designated writer unable to submit classified records. Use this to give a
+writer the clearance its records need, for example clearance 4 for an audit
+corpus that legitimately escalates to CONFIDENTIAL and above.
+
+Operator-only: the route is loopback-gated and requires the current CEREBRUM
+control actor, so call it from the node host with the operator/Root key
+material. An ordinary agent cannot elevate itself, and the attempt is refused
+rather than silently ignored. On an app-v23 node the legacy
+`PATCH /v1/dashboard/network/agents/{id}` route refuses permission changes with
+`410 legacy_permission_route_retired`, which is why this endpoint exists.
+
+A valid combination is required: members and managers may hold the Standard
+profile, and only `role="admin"` needs Top Secret clearance (4) with the
+read-all capability.
 
 ---
 
@@ -752,6 +825,8 @@ pipe_send(
     ttl_minutes: int | None = None,
     source_chain_id: str | None = None,
     destination_chain_id: str | None = None,
+    *,
+    idempotency_key: str | None = None,
 ) -> PipeSendResponse
 ```
 
@@ -761,6 +836,15 @@ Route local work by `to_agent` (agent ID) or `to_provider` (provider name). For
 federated work, call `pipe_resolve()` immediately before sending and pass its
 exact agent/source/destination fields; the server re-resolves and rejects stale
 contact, agreement, pause, or opt-in state.
+
+Optional keyword-only `idempotency_key` is included in the signed JSON unchanged;
+omitted/`None` preserves the legacy request body. The SDK rejects non-string,
+blank, or over-256-UTF-8-byte keys before HTTP. For supported exact-agent local
+or federated sends, reuse the same key and request fields after uncertainty:
+server-side sender-scoped idempotency returns the original row, while changed
+content conflicts. The SDK does not retry automatically. Provider-addressed
+work is not covered by this canonical exact-agent guarantee. This exposes the
+existing REST contract; it does not establish transport readiness or delivery.
 
 Returns `PipeSendResponse(pipe_id, status, expires_at,
 destination_chain_id)`. An empty destination identifies ordinary local work.
@@ -976,6 +1060,93 @@ remain optional so the client can parse responses from older nodes.
 
 ---
 
+### Auxiliary workflow journal (current source)
+
+Both clients expose the following methods; await their async counterparts:
+
+```python
+workflow_get(record_id: str) -> WorkflowJournalRecord
+workflow_put(record_id: str, kind: str, expected_revision: int, payload: Any, *, guard: dict[str, Any] | WorkflowJournalGuard = ...) -> WorkflowJournalRecord
+workflow_list(*, after: str | None = None, limit: int = 20) -> WorkflowJournalPage
+```
+
+GET/PUT use `/v1/workflows/{record_id}`. List uses signed
+`GET /v1/workflows?after=<UUID>&limit=<1..50>` (default limit 20; omitted `after`
+starts the UUID-ordered scan). No actor or kind filter is accepted. The SDK
+validates canonical nonzero UUIDs, exact integer revisions, and strict JSON
+payloads bounded to 16384 encoded bytes. PUT kinds are `mesh_outbound`,
+`mesh_inbound`, `public_proposal`, `conversation_control`, and
+`conversation_session`; `expected_revision` is 0 for create or
+the exact current revision for update, and must be below `9007199254740991`.
+
+For `conversation_session`, an optional `guard` is a `WorkflowJournalGuard`
+or a dict with `record_id` and `expected_revision`. It names a different
+same-agent `conversation_control` record at the exact positive revision.
+The store checks the control and target revision in the same transaction;
+an unavailable or conflicting control refuses the write. Omit `guard` for an
+unguarded write; `None` is not a supported guard value
+(`sdk/python/src/sage_sdk/client.py`, `_workflow_put_body`;
+`internal/store/workflow_journal.go`, `PutWorkflowJournalGuarded`).
+
+Records have exactly `schema="sage.workflow-journal.v1"`, `agent_id`,
+`record_id`, `revision`, `kind`, `payload`, `trust="untrusted_auxiliary"`.
+Pages have exactly `schema`, `items` (those records), `next_after` (last returned
+UUID when more exist, otherwise null), and `has_more`. Models reject extra
+fields/coercions; clients also check the signed actor, requested UUID or cursor,
+page size, and ordering. Model serialization uses the wire key `schema`.
+
+There are no automatic retries, scans, sends, or empty-state fallbacks. HTTP
+404 remains distinct from 503 (locked/corrupt/unavailable vault). Reconcile
+ambiguous PUT with GET; exact revision-1 create replay requires byte-identical
+kind/payload, while stale update retries conflict. Pagination is not a consistent
+multi-page snapshot: restart a scan when a complete reconciliation is needed.
+This is existing-vault auxiliary untrusted state, not canonical memory, verified
+foreign provenance, public acceptance, or deployment/readiness evidence.
+Sources: `sdk/python/src/sage_sdk/{client,async_client,models}.py` and
+`api/rest/workflow_journal_handler.go`.
+
+### Private original JPEG objects (current source)
+
+Both clients expose these methods; await the async equivalents:
+```python
+private_media_put(object_id: str, jpeg: bytes) -> PrivateMediaMetadata
+private_media_get(object_id: str) -> bytes
+```
+They sign `/v1/private-media/{object_id}` with fresh nonces. PUT signs the exact
+raw JPEG bytes with `Content-Type: image/jpeg`, never JSON/base64. UUIDs must be
+canonical, lowercase, and nonzero; input must be `bytes`, at most 2097152 bytes,
+with valid bounded JPEG headers (maximum 1920 by 1080). This is header validation,
+not raster decoding; original bytes and embedded metadata remain unchanged.
+
+`PrivateMediaMetadata` (from `sage_sdk.models`) requires exactly `schema`
+(`sage.private-media.v1`), `agent_id` (lowercase hex64), `object_id` (UUID),
+`revision` (strict integer 1), `length` (strict integer 1–2097152), and `digest`
+(lowercase SHA-256 hex64). Extras/coercions/missing fields are rejected; wire
+serialization uses `schema`. PUT additionally checks actor, UUID, length, and
+digest against the signed request and original bytes.
+
+Responses are streamed with caps: GET 2 MiB, PUT metadata 4096 bytes. GET requires
+`image/jpeg`, the exact private-media schema marker, matching `X-SAGE-Agent-ID`
+and `X-SAGE-Media-ID`, and a valid `X-SAGE-Media-SHA256` verified against returned
+bytes. `Content-Length` is required and verified; `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff` are required. Encoded responses and redirects
+are rejected. Headers are checked before reading; bodies stop at the byte bound.
+
+Only schema-marked HTTP 404 raises `SageNotFoundError`. An unmarked router 404
+becomes `SageAPIError(status_code=503)` (unavailable), not a missing object.
+Other HTTP errors preserve status with fixed sanitized detail and unread error
+bodies. Transport errors use status 0 and generic detail; response validation
+raises sanitized `ValueError`. There are no automatic retries or redirects.
+After an uncertain PUT, reconcile GET or explicitly retry identical bytes under
+the same UUID with a fresh nonce; different-byte replacement conflicts.
+
+Use `trust_env=False` for a pinned local connection to avoid environment proxy
+routing; this does not replace endpoint/actor or pre/post vault-epoch checks by
+the runtime. The API remains disabled without trusted server injection. No
+version-pin change, key creation, activation, history migration, or E2E/readiness
+guarantee is provided. Sources: `sdk/python/src/sage_sdk/{client,async_client,models}.py`
+and `api/rest/private_media_handler.go`.
+
 ### Canonical local Messages (v11.17)
 
 These methods share the existing local pipeline inbox but add durable
@@ -983,6 +1154,26 @@ idempotency, exact receive-batch replay, exact-recipient read evidence, and a
 payload-free sender status projection. They are same-node only. Federated
 delivery/read evidence is a separate capability-negotiated receipt-v2 REST
 protocol; it must never be inferred from these methods or from `pipe_status()`.
+
+#### `message_storage_status()`
+
+```python
+message_storage_status() -> MessageStorageStatus
+```
+
+Signed `GET /v1/messages/storage`; the async counterpart is awaited. The strict
+model requires exactly `schema="sage.message-storage.v1"`, lowercase 64-hex
+`instance_id` and `agent_id`, canonical uint64 decimal-string `vault_generation`,
+and boolean `encryption_expected`, `vault_active`, `stable`,
+`canonical_send_idempotency`, `encrypted_send_admission`. Missing/extra fields
+and coercions are rejected. HTTP errors (including an older node's 404) propagate;
+the SDK neither retries nor fabricates readiness. No chain field is supplied:
+the operator must separately authenticate and pin the endpoint to its chain.
+
+This documents current source support, not deployment or automatic activation.
+The response is a point-in-time observation, not proof of historical-message
+migration or recipient-only end-to-end encryption. See the REST storage-status
+contract and `sdk/python/src/sage_sdk/models.py:MessageStorageStatus`.
 
 #### `message_send()`
 
@@ -993,6 +1184,8 @@ message_send(
     idempotency_key: str,
     intent: str | None = None,
     ttl_minutes: int | None = None,
+    *,
+    require_encrypted_storage: bool = False,
 ) -> MessageSendResponse
 ```
 
@@ -1000,6 +1193,15 @@ message_send(
 exact retry returns the original `message_id`; reusing the key for different
 content is HTTP 409. Omitted/`None`/`0` `ttl_minutes` is durable until handled;
 pass 1–1440 only to request explicit expiry.
+
+`require_encrypted_storage=True` includes that exact boolean in the signed JSON
+body and requests the server's atomic encrypted-storage admission guard. False
+is omitted, preserving the legacy body; non-booleans raise `TypeError` before
+HTTP. First verify the endpoint advertises `encrypted_send_admission=True`;
+older servers must not be assumed to enforce an unknown field. This protects
+current send admission, not old plaintext rows, historical migrations, remote
+delivery, or recipient-only E2E encryption. Implementation: `SageClient.message_send`
+and `AsyncSageClient.message_send` in `sdk/python/src/sage_sdk/`.
 
 #### `messages_receive()`
 
@@ -1832,10 +2034,13 @@ except SageAPIError as e:
 
 ## Method Count Summary
 
-**`SageClient`**: 84 public methods
-**`AsyncSageClient`**: 85 public methods (`close` is async-only)
+**`SageClient`**: 92 public methods
+**`AsyncSageClient`**: 93 public methods (`close` is async-only)
 
-Groups: Health (2), Memory (8), Embeddings (1), Tasks (2), Voting/Validation
-(5), Agents (8), Validator (2), Pipeline (10), canonical Messages (5), Access Control (4), Domains (4), Organizations (7), Departments (6),
-Federation (5), Governance and scope visibility (8), and async lifecycle (1) =
-85 distinct methods across both clients (counting the 84 shared methods once).
+There are 92 shared public methods, including retained pipeline/receipt
+compatibility helpers, private media and workflow journal operations. The
+async-only `close()` makes 93 distinct public methods across the two clients.
+Constructors, context-manager hooks and private helpers are excluded. Counts
+were checked against the class definitions in
+`sdk/python/src/sage_sdk/client.py` and
+`sdk/python/src/sage_sdk/async_client.py`.

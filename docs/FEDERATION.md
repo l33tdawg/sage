@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.19.0 federation behavior. -->
+<!-- Verified against SAGE v11.23.15 federation behavior. -->
 
 # Connect your SAGE to another network
 
@@ -180,6 +180,35 @@ off. CEREBRUM displays the mutable **Rename agent** label while routing remains
 bound to the immutable agent ID and exact remote chain, so duplicate friendly
 names cannot redirect a signed request.
 
+#### You choose which of your agents the other side can find
+
+On an upgraded link SAGE also advertises its own eligible ordinary agents so the
+other side can address them without a domain share. That is convenient with one
+or two agents and confusing with a dozen: the other operator sees names they do
+not recognise, picks one, and sends work to the wrong agent.
+
+Open the connection. Under **Viewing this node**, every eligible agent on this
+SAGE carries a **Visible** switch that applies to this connection alone:
+
+- Flipping an agent to **Not visible** removes it from this peer's listing and
+  search; flipping it back restores it.
+- **Show all agents** and **Hide all agents** move the whole roster at once.
+  A connection nobody has configured is all agents visible.
+- Each switch saves immediately under the connection's revision-bound
+  agreement, so there is no Save button.
+
+The change applies to their next listing, search, or `sage_find_agent` lookup;
+nothing already delivered is affected. Every connection keeps its own roster,
+so hiding an agent from one peer never hides it from another.
+
+This control is discovery only. It grants no memory access (that is the
+agent-export and manual domain lanes above) and it authorises no delivery (a
+discovered agent still has to accept, and its own Access Controls policy still
+applies). One deliberate asymmetry: an agent whose own policy refuses federated
+delivery stays listed, marked **Not accepting**, so the other side can see that
+it exists without being promised a route. Use **None** or an explicit list if
+you want it hidden entirely.
+
 New MCP clients use `sage_find_agent` followed by `sage_message_send`, then
 `sage_inbox`/`sage_messages_receive`, `sage_message_reply`,
 `sage_message_status`, and `sage_message_history`. The older `sage_pipe*` names
@@ -194,6 +223,20 @@ choose a shorter explicit TTL. Completed canonical history remains queryable;
 legacy `pipe-*` compatibility rows retain their bounded cleanup policy.
 
 ### Roaming and route recovery
+
+**A relayed link is slower than a LAN link, and SAGE budgets for that.** A
+Circuit Relay v2 path costs the dialer-to-relay leg, the relay-to-peer leg and
+the relay's own handshake before the encrypted federation handshake even starts,
+so a cross-region relay can need several round trips at a few hundred
+milliseconds each. Relayed dials therefore get their own, larger time budget
+than direct ones, and a probe or route refresh against a peer whose only
+candidate is a relay uses the longer budget instead of the LAN-shaped one. If a
+connection reports **Secure relay unavailable**, the relay itself is the
+problem; **No answer in time** or **Connection closed during handshake** mean the
+path is slow rather than broken — retry, and prefer a relay near both machines.
+The budgets are operator-tunable (see the `SAGE_FED_*` variables in
+`docs/reference/environment-variables.md`), which is the lever for a
+pathologically slow link.
 
 Established v11.17.7+ links persist signed route snapshots for the stable peer
 identity and rank safe Direct and Secure relay candidates after address or

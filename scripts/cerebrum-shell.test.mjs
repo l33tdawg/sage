@@ -796,15 +796,12 @@ test('search and maintenance controls keep useful screen-reader names', () => {
         assert.match(search, new RegExp(`aria-label="${label}"`));
     }
     assert.match(search, /aria-label=\$\{`Select memory from \$\{m\.domain_tag\} for bulk actions`\}/);
-    for (const label of [
-        'Enable automatic memory cleanup',
-        'Observation lifetime in days',
-        'Session context lifetime in days',
-        'Stale confidence threshold',
-        'Cleanup interval in hours',
-    ]) {
-        assert.match(cleanup, new RegExp(`aria-label="${label}"`));
+    assert.match(cleanup, /aria-label="Enable automatic memory cleanup"/);
+    for (const label of ['Observation lifetime (days)', 'Session-context lifetime (days)',
+        'Computed confidence threshold', 'Automatic interval (hours)']) {
+        assert.ok(cleanup.includes(label));
     }
+    assert.match(cleanup, /aria-label=\$\{label\}/);
     assert.match(settings, /aria-label="Enable contextual tooltips"/);
     assert.match(appSource, /aria-label="Open SAGE at login"/);
 });
@@ -825,10 +822,10 @@ test('destructive memory actions use the consistent explanatory dialog', () => {
         'memory deletion must not use an undiscoverable click-twice interaction');
 
     assert.match(cleanup, /Clean Synaptic Ledger\?/);
-    assert.match(cleanup, /Use Preview first if you want to see the exact count/,
+    assert.match(cleanup, /Preview first to inspect the full eligible count/,
         'cleanup must provide a concrete next step before mutation');
-    assert.match(cleanup, /remain in the audit history/);
-    assert.match(cleanup, /Memories outside the current rules stay active/,
+    assert.match(cleanup, /retain audit history/);
+    assert.match(cleanup, /Open tasks and internal records are protected/,
         'cleanup must say what remains safe');
     assert.doesNotMatch(cleanup, /Click again to confirm|confirmCleanup/,
         'cleanup must use the shared accessible dialog instead of a five-second click-twice latch');
@@ -1029,7 +1026,7 @@ test('federation ceremony presents one clear two-way scan flow without dropping 
     assert.match(hostWizard, /They scan this SAGE/);
     assert.match(hostWizard, /Scan their SAGE back/);
     assert.ok(hostWizard.indexOf('They scan this SAGE') < hostWizard.indexOf('Scan their SAGE back'));
-    assert.match(appSource, /Scan each other[\s\S]*Confirm colleague[\s\S]*Connected/,
+    assert.match(appSource, /Exchange codes[\s\S]*Verify together[\s\S]*Explore agents/,
         'operators should see three human stages rather than protocol internals');
     assert.match(hostWizard, /expectedCode=\$\{view\.code_g\}/,
         'the pin-bound anti-relay safety code remains deliberate and unskippable');
@@ -1066,7 +1063,7 @@ test('federation uses one automatic route flow and explains every actionable rou
     assert.match(apiSource, /fedHostCreate\(endpoint, transport = 'auto'\)/);
     assert.match(appSource, /from '\.\/federation-route-state\.js'/);
     assert.match(hostWizard, /<h2>Connect another SAGE<\/h2>/);
-    assert.match(hostWizard, /checks Direct and Secure relay routes and chooses the best one automatically/);
+    assert.match(hostWizard, /chooses the best available route automatically/);
     assert.match(hostWizard, /phase: 'prepared'/);
     assert.doesNotMatch(hostWizard, /Same Wi|local network<\/button>|Across the internet|setRouteMode/,
         'operators must not choose topology that SAGE can negotiate itself');
@@ -1192,7 +1189,7 @@ test('direct federation controls are symmetric after pairing', () => {
     assert.match(panel, /const showOutgoing = roleKnown/);
     assert.match(panel, /\$\{roleKnown && html`<section class="fed-perm-section fed-agent-section">/,
         'agent contact controls must not disappear merely because this SAGE scanned the first code');
-	assert.match(panel, /Each SAGE independently chooses which local agents join it/,
+	assert.match(panel, /Agents can discover and message across upgraded nodes automatically/,
 		'the ceremony role must not control ongoing pairwise membership');
 	assert.match(panel, /This trusted connection is its own federation group/,
 		'the pairwise relationship itself must be the group; no mirrored local group is required');
@@ -1212,10 +1209,10 @@ test('federation agent membership stays administrative and message RBAC remains 
     assert.match(apiSource, /connections\/\$\{encodeURIComponent\(chainId\)\}\/pipe-contacts/);
     assert.match(apiSource, /agent_id: agentId, contact_id: contactId, accepting: !!accepting/,
         'a toggle must carry the exact agent and contact revision instead of a display handle');
-    assert.match(panel, /<h4>Federated agents<\/h4>/);
-    assert.match(panel, /CEREBRUM manages the connection/,
+    assert.match(panel, /<h4>Agent-owned memory sharing<\/h4>/);
+    assert.match(panel, /<\$\{FederationDirectory}/,
         'CEREBRUM must remain the administrative surface, not become a second inbox');
-    assert.match(panel, /Work requests are Off until you enable them/);
+    assert.match(panel, /Agent discovery and messaging are handled separately above/);
     assert.match(panel, /messages blocked by Agent RBAC/,
         'message delivery must remain visibly governed separately from exported Read membership');
     assert.match(panel, /contact\.contact_id/,
@@ -1257,8 +1254,8 @@ test('federation agent membership stays administrative and message RBAC remains 
         'manual Refresh must retry the friendly agent directory');
     assert.match(panel, /fed-agent-lookup-status" role="status" aria-live="polite"/,
         'exact-agent access checks must be visibly announced');
-    assert.match(panel, /added\. Work requests are Off until you enable them/,
-        'successful exact-agent checks must announce both insertion and safe default-off consent');
+    assert.match(panel, /owned memory is now shared for live Read/,
+        'explicit memory exports must announce Read access separately from messaging');
     assert.match(panel, /pinnedLocalAgentGenerationRef/,
         'older polls must not overwrite an agent selected while they were in flight');
     assert.match(panel, /pinnedGeneration === pinnedLocalAgentGenerationRef\.current/,
@@ -1275,8 +1272,11 @@ test('federation agent membership stays administrative and message RBAC remains 
         'a stale poll must not mark a newer failed contact projection as known');
     assert.match(panel, /check access<\/option>/,
         'directory options must disclose that shared-domain eligibility is not known until selection');
-    assert.match(panel, /const currentDirectoryResponse = await fetchAgents\(\)[\s\S]*!appV23FederatedInboxEnabled\(currentAgent\.capabilities\)[\s\S]*setPipeContactPolicyBlock\(\{ agentID, selectedName \}\)[\s\S]*return;[\s\S]*fedPipeContactsGet\(chain, false, agentID\)/,
-        'the picker must refresh authoritative agent policy, then stop a current federation block before domain sharing or contact lookup');
+    assert.match(panel, /const currentDirectoryResponse = await fetchAgents[\s\S]*if \(!currentAgent\)[\s\S]*fedPipeContactsGet\(chain, false, agentID\)/,
+        'memory sharing must still resolve an active exact local identity');
+    const memoryPicker = panel.slice(panel.indexOf('const chooseLocalPipeContact'), panel.indexOf('const copyPipeContact'));
+    assert.doesNotMatch(memoryPicker, /!appV23FederatedInboxEnabled/,
+        'a messaging block must not force memory sharing to enable messages');
     assert.match(panel, /Open this agent’s inbox setting/,
         'a blocked inbox must remain actionable and deep-link to the exact agent policy');
     assert.match(panel, /#\/access\?agent=\$\{encodeURIComponent\(pipeContactPolicyBlock\.agentID\)\}&inbox=1/);
@@ -1307,7 +1307,7 @@ test('federation agent membership stays administrative and message RBAC remains 
         'remote refresh feedback must be visible and announced in its section');
     assert.match(panel, /\$\{syncSaveErr && html`<div class="fed-err fed-perm-error" role="alert">/,
         'remote copy-save feedback must remain visible beside the bottom Save controls');
-    assert.match(panel, /if \(dirty && !localPipeContactsKnown/,
+    assert.match(panel, /if \(dirty && !automaticNodeMessaging && !localPipeContactsKnown/,
         'an unavailable contact snapshot must conservatively warn before a domain save');
     assert.match(page, /Live Read, Copy, and agent work requests stop immediately/,
         'pause feedback must cover every suspended federation capability');
@@ -1494,7 +1494,7 @@ test('federation keeps temporary pause separate from permanent revocation and ma
     assert.match(page, /ended_at/);
     assert.match(page, /const reconnect = async \(conn\)/,
         'an intact but unreachable relationship must offer a retry path');
-    assert.match(page, /Scan a connection code/);
+    assert.match(page, /I have a connection code/);
     assert.match(page, /Create a connection code/);
 });
 
@@ -1586,9 +1586,9 @@ test('Sharing & Sync groups expose health and guarded operator controls', () => 
         'a final partial-setup error must survive the local projection reload');
 	assert.match(appSource, /For one other SAGE, use the direct relationship above instead/,
         'the direct relationship and group models must be visibly separate');
-	assert.match(appSource, /Each SAGE independently chooses which local agents join it/,
+	assert.match(appSource, /Agents can discover and message across upgraded nodes automatically/,
         'the ceremony role must not hide ordinary directional controls after trust is established');
-	assert.match(appSource, /Each SAGE independently chooses which local agents join it, which manual domains it shares/,
+	assert.match(appSource, /Each SAGE independently chooses which memory domains it shares/,
         'symmetric control means independent explicit grants, never an implied bilateral grant');
     assert.match(panel, /Select a trusted SAGE/,
         'adding a member must choose an established trust connection, not copy a key by hand');
@@ -1866,4 +1866,54 @@ test('guide describes token efficiency without promising lower usage', () => {
 test('CEREBRUM recommends canonical Messages instead of deprecated pipeline tools', () => {
     assert.doesNotMatch(appSource, /sage_pipe/);
     assert.match(appSource, /sends a message through SAGE/);
+});
+
+test('the app-version panel renders without governance scopes', () => {
+    // A personal node has no scope records until a scope_action commits, so
+    // gating the app-version card (and its Propose button) on the scope list
+    // hides the chain's only deliberate upgrade path exactly where an operator
+    // needs it. The card must render on its own; only the scope cards stay gated.
+    const governanceStart = appSource.indexOf('<h3>Governance');
+    assert.ok(governanceStart >= 0, 'the governance section must exist');
+    const scopesGate = appSource.indexOf('${govScopes.length > 0 && html`', governanceStart);
+    const appVersionPanel = appSource.indexOf('App version app-v${appUpgrade.status?.current_app_version', governanceStart);
+    assert.ok(scopesGate > governanceStart, 'the governance scope grid must stay gated on scopes');
+    assert.ok(appVersionPanel > governanceStart, 'the app-version panel must render in the governance section');
+    assert.ok(appVersionPanel < scopesGate,
+        'the app-version panel must render even when no governance scopes exist');
+    assert.ok(appSource.indexOf('${govScopes.map(scope => html`', scopesGate) > scopesGate,
+        'the scope cards must stay inside the scopes gate');
+});
+
+test('agent visibility is a live per-agent switch, not a buried save form', async () => {
+    const directorySource = await readFile(new URL('../web/static/js/federation-directory.js', import.meta.url), 'utf8');
+    assert.doesNotMatch(appSource, /Save discovery policy/,
+        'discovery must not require hunting for a Save button');
+    assert.doesNotMatch(appSource, /Unsaved discovery changes/);
+    assert.match(appSource, /const setAgentVisibility = \(agentID, visible\) =>/,
+        'visibility must be set one exact agent at a time');
+    assert.match(appSource, /expected_revision: Number\(agentExposure\.revision \|\| 0\)/,
+        'each switch must carry the revision it read');
+    assert.match(appSource, /const setAllAgentsVisible = visible =>/,
+        'bulk all/none must remain available for recovery');
+    assert.match(appSource, /automaticNodeMessaging !== false && html`<section class="fed-perm-section fed-agent-section"/,
+        'discovery switches only render for peers that support automatic discovery');
+    assert.match(directorySource, /role="switch"/,
+        'each local agent card must expose a visible switch');
+    assert.match(directorySource, /Not visible to \$\{node\.name\}/,
+        'the card must say what the switch means for this peer');
+});
+
+test('federation page leads with connections and folds exploration away', () => {
+    const page = appSource.slice(appSource.indexOf('function FederationPage('), appSource.indexOf('// PAGE_LABELS'));
+    assert.match(page, /class="fed-page-head"/,
+        'status and the master switch belong in one compact header');
+    assert.ok(page.indexOf('class="fed-conns"') > 0 && page.indexOf('class="fed-conns"') < page.indexOf('class="fed-collapsible"'),
+        'your connections must come before exploration and groups');
+    assert.match(page, /liveConns\.length === 0 \|\| showConnect/,
+        'the pairing wizard is behind the connect action once links exist');
+    assert.match(page, /fed-conn-badge/,
+        'each connection row states its discovery posture without expanding');
+    assert.match(page, /Explore agents[\s\S]*FederationConnectome/,
+        'the connectome lives in the collapsible exploration section');
 });

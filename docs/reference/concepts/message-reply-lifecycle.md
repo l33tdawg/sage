@@ -1,4 +1,4 @@
-Reconciled against SAGE v11.19.0 code. Cite file:line or file + symbol when behavior is non-obvious.
+Reconciled against SAGE v11.23.15 code. Cite file:line or file + symbol when behavior is non-obvious.
 
 # Message and Reply Lifecycle — who can see a reply, and where
 
@@ -237,6 +237,17 @@ This is also why replies never enter `sage_inbox.items[]`:
 - `replies_check_error` — present only when the probe failed. In that case
   `retained_reply_count` is **absent**, so "could not check" is never rendered
   as "you have no replies".
+
+v11.19.5 also advances the exact sender's payload-free inbox activity sequence
+when a fresh reply is persisted. `GET /v1/inbox/activity-state` returns only
+`{version,epoch,seq}`. The opaque 32-character database-incarnation epoch
+survives restart and backup restore but changes for a fresh database, preventing
+a preserved host cursor from hiding new cues after reinitialization. It exposes
+neither the reply nor its sender and is only a hint to inspect `sage_inbox`. It
+is not message work, never alters the v1 exact
+three-field message-wake payload, and never makes a Stop hook block. A
+UserPromptSubmit hook can surface the newer sequence on the next prompt, but
+cannot resurrect a task that the host has already made idle.
 
 None of these contributes to `count`, `message_count`, or
 `task_assignment_count`; neither does `reply_count`. `reply_items_passive:true`

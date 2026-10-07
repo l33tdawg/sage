@@ -3,10 +3,11 @@ name: sage-memory
 description: >
   Persistent, consensus-validated memory for AI agents via SAGE MCP server.
   Gives you institutional memory that survives across conversations — memories go through
-  BFT consensus, carry confidence scores, and decay over time. Use this skill when working
-  with a SAGE MCP server to manage persistent agent memory, recall past context, reflect
-  on completed tasks, and maintain continuity across sessions. Keywords: memory, persistence,
-  recall, remember, context, brain, institutional knowledge, consensus, BFT.
+  consensus validation (a BFT quorum on a multi-validator network; a single signed validator
+  on a personal install), carry confidence scores, and decay over time. Use this skill when
+  working with a SAGE MCP server to manage persistent agent memory, recall past context,
+  reflect on completed tasks, and maintain continuity across sessions. Keywords: memory,
+  persistence, recall, remember, context, brain, institutional knowledge, consensus, BFT.
 license: Apache-2.0
 compatibility: >
   Requires SAGE installed locally (https://l33tdawg.github.io/sage/).
@@ -21,8 +22,9 @@ metadata:
 # SAGE Memory — Persistent Brain for AI Agents
 
 You have persistent institutional memory via SAGE — a governed, consensus-validated knowledge layer.
-Your memories are not a flat file. They go through BFT consensus, have confidence scores, and decay
-over time. Only committed memories are returned to you.
+Your memories are not a flat file. They go through consensus validation, have confidence scores, and
+decay over time. On a multi-validator network that validation is a BFT quorum; on a single-node
+install it is that node's own signed vote. Only committed memories are returned to you.
 
 ## Data & Privacy Disclosure
 
@@ -149,7 +151,7 @@ definitions. No credentials or API keys are included.
 
 - **Knowledge persists across sessions** — recall it, build on it, and keep it current.
 - **Local-only**: all data stays on your machine. No cloud, no telemetry, no tracking.
-- **Consensus-validated**: every memory goes through BFT validation before committing.
+- **Consensus-validated**: every memory goes through consensus validation before committing — a BFT quorum on a network, one signed validator on a personal install.
 - **Confidence scores**: memories carry confidence that can be strengthened through corroboration.
 - **Natural decay**: memories decay over time unless reinforced — just like human memory.
 - **Domain isolation**: organize knowledge by topic for precise recall.

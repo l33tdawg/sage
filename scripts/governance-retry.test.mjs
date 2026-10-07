@@ -1,5 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+
+test('consensus fixture waits only for exact transaction index absence', () => {
+    const fixture = readFileSync(new URL('../deploy/scripts/run-v11.9-chaos.sh', import.meta.url), 'utf8');
+    assert.match(fixture, /python3 deploy\/scripts\/wait-comet-tx\.py "\$\{port\}" "\$\{hash\}"/);
+    const result = spawnSync('python3', ['-B', 'deploy/scripts/test_wait_comet_tx.py'], {
+        cwd: new URL('../', import.meta.url), encoding: 'utf8', timeout: 10000,
+    });
+    assert.equal(result.status, 0, result.stderr || String(result.error));
+});
 
 import {
     enqueueGovernedTransfer,

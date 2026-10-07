@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,6 +129,31 @@ func newAppV23DashboardRouteFixture(t *testing.T) appV23DashboardRouteFixture {
 	}
 
 	h := NewDashboardHandler(sqlStore, "test")
+	// Mirror the native node's supervised shutdown: audits must finish before
+	// the fixture closes Badger/SQLite, including cancelled request audits.
+	workerCtx, cancelWorkers := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	var workerMu sync.Mutex
+	stopping := false
+	h.RunBackground = func(fn func(context.Context)) {
+		workerMu.Lock()
+		defer workerMu.Unlock()
+		if stopping {
+			return
+		}
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			fn(workerCtx)
+		}()
+	}
+	t.Cleanup(func() {
+		workerMu.Lock()
+		stopping = true
+		cancelWorkers()
+		workerMu.Unlock()
+		workers.Wait()
+	})
 	h.BadgerStore = badgerStore
 	h.AdminSigningKey = keys["current-root"]
 	h.AppV23ActiveFn = func() bool { return true }
