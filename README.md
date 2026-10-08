@@ -320,7 +320,7 @@ uses re-enrollment; historical memory authorship is preserved.
 
 **SQLite dependency maintenance.** The SQLite driver moves to 1.60.1 with its matching libc dependency. This includes WAL shared-memory read-fault handling that returns an I/O error instead of crashing, plus faster argument binding for statements with many parameters. The embedded SQLite engine remains 3.53.4; Go tooling dependencies are also refreshed.
 
-**Reranker allocation checks.** The reranker keeps its existing limit of 1,000 results. Its bounds are reordered so CodeQL can verify the allocation limit directly, with regression tests for extreme limits, empty and oversized candidate pools, upstream failures and malformed scores.
+**Reranker allocation checks.** The reranker keeps its existing limit of 1,000 results. Its result slice now grows only within the capped selection loop, with no input-sized preallocation. Regression tests cover extreme limits, empty and oversized candidate pools, upstream failures and malformed scores.
 
 The optional LoCoMo and LongMemEval benchmark environments now pin `datasets==5.0.1`, addressing [GHSA-379c-qx7v-6h59 / CVE-2026-66007](https://github.com/advisories/GHSA-379c-qx7v-6h59). Browser fixture tests use Playwright 1.63.0.
 
