@@ -54,6 +54,63 @@ func (r scoredReranker) Rerank(context.Context, string, []string) ([]embedding.R
 	return r.scores, nil
 }
 
+func TestApplyRerankerTopKBounds(t *testing.T) {
+	tests := []struct {
+		name       string
+		candidates int
+		topK       int
+		want       int
+	}{
+		{"empty pool", 0, math.MaxInt, 0},
+		{"minimum integer", 3, math.MinInt, 0},
+		{"negative", 3, -1, 0},
+		{"zero", 3, 0, 0},
+		{"one", 3, 1, 1},
+		{"exact pool", 3, 3, 3},
+		{"pool smaller than request", 3, math.MaxInt, 3},
+		{"below allocation cap", 1200, 999, 999},
+		{"at allocation cap", 1200, 1000, 1000},
+		{"above allocation cap", 1200, 1001, 1000},
+		{"maximum integer", 1200, math.MaxInt, 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidates := make([]*memory.MemoryRecord, tt.candidates)
+			scores := make([]embedding.RerankResult, tt.candidates)
+			for i := range candidates {
+				candidates[i] = &memory.MemoryRecord{Content: "candidate"}
+				scores[i] = embedding.RerankResult{Index: i, Score: float64(i)}
+			}
+			modes := []struct {
+				name     string
+				reranker embedding.Reranker
+				reranked bool
+			}{
+				{"valid scores", scoredReranker{scores}, true},
+				{"upstream failure", &errReranker{msg: "unavailable"}, false},
+				{"malformed scores", scoredReranker{nil}, false},
+			}
+			for _, mode := range modes {
+				t.Run(mode.name, func(t *testing.T) {
+					got, err := (&SQLiteStore{}).applyReranker(context.Background(), "query", candidates, tt.topK, mode.reranker)
+					require.NoError(t, err)
+					require.Len(t, got, tt.want)
+					if mode.reranked {
+						require.LessOrEqual(t, cap(got), 1000, "result allocation must stay bounded")
+					}
+					for i, record := range got {
+						wantIndex := i
+						if mode.reranked {
+							wantIndex = len(candidates) - 1 - i
+						}
+						require.Same(t, candidates[wantIndex], record, "result %d must preserve the expected order", i)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestApplyRerankerMalformedScoresPreserveRRFTopK(t *testing.T) {
 	candidates := []*memory.MemoryRecord{
 		{MemoryID: "rrf-first", Content: "first", ConfidenceScore: 0.85},

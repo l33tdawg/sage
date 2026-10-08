@@ -2596,17 +2596,17 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 // reranker and returns the top-K. Failures fall back to the RRF-sorted
 // candidates so a flaky reranker upstream never blocks recall.
 func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidates []*memory.MemoryRecord, topK int, reranker embedding.Reranker) ([]*memory.MemoryRecord, error) {
-	// Bound topK so an attacker-influenced value can't drive a giant
-	// preallocation in `out := make(..., 0, topK)` below.
+	// Clip to the candidate count first, then leave an explicit constant
+	// bound on the value used for allocation.
+	if topK > len(candidates) {
+		topK = len(candidates)
+	}
 	const maxRerankK = 1000
 	if topK < 0 {
 		topK = 0
 	}
 	if topK > maxRerankK {
 		topK = maxRerankK
-	}
-	if topK > len(candidates) {
-		topK = len(candidates)
 	}
 	texts := make([]string, len(candidates))
 	for i, c := range candidates {
