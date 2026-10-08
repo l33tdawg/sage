@@ -97,7 +97,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.17`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.18`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -314,7 +314,19 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.23.17 and earlier)</summary>
+<summary>Recent release notes (v11.23.18 and earlier)</summary>
+
+## What's New in v11.23.18
+
+**SQLite dependency maintenance.** The SQLite driver moves to 1.60.1 with its matching libc dependency. This includes WAL shared-memory read-fault handling that returns an I/O error instead of crashing, plus faster argument binding for statements with many parameters. The embedded SQLite engine remains 3.53.4; Go tooling dependencies are also refreshed.
+
+**Reranker allocation checks.** The reranker keeps its existing limit of 1,000 results. Its result slice now grows only within the capped selection loop, with no input-sized preallocation. Regression tests cover extreme limits, empty and oversized candidate pools, upstream failures and malformed scores.
+
+The optional LoCoMo and LongMemEval benchmark environments now pin `datasets==5.0.1`, addressing [GHSA-379c-qx7v-6h59 / CVE-2026-66007](https://github.com/advisories/GHSA-379c-qx7v-6h59). Browser fixture tests use Playwright 1.63.0.
+
+No consensus execution change, app-version change or chain migration; app-v28 stays active. The experimental, default-off local judge remains pinned to v16, with its runtime, thresholds and published qualification limits unchanged.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.18`. SDK 11.23.18.
 
 ## What's New in v11.23.17
 
