@@ -1,6 +1,6 @@
 # The signer fence — same-key nonce ordering, and what it cannot prove
 
-**Status: v11.23.19. Persisted signer-fence records survive restarts in
+**Status: v11.23.20. Persisted signer-fence records survive restarts in
 `sage-gui` and both AMID modes. Restored fences wait for chain-proven fate;
 `sage-gui` also provides an explicit operator exit for the shape no proof can
 settle. Signed transaction bytes are not stored. Read "What the fence still

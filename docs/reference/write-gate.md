@@ -95,7 +95,7 @@ separately before submitting the memory. REST clients first sign
 `POST /v1/memory/evidence` with `{"evidence":"source text"}`, then include the
 returned `evidence_id` in the same agent's signed `POST /v1/memory/submit`.
 Only that random ID enters the submission proof; the source text stays in the
-node's SQLite store. The Python SDK v11.23.19 does not yet expose this upload
+node's SQLite store. The Python SDK v11.23.20 does not yet expose this upload
 or the `evidence_id` argument. See the [REST contract](rest-api.md#post-v1memoryevidence)
 and [MCP parameter reference](mcp-tools.md#sage_remember)
 (`api/rest/memory_evidence.go`; `internal/mcp/tools.go`, `toolRemember`).
