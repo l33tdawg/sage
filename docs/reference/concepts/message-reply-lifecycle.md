@@ -1,4 +1,4 @@
-Reconciled against SAGE v11.23.20 code. Cite file:line or file + symbol when behavior is non-obvious.
+Reconciled against SAGE v11.23.21 code. Cite file:line or file + symbol when behavior is non-obvious.
 
 # Message and Reply Lifecycle — who can see a reply, and where
 
@@ -259,11 +259,23 @@ and `reply_items_are_work:false` make that distinction machine-readable. Pinned
 by `internal/mcp/inbox_reply_pointer_test.go`.
 
 The newest timestamp is a candidate watermark, not permission to skip a full
-page. When `reply_page_truncated=true`, callers keep their prior watermark and
-drain the inclusive window using the exact composite `reply_next_before` cursor
-until `page_truncated=false`. `reply_watermark_safe_to_advance` and
-`reply_catch_up_action` make this fail-safe sequence explicit; advancing early
-would strand replies between the returned page tail and the new timestamp.
+page. Save the originating inbox response's `reply_watermark_candidate` for
+after catch-up. It uses the earlier valid timestamp from the pointer and first
+page, or the available one if the other is missing. When
+`reply_page_truncated=true`, keep the prior watermark and call
+`sage_message_replies` with `reply_next_page_arguments`, then each pager's
+`next_page_arguments`. These preserve `since` and `limit` while advancing the
+exact composite `before` cursor.
+
+Once a pager returns `page_truncated=false`, process that final page and use the
+original candidate as the next inbox `reply_since`. An already complete inbox
+page needs no pager call. If no candidate exists, omit the next `reply_since`.
+`reply_watermark_safe_to_advance` is a snapshot in the original inbox response;
+it does not update while paging. Neither reads nor catch-up store a server-side
+watermark. Reusing an old or omitted watermark replays the same range. Inclusive
+timestamp boundaries may also repeat a full page of tied replies, so always
+deduplicate by `message_id`. Advancing before the range is drained would strand
+replies between the returned page tail and the new timestamp.
 
 **The pointer must never assert pendency.** Because the count can never return
 to zero, a string such as "N replies are waiting. Read them with
