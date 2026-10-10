@@ -677,8 +677,8 @@ def test_federated_pipe_resolve_send_and_result_binding(client, mock_api):
 
 
 def test_empty_pipe_collections_tolerate_legacy_null(client, mock_api):
-    mock_api.get("/v1/pipe/inbox").mock(
-        return_value=httpx.Response(200, json={"items": None, "count": 0})
+    mock_api.get("/v1/messages/inbox").mock(
+        return_value=httpx.Response(200, json={"passive": True,"items": None, "count": 0})
     )
     mock_api.get("/v1/pipe/results").mock(
         return_value=httpx.Response(200, json={"items": None, "count": 0})
@@ -829,8 +829,8 @@ def test_pipeline_trust_metadata_keeps_prompt_injection_untrusted(client, mock_a
         "payload_authority": "request_only",
         "receipt_protocol_version": 2,
     }
-    mock_api.get("/v1/pipe/inbox").mock(
-        return_value=httpx.Response(200, json={
+    mock_api.get("/v1/messages/inbox").mock(
+        return_value=httpx.Response(200, json={"passive": True,
             "items": [{**common, "authority": "request_only"}],
             "count": 1,
         })
@@ -904,3 +904,22 @@ def test_pipeline_trust_metadata_keeps_prompt_injection_untrusted(client, mock_a
     assert update.last_error == injection
     assert update.authority == "notification_only"
     assert update.trust == "untrusted_metadata"
+
+def test_passive_inbox_preserves_and_follows_cursor(client, mock_api):
+    route = mock_api.get("/v1/messages/inbox").mock(
+        side_effect=[
+            httpx.Response(200, json={"passive": True, "items": [], "count": 0, "has_more": True, "next_cursor": "opaque-position"}),
+            httpx.Response(200, json={"passive": True, "items": [], "count": 0, "has_more": False}),
+        ]
+    )
+    first = client.pipe_inbox(limit=1)
+    assert first.passive and first.has_more
+    second = client.pipe_inbox(limit=1, cursor=first.next_cursor)
+    assert not second.has_more
+    assert route.calls[1].request.url.params["cursor"] == "opaque-position"
+    assert all(call.request.method == "GET" for call in route.calls)
+
+def test_passive_inbox_rejects_unconfirmed_contract(client, mock_api):
+    mock_api.get("/v1/messages/inbox").mock(return_value=httpx.Response(200, json={"items": [], "count": 0}))
+    with pytest.raises(ValueError, match="did not confirm passive"):
+        client.pipe_inbox()

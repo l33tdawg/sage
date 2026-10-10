@@ -98,7 +98,7 @@ elif [ "${HOST_COMETBFT_VERSION}" != "${COMETBFT_VERSION#v}" ]; then
     # instead of leaking through as a confusing "cometbft: not found" from the
     # testnet call below. The build's stderr is intentionally NOT suppressed.
     docker run --rm -v "${GENESIS_DIR}:/genesis" \
-        golang:1.26.8-alpine sh -c '
+        golang:1.26.9-alpine sh -c '
         set -e
         apk add --no-cache git make >/dev/null 2>&1
         git clone --branch v'"${COMETBFT_VERSION#v}"' --depth 1 https://github.com/cometbft/cometbft.git /tmp/cometbft 2>/dev/null

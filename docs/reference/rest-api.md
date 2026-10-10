@@ -2099,7 +2099,7 @@ vault-backed. A foreign request or result is never automatically journaled,
 embedded, indexed as memory, written to Badger/AppHash, or treated as trusted
 instructions (`internal/store/sqlite.go:4764-4837`,
 `internal/store/pipeline_transport.go:92-176`,
-	`shouldAutoJournalPipeline`, `api/rest/pipe_handler.go:2259-2268`).
+	`shouldAutoJournalPipeline`, `api/rest/pipe_handler.go:2159-2168`).
 
 ### `POST /v1/pipe/resolve`
 
@@ -2445,7 +2445,7 @@ route is inside the active-ordinary-agent boundary; Root is not a messaging
 principal.
 
 The advertised MCP messaging tools use `sage_message_send`,
-`sage_messages_receive`, `sage_message_reply`, and `sage_message_status`.
+`sage_inbox`, `sage_message_claim`, `sage_message_reply`, and `sage_message_status`.
 Retained `sage_pipe` and `sage_pipe_result` calls are compatibility aliases;
 they are not additional inboxes or a reason to bypass canonical errors.
 `sage_find_agent` and `sage_directory` return caller-authorized addressing
@@ -2462,6 +2462,9 @@ or read state (`internal/mcp/tools.go`, `registerTools`, `toolFindAgent`,
 | `GET /v1/inbox/activity-state` | Fresh exact-signed, payload-free snapshot returning exactly `{version,epoch,seq}`. `epoch` is an opaque 32-character database-incarnation fence: it survives process restart and backup restore, but a fresh database receives a different epoch so a preserved client cursor cannot suppress new cues after reinitialization. The per-agent sequence advances for newly created task-assignment notices and newly persisted replies. It is coordination to inspect, not unfinished work: it never changes `/v1/messages/wake` or `/v1/messages/wake-state`, whose v1 payload remains exactly `{version,seq,pending}`, and it never makes Stop block. |
 | `GET /v1/messages/claimed-elsewhere` | Exact-caller payload-free coordination and recovery projection. Requires this runtime's 1–128-byte `claimant_session_id`; accepts `limit` 1–20 (default 5) and an optional opaque `cursor`. Returns the exact full `claimed_elsewhere_count` plus an oldest-first bounded `items` page, `limit`, `truncated`, and `next_cursor` only when more rows remain. Each item contains only `message_id`, its current `claimant_session_id` and `claim_revision`, `created_at`, optional `claimed_at`, `expires_at`, and `foreign`; sender/provider/chain identity, intent, payload, result, and content never cross this surface. The exact claimed-owner predicate includes still-actionable local, provider-addressed compatibility, and inbound-federated claims held by a different session and is not bounded by generic history's newest-100 window. |
 | `GET /v1/messages/own-claimed-unfinished` | Exact-caller, exact-session passive visibility for local, provider-addressed compatibility, or inbound-federated work already claimed by this runtime. Requires `claimant_session_id`; `limit` defaults to 5 and is capped at 20. Returns a bounded `items` list, exact `count`, `limit`, and `truncated`. Rows are marked `already_claimed_by_you:true`; the route never claims, reclaims, acknowledges, refreshes, hands off, or changes wake/workflow state. Another session or agent receives no matching IDs or payloads. |
+| `GET /v1/messages/inbox` | Passive oldest-first pending exact-recipient, provider-addressed, and inbound-federated inspection. Accepts limit 1–20 and an opaque cursor. Returns `{items,count,passive:true,has_more,limit,next_cursor?}`; it never claims, binds a session, acknowledges a read, or queues a receipt. Current foreign import authority is rechecked before content is returned. |
+| `GET /v1/messages/{message_id}/inspect` | Passive exact recipient/provider inspection before acceptance. Requires the current runtime's `claimant_session_id`. Returns a pending request or a claim already owned by that same session; competing claims fail without content. Receipt-v2 requests include an immutable `claim_receipt_challenge`. |
+| `PUT /v1/messages/{message_id}/claim` | Explicit exact acceptance. Requires `claimant_session_id`; receipt-v2 foreign claims additionally require the exact recipient's signed `claim_proof` over the supplied challenge at `PUT /v1/pipe/{message_id}/receipt/claimed`. Returns `item`, exact ID, claimed status, session, revision, and idempotent replay flag. Ownership and its session receipt are atomic; receipt-v2 also queues peer evidence in the same transaction. Same-session retries are idempotent; another session receives a conflict. No neighboring request is claimed. |
 | `POST /v1/messages/receive` | Requires a 1–256-byte `receive_token`; optional limit 1–20 and opaque `claimant_session_id` up to 128 bytes. Claims and persists one exact ordered batch with session attribution. Same caller/token/limit replays that batch after a lost response; a different limit is HTTP 409. Replay metadata is retained for 48 hours and capped at 4096 tokens per agent: capacity returns HTTP 429, while a purged/incomplete exact batch returns HTTP 410 instead of claiming later work. |
 | `PUT /v1/messages/{message_id}/claim-session` | Exact claimed recipient of inbound federated work only. Binds an unbound claim to one opaque MCP session; repeating the same bind is idempotent and a competing bind is HTTP 409. Retained pre-v11.18.24 claims are instead migrated to the explicit `legacy` fence and require handoff. |
 | `PUT /v1/messages/{message_id}/handoff` | Exact fetched recipient only. Current clients send `from_session_id`, `to_session_id`, and the exact non-negative `from_revision` from passive history. For pre-v11.19.5 REST compatibility only, omitted `from_revision` defaults to 0; `sage_message_handoff` always requires it. The route atomically compare-and-swaps both source fences for one still-claimed local or inbound federated message and always returns the incremented `claim_revision`. A stale or A→B→A delayed fence is HTTP 409, so omission can transfer only an untouched revision-0 claim; repeating an already-applied transfer is idempotent. Session IDs coordinate runtimes sharing one agent identity and confer no authorization. No timeout or age-based auto-steal exists. |
@@ -2633,7 +2636,7 @@ The retained `sage_pipe` alias delegates exact local sends to the canonical
 Messages service with a fresh internal idempotency key per invocation; callers
 that need lost-response replay use `sage_message_send` with their own key.
 Local send fallback requires a definitive route-not-found from an older node.
-`sage_inbox` claims through canonical receive when available and also exposes
+`sage_inbox` inspects pending messages passively and also exposes
 compatibility work. Local completion through `sage_pipe_result` uses canonical
 reply first; the exact typed provider-compatibility signal also permits its
 retained completion path. Generic conflicts, transport errors, and canonical
@@ -2723,52 +2726,19 @@ Deprecated `pipe-*` rows are reaped independently: pending or claimed rows older
 
 ### `GET /v1/pipe/inbox`
 
-Fetch pending messages for the authenticated agent (by agent_id or provider). Auto-claims all returned items.
-Inbound foreign work requires `claimant_session_id`; its claim and session fence
-commit atomically before the payload is returned. A missing session leaves
-foreign work pending rather than creating an unattributed claim.
-Provider-addressed compatibility work is also claimed and session-fenced
-atomically. If an older caller omits `claimant_session_id`, the server uses the
-explicit `legacy` fence and returns that binding on the item, so the claim is
-immediately visible and recoverable through claimed-elsewhere and handoff.
+Passive pending-message inspection, using the same paged store projection as
+`GET /v1/messages/inbox`. This route no longer auto-claims returned items.
 
-**Query parameters:** `limit` (1–20, default 5), `claimant_session_id` (required
-for inbound foreign work, 1–128 bytes)
+**Query parameters:** `limit` (1–20, default 5), `cursor` (the exact opaque
+`next_cursor` returned by the preceding page).
 
-**Response** (HTTP 200): `{"items": [...PipelineMessage], "count": N}`.
-An empty inbox is always encoded as `{"items":[],"count":0}`, never
-`items:null`; the Python SDK also normalizes `null` from an older node to an
-empty list (`api/rest/pipe_handler.go`; `internal/store/sqlite.go`;
-`sdk/python/src/sage_sdk/models.py:315-323`).
-Each item carries response-only
-`authority:"request_only"`, `payload_authority:"request_only"`,
-`trust:"agent_untrusted"`, and an explicit `security_notice`. Imported items
-instead use `trust:"external_untrusted"`. These labels are derived by the REST
-serializer and are not fields in the stored pipeline row, so a sender cannot
-persist or supply its own authority. `intent` and `payload` remain requests for
-consideration, never system, developer, or user instructions.
-For local parties, the response also adds current `from_display_name`,
-`from_registered_name`, `from_agent_provider`, `to_display_name`,
-`to_registered_name`, and `to_agent_provider` when the exact directory entries
-are available. These fields do not replace
-`from_agent`, `to_agent`, `from_provider`, or `to_provider`; lookups are
-deduplicated into one bounded metadata-only query per response and failures fall
-back without hiding work. Registered-name fields carry the saved value when
-present. For legacy rows without a saved value they match `GetAgent`'s current
-display-name compatibility fallback and therefore are not immutable history.
-Foreign agent IDs are never decorated from the local directory, even if an ID
-collides.
-Foreign items carry additive immutable provenance including
-`source_chain_id`, stable `source_pipe_id`, exact sender/recipient identities,
-and agreement/policy/contact bindings. REST clients must treat foreign payloads
-as untrusted input; the MCP `sage_inbox`/`sage_turn` formatter makes that
-boundary explicit with `foreign:true` and `trust:"external_untrusted"`. They use a
-fresh local `pipe_id`; a wire event ID is never adopted as the receiver's local
-primary key (`internal/store/store.go:563-606`,
-`internal/federation/pipe_transport.go:276-418`).
-
-Concurrent inbox reads return only messages whose claim compare-and-swap the
-caller actually won; a losing reader never receives the same work item.
+**Response:** `{items,count,passive:true,has_more,limit,next_cursor?}`.
+Items retain exact sender/recipient provenance, presentation metadata, and the
+REST trust boundary. Imported content is returned only after current foreign
+authorization is revalidated. No session binding, read acknowledgement, claim,
+or receipt is emitted. Repeating inspection cannot consume a request or hide
+it from another session. Claim an accepted exact request explicitly with
+`PUT /v1/messages/{message_id}/claim`.
 
 ---
 
@@ -2901,18 +2871,22 @@ off-chain insert. Starting it is a subsequent local exact-owner transition. An
 ownerless historical `in_progress` row is repaired back to `planned` at startup
 so the operator can triage it safely.
 
-`GET /v1/dashboard/task-notifications?limit=5` is signed with `X-Agent-ID` and
-peeks current notices, applies current active-agent and task RBAC checks, then
-acknowledges only the notices actually returned. A transient authorization
-lookup failure leaves the notice unread for retry; a definitive denial retires
-it. Notices are not
-pipeline jobs and require no result. `sage_inbox` merges them into its response;
-`sage_inception` instructs agents to check both `sage_backlog` and `sage_inbox`
-at session start.
-The handler uses only the signature-verified agent identity bound by dashboard
-authentication, rechecks that the agent is active, and rechecks current task
-read permission before returning each notice. A bare `X-Agent-ID` header cannot
-read or consume another agent's inbox.
+`GET /v1/dashboard/task-notifications/inbox?limit=5` is a passive signed
+agent projection. It accepts an opaque `cursor`, returns unread notices with
+`passive:true`, `has_more`, and `next_cursor` when needed, and rechecks
+current agent status and task read permission. Denied or transiently
+unavailable notices are filtered without changing their stored state. The
+parent `GET /v1/dashboard/task-notifications` is also passive.
+
+Explicit `PUT /v1/dashboard/task-notifications/{notification_id}/ack`
+acknowledges one current, authorized exact-owner notice. Retries are
+idempotent; current assignment generation and agent status are rechecked at
+the write boundary. Acknowledging a notice does not start or complete its task.
+
+`sage_inbox` inspects notices alongside independently paged message requests;
+`sage_task_notice_ack` performs the explicit acknowledgement after backlog
+review. A bare `X-Agent-ID` header cannot inspect or acknowledge another
+agent's notices.
 
 ---
 

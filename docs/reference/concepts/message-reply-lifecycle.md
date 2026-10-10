@@ -31,7 +31,7 @@ pre-11.18.5 process still requires a session restart.
                      ------                                    ---------
   sage_message_send ──► row inserted, status = pending
                             │
-                            │            sage_inbox / sage_messages_receive
+                            │            sage_message_claim
                             ├───────────────────────► claimed (claimed_by set)
                             │
                             │            sage_message_reply(message_id, result)
@@ -56,6 +56,10 @@ messages. Because the compatibility reply projection includes both kinds,
 `retained_reply_count` is the current retained snapshot and may decrease when a
 deprecated row ages out (§4). Rows are still not a governance record: if you
 need durable, consensus-validated knowledge, write a memory or a task.
+
+`sage_inbox` passively inspects pending requests before this lifecycle's claim
+transition. Inspection leaves them pending and creates no reply obligation.
+Only an explicit `sage_message_claim` accepts a selected exact request.
 
 Sending is durable delivery, not read. Claiming is not comprehension.
 `completed` means the recipient submitted a result, not that the result is

@@ -211,7 +211,7 @@ test('release and CI vulnerability gates scan the exact mandated Go floor', () =
     '../go.mod',
     '../natter/go.mod',
   ]) {
-    assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /^go 1\.26\.8$/m);
+    assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /^go 1\.26\.9$/m);
   }
   for (const [path, stage] of [
     ['../Dockerfile', 'builder'],
@@ -221,11 +221,11 @@ test('release and CI vulnerability gates scan the exact mandated Go floor', () =
     ['../deploy/federation-acceptance/Dockerfile.natter', 'build'],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), 'utf8');
-    assert.match(source, new RegExp(`^FROM golang:1\\.26\\.8-alpine AS ${stage}$`, 'm'));
+    assert.match(source, new RegExp(`^FROM golang:1\\.26\\.9-alpine AS ${stage}$`, 'm'));
   }
   assert.match(
     readFileSync(new URL('../deploy/init-testnet.sh', import.meta.url), 'utf8'),
-    /golang:1\.26\.8-alpine/,
+    /golang:1\.26\.9-alpine/,
   );
 });
 

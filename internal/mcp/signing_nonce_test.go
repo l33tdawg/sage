@@ -134,7 +134,7 @@ func TestReplaySafeCanonicalReceiveRetriesUnexpectedResponseEOFWithSameBody(t *t
 	require.Equal(t, int32(2), attempts.Load())
 }
 
-func TestNonReplayableClaimGETDoesNotRetryUnexpectedResponseEOF(t *testing.T) {
+func TestNonReplayableUpdateGETDoesNotRetryUnexpectedResponseEOF(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
 	server := NewServer("http://localhost:8080", priv)
@@ -149,7 +149,7 @@ func TestNonReplayableClaimGETDoesNotRetryUnexpectedResponseEOF(t *testing.T) {
 	})}
 	var out map[string]any
 	err = server.doSignedJSON(
-		context.Background(), http.MethodGet, "/v1/pipe/inbox?limit=5", nil, &out,
+		context.Background(), http.MethodGet, "/v1/pipe/updates?limit=5", nil, &out,
 	)
 	require.ErrorContains(t, err, "unexpected EOF")
 	require.Equal(t, int32(1), attempts.Load())
@@ -169,6 +169,10 @@ func TestSignedRequestReplayClassificationFailsClosed(t *testing.T) {
 		{name: "passive pipe outbox history", method: http.MethodGet, path: "/v1/pipe/history/outbox?limit=20", want: signedRequestReplaySafe},
 		{name: "passive results projection", method: http.MethodGet, path: "/v1/pipe/results?limit=5", want: signedRequestReplaySafe},
 		{name: "passive results count probe", method: http.MethodGet, path: "/v1/pipe/results?count_only=1", want: signedRequestReplaySafe},
+		{name: "passive canonical inbox", method: http.MethodGet, path: "/v1/messages/inbox?limit=5", want: signedRequestReplaySafe},
+		{name: "passive exact inspection", method: http.MethodGet, path: "/v1/messages/msg-a/inspect?claimant_session_id=x", want: signedRequestReplaySafe},
+		{name: "idempotent exact claim", method: http.MethodPut, path: "/v1/messages/msg-a/claim", want: signedRequestReplaySafe},
+		{name: "idempotent notice acknowledgement", method: http.MethodPut, path: "/v1/dashboard/task-notifications/notice-a/ack", want: signedRequestReplaySafe},
 		{name: "canonical message status", method: http.MethodGet, path: "/v1/messages/msg-1/status", want: signedRequestReplaySafe},
 		{name: "idempotent message send", method: http.MethodPost, path: "/v1/messages", want: signedRequestReplaySafe},
 		{name: "idempotent message receive", method: http.MethodPost, path: "/v1/messages/receive", want: signedRequestReplaySafe},
@@ -182,9 +186,9 @@ func TestSignedRequestReplayClassificationFailsClosed(t *testing.T) {
 		{name: "read-only federated claimed challenge", method: http.MethodGet, path: "/v1/pipe/pipe-1/receipt/challenge/claimed", want: signedRequestReplaySafe},
 		{name: "read-only federated read challenge", method: http.MethodGet, path: "/v1/pipe/pipe-1/receipt/challenge/read", want: signedRequestReplaySafe},
 		{name: "unknown federated receipt kind fails closed", method: http.MethodPut, path: "/v1/pipe/pipe-1/receipt/future", want: signedRequestSingleAttempt},
-		{name: "destructive pipe inbox", method: http.MethodGet, path: "/v1/pipe/inbox?limit=5", want: signedRequestSingleAttempt},
+		{name: "passive pipe inbox", method: http.MethodGet, path: "/v1/pipe/inbox?limit=5", want: signedRequestReplaySafe},
 		{name: "destructive pipe updates", method: http.MethodGet, path: "/v1/pipe/updates?limit=5", want: signedRequestSingleAttempt},
-		{name: "destructive task notifications", method: http.MethodGet, path: "/v1/dashboard/task-notifications?limit=5", want: signedRequestSingleAttempt},
+		{name: "passive task notifications", method: http.MethodGet, path: "/v1/dashboard/task-notifications?limit=5", want: signedRequestReplaySafe},
 		{name: "unknown get fails closed", method: http.MethodGet, path: "/v1/future/read", want: signedRequestSingleAttempt},
 		{name: "unknown nested memory get fails closed", method: http.MethodGet, path: "/v1/memory/mem-1/future-read", want: signedRequestSingleAttempt},
 		{name: "unknown nested pipe get fails closed", method: http.MethodGet, path: "/v1/pipe/pipe-1/future-read", want: signedRequestSingleAttempt},
@@ -199,9 +203,7 @@ func TestSignedRequestReplayClassificationFailsClosed(t *testing.T) {
 
 func TestDestructiveGETsNeverRetryAmbiguousFailures(t *testing.T) {
 	paths := []string{
-		"/v1/pipe/inbox?limit=5",
 		"/v1/pipe/updates?limit=5",
-		"/v1/dashboard/task-notifications?limit=5",
 	}
 	for _, path := range paths {
 		t.Run(path+"/transport_error", func(t *testing.T) {

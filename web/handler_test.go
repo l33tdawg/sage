@@ -993,7 +993,8 @@ func TestTaskAssignmentCrossProviderAppearsInBacklogAndInbox(t *testing.T) {
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
 
-	for wantCount := 1; wantCount >= 0; wantCount-- {
+	for read := 0; read < 2; read++ {
+		wantCount := 1
 		req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
 		require.Equal(t, agentID, signAgentGET(t, req, agentPriv))
 		w = httptest.NewRecorder()
@@ -2547,3 +2548,53 @@ func ed25519GenerateKey() (ed25519PublicKey, ed25519PrivateKey, error) {
 // Type aliases to avoid import naming conflicts with sha256.
 type ed25519PublicKey = ed25519pkg.PublicKey
 type ed25519PrivateKey = ed25519pkg.PrivateKey
+
+func TestTaskNoticeInspectionStaysUnreadUntilExplicitAcknowledgement(t *testing.T) {
+	h, s := newTestHandler(t)
+	router := testRouter(h)
+	pub, priv, err := ed25519pkg.GenerateKey(nil)
+	require.NoError(t, err)
+	agentID := hex.EncodeToString(pub)
+	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{AgentID: agentID, Name: "notice-agent", RegisteredName: "notice-agent", Status: "active"}))
+	for _, id := range []string{"notice-task-a", "notice-task-b"} {
+		insertTestTask(t, s, id, "work", "codex")
+		req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/"+id+"/assign", bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID)))
+		req.Header.Set("Content-Type", "application/json")
+		markLocalCEREBRUM(h, req)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		require.Equal(t, 200, recorder.Code, recorder.Body.String())
+	}
+	var id string
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications/inbox?limit=1", nil)
+		signAgentGET(t, req, priv)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		require.Equal(t, 200, recorder.Code, recorder.Body.String())
+		var body struct {
+			Items   []store.AgentNotification
+			Passive bool
+			HasMore bool   `json:"has_more"`
+			Next    string `json:"next_cursor"`
+		}
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
+		require.True(t, body.Passive)
+		require.True(t, body.HasMore)
+		require.NotEmpty(t, body.Next)
+		require.Len(t, body.Items, 1)
+		require.Equal(t, "unread", body.Items[0].State)
+		id = body.Items[0].NotificationID
+	}
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/task-notifications/"+id+"/ack", nil)
+		signAgentRequest(t, req, priv, nil)
+		recorder := httptest.NewRecorder()
+		router.ServeHTTP(recorder, req)
+		require.Equal(t, 200, recorder.Code, recorder.Body.String())
+	}
+	remaining, err := s.PeekAgentNotifications(context.Background(), agentID, 20)
+	require.NoError(t, err)
+	require.Len(t, remaining, 1)
+	require.NotEqual(t, id, remaining[0].NotificationID)
+}

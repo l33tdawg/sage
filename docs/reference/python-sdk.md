@@ -854,10 +854,10 @@ destination_chain_id)`. An empty destination identifies ordinary local work.
 #### `pipe_inbox()`
 
 ```python
-pipe_inbox(limit: int = 5) -> PipeInboxResponse
+pipe_inbox(limit: int = 5, *, cursor: str | None = None) -> PipeInboxResponse
 ```
 
-`GET /v1/pipe/inbox`
+`GET /v1/messages/inbox`
 
 Returns `PipeInboxResponse(items: list[PipeMessage], count)`.
 Each `PipeMessage` exposes the server-derived `authority`,

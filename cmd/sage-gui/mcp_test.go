@@ -261,7 +261,7 @@ func TestSagePermissionsConfigRemovesRetiredAliases(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, allow, "mcp__sage__sage_inception")
 	for _, tool := range []string{
-		"mcp__sage__sage_inbox", "mcp__sage__sage_messages_receive",
+		"mcp__sage__sage_inbox", "mcp__sage__sage_message_claim",
 		"mcp__sage__sage_message_history", "mcp__sage__sage_message_replies",
 		"mcp__sage__sage_message_status",
 	} {

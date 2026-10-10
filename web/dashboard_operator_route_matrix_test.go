@@ -35,12 +35,13 @@ func TestEveryProtectedDashboardMutationRejectsArbitrarySignedMember(t *testing.
 	// These routes intentionally sit outside the protected dashboard group or
 	// carry their own exact, non-operator authority.
 	reviewedExceptions := map[string]struct{}{
-		"POST /v1/dashboard/auth/lock":               {},
-		"POST /v1/dashboard/auth/login":              {},
-		"POST /v1/dashboard/network/claim":           {},
-		"POST /v1/dashboard/settings/ledger/recover": {},
-		"POST /v1/memory/pre-validate":               {},
-		"PUT /v1/dashboard/tasks/{id}/status":        {},
+		"POST /v1/dashboard/auth/lock":                               {},
+		"POST /v1/dashboard/auth/login":                              {},
+		"POST /v1/dashboard/network/claim":                           {},
+		"POST /v1/dashboard/settings/ledger/recover":                 {},
+		"POST /v1/memory/pre-validate":                               {},
+		"PUT /v1/dashboard/tasks/{id}/status":                        {},
+		"PUT /v1/dashboard/task-notifications/{notification_id}/ack": {},
 	}
 
 	var routes []string

@@ -120,7 +120,11 @@ func TestLegacyPipeSendProviderInboxCanBeClaimedByEitherMatchingAgent(t *testing
 			if first == other {
 				other = "agent-b"
 			}
-			require.Zero(t, readInbox(other), "the second agent must not receive already claimed provider work")
+			require.Equal(t, 1, readInbox(other), "inspection does not reserve work to either matching agent")
+			claim := httptest.NewRecorder()
+			pipeRouterAs(s, first).ServeHTTP(claim, httptest.NewRequest(http.MethodPut, "/v1/pipe/"+sent.PipeID+"/claim?claimant_session_id=winner", nil))
+			require.Equal(t, 200, claim.Code, claim.Body.String())
+			require.Zero(t, readInbox(other), "the second agent must not receive explicitly claimed provider work")
 			stored, err = memStore.GetPipeline(context.Background(), sent.PipeID)
 			require.NoError(t, err)
 			require.Equal(t, first, stored.ClaimedBy)

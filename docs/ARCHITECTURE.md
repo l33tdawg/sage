@@ -54,7 +54,7 @@ No tokens. No gas fees. No cryptocurrency. Just consensus-validated knowledge.
 | Layer | Technology |
 |-------|-----------|
 | Consensus | CometBFT v0.38.23 (ABCI 2.0, raw -- not Cosmos SDK) |
-| State Machine | Go 1.26.8+ ABCI application |
+| State Machine | Go 1.26.9+ ABCI application |
 | On-chain State | BadgerDB v4.9.6 (content hash, status, classification, votes, grants, appHash) |
 | Off-chain Storage | SQLite (personal / single-binary) or PostgreSQL 16 + pgvector / HNSW (cluster) -- write-behind projection |
 | Tx Format | Protobuf (deterministic serialization) |
@@ -78,7 +78,7 @@ No tokens. No gas fees. No cryptocurrency. Just consensus-validated knowledge.
 |------------|---------|-------|
 | Docker | 20.10+ | Required for the containerized network |
 | Docker Compose | v2+ | Uses `docker compose` (v2 syntax, not `docker-compose`) |
-| Go | 1.26.8+ | Only needed for local builds and running tests |
+| Go | 1.26.9+ | Only needed for local builds and running tests |
 | Python | 3.10+ | Only needed for the SDK and experiments |
 | make | any | Build automation |
 | curl | any | Used by `make status` and health checks |
@@ -856,7 +856,7 @@ governed memory; an agent must remember durable knowledge explicitly.
 
 The `/v1/pipe/*` routes remain the compatibility and federated transport
 surface. MCP clients should use `sage_find_agent`, `sage_message_send`,
-`sage_inbox`/`sage_messages_receive`, `sage_message_reply`,
+`sage_inbox`/`sage_message_claim`, `sage_message_reply`,
 `sage_message_replies`, `sage_message_status`, `sage_message_handoff`, and `sage_message_history`.
 
 `sage_message_replies` is the explicit sender-side pager for reply content.
@@ -882,7 +882,7 @@ The primary MCP runtime persists its claimant identity within exact
 agent/provider/project/transport scope and holds an OS advisory lock.
 Ordinary restart can reuse it after the previous runtime exits; concurrent
 runtimes retain independent identities. HTTP/SSE scopes are separate.
-`sage_inbox` exposes `own_claimed_unfinished` separately from newly claimed work
+`sage_inbox` exposes `own_claimed_unfinished` separately from pending requests
 and a bounded, payload-free `claimed_elsewhere` recovery projection. Page
 `sage_message_history(folder="claimed_elsewhere")` before intentional takeover;
 an empty new-work batch is not proof that the agent has no unfinished work.
@@ -1398,7 +1398,7 @@ sage/
 ├── papers/                           # Research papers (PDFs, CC BY 4.0)
 ├── .github/workflows/ci.yml          # CI: lint, test, build, docker, sdk-test
 ├── Makefile                          # Build/test/deploy targets
-├── go.mod                            # Go 1.26.8, CometBFT v0.38.23 (library)
+├── go.mod                            # Go 1.26.9, CometBFT v0.38.23 (library)
 └── .golangci.yml                     # Linter configuration
 ```
 

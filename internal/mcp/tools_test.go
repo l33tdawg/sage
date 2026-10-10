@@ -5881,11 +5881,11 @@ func TestSageTurn_Signal_KeywordOnlyOnHashNode(t *testing.T) {
 
 func TestSageInboxMergesTaskAssignmentNotices(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	mux.HandleFunc("/v1/messages/inbox", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"passive": true, "items": []any{}, "count": 0})
 	})
-	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
+	mux.HandleFunc("/v1/dashboard/task-notifications/inbox", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"passive": true,
 			"items": []map[string]any{{
 				"notification_id": "task-assignment:task-1:1", "kind": "task_assignment",
 				"task_id": "task-1", "assignment_version": 1, "domain": "work",
@@ -6002,13 +6002,13 @@ func TestSageBacklogExposesCurrentAssignmentOwnership(t *testing.T) {
 	require.Equal(t, 1, backlog["total_open"])
 }
 
-func TestSageInboxLimitAppliesAcrossBothSources(t *testing.T) {
+func TestSageInboxIndependentlyBoundsBothSources(t *testing.T) {
 	pipeLimit := make(chan string, 1)
 	notificationLimit := make(chan string, 1)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/messages/inbox", func(w http.ResponseWriter, r *http.Request) {
 		pipeLimit <- r.URL.Query().Get("limit")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{"passive": true,
 			"items": []map[string]any{
 				{"pipe_id": "p1", "from_provider": "codex", "payload": "one"},
 				{"pipe_id": "p2", "from_provider": "codex", "payload": "two"},
@@ -6016,9 +6016,9 @@ func TestSageInboxLimitAppliesAcrossBothSources(t *testing.T) {
 			"count": 2,
 		})
 	})
-	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/dashboard/task-notifications/inbox", func(w http.ResponseWriter, r *http.Request) {
 		notificationLimit <- r.URL.Query().Get("limit")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{"passive": true,
 			"items": []map[string]any{{"notification_id": "n1", "kind": "task_assignment", "task_id": "t1"}},
 			"count": 1,
 		})
@@ -6031,7 +6031,7 @@ func TestSageInboxLimitAppliesAcrossBothSources(t *testing.T) {
 	result, err := s.toolInbox(context.Background(), map[string]any{"limit": 3})
 	require.NoError(t, err)
 	require.Equal(t, "3", <-pipeLimit)
-	require.Equal(t, "1", <-notificationLimit, "only the remaining unified capacity may be requested")
+	require.Equal(t, "3", <-notificationLimit, "independent notice pages cannot be starved by messages")
 	inbox := result.(map[string]any)
 	require.Equal(t, 3, inbox["count"])
 	items := inbox["items"].([]map[string]any)
@@ -6044,10 +6044,10 @@ func TestSageInboxLimitAppliesAcrossBothSources(t *testing.T) {
 	require.Contains(t, items[2]["security_notice"], "Verify the task")
 }
 
-func TestSageInboxReturnsClaimedPipelineWorkWhenTaskInboxFails(t *testing.T) {
+func TestSageInboxReturnsPassiveRequestsWhenTaskInboxFails(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
+	mux.HandleFunc("/v1/messages/inbox", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"passive": true,
 			"items": []map[string]any{{
 				"pipe_id": "pipe-claimed", "from_agent": "agent-a", "from_provider": "codex",
 				"intent": "review", "payload": "check this", "created_at": "2026-07-11T00:00:00Z",
@@ -6055,7 +6055,7 @@ func TestSageInboxReturnsClaimedPipelineWorkWhenTaskInboxFails(t *testing.T) {
 			"count": 1,
 		})
 	})
-	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/dashboard/task-notifications/inbox", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
 	})
 	ts := httptest.NewServer(mux)
@@ -6073,7 +6073,7 @@ func TestSageInboxReturnsClaimedPipelineWorkWhenTaskInboxFails(t *testing.T) {
 	require.Len(t, items, 1)
 	require.Equal(t, "pipe-claimed", items[0]["message_id"])
 	require.NotContains(t, items[0], "pipe_id")
-	require.Equal(t, true, items[0]["requires_reply"])
+	require.Equal(t, false, items[0]["requires_reply"])
 	require.Equal(t, "request_only", items[0]["authority"])
 	require.Equal(t, "agent_untrusted", items[0]["trust"])
 	require.Contains(t, items[0]["security_notice"], "independent authorization")
@@ -6082,8 +6082,8 @@ func TestSageInboxReturnsClaimedPipelineWorkWhenTaskInboxFails(t *testing.T) {
 func TestFederatedPipelineContentAlwaysCarriesUntrustedProvenance(t *testing.T) {
 	foreignAgent := strings.Repeat("ab", 32)
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/pipe/inbox", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{
+	mux.HandleFunc("/v1/messages/inbox", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"passive": true,
 			"items": []map[string]any{{
 				"pipe_id": "local-import-id", "source_pipe_id": "remote-event-id",
 				"from_agent": foreignAgent, "source_chain_id": "amy-sage",
@@ -6092,8 +6092,8 @@ func TestFederatedPipelineContentAlwaysCarriesUntrustedProvenance(t *testing.T) 
 			"count": 1,
 		})
 	})
-	mux.HandleFunc("/v1/dashboard/task-notifications", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	mux.HandleFunc("/v1/dashboard/task-notifications/inbox", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"passive": true, "items": []any{}, "count": 0})
 	})
 	mux.HandleFunc("/v1/pipe/history/inbox", func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "1", r.URL.Query().Get("count_only"))

@@ -210,7 +210,7 @@ it exists without being promised a route. Use **None** or an explicit list if
 you want it hidden entirely.
 
 New MCP clients use `sage_find_agent` followed by `sage_message_send`, then
-`sage_inbox`/`sage_messages_receive`, `sage_message_reply`,
+`sage_inbox`/`sage_message_claim`, `sage_message_reply`,
 `sage_message_status`, and `sage_message_history`. The older `sage_pipe*` names
 are hidden deprecated compatibility aliases. A trusted peer may be offline when
 work is queued; SAGE revalidates the current agreement, shared-domain access,

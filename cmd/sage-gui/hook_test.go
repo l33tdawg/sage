@@ -182,7 +182,7 @@ func TestHookInboxStatusIsPayloadFreeAndIdentityScoped(t *testing.T) {
 	assert.Equal(t, []string{"/v1/pipe/history/inbox?count_only=1", "/v1/messages/wake-state", "/v1/inbox/activity-state"}, requestedPaths)
 	assert.Contains(t, stdout, "2 unclaimed item(s)")
 	assert.Contains(t, stdout, hex.EncodeToString(pub))
-	assert.Contains(t, stdout, "Call sage_inbox with a fresh poll")
+	assert.Contains(t, stdout, "Call sage_inbox with a fresh passive poll")
 	assert.NotContains(t, stdout, "sentinel-payload")
 	assert.NotContains(t, stdout, "message_id")
 }
@@ -257,7 +257,7 @@ func TestHookInboxActivityCueIsPayloadFreeAndMonotonic(t *testing.T) {
 
 	first := captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) })
 	require.Contains(t, first, "SAGE inbox activity changed")
-	require.Contains(t, first, "Call sage_inbox with a fresh poll")
+	require.Contains(t, first, "Call sage_inbox with a fresh passive poll")
 	require.NotContains(t, first, "must-not-leak")
 	assert.Empty(t, captureStdout(t, func() { require.NoError(t, runHookInboxStatus()) }))
 
