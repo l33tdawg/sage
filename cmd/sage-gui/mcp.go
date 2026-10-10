@@ -1275,7 +1275,8 @@ func sagePermissionsConfig(settings map[string]any) map[string]any {
 		"mcp__sage__sage_rename",
 		"mcp__sage__sage_timeline",
 		"mcp__sage__sage_inbox",
-		"mcp__sage__sage_messages_receive",
+		"mcp__sage__sage_message_claim",
+		"mcp__sage__sage_task_notice_ack",
 		"mcp__sage__sage_message_history",
 		"mcp__sage__sage_message_replies",
 		"mcp__sage__sage_message_status",
@@ -1293,9 +1294,8 @@ func sagePermissionsConfig(settings map[string]any) map[string]any {
 	if existing, ok := perms["allow"].([]any); ok {
 		for _, v := range existing {
 			if s, ok := v.(string); ok {
-				// Remove the retired alias from generated permissions during
-				// self-heal. Current MCP servers expose only sage_inception.
-				if s == "mcp__sage__sage_red_pill" {
+				// Remove retired tool names while regenerating permissions.
+				if s == "mcp__sage__sage_red_pill" || s == "mcp__sage__sage_messages_receive" {
 					continue
 				}
 				allowList = append(allowList, s)

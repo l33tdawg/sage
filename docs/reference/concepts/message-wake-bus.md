@@ -128,9 +128,9 @@ deadlines bound a client that stops reading. These are coordination controls,
 not evidence that the consumer is online or attended to an event.
 
 After receiving a wake, the supervisor calls the unified `sage_inbox` operation
-to claim exact, provider-addressed, or federated work. `sage_messages_receive`
+to claim exact, provider-addressed, or federated work. `sage_message_claim`
 remains available for token-replay-safe exact-local batches; its deliberate
-federated-row exclusion is unchanged. Federated work is claimed via `sage_inbox`. Only those existing
+federated-row exclusion is unchanged. Federated work is inspected via `sage_inbox` and accepted explicitly via `sage_message_claim`. Only those existing
 claim operations affect message lifecycle state.
 
 ## Separate from dashboard and MCP transport SSE

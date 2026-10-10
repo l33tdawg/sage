@@ -73,6 +73,9 @@ func messageRouterAs(s *Server, callerID string, exactProof bool) http.Handler {
 	r.Get("/v1/inbox/activity-state", s.handleInboxActivityState)
 	r.Get("/v1/messages/claimed-elsewhere", s.handleMessagesClaimedElsewhere)
 	r.Get("/v1/messages/own-claimed-unfinished", s.handleOwnClaimedUnfinishedMessages)
+	r.Get("/v1/messages/inbox", s.handleMessageInbox)
+	r.Get("/v1/messages/{message_id}/inspect", s.handleMessageInspect)
+	r.Put("/v1/messages/{message_id}/claim", s.handleMessageClaim)
 	r.Post("/v1/messages/receive", s.handleMessagesReceive)
 	r.Post("/v1/messages/{message_id}/reply", s.handleMessageReply)
 	r.Put("/v1/messages/{message_id}/handoff", s.handleMessageHandoff)
@@ -138,8 +141,8 @@ func TestProviderAddressedInboxClaimIsSessionBoundAndReplyCompatibilityIsTyped(t
 	}))
 
 	claimed := httptest.NewRecorder()
-	pipeRouterAs(s, bob).ServeHTTP(claimed, httptest.NewRequest(http.MethodGet,
-		"/v1/pipe/inbox?limit=5&claimant_session_id=session-a", nil))
+	pipeRouterAs(s, bob).ServeHTTP(claimed, httptest.NewRequest(http.MethodPut,
+		"/v1/pipe/msg-provider-rest/claim?claimant_session_id=session-a", nil))
 	require.Equal(t, http.StatusOK, claimed.Code, claimed.Body.String())
 	require.Contains(t, claimed.Body.String(), "msg-provider-rest")
 	elsewhere := callMessageJSON(t, messageRouterAs(s, bob, true), http.MethodGet,
@@ -242,7 +245,11 @@ func TestProviderAddressedSessionlessClaimsUseImmediateLegacyFence(t *testing.T)
 	pipeRouterAs(s, bob).ServeHTTP(inbox, httptest.NewRequest(http.MethodGet, "/v1/pipe/inbox?limit=1", nil))
 	require.Equal(t, http.StatusOK, inbox.Code, inbox.Body.String())
 	require.Contains(t, inbox.Body.String(), `"pipe_id":"msg-provider-sessionless-inbox"`)
-	require.Contains(t, inbox.Body.String(), `"claimant_session_id":"legacy"`)
+	require.NotContains(t, inbox.Body.String(), "claimant_session_id")
+	explicitInboxClaim := httptest.NewRecorder()
+	pipeRouterAs(s, bob).ServeHTTP(explicitInboxClaim, httptest.NewRequest(http.MethodPut, "/v1/pipe/msg-provider-sessionless-inbox/claim", nil))
+	require.Equal(t, 200, explicitInboxClaim.Code, explicitInboxClaim.Body.String())
+	require.Contains(t, explicitInboxClaim.Body.String(), `"claimant_session_id":"legacy"`)
 	for index, id := range []string{"msg-provider-sessionless-explicit", "msg-provider-sessionless-result"} {
 		require.NoError(t, sqlite.InsertPipeline(t.Context(), &store.PipelineMessage{
 			PipeID: id, FromAgent: strings.Repeat("e", 64), ToProvider: "codex", Payload: "private-" + id,

@@ -211,7 +211,7 @@ sage-gui setup
 
 ### 3. Start using it
 
-Just chat normally. SAGE v11.23.18 advertises 35 MCP tools. The core workflow is:
+Just chat normally. SAGE v11.23.18 advertises 36 MCP tools. The core workflow is:
 
 | Tool | What it does |
 |------|-------------|
@@ -230,7 +230,9 @@ Just chat normally. SAGE v11.23.18 advertises 35 MCP tools. The core workflow is
 | `sage_backlog` | View and prioritize your task backlog |
 | `sage_find_agent` | Resolve a local or authorized federated agent by human name |
 | `sage_message_send` | Idempotently send work to one exact agent |
-| `sage_messages_receive` / `sage_inbox` | Receive bounded untrusted inbox work |
+| `sage_inbox` | Passively inspect pending requests and task notices |
+| `sage_message_claim` | Explicitly accept one authorized exact request |
+| `sage_task_notice_ack` | Acknowledge one reviewed task assignment notice |
 | `sage_message_reply` | Reply to one received message |
 | `sage_message_replies` | Read the replies recipients returned for messages **you** sent |
 | `sage_message_status` / `sage_message_history` | Inspect sender-only lifecycle state and retained history |
@@ -240,6 +242,11 @@ corroboration tools complete the advertised set. See the authoritative
 [`reference/mcp-tools.md`](reference/mcp-tools.md). Deprecated `sage_pipe*`
 compatibility aliases remain callable for older clients but are intentionally
 absent from tool discovery.
+
+Checking the inbox creates no reply obligation. Inspect pending requests with
+`sage_inbox`, verify authorization, then accept a selected request explicitly
+with `sage_message_claim(message_id=...)` before replying. Task notices stay
+unread until `sage_task_notice_ack`. Repeated inspection claims nothing.
 
 Message claims belong to a runtime identity, not merely to the agent key.
 `sage_inbox` reports `claimant_identity_mode` and includes `claim_revision` in

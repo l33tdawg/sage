@@ -805,6 +805,9 @@ func isAgentOwnedDashboardMutation(r *http.Request) bool {
 	case r.Method == http.MethodPost && path == "/v1/memory/pre-validate":
 		return true
 	case r.Method == http.MethodPut:
+		if isTaskNoticeAckPath(path) {
+			return true
+		}
 		parts := strings.Split(strings.Trim(path, "/"), "/")
 		return len(parts) == 5 &&
 			parts[0] == "v1" &&
@@ -878,7 +881,9 @@ func isRemoteSignedAgentDashboardRoute(r *http.Request) bool {
 	switch {
 	case r.Method == http.MethodGet && path == "/v1/dashboard/tasks":
 		return true
-	case r.Method == http.MethodGet && path == "/v1/dashboard/task-notifications":
+	case r.Method == http.MethodGet && (path == "/v1/dashboard/task-notifications" || path == "/v1/dashboard/task-notifications/inbox"):
+		return true
+	case r.Method == http.MethodPut && isTaskNoticeAckPath(path):
 		return true
 	case r.Method == http.MethodGet && path == "/v1/dashboard/settings/boot-instructions":
 		return true
@@ -1044,10 +1049,18 @@ func (h *DashboardHandler) isEligibleTaskDashboardAgent(
 // Root must not enter these handlers as an "agent"; a promoted Admin retains
 // its ordinary agent identity only while its approval matches the current Root
 // generation. The mixed task list remains a separate human CEREBRUM view.
+func isTaskNoticeAckPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	return len(parts) == 5 && parts[0] == "v1" && parts[1] == "dashboard" && parts[2] == "task-notifications" && parts[3] != "" && parts[4] == "ack"
+}
+
 func isAgentOnlyDashboardRoute(r *http.Request) bool {
 	path := strings.TrimSuffix(r.URL.Path, "/")
+	if r.Method == http.MethodPut && isTaskNoticeAckPath(path) {
+		return true
+	}
 	if r.Method == http.MethodGet &&
-		path == "/v1/dashboard/task-notifications" {
+		(path == "/v1/dashboard/task-notifications" || path == "/v1/dashboard/task-notifications/inbox") {
 		return true
 	}
 	if r.Method != http.MethodPut {
@@ -1450,6 +1463,10 @@ func (h *DashboardHandler) RegisterRoutes(r chi.Router) {
 			r.Put("/v1/dashboard/tasks/{id}/assign", h.handleAssignTask)
 			r.With(h.dashboardTaskNotificationAccessGate).
 				Get("/v1/dashboard/task-notifications", h.handleTaskNotifications)
+			r.With(h.dashboardTaskNotificationAccessGate).
+				Get("/v1/dashboard/task-notifications/inbox", h.handleTaskNotifications)
+			r.With(h.dashboardTaskNotificationAccessGate).
+				Put("/v1/dashboard/task-notifications/{notification_id}/ack", h.handleTaskNotificationAck)
 
 			// Tags
 			r.With(h.cerebrumOperatorGate).
@@ -4572,80 +4589,100 @@ func (h *DashboardHandler) agentCanWriteDomainAppV23(agentID, domain string) boo
 	return err == nil && hasGrant
 }
 
-// handleTaskNotifications returns one-way assignment notices for the signed
-// agent. Reading atomically acknowledges them; unlike pipeline work, these
-// notices require no claim or result.
+// handleTaskNotifications passively inspects one-way assignment notices.
+// Returned notices remain unread until the agent explicitly acknowledges them.
 func (h *DashboardHandler) handleTaskNotifications(w http.ResponseWriter, r *http.Request) {
 	agentID := verifiedDashboardAgentID(r.Context())
-	if agentID == "" {
-		writeError(w, http.StatusUnauthorized, "agent identity required")
+	if agentID == "" || !h.isActiveRegisteredDashboardAgent(r.Context(), agentID) {
+		writeError(w, http.StatusForbidden, "active signed agent identity required")
 		return
+	}
+	limit := 5
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 20 {
+			writeError(w, 400, "limit must be between 1 and 20")
+			return
+		}
+		limit = value
+	}
+	cursor := r.URL.Query().Get("cursor")
+	if _, _, err := store.DecodeInboxCursor(cursor); err != nil {
+		writeError(w, 400, "invalid notice cursor")
+		return
+	}
+	notices, ok := h.store.(store.TaskNoticeInboxStore)
+	if !ok {
+		writeError(w, 501, "passive task notices unavailable")
+		return
+	}
+	items, next, err := notices.PeekAgentNotificationPage(r.Context(), agentID, limit, cursor)
+	if err != nil {
+		writeError(w, 503, "task notice inspection unavailable")
+		return
+	}
+	filtered := make([]*store.AgentNotification, 0, len(items))
+	for _, item := range items {
+		if allowed, _ := h.agentTaskReadDecision(r.Context(), agentID, item.TaskID, item.Domain); allowed {
+			filtered = append(filtered, item)
+		}
 	}
 	if !h.isActiveRegisteredDashboardAgent(r.Context(), agentID) {
-		writeError(w, http.StatusForbidden, "active current-generation agent identity required")
+		writeError(w, http.StatusForbidden, "active signed agent identity required")
 		return
 	}
-	agentStore, ok := h.store.(store.AgentStore)
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "agent registry is not available on this datastore")
+	response := map[string]any{"items": filtered, "count": len(filtered), "passive": true, "has_more": next != ""}
+	if next != "" {
+		response["next_cursor"] = next
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSONResp(w, 200, response)
+}
+
+func (h *DashboardHandler) handleTaskNotificationAck(w http.ResponseWriter, r *http.Request) {
+	agentID := verifiedDashboardAgentID(r.Context())
+	if agentID == "" || !h.isActiveRegisteredDashboardAgent(r.Context(), agentID) {
+		writeError(w, http.StatusForbidden, "active signed agent identity required")
 		return
 	}
-	agent, err := agentStore.GetAgent(r.Context(), agentID)
-	if err != nil || agent == nil || agent.Status != "active" || agent.RemovedAt != nil {
-		writeError(w, http.StatusForbidden, "active registered agent identity required")
+	notices, ok := h.store.(store.TaskNoticeInboxStore)
+	assignments, canAck := h.store.(store.TaskAssignmentStore)
+	if !ok || !canAck {
+		writeError(w, 501, "task notice acknowledgement unavailable")
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	assignmentStore, ok := h.store.(store.TaskAssignmentStore)
-	if !ok {
-		writeJSONResp(w, http.StatusOK, map[string]any{"items": []any{}, "count": 0})
-		return
-	}
-	items, err := assignmentStore.PeekAgentNotifications(r.Context(), agentID, limit)
+	id := chi.URLParam(r, "notification_id")
+	notice, err := notices.GetAgentNotification(r.Context(), agentID, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, 404, "notice is not available to this agent")
 		return
 	}
-	filtered := items[:0]
-	ackIDs := make([]string, 0, len(items))
-	deniedIDs := make([]string, 0)
-	for _, item := range items {
-		allowed, definitive := h.agentTaskReadDecision(r.Context(), agentID, item.TaskID, item.Domain)
-		if allowed {
-			filtered = append(filtered, item)
-			ackIDs = append(ackIDs, item.NotificationID)
-		} else if definitive {
-			deniedIDs = append(deniedIDs, item.NotificationID)
+	allowed, definitive := h.agentTaskReadDecision(r.Context(), agentID, notice.TaskID, notice.Domain)
+	if !allowed {
+		if definitive {
+			writeError(w, 404, "notice is not available to this agent")
+		} else {
+			writeError(w, 503, "task authorization unavailable")
+		}
+		return
+	}
+	replayed := notice.State == "read"
+	if !replayed {
+		winners, err := assignments.AcknowledgeAgentNotifications(r.Context(), agentID, []string{id})
+		if err != nil {
+			writeError(w, 503, "task notice acknowledgement unavailable")
+			return
+		}
+		if len(winners) == 0 {
+			current, err := notices.GetAgentNotification(r.Context(), agentID, id)
+			if err != nil || current.State != "read" {
+				writeError(w, 409, "notice assignment changed; refresh the inbox")
+				return
+			}
+			replayed = true
 		}
 	}
-	// Close the small status-change window between the first active check and
-	// response serialization. RBAC is rechecked per task immediately above.
-	agent, err = agentStore.GetAgent(r.Context(), agentID)
-	if err != nil || agent == nil || agent.Status != "active" || agent.RemovedAt != nil {
-		writeError(w, http.StatusForbidden, "active registered agent identity required")
-		return
-	}
-	if err = assignmentStore.SupersedeAgentNotifications(r.Context(), agentID, deniedIDs); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	acknowledged, err := assignmentStore.AcknowledgeAgentNotifications(r.Context(), agentID, ackIDs)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	winners := make(map[string]bool, len(acknowledged))
-	for _, id := range acknowledged {
-		winners[id] = true
-	}
-	returned := filtered[:0]
-	for _, item := range filtered {
-		if winners[item.NotificationID] {
-			item.State = "read"
-			returned = append(returned, item)
-		}
-	}
-	writeJSONResp(w, http.StatusOK, map[string]any{"items": returned, "count": len(returned)})
+	writeJSONResp(w, 200, map[string]any{"notification_id": id, "state": "read", "idempotent_replay": replayed})
 }
 
 // handleCreateTaskDashboard creates a new task from the CEREBRUM dashboard.

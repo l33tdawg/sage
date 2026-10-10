@@ -1096,111 +1096,11 @@ func (s *Server) writeRemotePipeTargetError(w http.ResponseWriter, err error) {
 
 // handlePipeInbox returns pending pipeline items for the authenticated agent.
 func (s *Server) handlePipeInbox(w http.ResponseWriter, r *http.Request) {
-	limit := 5
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 20 {
-			limit = n
-		}
-	}
-
-	agentID := middleware.ContextAgentID(r.Context())
-	claimantSessionID := strings.TrimSpace(r.URL.Query().Get("claimant_session_id"))
-	if len(claimantSessionID) > store.MaxMessageClaimantSessionBytes {
-		writeProblem(w, http.StatusBadRequest, "Invalid claimant session", "claimant_session_id is too long")
-		return
-	}
-
-	// Look up agent's provider
-	provider := ""
-	if s.agentStore != nil {
-		if agent, err := s.agentStore.GetAgent(r.Context(), agentID); err == nil {
-			provider = agent.Provider
-		}
-	}
-
-	pipeStore, ok := s.store.(store.PipelineStore)
-	if !ok {
-		writeProblem(w, http.StatusInternalServerError, "Pipeline not available", "store does not support pipeline operations")
-		return
-	}
-
-	items, err := pipeStore.GetInbox(r.Context(), agentID, provider, limit)
-	if err != nil {
-		writeProblem(w, http.StatusInternalServerError, "Inbox query failed", err.Error())
-		return
-	}
-
-	// Auto-claim returned items, but return ONLY CAS winners. Two concurrent
-	// inbox reads may select the same pending row; ignoring ClaimPipeline errors
-	// let both agents believe they owned it. The loser now omits that item.
-	claimedItems := make([]*store.PipelineMessage, 0, len(items))
-	for _, item := range items {
-		if item.SourceChainID != "" {
-			// Negotiated v2 imports are returned pending so the exact signed
-			// /receipt/claimed transition can atomically claim+enqueue evidence.
-			// Legacy imports preserve claim-on-inbox compatibility.
-			if receiptStore, ok := s.store.(federatedPipeReceiptInboundStore); ok {
-				if _, receiptErr := receiptStore.GetFederatedReceiptInbound(r.Context(), item.PipeID); receiptErr == nil {
-					claimedItems = append(claimedItems, item)
-					continue
-				}
-			}
-			authorizer, ok := s.federation.(federatedPipeAdmissionAuthorizer)
-			sessionClaimer, supportsSessionClaim := s.store.(federatedMessageSessionClaimer)
-			if claimantSessionID == "" || !supportsSessionClaim || !ok || authorizer.WithAuthorizedImportedPipe(r.Context(), item, func() error {
-				return sessionClaimer.ClaimFederatedMessageWithSession(r.Context(), agentID, item.PipeID, claimantSessionID)
-			}) != nil {
-				continue
-			}
-			item.ClaimedSessionID = claimantSessionID
-		} else if item.ToAgent == "" && item.ToProvider != "" {
-			providerClaimSessionID := claimantSessionID
-			if providerClaimSessionID == "" {
-				providerClaimSessionID = "legacy"
-			}
-			sessionClaimer, ok := s.store.(providerMessageSessionClaimer)
-			if !ok || sessionClaimer.ClaimProviderMessageWithSession(r.Context(), agentID, item.PipeID, providerClaimSessionID) != nil {
-				continue
-			}
-			item.ClaimedSessionID = providerClaimSessionID
-		} else {
-			exactSessionID := claimantSessionID
-			if exactSessionID == "" {
-				exactSessionID = "legacy"
-			}
-			sessionClaimer, ok := s.store.(exactLocalMessageSessionClaimer)
-			if !ok || sessionClaimer.ClaimExactLocalMessageWithSession(r.Context(), agentID, item.PipeID, exactSessionID) != nil {
-				continue
-			}
-			item.ClaimedSessionID = exactSessionID
-			item.ClaimRevision = 0
-		}
-		item.Status = "claimed"
-		item.ClaimedBy = agentID
-		claimedItems = append(claimedItems, item)
-	}
-
-	presentations := s.resolvePipelineAgentPresentations(
-		r.Context(), pipelineMessageAgentIDs(claimedItems)...,
-	)
-	responseItems := make([]pipelineMessageRESTResponse, 0, len(claimedItems))
-	for _, item := range claimedItems {
-		response := enrichPipelineMessageREST(pipelineMessageREST(item, "inbox"), presentations)
-		if receiptStore, ok := s.store.(federatedPipeReceiptInboundStore); ok {
-			if _, err := receiptStore.GetFederatedReceiptInbound(r.Context(), item.PipeID); err == nil {
-				response.ReceiptProtocolVersion = federation.PipeReceiptVersion
-			}
-		}
-		responseItems = append(responseItems, response)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"items": responseItems,
-		"count": len(claimedItems),
-	})
+	s.messageInbox(w, r)
 }
 
 // pipeHistoryLimit deliberately permits a slightly wider passive page than the
-// claim-on-read work queue. These endpoints never acknowledge or claim a row,
+// pending-only work queue. These endpoints never acknowledge or claim a row,
 // so a replay cannot consume work or hide an item.
 func pipeHistoryLimit(r *http.Request) int {
 	limit := 20

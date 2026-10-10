@@ -177,10 +177,10 @@ func TestAdvertisedMessageReplyForbidsSubstituteSend(t *testing.T) {
 	require.Contains(t, inbox, "failed reply is not authorization")
 	require.Contains(t, inbox, "sage_message_send")
 
-	receive := s.tools["sage_messages_receive"].Description
-	require.Contains(t, receive, "fresh token does not make prior work look cleared")
-	require.Contains(t, receive, "own_claimed_unfinished")
-	require.Contains(t, receive, "claimed_elsewhere")
+	receive := s.tools["sage_message_claim"].Description
+	require.Contains(t, receive, "one exact message_id")
+	require.Contains(t, receive, "idempotent")
+	require.Contains(t, receive, "competing session")
 }
 
 // TestHiddenCompatibilityToolsAreUnchangedByReplyVisibility guards the other
@@ -188,7 +188,7 @@ func TestAdvertisedMessageReplyForbidsSubstituteSend(t *testing.T) {
 // deprecated pipe alias, and must not teach a client to use one.
 func TestHiddenCompatibilityToolsAreUnchangedByReplyVisibility(t *testing.T) {
 	s, _ := newAdvertisedToolTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"passive": true, "items": []any{}, "count": 0})
 	})
 	require.Len(t, hiddenCompatibilityTools, 4)
 	for _, legacy := range []string{"sage_pipe", "sage_pipe_history", "sage_pipe_receipt_status", "sage_pipe_result"} {
@@ -207,9 +207,9 @@ func TestHiddenCompatibilityToolsAreUnchangedByReplyVisibility(t *testing.T) {
 
 func TestAdvertisedMessageIdentityContractsKeepExactIDsAuthoritative(t *testing.T) {
 	s, _ := newAdvertisedToolTestServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"passive": true, "items": []any{}, "count": 0})
 	})
-	for _, name := range []string{"sage_messages_receive", "sage_inbox"} {
+	for _, name := range []string{"sage_message_claim", "sage_inbox"} {
 		tool := s.tools[name]
 		require.Contains(t, tool.Description, "sender_agent", name)
 		require.Contains(t, tool.Description, "presentation metadata", name)

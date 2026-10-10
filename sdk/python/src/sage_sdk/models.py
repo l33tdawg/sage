@@ -497,6 +497,10 @@ class PipeMessage(BaseModel):
 
 
 class PipeInboxResponse(BaseModel):
+    passive: bool = False
+    has_more: bool = False
+    next_cursor: str | None = None
+    limit: int | None = None
     items: list[PipeMessage]
     count: int
 

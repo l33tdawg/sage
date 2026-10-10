@@ -386,6 +386,8 @@ elif [ "$MODE" = full ]; then
     i=$((i + 1)); [ "$i" -lt 45 ] || die "friendly registered-name message did not reach the exact remote inbox"
     sleep 2
   done
+  friendly_claim_args=$(node -e 'process.stdout.write(JSON.stringify({message_id:process.argv[1]}))' "$friendly_received_id")
+  mcp_call node-b sage_message_claim "$friendly_claim_args" >/dev/null
   friendly_reply_args=$(node -e 'process.stdout.write(JSON.stringify({message_id:process.argv[1],result:"v11.18 friendly acceptance reply"}))' "$friendly_received_id")
   friendly_reply=$(mcp_call node-b sage_message_reply "$friendly_reply_args")
   reply_event_id=$(jfield "$friendly_reply" reply_event_id)
@@ -427,6 +429,8 @@ elif [ "$MODE" = full ]; then
     i=$((i + 1)); [ "$i" -lt 45 ] || die "offline message did not persist/deliver to restarted inbox"
     sleep 2
   done
+  claim_args=$(node -e 'process.stdout.write(JSON.stringify({message_id:process.argv[1]}))' "$received_id")
+  mcp_call node-b sage_message_claim "$claim_args" >/dev/null
   reply_args=$(node -e 'process.stdout.write(JSON.stringify({message_id:process.argv[1],result:"v11.18.1 acceptance reply"}))' "$received_id")
   mcp_call node-b sage_message_reply "$reply_args" >/dev/null
   status_args=$(node -e 'process.stdout.write(JSON.stringify({message_id:process.argv[1]}))' "$message_id")

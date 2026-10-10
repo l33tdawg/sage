@@ -1147,6 +1147,10 @@ var retryableReadOnlyGETPaths = map[string]bool{
 	"/v1/memory/tasks":                         true,
 	"/v1/memory/timeline":                      true,
 	"/v1/messages/own-claimed-unfinished":      true,
+	"/v1/messages/inbox":                       true,
+	"/v1/pipe/inbox":                           true,
+	"/v1/dashboard/task-notifications":         true,
+	"/v1/dashboard/task-notifications/inbox":   true,
 	"/v1/pipe/history/inbox":                   true,
 	"/v1/pipe/history/outbox":                  true,
 	"/v1/pipe/results":                         true,
@@ -1158,9 +1162,7 @@ var retryableReadOnlyGETPaths = map[string]bool{
 // fail-closed default even if omitted, but naming them prevents a future
 // reviewer from casually adding them to the read-only allowlist.
 var nonReplayableGETPaths = map[string]bool{
-	"/v1/dashboard/task-notifications": true,
-	"/v1/pipe/inbox":                   true,
-	"/v1/pipe/updates":                 true,
+	"/v1/pipe/updates": true,
 }
 
 // retryableIdempotentPOSTPaths lists POST endpoints that are read-only or
@@ -1196,6 +1198,9 @@ func classifySignedRequestReplay(method, path string) signedRequestReplaySafety 
 	case http.MethodGet:
 		if nonReplayableGETPaths[path] {
 			return signedRequestSingleAttempt
+		}
+		if matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/inspect") {
+			return signedRequestReplaySafe
 		}
 		if retryableReadOnlyGETPaths[path] {
 			return signedRequestReplaySafe
@@ -1233,10 +1238,11 @@ func classifySignedRequestReplay(method, path string) signedRequestReplaySafety 
 			return signedRequestReplaySafe
 		}
 	case http.MethodPut:
-		if path == "/v1/messages/read-batch" || path == "/v1/pipe/receipts/batch" {
+		if path == "/v1/messages/read-batch" || path == "/v1/pipe/receipts/batch" || matchesSinglePathSegmentWithSuffix(path, "/v1/dashboard/task-notifications/", "/ack") {
 			return signedRequestReplaySafe
 		}
-		if matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/read") ||
+		if matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/claim") ||
+			matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/read") ||
 			matchesSinglePathSegmentWithSuffix(path, "/v1/messages/", "/handoff") {
 			return signedRequestReplaySafe
 		}

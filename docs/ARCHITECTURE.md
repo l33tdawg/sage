@@ -856,7 +856,7 @@ governed memory; an agent must remember durable knowledge explicitly.
 
 The `/v1/pipe/*` routes remain the compatibility and federated transport
 surface. MCP clients should use `sage_find_agent`, `sage_message_send`,
-`sage_inbox`/`sage_messages_receive`, `sage_message_reply`,
+`sage_inbox`/`sage_message_claim`, `sage_message_reply`,
 `sage_message_replies`, `sage_message_status`, `sage_message_handoff`, and `sage_message_history`.
 
 `sage_message_replies` is the explicit sender-side pager for reply content.
@@ -882,7 +882,7 @@ The primary MCP runtime persists its claimant identity within exact
 agent/provider/project/transport scope and holds an OS advisory lock.
 Ordinary restart can reuse it after the previous runtime exits; concurrent
 runtimes retain independent identities. HTTP/SSE scopes are separate.
-`sage_inbox` exposes `own_claimed_unfinished` separately from newly claimed work
+`sage_inbox` exposes `own_claimed_unfinished` separately from pending requests
 and a bounded, payload-free `claimed_elsewhere` recovery projection. Page
 `sage_message_history(folder="claimed_elsewhere")` before intentional takeover;
 an empty new-work batch is not proof that the agent has no unfinished work.

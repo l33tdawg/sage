@@ -577,7 +577,7 @@ func TestHandleToolsList(t *testing.T) {
 
 	result := resp.Result.(map[string]any)
 	tools := result["tools"].([]map[string]any)
-	assert.Len(t, tools, 35)
+	assert.Len(t, tools, 36)
 
 	// Collect tool names
 	names := make(map[string]bool)
@@ -606,7 +606,7 @@ func TestHandleToolsList(t *testing.T) {
 		if tool["name"] == "sage_timeline" {
 			sageTimeline = tool
 		}
-		if tool["name"] == "sage_messages_receive" {
+		if tool["name"] == "sage_message_claim" {
 			sageMessagesReceive = tool
 		}
 		if tool["name"] == "sage_inbox" {
@@ -622,11 +622,11 @@ func TestHandleToolsList(t *testing.T) {
 		"sage_gov_status", "sage_gov_vote", "sage_inbox", "sage_inception",
 		"sage_link", "sage_list", "sage_message_handoff", "sage_message_reply", "sage_message_send",
 		"sage_message_history", "sage_message_replies", "sage_message_status",
-		"sage_messages_receive",
+		"sage_message_claim",
 		"sage_node_health",
 		"sage_recall", "sage_reflect", "sage_register", "sage_reinstate",
 		"sage_remember", "sage_rename", "sage_scope_get", "sage_scope_list",
-		"sage_status", "sage_task", "sage_timeline", "sage_turn",
+		"sage_status", "sage_task", "sage_task_notice_ack", "sage_timeline", "sage_turn",
 	}
 	actual := make([]string, 0, len(names))
 	for name := range names {
@@ -639,7 +639,7 @@ func TestHandleToolsList(t *testing.T) {
 	assert.False(t, names["sage_pipe_history"], "deprecated compatibility tools must be hidden from discovery")
 	assert.True(t, names["sage_message_send"])
 	assert.True(t, names["sage_message_history"])
-	assert.True(t, names["sage_messages_receive"])
+	assert.True(t, names["sage_message_claim"])
 	assert.True(t, names["sage_message_reply"])
 	assert.True(t, names["sage_message_replies"],
 		"the sender-side reply read must be advertised, not a hidden compatibility alias")
@@ -665,8 +665,8 @@ func TestHandleToolsList(t *testing.T) {
 	assert.True(t, names["sage_rename"])
 
 	for name, tool := range map[string]map[string]any{
-		"sage_messages_receive": sageMessagesReceive,
-		"sage_inbox":            sageInbox,
+		"sage_message_claim": sageMessagesReceive,
+		"sage_inbox":         sageInbox,
 	} {
 		require.NotNil(t, tool, name)
 		description := tool["description"].(string)

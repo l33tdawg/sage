@@ -312,3 +312,35 @@ func TestPostgresAcknowledgeLocksTaskBeforeNotice(t *testing.T) {
 	require.Equal(t, []string{"notice-1"}, acknowledged)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestPostgresTaskNoticePagingIsPassiveAndKeepsEqualTimestampRows(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	t.Cleanup(mock.Close)
+	s := &PostgresStore{db: mock}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	columns := []string{"notification_id", "agent_id", "kind", "task_id", "assignment_version", "domain", "title", "state", "created_at"}
+	rows := pgxmock.NewRows(columns).
+		AddRow("notice-a", "agent-a", "task_assignment", "task-a", int64(1), "work", "A", "unread", now).
+		AddRow("notice-b", "agent-a", "task_assignment", "task-b", int64(1), "work", "B", "unread", now)
+	mock.ExpectQuery("SELECT n.notification_id.*FROM agent_notifications").
+		WithArgs("agent-a", time.Time{}, "", 2).WillReturnRows(rows)
+	items, next, err := s.PeekAgentNotificationPage(context.Background(), "agent-a", 1, "")
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	require.Equal(t, "unread", items[0].State)
+	require.NotEmpty(t, next)
+	afterTime, afterID, err := DecodeInboxCursor(next)
+	require.NoError(t, err)
+	after, _ := time.Parse(time.RFC3339Nano, afterTime)
+	require.Equal(t, "notice-a", afterID)
+	mock.ExpectQuery("SELECT n.notification_id.*FROM agent_notifications").
+		WithArgs("agent-a", after, afterID, 2).
+		WillReturnRows(pgxmock.NewRows(columns).AddRow("notice-b", "agent-a", "task_assignment", "task-b", int64(1), "work", "B", "unread", now))
+	tail, next, err := s.PeekAgentNotificationPage(context.Background(), "agent-a", 1, next)
+	require.NoError(t, err)
+	require.Len(t, tail, 1)
+	require.Equal(t, "notice-b", tail[0].NotificationID)
+	require.Empty(t, next)
+	require.NoError(t, mock.ExpectationsWereMet(), "passive paging permits no write")
+}
