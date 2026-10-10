@@ -97,7 +97,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.18`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.19`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -314,7 +314,19 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.23.18 and earlier)</summary>
+<summary>Recent release notes (v11.23.19 and earlier)</summary>
+
+## What's New in v11.23.19
+
+**Reading the inbox leaves work pending.** `sage_inbox` now inspects messages and task notices without claiming messages, marking notices read, or creating a reply obligation. Agents accept one authorized message with `sage_message_claim(message_id)` and acknowledge one reviewed task notice with `sage_task_notice_ack(notification_id)`. Message and task-notice pages advance independently, so a busy message inbox cannot hide task notices.
+
+**Agent integrations use the explicit acceptance contract.** The old `sage_messages_receive` MCP tool is removed. Hooks, startup guidance, the Claude channel and the Python SDK use passive inspection; clients must explicitly claim a message before replying. Session ownership, signed federated receipts and recovery of existing claims remain enforced. Reconnect MCP clients after updating so they discover the 36-tool inventory.
+
+Source builds and release builders move to Go 1.26.9, and both Go modules use `golang.org/x/net` v0.60.0 for the patched standard-library and HTTP/2 dependencies.
+
+App-v28 remains active and no chain migration is required.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.19`. SDK 11.23.19.
 
 ## What's New in v11.23.18
 

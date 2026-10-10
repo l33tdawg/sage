@@ -1,8 +1,8 @@
-<!-- Status model and compatibility notes reconciled with SAGE v11.23.18, source baseline 8a9c75bfbe7365bef031a2ca127885be9b9d9734. -->
+<!-- Status model and compatibility notes reconciled with SAGE v11.23.19, source baseline 8a9c75bfbe7365bef031a2ca127885be9b9d9734. -->
 
 # Memory Lifecycle
 
-Status model and compatibility notes verified against SAGE v11.23.18, source
+Status model and compatibility notes verified against SAGE v11.23.19, source
 baseline `8a9c75bfbe7365bef031a2ca127885be9b9d9734`. Historical sections below
 identify their fork boundaries.
 
