@@ -1,8 +1,8 @@
-Verified against SDK source for SAGE v11.23.20. Package: sage-agent-sdk.
+Verified against SDK source for SAGE v11.23.21. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.23.20
+**Package:** `sage-agent-sdk` **Version:** 11.23.21
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -202,7 +202,7 @@ response is already on-chain even though the governed memory lifecycle remains
 
 **Optional memory gate:** a transaction receipt may still have
 `status="proposed"` while node-local judging or operator review is pending.
-Inspect `get_memory(memory_id)` for the final lifecycle status. SDK v11.23.20
+Inspect `get_memory(memory_id)` for the final lifecycle status. SDK v11.23.21
 has no evidence-upload helper or `propose(evidence_id=...)` argument; use
 MCP `sage_remember(evidence=...)` or the signed
 [REST evidence flow](rest-api.md#post-v1memoryevidence) when supplying source

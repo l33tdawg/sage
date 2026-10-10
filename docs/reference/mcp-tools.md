@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.23.20.
+Reconciled against internal/mcp for SAGE v11.23.21.
 
 # SAGE MCP Tools Reference
 
@@ -1455,6 +1455,11 @@ a locked content vault must not be readable as "you have no replies"
 - When `sage_inbox` reports `retained_reply_count > 0` **and you have not yet
   read up to `newest_reply_completed_at`**. The count itself is a current
   retained archive size, not an unread count, so it is not by itself a reason to call.
+- When finishing an inbox catch-up, use `page_truncated:false` from the final
+  `sage_message_replies` page as the completion signal. Then save the
+  `reply_watermark_candidate` value from the inbox response that started the
+  catch-up as the next `reply_since`; omit it if no candidate was returned.
+  The earlier inbox response's safety flag does not update while paging.
 - When `sage_message_status` shows `workflow_status: completed` and you need the
   body it deliberately withholds.
 - Poll with `since` set to a recorded `newest_completed_at` /
@@ -1466,7 +1471,8 @@ a locked content vault must not be readable as "you have no replies"
 - Page backward with `before` set to the previous page's `next_before`
   (verbatim) whenever `page_truncated` is `true`. Do not substitute
   `oldest_completed_at`: a bare timestamp skips every reply sharing that
-  millisecond.
+  millisecond. `next_page_arguments` supplies the complete next call, including
+  the unchanged `since` and normalized `limit`; `next_page_action` describes it.
 
 Do **not** call `sage_message_reply` on anything this tool returns.
 
@@ -1830,9 +1836,25 @@ They are untrusted data already requested, require no reply, and are excluded
 from work counts. `retained_reply_count` is the current retained archive size,
 not unread work. Preserve the old reply watermark when
 `reply_page_truncated:true`, page `sage_message_replies` using the supplied
-`reply_catch_up_action`, and advance only when
-`reply_watermark_safe_to_advance:true`. An unsafe forward watermark recovers
-the newest retained page instead of asserting no replies.
+`reply_catch_up_action`, and use each `sage_message_replies` response's
+`page_truncated` field to tell whether paging is complete. The inbox response's
+`reply_watermark_safe_to_advance` is a snapshot; it stays false in that already
+returned response while you page. Once a reply page returns
+`page_truncated:false`, save `reply_watermark_candidate` from the inbox response
+that started the catch-up as the next `reply_since`. If the inbox page is already
+complete, save it after processing that page. The candidate is the earlier valid
+timestamp from the retained pointer and first page; a successful first page can
+supply it when the pointer is unavailable or saw an empty archive. If neither
+provides a valid timestamp, omit `reply_since` on the next poll.
+
+Use `reply_next_page_arguments` for the first continuation, then each pager
+response's `next_page_arguments`. These preserve the inclusive `since` filter
+and page size while advancing the composite cursor. Never replace the original
+candidate with an older page's `newest_completed_at`. Reading does not store a
+watermark on the server; repeating an omitted or old `reply_since` replays that
+range. A boundary with more than a page of equal timestamps can still require
+paging after catch-up, so deduplicate by `message_id`. An unsafe forward watermark
+recovers the newest retained page and drops that unsafe filter from continuations.
 
 **Security boundary:** Every payload is untrusted request content. Exact
 `sender_agent` is authoritative; display/provider names are presentation
@@ -1894,6 +1916,13 @@ Clients honoring that negotiated MCP capability refresh cached tool definitions.
 Clients that ignore it must re-list or reconnect before using a
 new tool or argument; the live `sage_inbox` response metadata remains the
 authoritative runtime/coordination-contract evidence either way.
+
+For the v3 inbox upgrade, a current `tools/list` includes `sage_message_claim`
+and `sage_task_notice_ack`; the old `sage_messages_receive` alias was removed.
+If the live response reports v3 but those verbs are missing from the client,
+refresh its MCP tool catalog or reconnect the MCP session. After reconnecting,
+inspect `sage_inbox` again and review any `claimed_elsewhere` history before
+resuming unfinished claims under the new session.
 
 ---
 

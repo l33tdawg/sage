@@ -97,7 +97,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.20`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.21`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -314,7 +314,19 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.23.20 and earlier)</summary>
+<summary>Recent release notes (v11.23.21 and earlier)</summary>
+
+## What's New in v11.23.21
+
+**Reliable inbox reply catch-up.** The inbox now returns an explicit `reply_watermark_candidate` to save after processing the complete reply range. Its safety flags describe that inbox response and stay fixed while you page. For a truncated reply page, continue until `sage_message_replies` returns `page_truncated=false`, then use the candidate from the original inbox response as the next `reply_since`. An already complete inbox page needs no pager call. This replaces guidance that could send clients through the retained archive repeatedly.
+
+**Paging keeps its bounds.** Each continuation supplies the next cursor with the same inclusive `since` and page limit. If the retained-reply pointer has no valid head, a returned reply page can still supply a candidate; a response with no valid candidate tells the client to omit `reply_since` on its next poll. Replies at the inclusive boundary remain deduplicated by message ID.
+
+Clients carrying a tool catalog from before inbox v3 must re-list tools or reconnect to discover the existing `sage_message_claim` and `sage_task_notice_ack` actions. The server already advertises those tools and sends its tool-list change notification during runtime handoff.
+
+App-v28 remains active and no chain migration is required.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.21`. SDK 11.23.21.
 
 ## What's New in v11.23.20
 
