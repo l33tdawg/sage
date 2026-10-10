@@ -32,7 +32,7 @@ func (s *SQLiteStore) PeekAgentNotificationPage(ctx context.Context, agentID str
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := make([]*AgentNotification, 0, limit+1)
 	for rows.Next() {
 		var n AgentNotification

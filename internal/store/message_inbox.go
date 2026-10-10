@@ -60,7 +60,7 @@ func (s *SQLiteStore) GetPendingInboxPage(ctx context.Context, agentID, provider
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	items := make([]*PipelineMessage, 0, limit+1)
 	for rows.Next() {
 		var m PipelineMessage
@@ -95,8 +95,8 @@ func (s *SQLiteStore) InspectClaimableMessage(ctx context.Context, agentID, prov
 	if err != nil {
 		return nil, ErrMessageNotFound
 	}
-	if agentID == "" || m.DestinationChainID != "" || !m.ExpiresAt.After(time.Now().UTC()) ||
-		(m.ToAgent != agentID && !(m.ToAgent == "" && provider != "" && m.ToProvider == provider)) {
+	isRecipient := m.ToAgent == agentID || (m.ToAgent == "" && provider != "" && m.ToProvider == provider)
+	if agentID == "" || m.DestinationChainID != "" || !m.ExpiresAt.After(time.Now().UTC()) || !isRecipient {
 		return nil, ErrMessageNotFound
 	}
 	if m.Status == "pending" {

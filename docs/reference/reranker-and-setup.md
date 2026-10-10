@@ -138,7 +138,7 @@ tools read: `recall_top_k` and `recall_min_confidence`. Routes at
 
 ### `GET /v1/dashboard/settings/recall`
 
-Returns the current values (`handleGetRecallSettings`, `web/handler.go:5315-5361`).
+Returns the current values (`handleGetRecallSettings`, `web/handler.go:5352-5398`).
 
 **Response** (HTTP 200): `{"top_k": 5, "min_confidence": 70}`
 
@@ -154,7 +154,7 @@ to inspect lower-confidence results within the same authorization scope
 
 ### `POST /v1/dashboard/settings/recall`
 
-Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:5383-5436`).
+Saves both values, **clamped** (`handleSaveRecallSettings`, `web/handler.go:5420-5473`).
 
 **Request:** `{"top_k": 10, "min_confidence": 75}`
 **Response** (HTTP 200): `{"ok": true, "top_k": 10, "min_confidence": 75}`
@@ -393,7 +393,7 @@ means the feature is unavailable on this node and every endpoint returns
 > not treated as an incompatibility, so a good install is never blocked on an ambiguous signal.
 
 **Auth:** these routes carry `authMiddleware` **plus** a strict same-origin gate
-(`wizardSecurityGate`, `web/handler.go:1840-1850`, `web/handler.go:764`). Because setup
+(`wizardSecurityGate`, `web/handler.go:1863-1876`, `web/handler.go:764`). Because setup
 downloads and `chmod`s a binary and spawns `llama-server` as a subprocess, the same
 gate the ChatGPT / federation / network-join wizards use rejects any request whose
 `Origin` / `Sec-Fetch-Site` is not local, independent of cookie or session state - a
@@ -494,7 +494,7 @@ downloads the pinned OpenAI `tunnel-client` if needed, writes the profile, start
 the client in the background, and surfaces the final connector URL. Routes are
 registered by `RegisterChatGPTTunnelRoutes` (`web/chatgpt_tunnel_handler.go:30-35`)
 inside the same `wizardSecurityGate` group as the ChatGPT wizard
-(`web/handler.go:1840-1850`).
+(`web/handler.go:1863-1876`).
 
 **Auth:** these routes carry dashboard auth plus the strict same-origin wizard gate.
 They download a binary and spawn a subprocess, so a cross-origin browser tab must

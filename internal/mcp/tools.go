@@ -6212,8 +6212,8 @@ func (s *Server) toolMessageClaim(ctx context.Context, params map[string]any) (a
 		Passive        bool                  `json:"passive"`
 		ClaimChallenge json.RawMessage       `json:"claim_receipt_challenge"`
 	}
-	if err := s.doSignedJSON(ctx, http.MethodGet, "/v1/messages/"+escaped+"/inspect?claimant_session_id="+url.QueryEscape(session), nil, &inspection); err != nil {
-		return nil, fmt.Errorf("message claim inspection: %w", err)
+	if inspectErr := s.doSignedJSON(ctx, http.MethodGet, "/v1/messages/"+escaped+"/inspect?claimant_session_id="+url.QueryEscape(session), nil, &inspection); inspectErr != nil {
+		return nil, fmt.Errorf("message claim inspection: %w", inspectErr)
 	}
 	if !inspection.Passive || inspection.Item.PipeID != id {
 		return nil, fmt.Errorf("server returned an invalid exact message inspection")
@@ -6223,19 +6223,19 @@ func (s *Server) toolMessageClaim(ctx context.Context, params map[string]any) (a
 		if len(inspection.ClaimChallenge) == 0 {
 			return nil, fmt.Errorf("federated claim inspection omitted its exact receipt challenge")
 		}
-		prepared, err := s.prepareSignedRequest(ctx, http.MethodPut, "/v1/pipe/"+escaped+"/receipt/claimed", inspection.ClaimChallenge)
-		if err != nil {
-			return nil, err
+		prepared, prepareErr := s.prepareSignedRequest(ctx, http.MethodPut, "/v1/pipe/"+escaped+"/receipt/claimed", inspection.ClaimChallenge)
+		if prepareErr != nil {
+			return nil, prepareErr
 		}
-		proof, err := pipelineProofFromPrepared(prepared)
-		if err != nil {
-			return nil, err
+		proof, proofErr := pipelineProofFromPrepared(prepared)
+		if proofErr != nil {
+			return nil, proofErr
 		}
 		body["claim_proof"] = proof
 	}
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
+	encoded, marshalErr := json.Marshal(body)
+	if marshalErr != nil {
+		return nil, marshalErr
 	}
 	var claim struct {
 		Item     pipelineInboxWireItem `json:"item"`
@@ -6244,8 +6244,8 @@ func (s *Server) toolMessageClaim(ctx context.Context, params map[string]any) (a
 		Revision uint64                `json:"claim_revision"`
 		Replayed bool                  `json:"idempotent_replay"`
 	}
-	if err := s.doSignedJSON(ctx, http.MethodPut, "/v1/messages/"+escaped+"/claim", encoded, &claim); err != nil {
-		return nil, fmt.Errorf("exact message claim failed; refresh passive inbox/history before retrying: %w", err)
+	if claimErr := s.doSignedJSON(ctx, http.MethodPut, "/v1/messages/"+escaped+"/claim", encoded, &claim); claimErr != nil {
+		return nil, fmt.Errorf("exact message claim failed; refresh passive inbox/history before retrying: %w", claimErr)
 	}
 	if claim.Status != "claimed" || claim.Item.PipeID != id || claim.Session != session {
 		return nil, fmt.Errorf("server did not confirm this session's exact claim; reconcile passive history")
