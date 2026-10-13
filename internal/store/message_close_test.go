@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -205,4 +206,20 @@ func TestMessageCloseReasonUsesVaultEncryption(t *testing.T) {
 	s.ActivateVault(nil)
 	_, err = s.CloseMessage(ctx, "bob", "msg-encrypted", "session", "private audit reason")
 	require.Error(t, err, "locked vault cannot validate a close retry")
+}
+
+func TestMessageCloseWaitForVaultPublicationIsCancellable(t *testing.T) {
+	s := newMessageTestStore(t)
+	ctx := t.Context()
+	_, _, err := s.SendLocalMessage(ctx, "key", testLocalMessage("msg-vault-wait", "alice", "bob", "FYI"))
+	require.NoError(t, err)
+	s.vaultPublicationMu.Lock()
+	bounded, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	_, err = s.CloseMessage(bounded, "bob", "msg-vault-wait", "session", "reviewed")
+	cancel()
+	s.vaultPublicationMu.Unlock()
+	require.True(t, errors.Is(err, context.DeadlineExceeded))
+	msg, err := s.GetPipeline(ctx, "msg-vault-wait")
+	require.NoError(t, err)
+	require.Equal(t, "pending", msg.Status)
 }

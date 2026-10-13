@@ -23,6 +23,25 @@ func (s *SQLiteStore) CloseMessage(ctx context.Context, receiverID, messageID, s
 		strings.TrimSpace(reason) == "" || len(reason) > MaxMessageCloseReasonBytes {
 		return false, ErrMessageNotFound
 	}
+	if s.db != nil {
+		// Hold vault publication through commit so an enable/lock transition
+		// cannot race a plaintext reason or a stale transaction vault snapshot.
+		unlock, err := s.lockVaultWrite(ctx)
+		if err != nil {
+			return false, err
+		}
+		defer unlock()
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return false, err
+		}
+		defer tx.Rollback() //nolint:errcheck
+		replayed, err := s.transactionClone(tx, false).CloseMessage(ctx, receiverID, messageID, sessionID, reason)
+		if err != nil {
+			return false, err
+		}
+		return replayed, tx.Commit()
+	}
 	var replayed bool
 	err := s.RunInTx(ctx, func(txStore OffchainStore) error {
 		tx := txStore.(*SQLiteStore)
