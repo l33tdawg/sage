@@ -167,18 +167,19 @@ const (
 // persist or submit their own authority.
 type pipelineMessageRESTResponse struct {
 	*store.PipelineMessage
-	FromDisplayName    string `json:"from_display_name,omitempty"`
-	FromRegisteredName string `json:"from_registered_name,omitempty"`
-	FromAgentProvider  string `json:"from_agent_provider,omitempty"`
-	ToDisplayName      string `json:"to_display_name,omitempty"`
-	ToRegisteredName   string `json:"to_registered_name,omitempty"`
-	ToAgentProvider    string `json:"to_agent_provider,omitempty"`
-	ReplySourceChainID string `json:"reply_source_chain_id,omitempty"`
-	Authority          string `json:"authority,omitempty"`
-	Trust              string `json:"trust"`
-	SecurityNotice     string `json:"security_notice"`
-	PayloadAuthority   string `json:"payload_authority,omitempty"`
-	ResultAuthority    string `json:"result_authority,omitempty"`
+	FromDisplayName      string `json:"from_display_name,omitempty"`
+	FromRegisteredName   string `json:"from_registered_name,omitempty"`
+	FromAgentProvider    string `json:"from_agent_provider,omitempty"`
+	ToDisplayName        string `json:"to_display_name,omitempty"`
+	ToRegisteredName     string `json:"to_registered_name,omitempty"`
+	ToAgentProvider      string `json:"to_agent_provider,omitempty"`
+	ReplySourceChainID   string `json:"reply_source_chain_id,omitempty"`
+	Authority            string `json:"authority,omitempty"`
+	Trust                string `json:"trust"`
+	SecurityNotice       string `json:"security_notice"`
+	PayloadAuthority     string `json:"payload_authority,omitempty"`
+	ResultAuthority      string `json:"result_authority,omitempty"`
+	CloseReasonAuthority string `json:"close_reason_authority,omitempty"`
 	// RepliedBy is the provenance of untrusted, model-consumed reply content:
 	// the agent that ACTUALLY completed the row. It is not the addressee.
 	// callerCanClaimPipe admits an operator/admin on any local pipe and a
@@ -341,6 +342,9 @@ func pipelineMessageREST(msg *store.PipelineMessage, surface string) pipelineMes
 	if msg == nil {
 		response.SecurityNotice = pipeRESTCombinedSecurityNotice
 		return response
+	}
+	if msg.CloseReason != "" {
+		response.CloseReasonAuthority = pipeResultAuthority
 	}
 	if msg.SourceChainID != "" || msg.DestinationChainID != "" {
 		response.Trust = pipeForeignTrust
@@ -1902,6 +1906,11 @@ func (s *Server) handlePipeStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if callerID != msg.ToAgent && callerID != msg.ClaimedBy {
+		copy := *msg
+		copy.CloseReason = ""
+		msg = &copy
+	}
 	replySourceChainID := ""
 	if msg.SourceChainID != "" && s.federation != nil {
 		replySourceChainID = s.federation.LocalChainID()

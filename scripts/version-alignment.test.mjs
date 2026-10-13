@@ -58,7 +58,7 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/ADMIN_BOOTSTRAP.md', `Reconciled through SAGE v${version}/app-v27`],
     ['docs/GETTING_STARTED.md', 'From Source (Go 1.26.9+)'],
     ['docs/GETTING_STARTED.md', `# sage-gui v${version}`],
-    ['docs/GETTING_STARTED.md', `SAGE v${version} advertises 36 MCP tools`],
+    ['docs/GETTING_STARTED.md', `SAGE v${version} advertises 37 MCP tools`],
     ['docs/ARCHITECTURE.md', 'Go 1.26.9+ ABCI application'],
     ['docs/ARCHITECTURE.md', '| Go | 1.26.9+ |'],
     ['docs/reference/concepts/signer-nonce-fence.md', `Status: v${version}.`],
@@ -79,7 +79,7 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/UPGRADING.md', '| v11.19.21 | Co-commit tombstones'],
     ['docs/UPGRADING.md', '| v11.20.0 | Encrypted agent working state'],
     ['docs/UPGRADING.md', '| v11.23.21 | Reliable inbox reply catch-up'],
-    ['docs/UPGRADING.md', `| v${version} | Federation agent visibility selections`],
+    ['docs/UPGRADING.md', `| v${version} | Close reviewed messages without replies`],
     ['docs/ROADMAP.md', `## v${version} release`],
     ['docs/UPGRADING.md', 'The recovery commands in this guide require SAGE v11.18.0 or later.'],
     ['docs/UPGRADING.md', '`backup --full`, `restore --from`,'],
@@ -161,7 +161,7 @@ test('v11.18 user, recovery, federation, and SDK guides stay aligned', () => {
   assert.match(read('docs/FEDERATION.md'), /15 minutes/);
   assert.match(read('docs/UPGRADING.md'), /sage-gui upgrade lineage verify --json --manifest repair\.json/);
   assert.match(roadmap, /helper outside the replaceable bundle/);
-  assert.match(gettingStarted, /advertises 36 MCP tools/);
+  assert.match(gettingStarted, /advertises 37 MCP tools/);
   assert.match(gettingStarted, /Deprecated `sage_pipe\*`\s+compatibility/);
   assert.match(sdkReadme, /Compatibility pipeline/);
 });

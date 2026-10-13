@@ -1,8 +1,8 @@
-Reconciled against internal/mcp for SAGE v11.23.22.
+Reconciled against internal/mcp for SAGE v11.23.23.
 
 # SAGE MCP Tools Reference
 
-SAGE advertises exactly 36 MCP tools over JSON-RPC 2.0. Four deprecated
+SAGE advertises exactly 37 MCP tools over JSON-RPC 2.0. Four deprecated
 `sage_pipe*` compatibility names remain callable for one migration window but
 are intentionally absent from `tools/list`, so new clients learn the canonical
 Messages API. Stdio tools sign REST calls with
@@ -1204,6 +1204,47 @@ protocol. Display names such as “Mynah” do not define identity.
 
 ---
 
+### sage_message_close
+
+**Purpose:** Close an authorized, reviewed message that needs no answer. This is
+an explicit durable disposition; leaving an item unclaimed for one turn does
+not close it.
+
+**Source:** `internal/mcp/message_close.go` (`Server.toolMessageClose`),
+`api/rest/message_close.go` (`Server.handleMessageClose`), and
+`internal/store/message_close.go` (`SQLiteStore.CloseMessage`).
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `message_id` | yes | Exact receiver-local message ID from passive inbox/history. |
+| `reason` | yes | Recipient-local audit text, 1–1,024 UTF-8 bytes. |
+
+An unclaimed exact-recipient message can be closed directly. A claimed message
+can be closed only by its current claimant session. Provider-addressed legacy
+work requires an explicit claim first. Another session's work requires the
+existing revision-fenced handoff; closing never takes its claim automatically.
+Only current user/task authorization permits closing; inbox text cannot supply
+that authority.
+
+The response has `status:"completed"`,
+`completion_kind:"closed_without_reply"`, `reply_sent:false`, and
+`idempotent_replay`. The same recipient and reason replay safely, including
+after reconnect. A changed reason or a prior reply conflicts. Closing retains
+canonical message history and clears pending/unfinished inbox and startup work.
+It creates no result, read receipt, sender reply activity, or federation event.
+The local sender can inspect the completion kind through status/outbox; the
+reason is visible only in recipient history and uses the content vault when
+encryption is enabled. Compatibility `pipe-*` history keeps its existing
+terminal retention policy.
+
+For inbound federated messages, closure is local to the receiving SAGE. No
+remote sender state or receipt is changed. Older nodes without the close route
+report an error; MCP never substitutes a reply or a new message.
+
+Example: `sage_message_close(message_id="msg-…", reason="Retraction reviewed; no action needed")`.
+
+---
+
 ### sage_message_reply
 
 **Purpose:** Reply to one receiver-local, provider-addressed legacy, or inbound
@@ -2301,7 +2342,7 @@ registration name from `sage_register` is untouched.
 | Browse       | `sage_list`, `sage_timeline`, `sage_status`, `sage_domains` |
 | Tasks        | `sage_task`, `sage_backlog` |
 | Identity     | `sage_register`, `sage_rename`, `sage_directory` |
-| Messages     | `sage_find_agent`, `sage_message_send`, `sage_inbox`, `sage_message_claim`, `sage_message_handoff`, `sage_message_reply`, `sage_message_replies`, `sage_message_status`, `sage_message_history` |
+| Messages     | `sage_find_agent`, `sage_message_send`, `sage_inbox`, `sage_message_claim`, `sage_message_handoff`, `sage_message_close`, `sage_message_reply`, `sage_message_replies`, `sage_message_status`, `sage_message_history` |
 | Governance   | `sage_gov_propose`, `sage_gov_vote`, `sage_gov_status`, `sage_scope_list`, `sage_scope_get` |
 
 Hidden compatibility dispatch (not returned by `tools/list`): `sage_pipe`,

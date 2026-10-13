@@ -854,17 +854,19 @@ var (
 // PipelineMessage represents an ephemeral agent-to-agent work item.
 // These are NOT memories — they are transient messages that auto-expire.
 type PipelineMessage struct {
-	PipeID       string    `json:"pipe_id"`
-	FromAgent    string    `json:"from_agent"`
-	FromProvider string    `json:"from_provider"`
-	ToAgent      string    `json:"to_agent,omitempty"`
-	ToProvider   string    `json:"to_provider"`
-	Intent       string    `json:"intent"`
-	Payload      string    `json:"payload"`
-	Result       string    `json:"result,omitempty"`
-	Status       string    `json:"status"` // pending, claimed, completed, expired, failed
-	CreatedAt    time.Time `json:"created_at"`
-	ClaimedBy    string    `json:"claimed_by,omitempty"`
+	PipeID         string    `json:"pipe_id"`
+	FromAgent      string    `json:"from_agent"`
+	FromProvider   string    `json:"from_provider"`
+	ToAgent        string    `json:"to_agent,omitempty"`
+	ToProvider     string    `json:"to_provider"`
+	Intent         string    `json:"intent"`
+	Payload        string    `json:"payload"`
+	Result         string    `json:"result,omitempty"`
+	CompletionKind string    `json:"completion_kind,omitempty"`
+	CloseReason    string    `json:"close_reason,omitempty"`
+	Status         string    `json:"status"` // pending, claimed, completed, expired, failed
+	CreatedAt      time.Time `json:"created_at"`
+	ClaimedBy      string    `json:"claimed_by,omitempty"`
 	// ClaimedSessionID is opaque MCP coordination metadata. It distinguishes
 	// concurrent runtimes that intentionally share one signed agent identity;
 	// it is not an authorization principal.
@@ -1003,6 +1005,7 @@ type MessageStatus struct {
 	ReadStatus      string     `json:"read_status"`
 	ReadEvidence    string     `json:"read_evidence,omitempty"`
 	WorkflowStatus  string     `json:"workflow_status"`
+	CompletionKind  string     `json:"completion_kind,omitempty"`
 	SentAt          time.Time  `json:"sent_at"`
 	DeliveredAt     *time.Time `json:"delivered_at,omitempty"`
 	ReadAt          *time.Time `json:"read_at,omitempty"`

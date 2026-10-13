@@ -664,3 +664,25 @@ async def test_passive_inbox_rejects_unconfirmed_contract(async_client, mock_api
     mock_api.get("/v1/messages/inbox").mock(return_value=httpx.Response(200, json={"items": [], "count": 0}))
     with pytest.raises(ValueError, match="did not confirm passive"):
         await async_client.pipe_inbox()
+
+
+@pytest.mark.asyncio
+async def test_message_close_is_signed_and_carries_no_reply(async_client, mock_api):
+    route = mock_api.post("/v1/messages/message-close/close").mock(
+        return_value=httpx.Response(200, json={
+            "message_id": "message-close", "status": "completed",
+            "completion_kind": "closed_without_reply", "reply_sent": False,
+            "idempotent_replay": True,
+        })
+    )
+    result = await async_client.message_close(
+        "message-close", "reviewed", claimant_session_id="session-a",
+    )
+    assert result.completion_kind == "closed_without_reply"
+    assert result.reply_sent is False
+    assert result.idempotent_replay is True
+    import json
+    assert json.loads(route.calls[0].request.content) == {
+        "reason": "reviewed", "claimant_session_id": "session-a",
+    }
+    assert route.calls[0].request.headers["X-Signature"]

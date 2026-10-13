@@ -6600,7 +6600,7 @@ func (s *SQLiteStore) migratePipelineTerminalRetention(ctx context.Context) erro
 
 func (s *SQLiteStore) decryptPipelineFields(m *PipelineMessage) error {
 	for label, field := range map[string]*string{
-		"intent": &m.Intent, "payload": &m.Payload, "result": &m.Result,
+		"intent": &m.Intent, "payload": &m.Payload, "result": &m.Result, "close reason": &m.CloseReason,
 	} {
 		if *field == "" {
 			continue
@@ -6613,6 +6613,9 @@ func (s *SQLiteStore) decryptPipelineFields(m *PipelineMessage) error {
 			return ErrPipeContentUnavailable
 		}
 		*field = plaintext
+	}
+	if m.CloseReason != "" {
+		m.CompletionKind = "closed_without_reply"
 	}
 	return nil
 }
@@ -6702,7 +6705,7 @@ func (s *SQLiteStore) GetPipeline(ctx context.Context, pipeID string) (*Pipeline
 		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
 		        COALESCE(result, ''), status, created_at, COALESCE(claimed_by, ''), claimed_at, completed_at, expires_at, COALESCE(journal_id, ''),
 		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision,
-		        federation_authorization_mode, federation_linked_relation
+		        federation_authorization_mode, federation_linked_relation, COALESCE((SELECT reason FROM message_closures c WHERE c.message_id=pipeline_messages.pipe_id),'')
 		 FROM pipeline_messages WHERE pipe_id = ?`, pipeID)
 
 	var m PipelineMessage
@@ -6712,7 +6715,7 @@ func (s *SQLiteStore) GetPipeline(ctx context.Context, pipeID string) (*Pipeline
 		&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &m.ClaimedBy, &claimedAt, &completedAt,
 		&expiresAt, &m.JournalID, &m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID,
 		&m.FederationPolicyEpoch, &m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision,
-		&m.FederationAuthorizationMode, &m.FederationLinkedRelation); err != nil {
+		&m.FederationAuthorizationMode, &m.FederationLinkedRelation, &m.CloseReason); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("pipeline message not found: %s", pipeID)
 		}
@@ -6775,7 +6778,7 @@ func (s *SQLiteStore) GetInboxHistory(ctx context.Context, agentID, provider str
 		`SELECT p.pipe_id, p.from_agent, p.from_provider, p.to_agent, p.to_provider, p.intent, p.payload,
 		        COALESCE(result, ''), status, created_at, COALESCE(claimed_by, ''), claimed_at, completed_at, expires_at, COALESCE(journal_id, ''),
 		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision,
-		        federation_authorization_mode, federation_linked_relation, COALESCE(r.claimant_session_id, ''), COALESCE(r.claim_revision, 0)
+		        federation_authorization_mode, federation_linked_relation, COALESCE((SELECT reason FROM message_closures c WHERE c.message_id=p.pipe_id),''), COALESCE(r.claimant_session_id, ''), COALESCE(r.claim_revision, 0)
 		 FROM pipeline_messages p
 		 LEFT JOIN message_fetch_receipts r ON r.message_id=p.pipe_id AND r.receiver_agent_id=?
 		 WHERE p.destination_chain_id = ''
@@ -6799,7 +6802,7 @@ func (s *SQLiteStore) GetInboxHistory(ctx context.Context, agentID, provider str
 			&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &m.ClaimedBy, &claimedAt, &completedAt,
 			&expiresAt, &m.JournalID, &m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID,
 			&m.FederationPolicyEpoch, &m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision,
-			&m.FederationAuthorizationMode, &m.FederationLinkedRelation, &m.ClaimedSessionID, &m.ClaimRevision); err != nil {
+			&m.FederationAuthorizationMode, &m.FederationLinkedRelation, &m.CloseReason, &m.ClaimedSessionID, &m.ClaimRevision); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = parseTime(createdAt)
@@ -6835,7 +6838,7 @@ func (s *SQLiteStore) GetOutbox(ctx context.Context, agentID string, limit int) 
 		`SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
 		        COALESCE(result, ''), status, created_at, COALESCE(claimed_by, ''), claimed_at, completed_at, expires_at, COALESCE(journal_id, ''),
 		        source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision,
-		        federation_authorization_mode, federation_linked_relation
+		        federation_authorization_mode, federation_linked_relation, CASE WHEN EXISTS (SELECT 1 FROM message_closures c WHERE c.message_id=pipeline_messages.pipe_id) THEN 'closed_without_reply' ELSE '' END
 		 FROM pipeline_messages
 		 WHERE from_agent = ? AND source_chain_id = ''
 		 ORDER BY created_at DESC LIMIT ?`, agentID, limit)
@@ -6853,7 +6856,7 @@ func (s *SQLiteStore) GetOutbox(ctx context.Context, agentID string, limit int) 
 			&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &m.ClaimedBy, &claimedAt, &completedAt,
 			&expiresAt, &m.JournalID, &m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID,
 			&m.FederationPolicyEpoch, &m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision,
-			&m.FederationAuthorizationMode, &m.FederationLinkedRelation); err != nil {
+			&m.FederationAuthorizationMode, &m.FederationLinkedRelation, &m.CompletionKind); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = parseTime(createdAt)
@@ -6999,7 +7002,8 @@ func (s *SQLiteStore) GetCompletedForSender(ctx context.Context, agentID string,
 	rows, err := s.conn.QueryContext(ctx,
 		`SELECT `+completedForSenderColumns+`
 		 FROM pipeline_messages
-		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'`+
+		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'
+		   AND NOT EXISTS (SELECT 1 FROM message_closures c WHERE c.message_id=pipeline_messages.pipe_id)`+
 			completedForSenderOrder,
 		agentID, limit)
 	if err != nil {
@@ -7048,6 +7052,7 @@ func (s *SQLiteStore) GetCompletedForSenderBefore(
 		`SELECT `+completedForSenderColumns+`
 		 FROM pipeline_messages
 		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'
+		   AND NOT EXISTS (SELECT 1 FROM message_closures c WHERE c.message_id=pipeline_messages.pipe_id)
 		   AND completed_at IS NOT NULL
 		   AND (completed_at < ? OR (completed_at = ? AND (? OR pipe_id < ?)))`+
 			completedForSenderOrder,
@@ -7078,7 +7083,8 @@ func (s *SQLiteStore) SummarizeCompletedForSender(ctx context.Context, agentID s
 	var newest *string
 	if err := s.conn.QueryRowContext(ctx,
 		`SELECT COUNT(*), MAX(completed_at) FROM pipeline_messages
-		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'`,
+		 WHERE from_agent = ? AND source_chain_id = '' AND status = 'completed'
+		   AND NOT EXISTS (SELECT 1 FROM message_closures c WHERE c.message_id=pipeline_messages.pipe_id)`,
 		agentID).Scan(&summary.Count, &newest); err != nil {
 		return PipelineReplySummary{}, err
 	}
@@ -7093,7 +7099,7 @@ func (s *SQLiteStore) ListPipelines(ctx context.Context, status string, limit in
 	query := `SELECT pipe_id, from_agent, from_provider, to_agent, to_provider, intent, payload,
 		                 COALESCE(result, ''), status, created_at, claimed_at, completed_at, expires_at, COALESCE(journal_id, ''),
 		                 source_chain_id, source_pipe_id, destination_chain_id, federation_policy_epoch, federation_agreement_id, federation_contact_id, federation_contact_revision,
-		                 federation_authorization_mode, federation_linked_relation
+		                 federation_authorization_mode, federation_linked_relation, CASE WHEN EXISTS (SELECT 1 FROM message_closures c WHERE c.message_id=pipeline_messages.pipe_id) THEN 'closed_without_reply' ELSE '' END
 	          FROM pipeline_messages`
 	var args []any
 	if status != "" {
@@ -7118,7 +7124,7 @@ func (s *SQLiteStore) ListPipelines(ctx context.Context, status string, limit in
 			&m.Intent, &m.Payload, &m.Result, &m.Status, &createdAt, &claimedAt, &completedAt,
 			&expiresAt, &m.JournalID, &m.SourceChainID, &m.SourcePipeID, &m.DestinationChainID,
 			&m.FederationPolicyEpoch, &m.FederationAgreementID, &m.FederationContactID, &m.FederationContactRevision,
-			&m.FederationAuthorizationMode, &m.FederationLinkedRelation); err != nil {
+			&m.FederationAuthorizationMode, &m.FederationLinkedRelation, &m.CompletionKind); err != nil {
 			return nil, err
 		}
 		m.CreatedAt = parseTime(createdAt)

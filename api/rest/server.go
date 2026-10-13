@@ -878,6 +878,7 @@ func (s *Server) setupRouter() chi.Router {
 			r.Put("/v1/messages/{message_id}/claim", s.handleMessageClaim)
 			r.Post("/v1/messages/receive", s.handleMessagesReceive)
 			r.Post("/v1/messages/{message_id}/reply", s.handleMessageReply)
+			r.Post("/v1/messages/{message_id}/close", s.handleMessageClose)
 			r.Put("/v1/messages/{message_id}/handoff", s.handleMessageHandoff)
 			r.Put("/v1/messages/{message_id}/claim-session", s.handleFederatedMessageClaimSession)
 			r.Put("/v1/messages/{message_id}/read", s.handleMessageRead)

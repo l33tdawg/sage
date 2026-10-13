@@ -825,6 +825,22 @@ class AsyncSageClient:
         )
         return MessageReceiveResponse.model_validate(resp.json())
 
+    async def message_close(
+        self, message_id: str, reason: str, *, claimant_session_id: str,
+    ) -> MessageActionResponse:
+        """Close reviewed inbox work without a reply, preserving recipient-local history.
+
+        Unclaimed exact-recipient messages need no receive/claim call. Claimed
+        messages require the session that owns the claim. Foreign closure is
+        local to the receiving node and does not notify the remote sender.
+        """
+        encoded_id = quote(message_id, safe="")
+        resp = await self._request(
+            "POST", f"/v1/messages/{encoded_id}/close",
+            json={"reason": reason, "claimant_session_id": claimant_session_id},
+        )
+        return MessageActionResponse.model_validate(resp.json())
+
     async def message_reply(self, message_id: str, result: str) -> MessageActionResponse:
         """Reply as the exact recipient after canonical receive."""
         encoded_id = quote(message_id, safe="")

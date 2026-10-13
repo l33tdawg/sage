@@ -97,7 +97,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.22`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.23`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -314,7 +314,17 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.23.22 and earlier)</summary>
+<summary>Recent release notes (v11.23.23 and earlier)</summary>
+
+## What's New in v11.23.23
+
+**Close reviewed notices without replying.** `sage_message_close(message_id, reason)` records an explicit “closed without reply” outcome for informational or withdrawn messages. Closing retains history and clears pending and unfinished inbox reminders across sessions and restarts. Exact-recipient pending messages need no claim; existing claims remain protected by their current session.
+
+The close reason stays in recipient history and uses the content vault when enabled. Closures create no reply, read receipt, or sender reply activity. Inbound federated closure is local to the receiving SAGE. REST and both Python clients expose the same action, and startup nudges explain when to use it.
+
+App-v28 remains active and no chain migration is required. Clients with a cached tool catalog re-list or reconnect to discover the new action.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.23`. SDK 11.23.23.
 
 ## What's New in v11.23.22
 

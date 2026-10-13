@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 11.23.22
+  version: 11.23.23
   description: |-
     (Sovereign) Agent Governed Experience — network REST API for memory
     submission, validation, and query.
@@ -2172,6 +2172,19 @@ components:
         unfinished-work or Stop authority. Compare epoch before seq so a
         preserved cursor cannot suppress cues after database reinitialization.
 
+    MessageCloseRequest:
+      type: object
+      required: [reason, claimant_session_id]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          description: Recipient-local audit reason, up to 1024 UTF-8 bytes.
+        claimant_session_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+
     MessageReplyRequest:
       type: object
       required: [result]
@@ -2190,6 +2203,12 @@ components:
         status:
           type: string
           enum: [completed]
+        completion_kind:
+          type: string
+          const: closed_without_reply
+        reply_sent:
+          type: boolean
+          const: false
         read_status:
           type: string
           enum: [confirmed]
@@ -2216,6 +2235,9 @@ components:
         read_evidence:
           type: string
           const: local_exact_ack
+        completion_kind:
+          type: string
+          const: closed_without_reply
         workflow_status:
           type: string
           enum: [pending, claimed, completed, expired, failed]
@@ -5353,6 +5375,49 @@ paths:
           $ref: "#/components/responses/Conflict"
         "501":
           $ref: "#/components/responses/NotImplemented"
+
+  /v1/messages/{message_id}/close:
+    post:
+      operationId: messageClose
+      summary: Close reviewed inbox work without sending a reply.
+      description: >-
+        Requires a fresh nonce-bound exact-recipient signature and an opaque
+        claimant session. Pending exact-recipient messages need no claim.
+        Claimed work requires its current session; provider-addressed work must
+        be claimed first. Preserves history and clears unfinished work without
+        creating a result, read receipt, or federation event. Foreign closure
+        is receiver-local. Identical recipient/reason retries are idempotent.
+      tags: [Messages]
+      parameters:
+        - name: message_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MessageCloseRequest"
+      responses:
+        "200":
+          description: Closed without a reply, or identical retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageActionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "501":
+          description: Store does not support close without reply.
 
   /v1/messages/{message_id}/reply:
     post:

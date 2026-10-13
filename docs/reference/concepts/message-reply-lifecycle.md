@@ -1,4 +1,4 @@
-Reconciled against SAGE v11.23.22 code. Cite file:line or file + symbol when behavior is non-obvious.
+Reconciled against SAGE v11.23.23 code. Cite file:line or file + symbol when behavior is non-obvious.
 
 # Message and Reply Lifecycle — who can see a reply, and where
 
@@ -23,6 +23,30 @@ remaining stream to the new runtime before dispatch. The one transition from a
 pre-11.18.5 process still requires a session restart.
 
 ---
+
+## Closing without a reply
+
+An informational or withdrawn request can be closed with
+`sage_message_close(message_id, reason)` after reviewing its current
+authorization. An exact-recipient pending item needs no claim; a claimed item
+must belong to the closing session. This stores a terminal `completed` row with
+`completion_kind="closed_without_reply"` and an encrypted-at-rest audit reason
+when the content vault is enabled. It removes the item from pending and
+unfinished inbox/wake projections, including after restart, while retaining
+history. Another session's claim remains protected.
+
+A closure is absent from `sage_message_replies`, `reply_items`, reply counts,
+and reply watermarks. It creates no read receipt, sender reply activity, or
+federation event. The same local sender can inspect its completion kind, but
+only recipient history includes the reason. Foreign closure is receiver-local;
+it does not assert a remote terminal state. Identical retries are idempotent,
+while changing the reason or closing an already replied item conflicts.
+
+**Source:** `internal/store/message_close.go` (`SQLiteStore.CloseMessage`),
+`internal/store/messages.go` (`SQLiteStore.GetMessageStatusForSender`),
+`internal/store/sqlite.go` (`SQLiteStore.GetCompletedForSender`,
+`SQLiteStore.SummarizeCompletedForSender`). See
+[`sage_message_close`](../mcp-tools.md#sage_message_close) for arguments.
 
 ## 1. The lifecycle
 
@@ -62,7 +86,7 @@ transition. Inspection leaves them pending and creates no reply obligation.
 Only an explicit `sage_message_claim` accepts a selected exact request.
 
 Sending is durable delivery, not read. Claiming is not comprehension.
-`completed` means the recipient submitted a result, not that the result is
+For a replied message, `completed` means the recipient submitted a result, not that the result is
 correct.
 
 ---

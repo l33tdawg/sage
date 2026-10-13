@@ -9,7 +9,7 @@ claim, presence, or workflow evidence.
 
 ## Durable sequence
 
-The canonical `POST /v1/messages` path uses `SendLocalMessage` (`internal/store/messages.go:324-402`)
+The canonical `POST /v1/messages` path uses `SendLocalMessage` (`internal/store/messages.go:332-410`)
 to insert the pending `msg-*` row,
 caller-scoped idempotency binding, and the recipient's next
 `message_wake_state.seq` in one SQLite transaction. A fresh recipient begins at
@@ -18,10 +18,10 @@ advance the sequence. A rollback advances nothing.
 
 The deprecated `POST /v1/pipe/send` route now preserves the same wake invariant
 for exact local recipients. A request carrying `idempotency_key` uses the keyed
-`SendLocalMessage` (`internal/store/messages.go:324-402`) path. An unkeyed request uses
-`AdmitLocalMessage` (`internal/store/messages.go:403-439`), which inserts the row and allocates the
+`SendLocalMessage` (`internal/store/messages.go:332-410`) path. An unkeyed request uses
+`AdmitLocalMessage` (`internal/store/messages.go:411-447`), which inserts the row and allocates the
 sequence in one transaction without creating a replay mapping. After either
-fresh path commits, `handlePipeSend` (`api/rest/pipe_handler.go:652-1066`) publishes only the
+fresh path commits, `handlePipeSend` (`api/rest/pipe_handler.go:656-1070`) publishes only the
 returned process-local non-zero generation. A keyed replay loads
 the original row without `WakeSeq`, so it neither advances nor republishes the
 generation. Provider-only and outbound federated rows do not allocate a local

@@ -461,6 +461,8 @@ class PipeMessage(BaseModel):
     intent: str | None = None
     payload: str | None = None
     result: str | None = None
+    completion_kind: str | None = None
+    close_reason: str | None = None
     status: str
     created_at: str | None = None
     claimed_at: str | None = None
@@ -731,6 +733,8 @@ class MessageReceiveResponse(BaseModel):
 class MessageActionResponse(BaseModel):
     message_id: str
     status: str | None = None
+    completion_kind: str | None = None
+    reply_sent: bool | None = None
     read_status: str | None = None
     idempotent_replay: bool = False
 
@@ -741,6 +745,7 @@ class MessageStatusResponse(BaseModel):
     transport_status: str
     read_status: str
     read_evidence: str | None = None
+    completion_kind: str | None = None
     workflow_status: str
     sent_at: datetime
     delivered_at: datetime | None = None

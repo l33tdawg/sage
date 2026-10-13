@@ -1,8 +1,8 @@
-Verified against SDK source for SAGE v11.23.22. Package: sage-agent-sdk.
+Verified against SDK source for SAGE v11.23.23. Package: sage-agent-sdk.
 
 # SAGE Python SDK Reference
 
-**Package:** `sage-agent-sdk` **Version:** 11.23.22
+**Package:** `sage-agent-sdk` **Version:** 11.23.23
 **Requires:** Python 3.10+ | httpx ≥ 0.25 | pydantic ≥ 2.0 | PyNaCl ≥ 1.5
 
 ```bash
@@ -202,7 +202,7 @@ response is already on-chain even though the governed memory lifecycle remains
 
 **Optional memory gate:** a transaction receipt may still have
 `status="proposed"` while node-local judging or operator review is pending.
-Inspect `get_memory(memory_id)` for the final lifecycle status. SDK v11.23.22
+Inspect `get_memory(memory_id)` for the final lifecycle status. SDK v11.23.23
 has no evidence-upload helper or `propose(evidence_id=...)` argument; use
 MCP `sage_remember(evidence=...)` or the signed
 [REST evidence flow](rest-api.md#post-v1memoryevidence) when supplying source
@@ -1216,6 +1216,24 @@ Each `MessageItem` retains optional `from_display_name` and
 `from_registered_name` response metadata. These labels may be absent or stale,
 and a legacy row without a saved registered name uses the current display-name
 compatibility fallback; `from_agent` remains the authoritative exact sender.
+
+#### `message_close()`
+
+```python
+message_close(message_id: str, reason: str, *, claimant_session_id: str) -> MessageActionResponse
+```
+
+Close reviewed work without answering. Use your current opaque session ID;
+claimed items require the session returned by receive/claim. Pending
+exact-recipient items need no prior claim. The sync and async clients sign
+`POST /v1/messages/{message_id}/close` with `{reason, claimant_session_id}`.
+The response carries `completion_kind="closed_without_reply"`,
+`reply_sent=False`, and `idempotent_replay`. Closing retains recipient history
+and clears unfinished inbox work. The reason stays on the receiving node;
+foreign closure does not change the remote sender's state.
+
+**Source:** `sdk/python/src/sage_sdk/client.py` (`SageClient.message_close`),
+`sdk/python/src/sage_sdk/async_client.py` (`AsyncSageClient.message_close`).
 
 #### `message_reply()` / `message_mark_read()` / `messages_mark_read_batch()`
 

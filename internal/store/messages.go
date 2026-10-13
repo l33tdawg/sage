@@ -90,6 +90,14 @@ func (s *SQLiteStore) migrateMessages(ctx context.Context) error {
 			read_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
 			FOREIGN KEY (message_id) REFERENCES pipeline_messages(pipe_id) ON DELETE CASCADE
 		)`,
+		`CREATE TABLE IF NOT EXISTS message_closures (
+			message_id TEXT PRIMARY KEY,
+			receiver_agent_id TEXT NOT NULL,
+			claimant_session_id TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			closed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+			FOREIGN KEY (message_id) REFERENCES pipeline_messages(pipe_id) ON DELETE CASCADE
+		)`,
 		`CREATE TABLE IF NOT EXISTS message_wake_state (
 			recipient_agent_id TEXT PRIMARY KEY,
 			seq INTEGER NOT NULL CHECK(seq >= 0)
@@ -1363,12 +1371,14 @@ func (s *SQLiteStore) GetMessageStatusForSender(ctx context.Context, senderID, m
 	var workflow, sentAt, expiresAt string
 	var completedAt, terminalAt, readAt *string
 	err := s.conn.QueryRowContext(ctx,
-		`SELECT p.pipe_id,p.status,p.created_at,p.completed_at,p.terminal_at,p.expires_at,r.read_at
+		`SELECT p.pipe_id,p.status,p.created_at,p.completed_at,p.terminal_at,p.expires_at,r.read_at,
+		 CASE WHEN c.message_id IS NOT NULL THEN 'closed_without_reply' ELSE '' END
 		 FROM pipeline_messages p
 		 LEFT JOIN message_read_receipts r ON r.message_id=p.pipe_id
+		 LEFT JOIN message_closures c ON c.message_id=p.pipe_id
 		 WHERE p.pipe_id=? AND p.from_agent=? AND p.source_chain_id='' AND p.destination_chain_id=''
 		   AND p.to_agent!='' AND p.to_provider=''`,
-		messageID, senderID).Scan(&status.MessageID, &workflow, &sentAt, &completedAt, &terminalAt, &expiresAt, &readAt)
+		messageID, senderID).Scan(&status.MessageID, &workflow, &sentAt, &completedAt, &terminalAt, &expiresAt, &readAt, &status.CompletionKind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s.getFederatedMessageStatusForSender(ctx, senderID, messageID)
 	}
@@ -1395,6 +1405,9 @@ func (s *SQLiteStore) GetMessageStatusForSender(ctx context.Context, senderID, m
 			status.TerminalAt = status.CompletedAt
 		}
 		status.TerminalReason = "completed"
+		if status.CompletionKind != "" {
+			status.TerminalReason = status.CompletionKind
+		}
 	case "expired", "failed":
 		if status.TerminalAt == nil {
 			status.TerminalAt = &status.ExpiresAt

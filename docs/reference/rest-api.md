@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.23.22. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.23.23. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -2099,7 +2099,7 @@ vault-backed. A foreign request or result is never automatically journaled,
 embedded, indexed as memory, written to Badger/AppHash, or treated as trusted
 instructions (`internal/store/sqlite.go:4764-4837`,
 `internal/store/pipeline_transport.go:92-176`,
-	`shouldAutoJournalPipeline`, `api/rest/pipe_handler.go:2159-2168`).
+	`shouldAutoJournalPipeline`, `api/rest/pipe_handler.go:2168-2177`).
 
 ### `POST /v1/pipe/resolve`
 
@@ -2469,6 +2469,7 @@ or read state (`internal/mcp/tools.go`, `registerTools`, `toolFindAgent`,
 | `PUT /v1/messages/{message_id}/claim-session` | Exact claimed recipient of inbound federated work only. Binds an unbound claim to one opaque MCP session; repeating the same bind is idempotent and a competing bind is HTTP 409. Retained pre-v11.18.24 claims are instead migrated to the explicit `legacy` fence and require handoff. |
 | `PUT /v1/messages/{message_id}/handoff` | Exact fetched recipient only. Current clients send `from_session_id`, `to_session_id`, and the exact non-negative `from_revision` from passive history. For pre-v11.19.5 REST compatibility only, omitted `from_revision` defaults to 0; `sage_message_handoff` always requires it. The route atomically compare-and-swaps both source fences for one still-claimed local or inbound federated message and always returns the incremented `claim_revision`. A stale or A→B→A delayed fence is HTTP 409, so omission can transfer only an untouched revision-0 claim; repeating an already-applied transfer is idempotent. Session IDs coordinate runtimes sharing one agent identity and confer no authorization. No timeout or age-based auto-steal exists. |
 | `POST /v1/messages/{message_id}/reply` | Exact fetched recipient only. MCP supplies its opaque `claimant_session_id`, which must still own the claim after any handoff. Local replies and federated compatibility dispatch are idempotent; different second results are HTTP 409. Federated session check, completion, result fingerprint, and return event commit atomically. A live provider-addressed compatibility claim returns typed HTTP 409 `https://sage.dev/errors/message-legacy-provider-compatibility-scope` only after proving the exact persisted claimant identity and matching claimant session; only that signal authorizes MCP's retained completion route. Canonical typed 404 remains an authoritative non-enumerating denial. |
+| `POST /v1/messages/{message_id}/close` | Fresh exact-recipient nonce-bound signature; body `{reason, claimant_session_id}`. Reason is 1–1,024 UTF-8 bytes. Closes pending exact-recipient messages directly, or claimed local/federated/provider messages only for their current session. Returns `{message_id,status:"completed",completion_kind:"closed_without_reply",reply_sent:false,idempotent_replay}`. Identical recipient/reason retries replay; a changed reason or prior terminal outcome is HTTP 409. Clears pending and unfinished work while retaining history. Creates no reply, read receipt, or federation event. Foreign closure stays on the receiving node. Missing/unauthorized messages are non-enumerating HTTP 404. Source: `api/rest/message_close.go` (`Server.handleMessageClose`), `internal/store/message_close.go` (`SQLiteStore.CloseMessage`). |
 | `PUT /v1/messages/{message_id}/read` | Fresh nonce-bound exact-recipient signature. The message must already have been returned to that caller by canonical receive. Same acknowledgement is idempotent. |
 | `PUT /v1/messages/read-batch` | One fresh exact-recipient request acknowledges 1–20 already-fetched exact message IDs. Every item is authorized independently and returns `confirmed` or a generic per-item failure; one failure never rolls back independent successes. Exact replay is idempotent. |
 | `GET /v1/messages/{message_id}/status` | Exact sender only, payload-free metadata projection. Returns independent transport/read/workflow state and never decrypts content/proofs. |
@@ -2694,11 +2695,11 @@ local policy (`api/rest/pipe_handler.go`).
 
 For an exact local recipient, both keyed and unkeyed admissions insert the
 `msg-*` row and advance that recipient's durable wake sequence in one
-transaction. Keyed sends use `SendLocalMessage` (`internal/store/messages.go:324-402`);
-unkeyed sends use `AdmitLocalMessage` (`internal/store/messages.go:403-439`). The route publishes
+transaction. Keyed sends use `SendLocalMessage` (`internal/store/messages.go:332-410`);
+unkeyed sends use `AdmitLocalMessage` (`internal/store/messages.go:411-447`). The route publishes
 the returned non-zero generation only after commit. A backend without that
 atomic canonical capability returns HTTP 501 before insertion
-(`handlePipeSend`, `api/rest/pipe_handler.go:652-1066`). Provider-only and
+(`handlePipeSend`, `api/rest/pipe_handler.go:656-1070`). Provider-only and
 federated rows do not allocate an exact-local wake sequence.
 
 **Response** (HTTP 201 fresh; HTTP 200 exact keyed replay):
@@ -2712,7 +2713,7 @@ address resolved from a bounded legacy-status offline cache can be accepted
 locally while the peer is down. Delivery waits for that peer to return and pass
 the fresh live authorization preflight above.
 
-**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:771-777`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6620` declaration, `:6619` payload, `:6622` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:792-794`) to 413.
+**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:771-777`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6623` declaration, `:6625` payload, `:6628` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:792-794`) to 413.
 
 **Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`). An index-backed COUNT and its INSERT run under the same write critical section, so parallel sends cannot race past either cap. Over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
 
@@ -2920,7 +2921,7 @@ the result over the original agreement-bound return route
 | `source_chain_id` | string | for foreign work | Exact local reply-source chain returned as `reply_source_chain_id` by the pipe status preflight; prevents another node relabeling the signed result |
 | `claimant_session_id` | string | for foreign work; recommended for provider-addressed compatibility work | Opaque 1–128-byte session currently holding the claim. A provider-addressed row claimed by an older sessionless caller is fenced as `legacy`, and an omitted result session selects only that exact fence; it cannot bypass a named sibling session. |
 
-`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6886`, mapping `ErrPipeResultTooLarge` at `:6885-6886`).
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6889`, mapping `ErrPipeResultTooLarge` at `:6891-6892`).
 
 **Response** (HTTP 200):
 `{"status":"completed","journal_id":"<memory_id or empty>","journaled":true|false}`.
