@@ -6,15 +6,24 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestSageFindAgentRanksUnifiedMatchesBeforeApplyingLimit(t *testing.T) {
-	for _, limit := range []int{1, 10} {
-		t.Run(strconv.Itoa(limit), func(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		limit         int
+		remoteExact   bool
+		wantTotal     int
+		wantAddresses []string
+	}{
+		{"substrings from both sources", 10, false, 2, []string{"local-helper", "remote-helper@remote-chain"}},
+		{"exact first under limit", 1, true, 3, []string{"remote-exact@remote-chain"}},
+		{"exact and substrings from both sources", 10, true, 3, []string{"remote-exact@remote-chain", "local-helper", "remote-helper@remote-chain"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			mux := http.NewServeMux()
 			mux.HandleFunc("/v1/agents/lookup", func(w http.ResponseWriter, r *http.Request) {
 				require.NotEmpty(t, r.Header.Get("X-Agent-ID"))
@@ -27,12 +36,17 @@ func TestSageFindAgentRanksUnifiedMatchesBeforeApplyingLimit(t *testing.T) {
 				require.NotEmpty(t, r.Header.Get("X-Agent-ID"))
 				require.Equal(t, "voice", r.URL.Query().Get("agent_name"))
 				require.Equal(t, "20", r.URL.Query().Get("agent_limit"))
+				contacts := []map[string]any{{
+					"agent_id": "remote-helper", "display_name": "Zulu voice helper", "address": "remote-helper@remote-chain", "authorization_mode": "linked-v23",
+				}}
+				if tc.remoteExact {
+					contacts = append(contacts, map[string]any{
+						"agent_id": "remote-exact", "display_name": "Voice", "address": "remote-exact@remote-chain", "authorization_mode": "linked-v23",
+					})
+				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"connections": []map[string]any{{
 					"remote_chain_id": "remote-chain", "network_name": "Remote SAGE",
-					"remote_agents": []map[string]any{
-						{"agent_id": "remote-helper", "display_name": "Zulu voice helper", "address": "remote-helper@remote-chain", "authorization_mode": "linked-v23"},
-						{"agent_id": "remote-exact", "display_name": "Voice", "address": "remote-exact@remote-chain", "authorization_mode": "linked-v23"},
-					},
+					"remote_agents": contacts,
 				}}, "complete": true})
 			})
 			ts := httptest.NewServer(mux)
@@ -40,18 +54,16 @@ func TestSageFindAgentRanksUnifiedMatchesBeforeApplyingLimit(t *testing.T) {
 			_, key, err := ed25519.GenerateKey(nil)
 			require.NoError(t, err)
 			result, err := NewServer(ts.URL, key).toolFindAgent(context.Background(), map[string]any{
-				"name": "voice", "scope": "all", "limit": limit,
+				"name": "voice", "scope": "all", "limit": tc.limit,
 			})
 			require.NoError(t, err)
 			out := result.(map[string]any)
-			require.Equal(t, 3, out["total"])
-			require.Equal(t, limit == 1, out["truncated"])
+			require.Equal(t, tc.wantTotal, out["total"])
+			require.Equal(t, tc.limit == 1, out["truncated"])
 			matches := out["matches"].([]map[string]any)
-			require.Len(t, matches, min(limit, 3))
-			require.Equal(t, "remote-exact@remote-chain", matches[0]["to"])
-			if limit > 1 {
-				require.Equal(t, "local-helper", matches[1]["to"])
-				require.Equal(t, "remote-helper@remote-chain", matches[2]["to"])
+			require.Len(t, matches, len(tc.wantAddresses))
+			for i, address := range tc.wantAddresses {
+				require.Equal(t, address, matches[i]["to"])
 			}
 		})
 	}
