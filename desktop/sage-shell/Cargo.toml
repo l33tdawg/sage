@@ -1,6 +1,6 @@
 [package]
 name = "sage-shell"
-version = "11.23.23"
+version = "11.23.24"
 description = "Additive native CEREBRUM shell"
 authors = ["Dhillon Andrew Kannabhiran"]
 edition = "2024"

@@ -97,7 +97,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.23`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.24`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -314,7 +314,17 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.23.23 and earlier)</summary>
+<summary>Recent release notes (v11.23.24 and earlier)</summary>
+
+## What's New in v11.23.24
+
+**Find agents across connected SAGEs in one call.** `sage_find_agent(name="...")` searches this SAGE and caller-authorized contacts on connected SAGEs together by default. Exact name matches rank first in one bounded list. Local matches no longer hide remote matches, and same-named agents keep distinct exact addresses so you can choose the intended recipient.
+
+Use `scope="local"` to search only this SAGE, or `peer_chain` to select one connected SAGE. If federated discovery cannot be verified, local matches remain available with an explicit incomplete flag. Cached contacts retain their caller-specific authorization checks, and each continuation still reads one bounded peer page.
+
+MCP descriptions and message guidance now point to the combined lookup. After upgrading, re-list tools or reconnect clients with a cached catalog to load the new parameter and guidance. App-v28 remains active and no chain migration is required.
+
+Container: `ghcr.io/l33tdawg/sage:11.23.24`. SDK 11.23.24.
 
 ## What's New in v11.23.23
 
