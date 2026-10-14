@@ -218,6 +218,13 @@ delivery stays listed, marked **Not accepting**, so the other side can see that
 it exists without being promised a route. Use **Hide all agents** or an individual visibility choice if
 you want it hidden entirely.
 
+To find a recipient, call `sage_find_agent(name="...")`. It searches this SAGE
+and connected SAGEs together by default and returns one ranked list with exact
+addresses. Same-named agents remain separate choices; select the intended
+recipient's `to` value. Use `scope="local"` to search only this SAGE, or
+`peer_chain` to select one connected SAGE. `sage_directory` provides the same
+local-and-connected default when browsing recipients instead of searching by name.
+
 New MCP clients use `sage_find_agent` followed by `sage_message_send`, then
 `sage_inbox`/`sage_message_claim`, `sage_message_reply`,
 `sage_message_status`, and `sage_message_history`. The older `sage_pipe*` names

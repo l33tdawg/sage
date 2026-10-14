@@ -12,8 +12,8 @@ import "testing"
 // operator granting domain access knows which row is which — could not be
 // reached by "send this to mynah", which is what a human actually says.
 //
-// The safety argument for allowing partials at all: exact still wins outright
-// (toolFindAgent only falls back when localExact is empty), and every match is
+// The safety argument for allowing partials at all: exact matches rank first
+// across local and federated results, and every match is
 // returned with its agent_id for the model to choose from rather than resolved
 // silently to one.
 func TestMatchesAgentName(t *testing.T) {

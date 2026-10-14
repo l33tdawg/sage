@@ -707,7 +707,7 @@ func TestSageFederationDiscoversRemoteDomainsAndAgents(t *testing.T) {
 	assert.Equal(t, float64(3), connections[0]["sync"].(map[string]any)["saved_copies"])
 }
 
-func TestSageFindAgentPrefersLocalActiveMatches(t *testing.T) {
+func TestSageFindAgentCombinesLocalAndFederatedExactMatches(t *testing.T) {
 	var federationRequested bool
 	var lookupRequests int
 	mux := http.NewServeMux()
@@ -715,14 +715,20 @@ func TestSageFindAgentPrefersLocalActiveMatches(t *testing.T) {
 		lookupRequests++
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"agents": []map[string]any{
-				{"agent_id": "local-innovium", "name": "Innovium", "registered_name": "claude-code/innovium", "provider": "claude-code", "status": "active"},
-				{"agent_id": "inactive-innovium", "name": "Innovium old", "status": "inactive"},
+				{"agent_id": "local-innovium", "name": "Innovium", "registered_name": "claude-code/innovium", "provider": "claude-code", "status": "active", "match_kind": "exact"},
 			},
 		})
 	})
 	mux.HandleFunc("/v1/federation/available", func(w http.ResponseWriter, _ *http.Request) {
 		federationRequested = true
-		_ = json.NewEncoder(w).Encode(map[string]any{"connections": []any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"connections": []map[string]any{{
+			"remote_chain_id": "remote-chain", "network_name": "Remote SAGE",
+			"remote_agents": []map[string]any{{
+				"agent_id": "remote-innovium", "display_name": "Innovium",
+				"address": "remote-innovium@remote-chain", "authorization_mode": "node-messaging-v1",
+				"available": true, "accepting": true,
+			}},
+		}}})
 	})
 	ts := httptest.NewServer(mux)
 	defer ts.Close()
@@ -731,19 +737,22 @@ func TestSageFindAgentPrefersLocalActiveMatches(t *testing.T) {
 	s := NewServer(ts.URL, priv)
 	result, err := s.toolFindAgent(context.Background(), map[string]any{"name": "innovium"})
 	require.NoError(t, err)
-	assert.False(t, federationRequested, "a local match must not probe federation")
+	assert.True(t, federationRequested, "a local exact match must not hide a same-named connected agent")
 	assert.Equal(t, 1, lookupRequests, "one name resolution must remain one bounded local lookup")
 
 	out := result.(map[string]any)
-	assert.Equal(t, []string{"local"}, out["searched"])
-	assert.Equal(t, 1, out["total"])
+	assert.Equal(t, []string{"local", "federated"}, out["searched"])
+	assert.Equal(t, 2, out["total"])
 	assert.Equal(t, true, out["complete"])
 	assert.Empty(t, out["next_peer_cursor"])
 	matches := out["matches"].([]map[string]any)
-	require.Len(t, matches, 1)
+	require.Len(t, matches, 2)
 	assert.Equal(t, "local", matches[0]["scope"])
 	assert.Equal(t, "local-innovium", matches[0]["agent_id"])
 	assert.Equal(t, "local-innovium", matches[0]["to"])
+	assert.Equal(t, "remote-innovium@remote-chain", matches[1]["to"])
+	assert.Equal(t, "exact", matches[0]["match_kind"])
+	assert.Equal(t, "exact", matches[1]["match_kind"])
 }
 
 func TestSageFindAgentPeerChainDisambiguatesSameNamedRemoteAgent(t *testing.T) {
@@ -854,8 +863,9 @@ func TestSageFindAgentPreservesPeerCursorUntilLaterExactBeatsLocalSubstring(t *t
 	require.Equal(t, true, secondOut["complete"])
 	require.Empty(t, secondOut["next_peer_cursor"])
 	secondMatches := secondOut["matches"].([]map[string]any)
-	require.Len(t, secondMatches, 1)
+	require.Len(t, secondMatches, 2)
 	require.Equal(t, "remote-voice@remote-chain", secondMatches[0]["to"])
+	require.Equal(t, "local-voice-notes", secondMatches[1]["to"])
 	require.Equal(t, []string{"", "peer-page-2"}, federationCursors,
 		"each call must consume exactly one bounded federation page")
 }
@@ -1180,9 +1190,12 @@ func TestSageFindAgentFederatedExactBeatsLocalSubstring(t *testing.T) {
 	out := result.(map[string]any)
 	require.Equal(t, []string{"local", "federated"}, out["searched"])
 	matches := out["matches"].([]map[string]any)
-	require.Len(t, matches, 1)
+	require.Len(t, matches, 2)
 	require.Equal(t, "federated", matches[0]["scope"])
 	require.Equal(t, "remote-voice@remote-chain", matches[0]["to"])
+	require.Equal(t, "local-voice-notes", matches[1]["to"])
+	require.Equal(t, "exact", matches[0]["match_kind"])
+	require.Equal(t, "substring", matches[1]["match_kind"])
 }
 
 func TestSageFindAgentFallsBackToContactableFederatedMatches(t *testing.T) {

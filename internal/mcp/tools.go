@@ -85,7 +85,7 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_federation": {
 			Name:        "sage_federation",
-			Description: "Discover connected SAGEs, remote agents, copy offers, and this caller's domain authorization. shared_read_domains passed the live peer-policy and exact linked-reader gates and are eligible for federated recall. read_candidate_domains are policy intersections only; inspect read_authorization before treating them as readable. Read-only and caller-filtered; pairing, sharing, subscriptions, and other mutations remain operator-only.",
+			Description: "Discover connected SAGEs, remote agents, copy offers, and this caller's domain authorization. To find a recipient by name, use sage_find_agent for one lookup across local and connected SAGEs. shared_read_domains passed the live peer-policy and exact linked-reader gates and are eligible for federated recall. read_candidate_domains are policy intersections only; inspect read_authorization before treating them as readable. Read-only and caller-filtered; pairing, sharing, subscriptions, and other mutations remain operator-only.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -96,12 +96,13 @@ func (s *Server) registerTools() map[string]Tool {
 		},
 		"sage_find_agent": {
 			Name:        "sage_find_agent",
-			Description: "Discover an active agent by a human name before sending a message. Searches active local registrations first with a bounded substring lookup across display name, immutable registered name, and provider; ASCII matching is case-insensitive, non-ASCII code points require registered casing, and exact field matches rank first. Set peer_chain to search one exact connected SAGE instead, including when a local agent has the same name. Returns exact values ready for sage_message_send.to. This is not a global directory or an online/reachability check: an absent match is not proof that a previously known exact agent_id is unreachable.",
+			Description: "Find an agent by human name in one lookup across this SAGE and connected SAGEs by default. Uses a bounded substring lookup across display name, immutable registered name, and provider; ASCII matching is case-insensitive, non-ASCII code points require registered casing, and exact field matches rank first across both local and federated results. Same-named agents are returned with distinct exact addresses; choose the intended recipient before sending. No separate sage_federation lookup is needed. Use scope=local to search only this SAGE, or peer_chain to search one exact connected SAGE. Returns exact values ready for sage_message_send.to. This is not a global directory or an online/reachability check: an absent match is not proof that a previously known exact agent_id is unreachable.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"name":        map[string]any{"type": "string", "description": "Human display-name, registered-name, or provider substring to find (for example, \"mynah\" finds \"MYNAH (SAGE Voice Bridge Agent)\"). ASCII matching is case-insensitive and bounded; non-ASCII code points require registered casing; exact field matches rank first."},
 					"limit":       map[string]any{"type": "integer", "description": "Maximum matches to return (default: 10, max: 20).", "default": 10, "minimum": 1, "maximum": 20},
+					"scope":       map[string]any{"type": "string", "enum": []string{"all", "local"}, "default": "all", "description": "Search local and connected SAGEs together by default. Use local to skip federation network checks; local cannot be combined with peer_chain or peer_cursor."},
 					"peer_chain":  map[string]any{"type": "string", "description": "Optional exact connected SAGE chain ID. When set, skips local matches and searches only that peer; useful when both SAGEs have an agent with the same display name."},
 					"peer_cursor": map[string]any{"type": "string", "description": "Bounded federated continuation returned by an incomplete previous lookup. Omit for the first page."},
 				},
@@ -2142,8 +2143,8 @@ func matchesAgentName(query string, candidates ...string) (exact bool, partial b
 //
 // Deliberately conservative, because the caller is `sage_find_agent` and its
 // answer feeds `sage_message_send` — a wrong match sends the owner's work to the wrong
-// agent. Two things keep that safe: an exact match always wins outright
-// (`toolFindAgent` only falls back to partials when `localExact` is empty), and
+// agent. Two things keep that safe: exact matches rank before partials across
+// local and federated results, and
 // every match is returned with its agent_id for the model to choose from rather
 // than resolved silently to one.
 func agentNameOverlaps(queryTokens, candidateTokens []string) bool {
@@ -2278,9 +2279,8 @@ func localAgentLookupSuffix(query string) string {
 }
 
 // toolFindAgent provides an explicit, safe recipient-discovery path for
-// agent-to-agent work. An exact local registration takes precedence. A local
-// substring match is held while federation is checked so that an exact linked
-// recipient on another SAGE cannot be hidden by an unrelated fuzzy local name.
+// agent-to-agent work. Local and federated matches share one bounded result,
+// with exact matches ranked ahead of substring matches regardless of origin.
 // The caller-filtered available view limits remote results to agents the caller
 // may already see and contact.
 func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any, error) {
@@ -2290,6 +2290,10 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 	query := strings.TrimSpace(stringParam(params, "name", ""))
 	if query == "" {
 		return nil, fmt.Errorf("'name' is required")
+	}
+	scope := strings.TrimSpace(stringParam(params, "scope", "all"))
+	if scope != "all" && scope != "local" {
+		return nil, fmt.Errorf("'scope' must be all or local")
 	}
 	limit := intParam(params, "limit", 10)
 	if limit <= 0 {
@@ -2305,6 +2309,15 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 	}
 	if peerChain != "" && peerCursor != "" {
 		return nil, fmt.Errorf("'peer_cursor' cannot be combined with 'peer_chain'")
+	}
+	if scope == "local" && (peerChain != "" || peerCursor != "") {
+		return nil, fmt.Errorf("'scope=local' cannot be combined with 'peer_chain' or 'peer_cursor'")
+	}
+	searched := []string{"local", "federated"}
+	if scope == "local" {
+		searched = []string{"local"}
+	} else if peerChain != "" {
+		searched = []string{"federated"}
 	}
 
 	var localResponse struct {
@@ -2328,8 +2341,7 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 		}
 	}
 
-	localExact := make([]findAgentLocalResult, 0)
-	localPartial := make([]findAgentLocalResult, 0)
+	candidates := make([]map[string]any, 0, len(localResponse.Agents))
 	for _, agent := range localResponse.Agents {
 		if agent.AgentID == "" {
 			continue
@@ -2339,60 +2351,66 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 		// MCP-side status/name copy drifted from that contract. The fallback is
 		// retained only for an older server that predates match_kind; that
 		// endpoint already returned active SQL rows exclusively.
-		switch agent.MatchKind {
-		case "exact":
-			localExact = append(localExact, agent)
-		case "substring":
-			localPartial = append(localPartial, agent)
-		case "":
+		matchKind := agent.MatchKind
+		if matchKind == "" {
 			exact, partial := matchesAgentName(
 				query, agent.Name, agent.RegisteredName, agent.Provider,
 			)
 			if exact {
-				localExact = append(localExact, agent)
+				matchKind = "exact"
 			} else if partial {
-				localPartial = append(localPartial, agent)
+				matchKind = "substring"
 			}
 		}
-	}
-	localResult := func(localMatches []findAgentLocalResult, searched []string) map[string]any {
-		sort.Slice(localMatches, func(i, j int) bool {
-			if localMatches[i].Name != localMatches[j].Name {
-				return strings.ToLower(localMatches[i].Name) < strings.ToLower(localMatches[j].Name)
-			}
-			return localMatches[i].AgentID < localMatches[j].AgentID
+		if matchKind != "exact" && matchKind != "substring" {
+			continue
+		}
+		candidates = append(candidates, map[string]any{
+			"scope":           "local",
+			"agent_id":        agent.AgentID,
+			"name":            agent.Name,
+			"registered_name": agent.RegisteredName,
+			"provider":        agent.Provider,
+			"status":          agent.Status,
+			"match_kind":      matchKind,
+			"to":              agent.AgentID,
 		})
-		matches := make([]map[string]any, 0, min(len(localMatches), limit))
-		for _, agent := range localMatches[:min(len(localMatches), limit)] {
-			matches = append(matches, map[string]any{
-				"scope":           "local",
-				"agent_id":        agent.AgentID,
-				"name":            agent.Name,
-				"registered_name": agent.RegisteredName,
-				"provider":        agent.Provider,
-				"status":          agent.Status,
-				"to":              agent.AgentID,
-			})
-		}
+	}
+	lookupResult := func(complete bool, nextCursor string, remoteTruncated bool, message string) map[string]any {
+		sort.Slice(candidates, func(i, j int) bool {
+			left, right := candidates[i], candidates[j]
+			if left["match_kind"] != right["match_kind"] {
+				return left["match_kind"] == "exact"
+			}
+			leftName := asciiLowerAgentName(left["name"].(string))
+			rightName := asciiLowerAgentName(right["name"].(string))
+			if leftName != rightName {
+				return leftName < rightName
+			}
+			if left["scope"] != right["scope"] {
+				return left["scope"] == "local"
+			}
+			return left["to"].(string) < right["to"].(string)
+		})
+		matches := make([]map[string]any, min(len(candidates), limit))
+		copy(matches, candidates)
 		return map[string]any{
 			"matches":          matches,
-			"total":            len(localMatches),
+			"total":            len(candidates),
 			"searched":         searched,
-			"truncated":        len(localMatches) > len(matches),
-			"complete":         true,
-			"next_peer_cursor": "",
-			"message":          "Found local agent matches. Pass a match's to value directly to sage_message_send.",
+			"truncated":        remoteTruncated || len(candidates) > len(matches),
+			"complete":         complete,
+			"next_peer_cursor": nextCursor,
+			"message":          message,
 		}
 	}
-	localPartialResult := func(err error) map[string]any {
-		result := localResult(localPartial, []string{"local", "federated"})
-		result["complete"] = false
+	localFallbackResult := func(err error) map[string]any {
+		result := lookupResult(false, "", false, "Local matches are shown, but federated discovery could not be revalidated. Do not treat this incomplete result as proof that a saved exact remote address is offline.")
 		result["federated_lookup_error"] = err.Error()
-		result["message"] = "Local partial matches are shown, but federated discovery could not be revalidated. Do not treat this incomplete result as proof that a saved exact remote address is offline."
 		return result
 	}
-	if len(localExact) > 0 {
-		return localResult(localExact, []string{"local"}), nil
+	if scope == "local" {
+		return lookupResult(true, "", false, "Searched only this SAGE. Pass a match's to value directly to sage_message_send. A directory result is not an online/offline verdict."), nil
 	}
 
 	connections, cacheHit := s.cachedFederatedAgentConnections(ctx, query)
@@ -2409,8 +2427,8 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 		var err error
 		connections, err = s.reauthorizeCachedFederatedAgentConnections(ctx, connections)
 		if err != nil {
-			if len(localPartial) > 0 {
-				return localPartialResult(err), nil
+			if len(candidates) > 0 {
+				return localFallbackResult(err), nil
 			}
 			return nil, err
 		}
@@ -2428,10 +2446,10 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 			path += "&peer_cursor=" + url.QueryEscape(peerCursor)
 		}
 		if err := s.doSignedJSON(ctx, "GET", path, nil, &federationResponse); err != nil {
-			if len(localPartial) > 0 {
-				return localPartialResult(err), nil
+			if len(candidates) > 0 {
+				return localFallbackResult(err), nil
 			}
-			return nil, fmt.Errorf("discover federated agents after local miss: %w", err)
+			return nil, fmt.Errorf("discover federated agents: %w", err)
 		}
 		connections = boundedFederatedAgentConnections(federationResponse.Connections)
 		federatedComplete = federationResponse.Complete == nil || *federationResponse.Complete
@@ -2441,12 +2459,6 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 		}
 	}
 
-	type federatedMatch struct {
-		connection findAgentFederatedConnection
-		contact    findAgentFederatedContact
-	}
-	federatedExact := make([]federatedMatch, 0)
-	federatedPartial := make([]federatedMatch, 0)
 	for _, connection := range connections {
 		if connection.RemoteChainID == "" {
 			continue
@@ -2458,57 +2470,34 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 				continue
 			}
 			exact, partial := matchesAgentName(query, contact.DisplayName, contact.RegisteredName, contact.Provider)
-			match := federatedMatch{connection: connection, contact: contact}
-			if exact {
-				federatedExact = append(federatedExact, match)
-			} else if partial {
-				federatedPartial = append(federatedPartial, match)
+			if !exact && !partial {
+				continue
 			}
+			matchKind := "substring"
+			if exact {
+				matchKind = "exact"
+			}
+			entry := map[string]any{
+				"scope":           "federated",
+				"agent_id":        contact.AgentID,
+				"name":            contact.DisplayName,
+				"registered_name": contact.RegisteredName,
+				"provider":        contact.Provider,
+				"match_kind":      matchKind,
+				"network":         connection.NetworkName,
+				"chain_id":        connection.RemoteChainID,
+				"address":         contact.Address,
+				"handle":          contact.Handle,
+				"to":              contact.Address,
+			}
+			if linked {
+				entry["authorization_mode"] = linkedFederatedAgentAuthorizationMode
+			} else {
+				entry["available"] = true
+				entry["accepting"] = true
+			}
+			candidates = append(candidates, entry)
 		}
-	}
-	if len(federatedExact) == 0 && len(localPartial) > 0 {
-		result := localResult(localPartial, []string{"local", "federated"})
-		result["complete"] = federatedComplete
-		result["next_peer_cursor"] = nextPeerCursor
-		if !federatedComplete {
-			result["message"] = "Local partial matches are shown, but more bounded federated peer pages remain. Pass next_peer_cursor as peer_cursor to check one more page for an exact remote recipient before choosing a fuzzy local match."
-		}
-		return result, nil
-	}
-	federatedMatches := federatedExact
-	if len(federatedMatches) == 0 {
-		federatedMatches = federatedPartial
-	}
-	sort.Slice(federatedMatches, func(i, j int) bool {
-		if federatedMatches[i].connection.RemoteChainID != federatedMatches[j].connection.RemoteChainID {
-			return federatedMatches[i].connection.RemoteChainID < federatedMatches[j].connection.RemoteChainID
-		}
-		if federatedMatches[i].contact.DisplayName != federatedMatches[j].contact.DisplayName {
-			return strings.ToLower(federatedMatches[i].contact.DisplayName) < strings.ToLower(federatedMatches[j].contact.DisplayName)
-		}
-		return federatedMatches[i].contact.AgentID < federatedMatches[j].contact.AgentID
-	})
-	matches := make([]map[string]any, 0, min(len(federatedMatches), limit))
-	for _, match := range federatedMatches[:min(len(federatedMatches), limit)] {
-		entry := map[string]any{
-			"scope":           "federated",
-			"agent_id":        match.contact.AgentID,
-			"name":            match.contact.DisplayName,
-			"registered_name": match.contact.RegisteredName,
-			"provider":        match.contact.Provider,
-			"network":         match.connection.NetworkName,
-			"chain_id":        match.connection.RemoteChainID,
-			"address":         match.contact.Address,
-			"handle":          match.contact.Handle,
-			"to":              match.contact.Address,
-		}
-		if isLinkedFederatedAgentContact(match.contact) {
-			entry["authorization_mode"] = linkedFederatedAgentAuthorizationMode
-		} else {
-			entry["available"] = true
-			entry["accepting"] = true
-		}
-		matches = append(matches, entry)
 	}
 	remoteTruncated := false
 	for _, connection := range connections {
@@ -2518,22 +2507,16 @@ func (s *Server) toolFindAgent(ctx context.Context, params map[string]any) (any,
 	if hasDomainFreeFederatedContacts(connections) {
 		cacheState = "live"
 	}
-	searched := []string{"local", "federated"}
-	message := "No local agent matched. Federated results are limited to current caller-authorized recipient relations; pass a match's to value directly to sage_message_send. SAGE always re-checks the target registration, route, and authorization before sending. A directory result is not an online/offline verdict and is not reachable, accepting, delivery, or read evidence."
+	message := "Searched this SAGE and connected SAGEs together. Exact name matches rank first; choose the intended recipient and pass its exact to value directly to sage_message_send. SAGE always re-checks the target registration, route, and authorization before sending. A directory result is not an online/offline verdict and is not reachable, accepting, delivery, or read evidence."
 	if peerChain != "" {
-		searched = []string{"federated"}
 		message = "Searched only the selected connected SAGE. Results are limited to current caller-authorized recipient relations; pass a match's to value directly to sage_message_send. SAGE always re-checks the target registration, route, and authorization before sending."
 	}
-	return map[string]any{
-		"matches":          matches,
-		"total":            len(federatedMatches),
-		"searched":         searched,
-		"federated_cache":  cacheState,
-		"truncated":        remoteTruncated || len(federatedMatches) > len(matches),
-		"complete":         federatedComplete,
-		"next_peer_cursor": nextPeerCursor,
-		"message":          message,
-	}, nil
+	if !federatedComplete && nextPeerCursor != "" {
+		message += " More bounded federated peer pages remain. Pass next_peer_cursor as peer_cursor to check one more page for an exact remote recipient."
+	}
+	result := lookupResult(federatedComplete, nextPeerCursor, remoteTruncated, message)
+	result["federated_cache"] = cacheState
+	return result, nil
 }
 
 func (s *Server) toolForget(ctx context.Context, params map[string]any) (any, error) {
@@ -5608,7 +5591,7 @@ func (s *Server) toolPipeReceiptStatus(ctx context.Context, params map[string]an
 	return response, nil
 }
 
-const pipeTargetResolutionGuidance = "Use an exact local agent ID or registered/display name, a federated #node/agent-prefix handle, or agent_id@chain. Use sage_find_agent to discover matching names and sage_directory for local agent IDs. A provider label resolves only when it exactly matches registered agent metadata; arbitrary provider aliases are not inferred."
+const pipeTargetResolutionGuidance = "Use an exact local agent ID or registered/display name, a federated #node/agent-prefix handle, or agent_id@chain. Use sage_find_agent to find matching names across local and connected SAGEs in one lookup, or sage_directory to browse their exact addresses. A provider label resolves only when it exactly matches registered agent metadata; arbitrary provider aliases are not inferred."
 
 func (s *Server) toolPipe(ctx context.Context, params map[string]any) (any, error) {
 	if err := s.requireBoundFederatedCaller(ctx); err != nil {

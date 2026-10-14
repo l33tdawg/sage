@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.23.23.
+Reconciled against internal/mcp for SAGE v11.23.23, with the unified agent lookup contract verified against current source.
 
 # SAGE MCP Tools Reference
 
@@ -1631,15 +1631,17 @@ original sender may query this projection.
 ### sage_find_agent
 
 **Purpose:** Discover an active recipient by a human name before calling
-`sage_message_send`. It searches active local registrations first using a bounded,
-literal substring match over display name, immutable registered name, and
+`sage_message_send`. One call searches active local registrations and
+caller-authorized contacts on connected SAGEs by default, using a bounded
+name lookup over display name, immutable registered name, and
 provider. ASCII matching is case-insensitive; non-ASCII code points require
 their registered casing. Thus `mynah` can resolve
-`MYNAH (SAGE Voice Bridge Agent)`. A local exact match returns immediately by
-default; local substring matches are combined with caller-authorized federated
-contacts so a stronger remote exact match can win. Set `peer_chain` to skip
-local discovery and search one exact connected SAGE when both nodes use the
-same agent name. It is not a global agent directory.
+`MYNAH (SAGE Voice Bridge Agent)`. Exact matches rank before substring matches
+across both sources; a local match never suppresses an authorized remote match.
+Same-named agents retain distinct exact `to` addresses so the caller can choose
+the intended recipient. No separate `sage_federation` call is needed to find
+an agent. Set `scope="local"` to search only this SAGE, or `peer_chain` to skip
+local discovery and search one exact connected SAGE. It is not a global agent directory.
 
 After app-v23, local discovery uses the same active-ordinary-agent boundary as
 local pipeline resolve/send/inbox for both caller and result: Root and every
@@ -1669,7 +1671,8 @@ contacted.
 | Name | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | Display-name, registered-name, or provider substring for local and federated contacts. Federated lookup requires at least two Unicode code points and applies a two-second candidate-query deadline. ASCII matching is case-insensitive and exact matches rank first; non-ASCII federated matching follows the remote SQLite registration casing behavior. |
-| `limit` | int | no | Maximum matches to return. Default 10, max 20. |
+| `limit` | int | no | Maximum matches across the combined local/federated result, after ranking. Default 10, max 20. |
+| `scope` | string | no | `all` (default) searches this SAGE and connected SAGEs together. `local` skips federation checks and cannot be combined with `peer_chain` or `peer_cursor`. |
 | `peer_chain` | string | no | Exact connected SAGE chain ID to search exclusively. Skips local matches and all other peers; cannot be combined with `peer_cursor`. |
 | `peer_cursor` | string | no | Opaque continuation returned as `next_peer_cursor` by an incomplete federated lookup. Omit it for the first page. One call consumes at most one bounded peer page; callers choose whether to continue and must not auto-walk the federation. |
 
@@ -1744,13 +1747,18 @@ remote agent contacts.
 
 - `matches`: recipient records with `scope` (`local` or `federated`) and a `to`
   field ready to pass to `sage_message_send`. Local `to` is the exact `agent_id`;
-  federated `to` is the exact `agent_id@chain` address.
-- `searched`: `["local"]` when an exact local match makes federation
-  unnecessary; a local substring match remains `["local", "federated"]` so an
-  exact authorized remote recipient can still win. If that bounded federated
-  page is incomplete, the local substring results preserve `complete:false`
-  and `next_peer_cursor` rather than pretending the lookup is finished.
-  With `peer_chain`, it is `["federated"]`.
+  federated `to` is the exact `agent_id@chain` address. `match_kind` is `exact`
+  or `substring`. Exact matches rank first, followed by name and exact address;
+  identical names put the local entry before federated entries without hiding
+  either. Substring matches remain visible when exact matches exist.
+- `searched`: `["local", "federated"]` by default, `["local"]` for
+  `scope="local"`, or `["federated"]` with `peer_chain`. If a bounded federated
+  page is incomplete, all current matches preserve `complete:false` and
+  `next_peer_cursor`. Each continuation rechecks local matches too; merge pages
+  by exact `to` address. A failed live or cached federated authorization check
+  keeps local matches with `complete:false` and `federated_lookup_error`, while
+  omitting remote contacts whose current authorization could not be verified.
+  With no local matches, a federated lookup failure remains an error.
 - `federated_cache`: `hit` or `miss` for legacy shared-domain contacts, or
   `live` when a linked-v23 relation deliberately bypasses the cache.
 - `total`, `truncated`, `complete`, `next_peer_cursor`, and a next-step
