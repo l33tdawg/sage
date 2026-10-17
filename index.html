@@ -11,20 +11,20 @@
   gtag('js', new Date());
   gtag('config', 'G-Y9LD21QVEQ');
 </script>
-<title>SAGE | Persistent memory for AI agents</title>
+<title>SAGE | Governed memory for AI agents</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<meta name="description" content="Persistent memory for AI agents. Keep project decisions and lessons across sessions with a local, open-source memory node, signed history and explicit access controls.">
+<meta name="description" content="Governed memory and messaging for AI agents. Agent-signed writes, admission through a reviewable consensus process, explicit access control, encrypted local storage, and an audit trail you can inspect.">
 <meta name="theme-color" content="#0a0614">
-  <meta property="og:title" content="SAGE | Persistent memory for AI agents">
-  <meta property="og:description" content="Persistent memory for AI agents. Keep project decisions and lessons across sessions with a local, open-source memory node, signed history and explicit access controls.">
+  <meta property="og:title" content="SAGE | Governed memory for AI agents">
+  <meta property="og:description" content="Governed memory and messaging for AI agents. Agent-signed writes, admission through a reviewable consensus process, explicit access control, encrypted local storage, and an audit trail you can inspect.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://l33tdawg.github.io/sage/">
 <meta property="og:image" content="https://l33tdawg.github.io/sage/assets/og-sage-home-20261003.jpg">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="SAGE | Persistent memory for AI agents">
-  <meta name="twitter:description" content="Persistent memory for AI agents. Keep project decisions and lessons across sessions with a local, open-source memory node, signed history and explicit access controls.">
+  <meta name="twitter:title" content="SAGE | Governed memory for AI agents">
+  <meta name="twitter:description" content="Governed memory and messaging for AI agents. Agent-signed writes, admission through a reviewable consensus process, explicit access control, encrypted local storage, and an audit trail you can inspect.">
 <meta name="twitter:image" content="https://l33tdawg.github.io/sage/assets/og-sage-home-20261003.jpg">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -975,8 +975,8 @@ footer a:hover { text-decoration: underline; }
       <div class="brand-hero-copy">
         <p class="brand-eyebrow">Sovereign Agent Governed Experience</p>
         <img class="brand-wordmark" src="assets/sage-wordmark.svg" width="531" height="110" alt="SAGE">
-        <h1 id="hero-heading">Stop re-explaining<br><em>your project.</em></h1>
-        <p class="brand-description">Give your AI agents a shared memory of the decisions you made, the approaches that failed and what to try next. Keep that context when you start a new session or switch tools.</p>
+        <h1 id="hero-heading">Memory your agents<br><em>can be held to.</em></h1>
+        <p class="brand-description">SAGE is a governed memory and messaging layer for AI agents. Every memory is signed by an agent, admitted through a reviewable process, scoped by permissions you set, and kept with an audit trail you can inspect.</p>
         <p class="brand-compatibility">Claude Code &middot; Codex &middot; Cursor &middot; Any MCP-capable client</p>
         <div class="hero-actions">
           <a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">Download SAGE <span aria-hidden="true">&darr;</span></a>
@@ -985,7 +985,7 @@ footer a:hover { text-decoration: underline; }
         <p class="brand-free">Free and open source. Runs on your machine.</p>
       </div>
       <div class="brand-assurance">
-        <span>Local by default</span><span>Signed memory history</span><span>You choose what to share</span>
+        <span>Agent-signed writes</span><span>Governed admission</span><span>Encrypted at rest</span>
         <a href="#trust" onclick="switchTab('home','trust');return false;">Read the trust details &rarr;</a>
       </div>
       <div class="brand-release">
@@ -1003,22 +1003,81 @@ footer a:hover { text-decoration: underline; }
     </div>
   </section>
 
-  <section class="brand-section" aria-labelledby="benefit-heading">
+  <section class="brand-section" aria-labelledby="governance-heading">
     <div class="container brand-benefit-layout">
       <div>
-        <div class="section-tag">Between sessions</div>
-        <h2 id="benefit-heading">Pick up the work.<br>Keep the reasoning.</h2>
-        <p class="section-desc">The useful context is often what you already tried, ruled out or decided. SAGE makes those lessons available to the next session.</p>
+        <div class="section-tag">Governance</div>
+        <h2 id="governance-heading">Memory that has to<br>earn its place.</h2>
+        <p class="section-desc">A memory is a claim, not a fact. SAGE records who made it, how it was admitted, and how much weight it still carries.</p>
         <div class="brand-benefits">
-          <div class="brand-benefit"><h3>Keep the why</h3><p>Record the decision and its reasoning, so the next agent has more than the final answer.</p></div>
-          <div class="brand-benefit"><h3>Carry lessons between tools</h3><p>Connect your tools to the same SAGE node. Give authorized agents access to the project memories they need.</p></div>
-          <div class="brand-benefit"><h3>Review what it remembers</h3><p>Inspect a memory's author, confidence and status in CEREBRUM. Keep useful context; deprecate what no longer belongs in recall.</p></div>
+          <div class="brand-benefit"><h3>Signed admission</h3><p>Agents sign what they write. Validation votes decide what commits: on a personal node you cast your own vote, on a network admission needs a quorum.</p></div>
+          <div class="brand-benefit"><h3>Challenge and corroboration</h3><p>A committed memory can be challenged, corroborated or reinstated. The disagreement stays in the record instead of disappearing from it.</p></div>
+          <div class="brand-benefit"><h3>Decay without reinforcement</h3><p>Confidence fades when nothing reinforces a claim, so stale context stops crowding out what your agents actually need.</p></div>
         </div>
       </div>
-      <div class="memory-example" aria-label="Illustrative example of memory across sessions">
-        <div class="example-head"><span>Project memory</span><span>Illustrative example</span></div>
-        <div class="example-step"><small>A lesson worth keeping</small><blockquote>We ruled out a full rewrite. The adapter fix passed the integration checks.</blockquote></div>
-        <div class="example-step"><small>The next session</small><p><span class="example-arrow" aria-hidden="true">&rarr;</span>Recall the adapter decision and its evidence before proposing another rewrite.</p></div>
+      <div class="memory-example" aria-label="Illustrative example of a governed memory lifecycle">
+        <div class="example-head"><span>Lifecycle</span><span>Illustrative example</span></div>
+        <div class="example-step"><small>Proposed, signed</small><blockquote>The vendor API times out under load; the retry wrapper is a workaround, not a fix.</blockquote></div>
+        <div class="example-step"><small>Challenged, then corroborated</small><p><span class="example-arrow" aria-hidden="true">&rarr;</span>A second agent disagrees, a third supplies evidence, confidence settles and the contested history stays on the record.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="brand-section" aria-labelledby="audit-heading">
+    <div class="container">
+      <div class="section-tag">Auditability</div>
+      <h2 id="audit-heading">Every memory<br>has a history.</h2>
+      <p class="section-desc">The record around a memory is the point: who wrote it, under which principal, how it was admitted, and what has happened to it since.</p>
+      <div class="trust-points" style="margin-top:40px;">
+        <article class="trust-point"><h3>Attributable author and principal</h3><p>Agent identity and content hash bind a memory to the exact agent and principal that wrote it. A relayed or shared write is never mistaken for a local one.</p></article>
+        <article class="trust-point"><h3>Reviewable lifecycle</h3><p>Proposed, committed, challenged, deprecated or reinstated: each transition is recorded with its reason, so the current state is explainable rather than just asserted.</p><a href="https://github.com/l33tdawg/sage/blob/main/docs/reference/concepts/memory-lifecycle.md">Read how memory changes</a></article>
+        <article class="trust-point"><h3>Inspectable storage</h3><p>Local BadgerDB and SQLite stores under your home directory. Query them, back them up, move them, or read the source that writes them.</p></article>
+        <article class="trust-point"><h3>Deprecation is not deletion</h3><p>Retiring a memory removes it from recall while the audit history stays intact, so later readers can still see that it existed and why it was withdrawn.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="brand-section brand-trust" id="trust" aria-labelledby="trust-heading">
+    <div class="container trust-layout">
+      <div>
+        <div class="section-tag">Security and privacy</div><h2 id="trust-heading">Sovereign<br>by default.</h2>
+        <p class="section-desc">Keep the node on your machine, encrypt what it holds, and decide which agents may reach it. Nothing is shared unless you grant it.</p>
+        <p class="trust-limits">SAGE supplies context to your model; it does not change the model's weights. Recall depends on the memories recorded, your configuration and the agent's use of its tools. Open source under Apache 2.0, with published research and benchmark scripts available to inspect.</p>
+        <p class="trust-limits"><strong>Composes with <a href="https://github.com/agentrust-io">AgenTrust</a>.</strong> SAGE ships a verified bridge, <a href="https://github.com/l33tdawg/sage-agenttrust">sage-agenttrust</a>, that gates memory submission on a verified execution attestation, so a committed memory can carry the attested identity that authored it. AgenTrust proves the runtime; SAGE proves the consensus record. The bridge is optional and additive, stock SAGE runs without it, and it establishes provenance rather than the truth of the content.</p>
+      </div>
+      <div class="trust-points">
+        <article class="trust-point"><h3>Local by default</h3><p>Memories live under <code>~/.sage/</code>. Optional federation, connectors and remote model providers can send data beyond your machine, but only when you configure them.</p><a href="privacy.html">Read the privacy details</a></article>
+        <article class="trust-point"><h3>Vault encryption</h3><p>Enable the vault to encrypt memory contents at rest with AES-256-GCM. Keep the recovery key somewhere safe.</p><a href="https://github.com/l33tdawg/sage/blob/main/docs/GETTING_STARTED.md">Read the setup guide</a></article>
+        <article class="trust-point"><h3>Classification and clearance</h3><p>Records carry a classification and agents an enrollment clearance. A write is checked against the caller's clearance, and recall only returns what that caller is entitled to see.</p></article>
+        <article class="trust-point"><h3>Explicit, revocable access</h3><p>Roles, domains, access groups and per-agent visibility are explicit policy rather than assumptions. Revoking access takes effect without rewriting the underlying record.</p><a href="#research" onclick="switchTab('research');return false;">Examine the research</a></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="brand-section" aria-labelledby="network-heading">
+    <div class="container">
+      <div class="section-tag">Networked agents</div>
+      <h2 id="network-heading">Sovereign nodes.<br>Shared memory.</h2>
+      <p class="section-desc">SAGE nodes federate under policy you write. Nothing is shared by default, and every peer grant is directional, scoped and revocable.</p>
+      <div class="trust-points" style="margin-top:40px;">
+        <article class="trust-point"><h3>Human-verified pairing</h3><p>A join ceremony pins the peer's identity and certificate before any agreement exists. Connections are established deliberately, not discovered and trusted.</p></article>
+        <article class="trust-point"><h3>Per-domain, per-direction grants</h3><p>Each peer agreement grants read, copy or write per domain, in one direction. A peer that can read a domain does not thereby gain the right to write to it.</p></article>
+        <article class="trust-point"><h3>Agent-level exposure</h3><p>Choose which local agents are discoverable to a peer, and which of your agents may reach a peer's exported domains. Visibility is not memory access, and neither is delivery authority.</p></article>
+        <article class="trust-point"><h3>Revocable at any time</h3><p>Pausing or revoking a connection invalidates the frozen agreement binding, so previously issued plans stop being usable rather than lingering as standing authority.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="brand-section" aria-labelledby="comms-heading">
+    <div class="container">
+      <div class="section-tag">Agent communication</div>
+      <h2 id="comms-heading">Durable messages.<br>Explicit ownership.</h2>
+      <p class="section-desc">Agents coordinate through an inbox with claims, receipts and consent, rather than by trusting whatever text arrives in them.</p>
+      <div class="trust-points" style="margin-top:40px;">
+        <article class="trust-point"><h3>Exact identities</h3><p>Messages route between exact agent identities. A reply never lands on a same-named stranger, and federated work stays chain-qualified.</p></article>
+        <article class="trust-point"><h3>Claims, not guesses</h3><p>Inspection is passive. Work is only taken when an agent explicitly claims a specific request, so two runtimes cannot silently duplicate the same task.</p></article>
+        <article class="trust-point"><h3>Consent before contact</h3><p>Receiver-local consent governs whether a remote agent may message you at all, separately from whether it can read your memory.</p></article>
+        <article class="trust-point"><h3>Receipts are not read evidence</h3><p>Delivery, read acknowledgement and results stay distinct states, so an agent never treats "it arrived" as "it was understood" or as permission to act on the contents.</p></article>
       </div>
     </div>
   </section>
@@ -1071,26 +1130,10 @@ footer a:hover { text-decoration: underline; }
     </div>
   </section>
 
-  <section class="brand-section brand-trust" id="trust" aria-labelledby="trust-heading">
-    <div class="container trust-layout">
-      <div>
-        <div class="section-tag">Under your control</div><h2 id="trust-heading">A memory system<br>you can inspect.</h2>
-        <p class="section-desc">Keep your memory node on your machine. Decide which agents can access it and which domains to share.</p>
-        <p class="trust-limits">SAGE supplies context to your model; it does not change the model's weights. Recall depends on the memories recorded, your configuration and the agent's use of its tools.</p>
-      </div>
-      <div class="trust-points">
-        <article class="trust-point"><h3>Local by default</h3><p>Memories live under <code>~/.sage/</code>. Optional federation, connectors and remote model providers can send data beyond your machine when you configure them.</p><a href="privacy.html">Read the privacy details</a></article>
-        <article class="trust-point"><h3>Optional vault encryption</h3><p>Enable the vault to encrypt memory contents at rest with AES-256-GCM. Keep the recovery key somewhere safe.</p><a href="https://github.com/l33tdawg/sage/blob/main/docs/GETTING_STARTED.md">Read the setup guide</a></article>
-        <article class="trust-point"><h3>Signed, attributable history</h3><p>Agent identity and content hashes bind memories to their recorded origin. Deprecating a memory removes it from recall while retaining the audit history.</p><a href="https://github.com/l33tdawg/sage/blob/main/docs/reference/concepts/memory-lifecycle.md">Read how memory changes</a></article>
-        <article class="trust-point"><h3>Open code and evidence</h3><p>Apache 2.0 source, published research and retrieval benchmark scripts are available to inspect. Results describe specific runs and configurations.</p><a href="#research" onclick="switchTab('research');return false;">Examine the research</a></article>
-      </div>
-    </div>
-  </section>
-
   <section class="brand-final" aria-labelledby="final-heading">
     <div class="container">
-      <div class="section-tag">Persistent memory for AI agents</div><h2 id="final-heading">Give the next session a head start.</h2>
-      <p>Keep the decisions and lessons your agents need to continue the work.</p>
+      <div class="section-tag">Governed memory for AI agents</div><h2 id="final-heading">Give every agent<br>something it can answer for.</h2>
+      <p>Signed, admitted, scoped and auditable: memory your agents can keep working from, and you can account for.</p>
       <div class="hero-actions"><a href="https://github.com/l33tdawg/sage/releases/latest" class="btn-primary">Download SAGE <span aria-hidden="true">&darr;</span></a><a href="connect.html" class="btn-secondary">Read the connection guide</a></div>
       <small>macOS &middot; Windows &middot; Linux &middot; Free &middot; Apache 2.0</small>
     </div>
@@ -1124,18 +1167,18 @@ footer a:hover { text-decoration: underline; }
       </details>
 
       <div class="features-grid reveal">
-        <div class="feature-card"><div><h3>Persistent Memory</h3><p>Recorded memories remain available across sessions, subject to their lifecycle and your access permissions. Keep project decisions, preferences and lessons from previous work.</p></div></div>
         <div class="feature-card"><div><h3>Governed Knowledge</h3><p>Memories pass admission checks before commit. Signed votes, challenges and corroboration provide a reviewable lifecycle for the record.</p></div></div>
+        <div class="feature-card"><div><h3>Federation</h3><p>Connect SAGE nodes over LAN, VPN, or configured internet routes with a human-verified join ceremony. Discover eligible agents and choose which memory domains to share, revocable any time.</p></div></div>
+        <div class="feature-card"><div><h3>Agent Messages</h3><p>Route durable work between exact agent identities, reply idempotently, and inspect passive history without turning delivery, read evidence, or results into the same state.</p></div></div>
+        <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Local BadgerDB/SQLite stores under your home directory. Inspect, query, back up, and move your data.</p></div></div>
         <div class="feature-card"><div><h3>Confidence Scoring</h3><p>Corroboration can reinforce a memory. Confidence can decay without reinforcement, helping recall favor useful context.</p></div></div>
+        <div class="feature-card"><div><h3>Persistent Memory</h3><p>Recorded memories remain available across sessions, subject to their lifecycle and your access permissions. Keep project decisions, preferences and lessons from previous work.</p></div></div>
         <div class="feature-card"><div><h3>Semantic Search + Reranker</h3><p>Recall by meaning with embeddings, then re-score the results with a reranker. Choose local providers to keep that processing on your machine.</p></div></div>
         <div class="feature-card"><div><h3>Learns From Outcomes</h3><p>Record what worked and what failed, then supply those lessons to later sessions. Published experiments examine the effects of this feedback loop.</p></div></div>
+        <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
         <div class="feature-card"><div><h3>CEREBRUM Dashboard</h3><p>A 3D MRI brain of your memories: domains as lobes, consolidation as depth. Search, curate, and drill into a memory&rsquo;s train of thought.</p></div></div>
         <div class="feature-card"><div><h3>Chat History Import</h3><p>Import from ChatGPT, Claude, or Gemini. Seed your AI&rsquo;s memory from existing conversation history.</p></div></div>
         <div class="feature-card"><div><h3>One-Click Updates</h3><p>Built-in auto-updater checks releases, downloads, and replaces, all from the dashboard.</p></div></div>
-        <div class="feature-card"><div><h3>Federation</h3><p>Connect SAGE nodes over LAN, VPN, or configured internet routes with a human-verified join ceremony. Discover eligible agents and choose which memory domains to share, revocable any time.</p></div></div>
-        <div class="feature-card"><div><h3>Fully Inspectable</h3><p>Local BadgerDB/SQLite stores under your home directory. Inspect, query, back up, and move your data.</p></div></div>
-        <div class="feature-card"><div><h3>Agent Messages</h3><p>Route durable work between exact agent identities, reply idempotently, and inspect passive history without turning delivery, read evidence, or results into the same state.</p></div></div>
-        <div class="feature-card"><div><h3>Auto-Journal</h3><p>Pipeline exchanges are summarised as memories automatically. Full audit trail of inter-agent work without storing bulky payloads.</p></div></div>
       </div>
 
       <div class="section-header" style="margin-top:64px;">
@@ -1562,7 +1605,7 @@ with SageClient(
 <!-- Footer (always visible) -->
 <footer>
   <div class="container">
-    <div class="brand-footer-links"><a href="privacy.html">Privacy details</a><a href="https://github.com/l33tdawg/sage/blob/main/docs/GETTING_STARTED.md">Setup guide</a><a href="https://github.com/l33tdawg/sage/tree/main/docs/reference">Technical reference</a><a href="https://sage-foundation.net/">SAGE Foundation</a></div>
+    <div class="brand-footer-links"><a href="privacy.html">Privacy details</a><a href="https://github.com/l33tdawg/sage/blob/main/docs/GETTING_STARTED.md">Setup guide</a><a href="https://github.com/l33tdawg/sage/tree/main/docs/reference">Technical reference</a><a href="https://github.com/l33tdawg/sage-agenttrust">AgenTrust bridge</a><a href="https://sage-foundation.net/">SAGE Foundation</a></div>
     <p>
       <strong>SAGE</strong> &middot; Persistent Memory for AI<br>
       Created by <a href="https://github.com/l33tdawg">Dhillon Andrew Kannabhiran</a><br>
