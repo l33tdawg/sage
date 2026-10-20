@@ -8,10 +8,6 @@ func (app *SageApp) postAppV29Fork(height int64) bool {
 	return app.appV29AppliedHeight > 0 && height > app.appV29AppliedHeight
 }
 
-func (app *SageApp) postAppV29Rules(height int64) bool {
-	return app.postAppV29Fork(height)
-}
-
 func (app *SageApp) refreshAppV29Fork() error {
 	app.appV29AppliedHeight = 0
 	rec, err := app.badgerStore.GetAppliedUpgrade(appV29UpgradeName)
