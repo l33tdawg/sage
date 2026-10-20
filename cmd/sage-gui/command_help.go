@@ -28,6 +28,8 @@ func handleCommandHelp(args []string) bool {
 		printHookUsage()
 	case "mcp-token":
 		printMCPTokenUsage()
+	case "org-token":
+		printOrgTokenUsage()
 	case "nevercompact":
 		printNeverCompactUsage()
 	case "upgrade":
