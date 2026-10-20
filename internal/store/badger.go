@@ -1715,6 +1715,17 @@ func (s *BadgerStore) IncrementVoteStats(validatorID string, accepted bool, bloc
 // changed (atomicity). LastBlockHeight is intentionally NOT touched here — it
 // records vote time (set by IncrementVoteStats), not verdict-resolution time.
 func (s *BadgerStore) UpdateVerdictStats(matches map[string]bool) error {
+	return s.updateVerdictStats(matches, "", false, false)
+}
+
+// UpdateVerdictStatsDeterministic is the app-v29 consensus form of
+// UpdateVerdictStats. It uses the explicitly fused EWMA recurrence so arm64 and
+// amd64 produce the same vstats:* bits from the same sequence of outcomes.
+func (s *BadgerStore) UpdateVerdictStatsDeterministic(matches map[string]bool) error {
+	return s.updateVerdictStats(matches, "", false, true)
+}
+
+func (s *BadgerStore) updateVerdictStats(matches map[string]bool, domain string, domainScoped, deterministic bool) error {
 	ids := make([]string, 0, len(matches))
 	for id := range matches {
 		ids = append(ids, id)
@@ -1723,8 +1734,12 @@ func (s *BadgerStore) UpdateVerdictStats(matches map[string]bool) error {
 
 	return s.update(func(txn *badger.Txn) error {
 		for _, id := range ids {
+			key := validatorStatsKey(id)
+			if domainScoped {
+				key = validatorDomainStatsKey(id, domain)
+			}
 			stats := &ValidatorStats{}
-			item, getErr := txn.Get(validatorStatsKey(id))
+			item, getErr := txn.Get(key)
 			if getErr == nil {
 				valErr := item.Value(func(val []byte) error {
 					existing, decErr := decodeValidatorStats(val)
@@ -1751,12 +1766,16 @@ func (s *BadgerStore) UpdateVerdictStats(matches map[string]bool) error {
 				outcome = 1.0
 				stats.CorrCount++
 			}
-			tracker.Update(outcome)
+			if deterministic {
+				tracker.UpdateDeterministic(outcome)
+			} else {
+				tracker.Update(outcome)
+			}
 			stats.EWMAWeightedSum = tracker.WeightedSum
 			stats.EWMAWeightDenom = tracker.WeightDenom
 			stats.EWMACount = uint64(tracker.Count) // #nosec G115 -- Count is monotonic non-negative
 
-			if err := s.txnSet(txn, validatorStatsKey(id), encodeValidatorStats(stats, true)); err != nil {
+			if err := s.txnSet(txn, key, encodeValidatorStats(stats, true)); err != nil {
 				return err
 			}
 		}
@@ -2552,54 +2571,13 @@ func (s *BadgerStore) GetValidatorDomainStats(validatorID, domain string) (*Vali
 // The global vstats: record is credited separately by UpdateVerdictStats; the
 // two are independent accumulators fed from the one terminal-verdict event.
 func (s *BadgerStore) UpdateDomainVerdictStats(domain string, matches map[string]bool) error {
-	ids := make([]string, 0, len(matches))
-	for id := range matches {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
+	return s.updateVerdictStats(matches, domain, true, false)
+}
 
-	return s.update(func(txn *badger.Txn) error {
-		for _, id := range ids {
-			key := validatorDomainStatsKey(id, domain)
-			stats := &ValidatorStats{}
-			item, getErr := txn.Get(key)
-			if getErr == nil {
-				valErr := item.Value(func(val []byte) error {
-					existing, decErr := decodeValidatorStats(val)
-					if decErr != nil {
-						return decErr
-					}
-					stats = existing
-					return nil
-				})
-				if valErr != nil {
-					return valErr
-				}
-			} else if getErr != badger.ErrKeyNotFound {
-				return getErr
-			}
-
-			tracker := &poe.EWMATracker{
-				WeightedSum: stats.EWMAWeightedSum,
-				WeightDenom: stats.EWMAWeightDenom,
-				Count:       int64(stats.EWMACount), // #nosec G115 -- non-negative count
-			}
-			outcome := 0.0
-			if matches[id] {
-				outcome = 1.0
-				stats.CorrCount++
-			}
-			tracker.Update(outcome)
-			stats.EWMAWeightedSum = tracker.WeightedSum
-			stats.EWMAWeightDenom = tracker.WeightDenom
-			stats.EWMACount = uint64(tracker.Count) // #nosec G115 -- Count is monotonic non-negative
-
-			if err := s.txnSet(txn, key, encodeValidatorStats(stats, true)); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+// UpdateDomainVerdictStatsDeterministic is the app-v29 consensus form of
+// UpdateDomainVerdictStats.
+func (s *BadgerStore) UpdateDomainVerdictStatsDeterministic(domain string, matches map[string]bool) error {
+	return s.updateVerdictStats(matches, domain, true, true)
 }
 
 // --- PoE epoch weights (v8.2) ---

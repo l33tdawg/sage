@@ -32,9 +32,8 @@ func upgradeStatusServer(t *testing.T, status sageabci.UpgradeGovernanceStatus) 
 }
 
 // The dashboard reads the same authoritative status the CLI does, and reports
-// the two ceilings. With the app-v28 evidence landed the ceilings are converged,
-// so a ballot at the ceiling is a normal one; a ballot above it still has to be
-// carried by explicit votes.
+// the two ceilings. App-v29 is compiled but dormant, so a v28 ballot is still
+// carried by the auto-voter while a v29 ballot requires explicit votes.
 func TestDashboardUpgradeStatusReportsCeilingsAndExplicitVoteRequirement(t *testing.T) {
 	target := uint64(28)
 	server := upgradeStatusServer(t, sageabci.UpgradeGovernanceStatus{
@@ -57,10 +56,10 @@ func TestDashboardUpgradeStatusReportsCeilingsAndExplicitVoteRequirement(t *test
 	require.Equal(t, float64(sageabci.MaxSupportedAppVersion()), body["auto_vote_ceiling"])
 	require.Equal(t, float64(sageabci.MaxCompiledAppVersion()), body["compiled_app_version"])
 	require.Equal(t, false, body["explicit_vote_required_now"],
-		"a ballot at the converged ceiling is carried by the auto-voter")
-	require.Equal(t, false, body["dormant_below_ceiling_gap"])
-	require.NotContains(t, body, "dormant_note",
-		"the note describes a compiled-ahead gate; the ceilings are converged")
+		"app-v28 remains within the auto-vote ceiling")
+	require.Equal(t, true, body["dormant_below_ceiling_gap"])
+	require.Contains(t, body, "dormant_note",
+		"the note describes the compiled-ahead app-v29 gate")
 
 	aboveCeiling := uint64(29)
 	server = upgradeStatusServer(t, sageabci.UpgradeGovernanceStatus{
@@ -78,8 +77,8 @@ func TestDashboardUpgradeStatusReportsCeilingsAndExplicitVoteRequirement(t *test
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 	require.Equal(t, true, body["explicit_vote_required_now"],
 		"a ballot above the auto-vote ceiling can only move on explicit votes")
-	require.Equal(t, false, body["dormant_below_ceiling_gap"],
-		"no compiled-ahead gate exists once the ceilings converge")
+	require.Equal(t, true, body["dormant_below_ceiling_gap"],
+		"app-v29 is compiled ahead of the app-v28 auto-vote ceiling")
 }
 
 // A chain with no ballot still reports the rung it is on and what comes next,

@@ -25,12 +25,12 @@ const (
 	// LatestSupportedAppVersion is the highest app protocol version this binary
 	// can serve or restore in a state-sync ceremony. It tracks the highest
 	// COMPILED fork gate, not the auto-vote readiness ceiling: a gate compiled
-	// ahead of its activation evidence (app-v28) still means a node carrying it
+	// ahead of its activation evidence (app-v29) still means a node carrying it
 	// can run the exact version it restores, which is the only question an
 	// authorization's exact-version pin asks. A joining node never sees a chain
 	// at a version its own binary cannot execute, because the receiver verifies
 	// the served bundle at that exact version.
-	LatestSupportedAppVersion uint64 = 28
+	LatestSupportedAppVersion uint64 = 29
 	cometNodeIDBytes                 = 20
 	maxJoinAuthorizationBytes        = 64 << 10
 )
@@ -44,7 +44,7 @@ var stateSyncChainIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 // authorization's exact version.
 func SupportsAppVersion(version uint64) bool {
 	switch version {
-	case RequiredAppVersion, 21, 22, 23, 24, 25, 26, 27, LatestSupportedAppVersion:
+	case RequiredAppVersion, 21, 22, 23, 24, 25, 26, 27, 28, LatestSupportedAppVersion:
 		return true
 	default:
 		return false

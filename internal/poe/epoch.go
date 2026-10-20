@@ -35,6 +35,18 @@ func RecencyScore(lastActive time.Time, now time.Time) float64 {
 	return math.Exp(-RecencyLambda * deltaHours)
 }
 
+// RecencyScoreDeterministic is the app-v29 consensus form of RecencyScore. It
+// keeps the same elapsed-time semantics but evaluates the exponential with the
+// portable explicitly-rounded implementation instead of architecture-specific
+// math assembly.
+func RecencyScoreDeterministic(lastActive time.Time, now time.Time) float64 {
+	deltaHours := now.Sub(lastActive).Hours()
+	if deltaHours < 0 {
+		deltaHours = 0
+	}
+	return deterministicExp(math.FMA(-RecencyLambda, deltaHours, 0))
+}
+
 // CorroborationScore computes S = log(1+count) / log(1+cMax).
 func CorroborationScore(count int, cMax int) float64 {
 	if cMax <= 0 {
@@ -44,4 +56,16 @@ func CorroborationScore(count int, cMax int) float64 {
 		count = 0
 	}
 	return math.Log(1.0+float64(count)) / math.Log(1.0+float64(cMax))
+}
+
+// CorroborationScoreDeterministic is the app-v29 consensus form of
+// CorroborationScore.
+func CorroborationScoreDeterministic(count int, cMax int) float64 {
+	if cMax <= 0 {
+		cMax = CorrMax
+	}
+	if count < 0 {
+		count = 0
+	}
+	return deterministicLog(1.0+float64(count)) / deterministicLog(1.0+float64(cMax))
 }

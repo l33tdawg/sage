@@ -36,6 +36,25 @@ func ComputeWeight(accuracy, domain, recency, corroboration float64) float64 {
 	return math.Exp(logWeight)
 }
 
+// ComputeWeightDeterministic is the app-v29 consensus form of ComputeWeight.
+// It uses a portable logarithm and exponential whose operations are explicitly
+// rounded, then combines the weighted logs with math.FMA. The result is a
+// function of the input bits on every architecture, including a mixed
+// arm64/amd64 validator set.
+func ComputeWeightDeterministic(accuracy, domain, recency, corroboration float64) float64 {
+	a := math.Max(accuracy, EpsilonFloor)
+	d := math.Max(domain, EpsilonFloor)
+	t := math.Max(recency, EpsilonFloor)
+	s := math.Max(corroboration, EpsilonFloor)
+
+	logWeight := AlphaAccuracy * deterministicLog(a)
+	logWeight = math.FMA(BetaDomain, deterministicLog(d), logWeight)
+	logWeight = math.FMA(GammaRecency, deterministicLog(t), logWeight)
+	logWeight = math.FMA(DeltaCorroboration, deterministicLog(s), logWeight)
+
+	return deterministicExp(logWeight)
+}
+
 // NormalizeWeights applies the reputation cap and normalizes weights to sum to 1.
 //
 // It sums the weight map in Go's randomized map-iteration order. Because IEEE-754

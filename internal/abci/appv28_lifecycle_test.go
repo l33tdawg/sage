@@ -10,16 +10,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The v28 gate shipped compiled ahead of its activation evidence, and the
-// release that carried the evidence raised the auto-vote ceiling to meet it: the
-// compiled and auto-vote ceilings are converged at 28, so a personal node
-// advances itself across the seam the same way it did for every earlier rung.
-func TestAppV28GateConvergesWithTheAutoVoteCeilingAfterItsEvidence(t *testing.T) {
+// App-v28 remains the auto-vote ceiling while app-v29 ships compiled and
+// dormant. App-v29 can only activate through an explicitly approved governance
+// plan until mixed-architecture and replay evidence lands.
+func TestAppV28RemainsTheAutoVoteCeilingWhileAppV29IsDormant(t *testing.T) {
 	require.Equal(t, tx.CanonicalUpgradeName(28), appV28UpgradeName)
-	require.Equal(t, uint64(28), maxCompiledAppVersion)
+	require.Equal(t, uint64(29), maxCompiledAppVersion)
 	require.Equal(t, uint64(28), MaxSupportedAppVersion())
-	require.Equal(t, maxCompiledAppVersion, MaxSupportedAppVersion(),
-		"the ceiling bump is the activation switch; it lands with the evidence")
+	require.Less(t, MaxSupportedAppVersion(), maxCompiledAppVersion,
+		"the auto-voter must abstain on the dormant app-v29 gate")
 }
 
 func TestAppV28ConstantsRefreshAndStrictBoundary(t *testing.T) {

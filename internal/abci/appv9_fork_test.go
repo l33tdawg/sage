@@ -442,8 +442,8 @@ func TestAppV9_ActiveUpgradeVote_UnsupportedTarget(t *testing.T) {
 	// auto-voter abstains — the liveness-layer guard against the
 	// maxSupportedAppVersion halt footgun (no consensus reject, no divergence).
 	// The target deliberately sits above the compiled ceiling as well as above
-	// the auto-vote ceiling: app-v28 is compiled but dormant, so a v28 proposal
-	// is refused by its own activation precondition instead.
+	// the auto-vote ceiling: app-v29 is compiled but dormant, so a real v29
+	// proposal is held to its own predecessor and evidence gates instead.
 	unsupported := maxCompiledAppVersion + 1
 	propose := encodeSignedUpgradePropose(t, admin, tx.CanonicalUpgradeName(unsupported), unsupported, "", 200)
 	require.Equal(t, uint32(0), finalizeBlock(t, app, 10, propose).TxResults[0].Code)

@@ -677,6 +677,10 @@ type SageApp struct {
 	// and the consensus-side co-commit tombstone rule. The activation block
 	// remains under app-v27 rules; v28 semantics begin strictly at H+1.
 	appV28AppliedHeight int64 // 0 => fork dormant
+	// appV29AppliedHeight gates architecture-independent PoE factor calculation,
+	// EWMA mutation, and epoch-weight persistence. The activation block remains
+	// under app-v28 arithmetic; v29 semantics begin strictly at H+1.
+	appV29AppliedHeight int64 // 0 => fork dormant
 	// appV23GenesisActive is loaded only from the dedicated, AppHash-covered
 	// dual-signed genesis activation marker. It is separate from applied-height
 	// upgrades because a v23-born chain has no historical activation block.
@@ -860,6 +864,7 @@ const appV25UpgradeName = "app-v25"
 const appV26UpgradeName = "app-v26"
 const appV27UpgradeName = "app-v27"
 const appV28UpgradeName = "app-v28"
+const appV29UpgradeName = "app-v29"
 
 // governanceDelegationDomainStateKey holds the stable, consensus-derived
 // domain that post-app-v20 governance authorizations must sign. It is approved
@@ -2289,6 +2294,40 @@ func poeFactorsPostV83(stats *store.ValidatorStats, height int64, blockTime time
 	return
 }
 
+// poeFactorsPostV29 is the architecture-deterministic form of
+// poeFactorsPostV83. It keeps the same committed inputs and time semantics, but
+// uses explicitly rounded arithmetic for every value that can reach a persisted
+// PoE weight.
+func poeFactorsPostV29(stats *store.ValidatorStats, height int64, blockTime time.Time) (accuracy, recency, corroboration float64) {
+	var tracker poe.EWMATracker
+	if stats != nil {
+		tracker = poe.EWMATracker{
+			WeightedSum: stats.EWMAWeightedSum,
+			WeightDenom: stats.EWMAWeightDenom,
+			Count:       int64(stats.EWMACount), // #nosec G115 -- non-negative
+		}
+	}
+	accuracy = tracker.AccuracyDeterministic()
+
+	if stats != nil && stats.LastBlockHeight > 0 {
+		blocksSinceLast := height - int64(stats.LastBlockHeight) // #nosec G115 -- block height fits in int64
+		if blocksSinceLast < 0 {
+			blocksSinceLast = 0
+		}
+		hoursSinceLast := float64(blocksSinceLast) * 3.0 / 3600.0
+		recency = poe.RecencyScoreDeterministic(blockTime.Add(-time.Duration(hoursSinceLast*float64(time.Hour))), blockTime)
+	} else {
+		recency = poe.EpsilonFloor
+	}
+
+	corrCount := 0
+	if stats != nil {
+		corrCount = int(stats.CorrCount) // #nosec G115 -- bounded count
+	}
+	corroboration = poe.CorroborationScoreDeterministic(corrCount, poe.CorrMax)
+	return
+}
+
 // defaultFlushMaxRetries caps Commit's SQLITE_BUSY retry loop. At 30 tries
 // with backoff capped at 5s, sustained contention is tolerated for several
 // minutes before the node panics — long enough to absorb realistic lock
@@ -2433,6 +2472,16 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 		_ = bs.CloseBadger()
 		return nil, invariantErr
 	}
+	if invariantErr := app.refreshAppV29Fork(); invariantErr != nil {
+		_ = ps.Close()
+		_ = bs.CloseBadger()
+		return nil, invariantErr
+	}
+	if invariantErr := app.validateAppV29Prerequisite(); invariantErr != nil {
+		_ = ps.Close()
+		_ = bs.CloseBadger()
+		return nil, invariantErr
+	}
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -2550,6 +2599,12 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	if invariantErr := app.validateAppV28Prerequisite(); invariantErr != nil {
 		return nil, invariantErr
 	}
+	if invariantErr := app.refreshAppV29Fork(); invariantErr != nil {
+		return nil, invariantErr
+	}
+	if invariantErr := app.validateAppV29Prerequisite(); invariantErr != nil {
+		return nil, invariantErr
+	}
 	app.reconcilePoEForkMonotonicity()
 
 	persistedVals, err := bs.LoadValidators()
@@ -2628,6 +2683,8 @@ func restoredValidatorInfo(id string, power int64) *validator.ValidatorInfo {
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV29AppliedHeight > 0:
+		return 29 // app-v29 (architecture-independent PoE math) — highest gate
 	case app.appV28AppliedHeight > 0:
 		return 28 // app-v28 (public-memory commitment + consensus co-commit rule) — highest gate
 	case app.appV27AppliedHeight > 0:
@@ -2703,13 +2760,9 @@ func (app *SageApp) currentAppVersion() uint64 {
 const maxSupportedAppVersion uint64 = 28
 
 // maxCompiledAppVersion is the highest app version this binary has a compiled
-// fork gate for (currently app-v28, converged with maxSupportedAppVersion). It
-// bounds what Info() may report and what an explicitly approved, quorum-decided
-// upgrade plan may activate. It is deliberately allowed to run ahead of
-// maxSupportedAppVersion while a gate awaits its activation evidence — the two
-// are equal at 28 today, and the next gate that ships dormant will separate
-// them again.
-const maxCompiledAppVersion uint64 = 28
+// fork gate for. app-v29 ships dormant above the auto-vote ceiling until
+// mixed-architecture golden vectors and chain-replay evidence land.
+const maxCompiledAppVersion uint64 = 29
 
 // MaxSupportedAppVersion returns the auto-vote readiness ceiling, which is the
 // highest app version this binary is prepared to activate unattended. Operator
@@ -3042,6 +3095,19 @@ func (app *SageApp) ActiveUpgradeVote() (proposalID string, targetVersion uint64
 		} else if _, predecessorErr := app.validateAppV28Predecessor(); predecessorErr != nil {
 			app.logger.Warn().Err(predecessorErr).Str("proposal_id", prop.ProposalID).
 				Msg("app-v28 predecessor is invalid; skipping auto-vote")
+			supported = false
+		}
+	}
+	if payload.Name == appV29UpgradeName && payload.TargetAppVersion == 29 {
+		if app.currentAppVersion() != 28 {
+			app.logger.Warn().
+				Str("proposal_id", prop.ProposalID).
+				Uint64("current_app_version", app.currentAppVersion()).
+				Msg("app-v29 upgrade requires app-v28 as its immediate predecessor; skipping auto-vote")
+			supported = false
+		} else if _, predecessorErr := app.validateAppV29Predecessor(); predecessorErr != nil {
+			app.logger.Warn().Err(predecessorErr).Str("proposal_id", prop.ProposalID).
+				Msg("app-v29 predecessor is invalid; skipping auto-vote")
 			supported = false
 		}
 	}
@@ -3764,6 +3830,7 @@ func (app *SageApp) cloneForAppV20Finalize(scopedStore *store.BadgerStore) *Sage
 		appV26AppliedHeight:      app.appV26AppliedHeight,
 		appV27AppliedHeight:      app.appV27AppliedHeight,
 		appV28AppliedHeight:      app.appV28AppliedHeight,
+		appV29AppliedHeight:      app.appV29AppliedHeight,
 		appV23GenesisActive:      app.appV23GenesisActive,
 		retainBlocks:             app.retainBlocks,
 		expectedGovernanceDomain: app.expectedGovernanceDelegationDomain(),
@@ -3812,6 +3879,7 @@ func (app *SageApp) publishAppV20FinalizeLocked(clone *SageApp) {
 	app.appV26AppliedHeight = clone.appV26AppliedHeight
 	app.appV27AppliedHeight = clone.appV27AppliedHeight
 	app.appV28AppliedHeight = clone.appV28AppliedHeight
+	app.appV29AppliedHeight = clone.appV29AppliedHeight
 	app.appV23GenesisActive = clone.appV23GenesisActive
 }
 
@@ -4509,6 +4577,26 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 				)
 			}
 		}
+		if plan.Name == appV29UpgradeName {
+			if plan.TargetAppVersion != 29 {
+				return nil, fmt.Errorf(
+					"sage: refuse malformed app-v29 activation at height %d: target_app_version=%d",
+					req.Height, plan.TargetAppVersion,
+				)
+			}
+			if current := app.currentAppVersion(); current != 28 {
+				return nil, fmt.Errorf(
+					"sage: refuse app-v29 activation at height %d: current committed app version is %d, want 28",
+					req.Height, current,
+				)
+			}
+			if _, predecessorErr := app.validateAppV29Predecessor(); predecessorErr != nil {
+				return nil, fmt.Errorf(
+					"sage: refuse app-v29 activation at height %d: invalid predecessor: %w",
+					req.Height, predecessorErr,
+				)
+			}
+		}
 		// Version-non-regression floor (deterministic on every replica): never
 		// commit a consensus version.app lower than the chain's current app
 		// version. app-v7 (content-validation) is an INDEPENDENT gate that can be
@@ -4646,6 +4734,9 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 			if promoteErr := app.promoteAppV28Indexes(req.Height); promoteErr != nil {
 				return nil, fmt.Errorf("sage: refuse app-v28 activation at height %d: %w", req.Height, promoteErr)
 			}
+		}
+		if plan.Name == appV29UpgradeName {
+			app.appV29AppliedHeight = req.Height
 		}
 		if plan.Name == appV12UpgradeName {
 			app.appV12AppliedHeight = req.Height
@@ -6627,6 +6718,7 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 	// scraping logs.
 	postFork := app.postV8_2Fork(height)
 	recordV8_2Branch(postFork)
+	deterministicPoE := app.postAppV29Fork(height)
 
 	// v8.3: capture the memory's status BEFORE any SetMemoryHash write below,
 	// so verdict-match crediting fires exactly once — on the transition INTO a
@@ -6696,7 +6788,12 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 			// domain signal). Domain experts thus carry genuinely more weight on
 			// in-domain memories. See docs/v8.4-PLAN.md.
 			gStats, _ := app.badgerStore.GetValidatorStats(v.ID)
-			acc, rec, corr := poeFactorsPostV83(gStats, height, blockTime)
+			var acc, rec, corr float64
+			if deterministicPoE {
+				acc, rec, corr = poeFactorsPostV29(gStats, height, blockTime)
+			} else {
+				acc, rec, corr = poeFactorsPostV83(gStats, height, blockTime)
+			}
 			// Domain accuracy defaults to the EWMA cold-start prior (0.5). A
 			// decode error / nil record is treated as cold-start, mirroring the
 			// nil-tolerance of the gStats path (poeFactorsPostV83's stats!=nil
@@ -6709,9 +6806,17 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 					WeightDenom: dStats.EWMAWeightDenom,
 					Count:       int64(dStats.EWMACount), // #nosec G115 -- non-negative
 				}
-				domainScore = domTracker.Accuracy()
+				if deterministicPoE {
+					domainScore = domTracker.AccuracyDeterministic()
+				} else {
+					domainScore = domTracker.Accuracy()
+				}
 			}
-			weights[v.ID] = poe.ComputeWeight(acc, domainScore, rec, corr)
+			if deterministicPoE {
+				weights[v.ID] = poe.ComputeWeightDeterministic(acc, domainScore, rec, corr)
+			} else {
+				weights[v.ID] = poe.ComputeWeight(acc, domainScore, rec, corr)
+			}
 		case postFork:
 			// Bootstrap fallback (1/N) covers three cases: pre-first-epoch
 			// chain, mid-epoch governance add, and defensive guard for a
@@ -6813,8 +6918,14 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 		for vid, votedAccept := range votes {
 			matches[vid] = votedAccept == finalAccepted
 		}
-		if err := app.badgerStore.UpdateVerdictStats(matches); err != nil {
-			app.logger.Error().Err(err).Str("memory_id", memoryID).Msg("v8.3 verdict-stats update")
+		var statsErr error
+		if deterministicPoE {
+			statsErr = app.badgerStore.UpdateVerdictStatsDeterministic(matches)
+		} else {
+			statsErr = app.badgerStore.UpdateVerdictStats(matches)
+		}
+		if statsErr != nil {
+			app.logger.Error().Err(statsErr).Str("memory_id", memoryID).Msg("v8.3 verdict-stats update")
 		}
 		// v8.4: also credit per-domain verdict-correctness for non-shared domains,
 		// so domainAccuracy(v, D) reflects how often v is right specifically in D.
@@ -6825,8 +6936,13 @@ func (app *SageApp) checkAndApplyQuorum(memoryID string, height int64, blockTime
 		// recorded non-shared domain; shared/unknown domains credit nothing
 		// per-domain (quorum falls back to the global weight for them anyway).
 		if useDomainWeight {
-			if err := app.badgerStore.UpdateDomainVerdictStats(memDomain, matches); err != nil {
-				app.logger.Error().Err(err).Str("memory_id", memoryID).Str("domain", memDomain).Msg("v8.4 domain verdict-stats update")
+			if deterministicPoE {
+				statsErr = app.badgerStore.UpdateDomainVerdictStatsDeterministic(memDomain, matches)
+			} else {
+				statsErr = app.badgerStore.UpdateDomainVerdictStats(memDomain, matches)
+			}
+			if statsErr != nil {
+				app.logger.Error().Err(statsErr).Str("memory_id", memoryID).Str("domain", memDomain).Msg("v8.4 domain verdict-stats update")
 			}
 		}
 	}
@@ -9886,6 +10002,7 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time, strict ...bo
 	// hardcoded-0 corroboration so v8.2.x blocks replay byte-identical. The
 	// strict-> gate means the activation block H_act itself is still pre-fork.
 	postV83 := app.postV8_3Fork(height)
+	postV29 := app.postAppV29Fork(height)
 
 	// Compute raw PoE weights for each validator
 	rawWeights := make(map[string]float64, len(validators))
@@ -9903,7 +10020,11 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time, strict ...bo
 			// v8.4's per-memory domain-conditional quorum weight compute these
 			// three factors with byte-identical arithmetic. A validator absent
 			// from vstats: reconstructs as EWMATracker{0,0,0} → 0.5 cold-start.
-			accuracy, recencyScore, corrScore = poeFactorsPostV83(stats, height, blockTime)
+			if postV29 {
+				accuracy, recencyScore, corrScore = poeFactorsPostV29(stats, height, blockTime)
+			} else {
+				accuracy, recencyScore, corrScore = poeFactorsPostV83(stats, height, blockTime)
+			}
 		} else {
 			// Phase-1 (pre-fork): accept-ratio accuracy blend, recency from last
 			// vote, corroboration hardcoded 0 — byte-identical to v8.2.x.
@@ -9945,6 +10066,9 @@ func (app *SageApp) processEpoch(height int64, blockTime time.Time, strict ...bo
 
 		// Compute PoE weight
 		weight := poe.ComputeWeight(accuracy, domainScore, recencyScore, corrScore)
+		if postV29 {
+			weight = poe.ComputeWeightDeterministic(accuracy, domainScore, recencyScore, corrScore)
+		}
 		rawWeights[v.ID] = weight
 
 		epochDetails[v.ID] = &store.EpochScore{
@@ -11692,6 +11816,17 @@ func (app *SageApp) applyUpgradeProposal(proposal *governance.ProposalState, hei
 			return fmt.Errorf("app-v28 upgrade has invalid predecessor: %w", predecessorErr)
 		}
 	}
+	if p.Name == appV29UpgradeName {
+		if p.TargetAppVersion != 29 {
+			return fmt.Errorf("app-v29 upgrade has target version %d, want 29", p.TargetAppVersion)
+		}
+		if current := app.currentAppVersion(); current != 28 {
+			return fmt.Errorf("app-v29 upgrade requires current app version 28, got %d", current)
+		}
+		if _, predecessorErr := app.validateAppV29Predecessor(); predecessorErr != nil {
+			return fmt.Errorf("app-v29 upgrade has invalid predecessor: %w", predecessorErr)
+		}
+	}
 
 	// Execution-height regression re-guard: the chain's committed app version
 	// may have advanced (another upgrade activated) between propose and quorum.
@@ -11917,6 +12052,20 @@ func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, b
 		if _, predecessorErr := app.validateAppV28Predecessor(); predecessorErr != nil {
 			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
 				"upgrade propose: app-v28 predecessor is invalid: %v", predecessorErr)}
+		}
+	}
+	if prop.Name == appV29UpgradeName {
+		if prop.TargetAppVersion != 29 {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: app-v29 requires target_app_version 29 (got %d)", prop.TargetAppVersion)}
+		}
+		if current := app.currentAppVersion(); current != 28 {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: app-v29 requires current committed app version 28 (got %d)", current)}
+		}
+		if _, predecessorErr := app.validateAppV29Predecessor(); predecessorErr != nil {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: app-v29 predecessor is invalid: %v", predecessorErr)}
 		}
 	}
 

@@ -213,12 +213,23 @@ func (app *SageApp) checkAndApplyScopedQuorum(ballot scope.Ballot, height int64,
 		matches[validatorID] = (decision == "accept") == finalAccepted
 	}
 	if len(matches) > 0 {
-		if err := app.badgerStore.UpdateVerdictStats(matches); err != nil {
-			app.logger.Error().Err(err).Str("memory_id", ballot.MemoryID).Msg("scoped verdict stats update")
+		var statsErr error
+		if app.postAppV29Fork(height) {
+			statsErr = app.badgerStore.UpdateVerdictStatsDeterministic(matches)
+		} else {
+			statsErr = app.badgerStore.UpdateVerdictStats(matches)
+		}
+		if statsErr != nil {
+			app.logger.Error().Err(statsErr).Str("memory_id", ballot.MemoryID).Msg("scoped verdict stats update")
 		}
 		if content, err := app.badgerStore.GetScopedContent(ballot.MemoryID); err == nil && content != nil {
-			if err := app.badgerStore.UpdateDomainVerdictStats(content.Domain, matches); err != nil {
-				app.logger.Error().Err(err).Str("memory_id", ballot.MemoryID).Str("domain", content.Domain).Msg("scoped domain verdict stats update")
+			if app.postAppV29Fork(height) {
+				statsErr = app.badgerStore.UpdateDomainVerdictStatsDeterministic(content.Domain, matches)
+			} else {
+				statsErr = app.badgerStore.UpdateDomainVerdictStats(content.Domain, matches)
+			}
+			if statsErr != nil {
+				app.logger.Error().Err(statsErr).Str("memory_id", ballot.MemoryID).Str("domain", content.Domain).Msg("scoped domain verdict stats update")
 			}
 		}
 	}
