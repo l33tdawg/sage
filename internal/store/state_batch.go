@@ -13,6 +13,13 @@ type StateWrite struct {
 	Value []byte
 }
 
+// StateCondition is a compare-and-set precondition. Value == nil requires the
+// key to be absent; otherwise the current bytes must match exactly.
+type StateCondition struct {
+	Key   string
+	Value []byte
+}
+
 // AtomicStateWriteStage identifies the durability boundaries exercised by the
 // v11.9 crash fixture. Production builds compile a no-op hook at each point.
 type AtomicStateWriteStage string

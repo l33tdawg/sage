@@ -1,7 +1,10 @@
 package orgpolicy
 
 import (
+	"bytes"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"testing"
 )
 
@@ -9,8 +12,9 @@ import (
 // assert the "single durable write" property directly (how many transactions,
 // which keys) without badger. It mirrors the store contract: absent key → nil.
 type fakeKV struct {
-	m      map[string][]byte
-	writes [][]KVWrite // one entry per SetStatesAtomic call
+	m        map[string][]byte
+	writes   [][]KVWrite // one entry per SetStatesAtomic call
+	afterGet func(string)
 }
 
 func newFakeKV() *fakeKV { return &fakeKV{m: map[string][]byte{}} }
@@ -22,6 +26,9 @@ func (f *fakeKV) GetState(key string) ([]byte, error) {
 	}
 	cp := make([]byte, len(v))
 	copy(cp, v)
+	if f.afterGet != nil {
+		f.afterGet(key)
+	}
 	return cp, nil
 }
 
@@ -35,6 +42,22 @@ func (f *fakeKV) SetStatesAtomic(w []KVWrite) error {
 		f.m[e.Key] = cp
 	}
 	return nil
+}
+
+func (f *fakeKV) CompareAndSetStatesAtomic(conditions []KVCondition, writes []KVWrite) (bool, error) {
+	for _, c := range conditions {
+		current, ok := f.m[c.Key]
+		if c.Value == nil {
+			if ok {
+				return false, nil
+			}
+			continue
+		}
+		if !ok || !bytes.Equal(current, c.Value) {
+			return false, nil
+		}
+	}
+	return true, f.SetStatesAtomic(writes)
 }
 
 func (f *fakeKV) batchKeys(i int) map[string]bool {
@@ -111,6 +134,27 @@ func TestEnrollmentReplayIsIdempotent(t *testing.T) {
 	acc, err := st.LoadAccepted(p.OrgID)
 	if err != nil || acc.Revision != p.Revision || acc.Digest != p.Digest() {
 		t.Fatalf("accepted not established by enrollment: %+v err=%v", acc, err)
+	}
+}
+
+func TestCommitFirstEnrollmentIsCompareAndSet(t *testing.T) {
+	kv := newFakeKV()
+	st := NewStore(kv)
+	p := signed(t, fixedKey(t, 1), nil)
+	first := sampleOutcome(t, p, hex.EncodeToString(pub(fixedKey(t, 9))))
+	requireErr := st.CommitFirstEnrollment(first)
+	if requireErr != nil {
+		t.Fatal(requireErr)
+	}
+
+	second := first
+	second.EnrolleePub = hex.EncodeToString(pub(fixedKey(t, 10)))
+	if err := st.CommitFirstEnrollment(second); !errors.Is(err, ErrEnrollmentConflict) {
+		t.Fatalf("second identity error = %v, want ErrEnrollmentConflict", err)
+	}
+	got, ok, err := st.LoadEnrollment(first.TokenID)
+	if err != nil || !ok || got.EnrolleePub != first.EnrolleePub {
+		t.Fatalf("first enrollment was overwritten: ok=%v got=%+v err=%v", ok, got, err)
 	}
 }
 
@@ -240,5 +284,33 @@ func TestAcceptedChainSurvivesRestart(t *testing.T) {
 	stale := signed(t, key, func(p *Policy) { p.Revision = 6 })
 	if _, d, _, err := restarted.ApplyPolicy(stale, pub(key)); err != nil || d != DecisionRejectedRollback {
 		t.Fatalf("after restart rollback not rejected: d=%q err=%v", d, err)
+	}
+}
+
+func TestApplyPolicyRejectsConcurrentHighWaterMarkChange(t *testing.T) {
+	kv := newFakeKV()
+	st := NewStore(kv)
+	key := fixedKey(t, 1)
+	p1 := signed(t, key, nil)
+	if _, d, _, err := st.ApplyPolicy(p1, pub(key)); err != nil || d != DecisionApplied {
+		t.Fatalf("seed: d=%q err=%v", d, err)
+	}
+
+	p2 := signed(t, key, func(p *Policy) { p.Revision = 4 })
+	kv.afterGet = func(requested string) {
+		if requested != acceptedKey(p1.OrgID) {
+			return
+		}
+		kv.afterGet = nil
+		raced := stateFrom(signed(t, key, func(p *Policy) { p.Revision = 9 }))
+		raw, _ := json.Marshal(raced)
+		_ = kv.SetStatesAtomic([]KVWrite{{Key: acceptedKey(p1.OrgID), Value: raw}})
+	}
+	if _, _, _, err := st.ApplyPolicy(p2, pub(key)); !errors.Is(err, ErrPolicyStateConflict) {
+		t.Fatalf("concurrent accepted-state update error = %v, want ErrPolicyStateConflict", err)
+	}
+	acc, err := st.LoadAccepted(p1.OrgID)
+	if err != nil || acc.Revision != 9 {
+		t.Fatalf("concurrent winner was overwritten: %+v err=%v", acc, err)
 	}
 }

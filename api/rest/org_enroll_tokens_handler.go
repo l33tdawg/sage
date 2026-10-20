@@ -29,6 +29,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/store"
 )
 
@@ -37,7 +38,7 @@ import (
 // mcpTokenStore. It is resolved from s.store at request time, exactly as the
 // mcp-token endpoints do.
 type orgEnrollTokenAdminStore interface {
-	IssueOrgEnrollmentToken(ctx context.Context, orgID, ownerID, nodeLabel, role, orgSignerPub, keyEpoch string) (*store.OrgEnrollmentTokenIssue, error)
+	IssueOrgEnrollmentToken(ctx context.Context, orgID, ownerID, nodeLabel, role, enrolleePub, scope, orgSignerPub, keyEpoch string) (*store.OrgEnrollmentTokenIssue, error)
 	ListOrgEnrollmentTokens(ctx context.Context, orgID string) ([]*store.OrgEnrollmentToken, error)
 	RevokeOrgEnrollmentToken(ctx context.Context, id string) error
 }
@@ -51,20 +52,25 @@ var orgEnrollRoles = map[string]bool{"member": true, "observer": true}
 type OrgEnrollTokenIssueRequest struct {
 	NodeLabel    string `json:"node_label"`          // operator label for the intended node
 	Role         string `json:"role"`                // org role the node is admitted as ("member" if empty)
+	EnrolleePub  string `json:"enrollee_pub"`        // exact node key allowed to redeem
+	Scope        string `json:"scope"`               // immutable policy scope for this enrollment
 	OrgSignerPub string `json:"org_signer_pub"`      // hex ed25519 org policy signing key the first policy must verify under
 	KeyEpoch     string `json:"key_epoch,omitempty"` // optional pinned key epoch of the first policy
 }
 
 // OrgEnrollTokenIssueResponse is shown ONCE; the plaintext is not recoverable.
 type OrgEnrollTokenIssueResponse struct {
-	ID        string    `json:"id"` // public token ID, used for revoke
-	OrgID     string    `json:"org_id"`
-	OwnerID   string    `json:"owner_id"`
-	NodeLabel string    `json:"node_label"`
-	Role      string    `json:"role"`
-	Token     string    `json:"token"`
-	IssuedAt  time.Time `json:"issued_at"`
-	UseHint   string    `json:"use_hint"`
+	ID          string    `json:"id"` // public token ID, used for revoke
+	OrgID       string    `json:"org_id"`
+	OwnerID     string    `json:"owner_id"`
+	NodeLabel   string    `json:"node_label"`
+	Role        string    `json:"role"`
+	EnrolleePub string    `json:"enrollee_pub"`
+	Scope       string    `json:"scope"`
+	Token       string    `json:"token"`
+	IssuedAt    time.Time `json:"issued_at"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	UseHint     string    `json:"use_hint"`
 }
 
 // OrgEnrollTokenSummary mirrors store.OrgEnrollmentToken; it never carries a token value.
@@ -74,9 +80,12 @@ type OrgEnrollTokenSummary struct {
 	OwnerID      string    `json:"owner_id"`
 	NodeLabel    string    `json:"node_label"`
 	Role         string    `json:"role"`
+	EnrolleePub  string    `json:"enrollee_pub"`
+	Scope        string    `json:"scope"`
 	OrgSignerPub string    `json:"org_signer_pub"`
 	KeyEpoch     string    `json:"key_epoch,omitempty"`
 	IssuedAt     time.Time `json:"issued_at"`
+	ExpiresAt    time.Time `json:"expires_at"`
 	RevokedAt    time.Time `json:"revoked_at,omitempty"`
 }
 
@@ -123,6 +132,8 @@ func (s *Server) handleOrgEnrollTokenIssue(w http.ResponseWriter, r *http.Reques
 	}
 	req.NodeLabel = strings.TrimSpace(req.NodeLabel)
 	req.Role = strings.TrimSpace(req.Role)
+	req.EnrolleePub = strings.TrimSpace(req.EnrolleePub)
+	req.Scope = strings.TrimSpace(req.Scope)
 	req.OrgSignerPub = strings.TrimSpace(req.OrgSignerPub)
 	req.KeyEpoch = strings.TrimSpace(req.KeyEpoch)
 	if req.Role == "" {
@@ -130,6 +141,22 @@ func (s *Server) handleOrgEnrollTokenIssue(w http.ResponseWriter, r *http.Reques
 	}
 	if req.NodeLabel == "" {
 		writeJSONError(w, http.StatusBadRequest, "node_label is required")
+		return
+	}
+	if len(req.EnrolleePub) != 64 {
+		writeJSONError(w, http.StatusBadRequest, "enrollee_pub must be a 64-char hex-encoded ed25519 public key")
+		return
+	}
+	if _, err := hex.DecodeString(req.EnrolleePub); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "enrollee_pub must be hex-encoded")
+		return
+	}
+	if _, err := auth.AgentIDToPublicKey(req.EnrolleePub); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "enrollee_pub must be an ed25519 public key")
+		return
+	}
+	if req.Scope == "" || len(req.Scope) > 256 {
+		writeJSONError(w, http.StatusBadRequest, "scope is required and must be at most 256 bytes")
 		return
 	}
 	if !orgEnrollRoles[req.Role] {
@@ -144,23 +171,33 @@ func (s *Server) handleOrgEnrollTokenIssue(w http.ResponseWriter, r *http.Reques
 		writeJSONError(w, http.StatusBadRequest, "org_signer_pub must be hex-encoded")
 		return
 	}
+	if _, err := auth.AgentIDToPublicKey(req.OrgSignerPub); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "org_signer_pub must be an ed25519 public key")
+		return
+	}
 
 	ownerID := middleware.ContextAgentID(r.Context())
-	issued, err := ts.IssueOrgEnrollmentToken(r.Context(), orgID, ownerID, req.NodeLabel, req.Role, req.OrgSignerPub, req.KeyEpoch)
+	issued, err := ts.IssueOrgEnrollmentToken(
+		r.Context(), orgID, ownerID, req.NodeLabel, req.Role,
+		req.EnrolleePub, req.Scope, req.OrgSignerPub, req.KeyEpoch,
+	)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "failed to persist enrollment token")
 		return
 	}
 
 	writeJSON(w, http.StatusCreated, OrgEnrollTokenIssueResponse{
-		ID:        issued.ID,
-		OrgID:     issued.OrgID,
-		OwnerID:   issued.OwnerID,
-		NodeLabel: issued.NodeLabel,
-		Role:      issued.Role,
-		Token:     issued.Token,
-		IssuedAt:  issued.IssuedAt,
-		UseHint:   "Give this token to the node out-of-band; it redeems it once at POST /v1/org/" + orgID + "/enroll. SAVE THIS TOKEN NOW — it is never shown again.",
+		ID:          issued.ID,
+		OrgID:       issued.OrgID,
+		OwnerID:     issued.OwnerID,
+		NodeLabel:   issued.NodeLabel,
+		Role:        issued.Role,
+		EnrolleePub: issued.EnrolleePub,
+		Scope:       issued.Scope,
+		Token:       issued.Token,
+		IssuedAt:    issued.IssuedAt,
+		ExpiresAt:   issued.ExpiresAt,
+		UseHint:     "Give this token to the node out-of-band; it redeems it once at POST /v1/org/" + orgID + "/enroll. SAVE THIS TOKEN NOW — it is never shown again.",
 	})
 }
 
@@ -183,9 +220,12 @@ func (s *Server) handleOrgEnrollTokenList(w http.ResponseWriter, r *http.Request
 			OwnerID:      t.OwnerID,
 			NodeLabel:    t.NodeLabel,
 			Role:         t.Role,
+			EnrolleePub:  t.EnrolleePub,
+			Scope:        t.Scope,
 			OrgSignerPub: t.OrgSignerPub,
 			KeyEpoch:     t.KeyEpoch,
 			IssuedAt:     t.IssuedAt,
+			ExpiresAt:    t.ExpiresAt,
 			RevokedAt:    t.RevokedAt,
 		})
 	}

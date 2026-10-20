@@ -46,6 +46,11 @@ var (
 	ErrOrgEnrollTokenRevoked  = errors.New("org enrollment token revoked")
 )
 
+// OrgEnrollmentTokenTTL is the fixed bearer lifetime. Enrollment credentials
+// are delivered out of band, so they stay short-lived even when an operator
+// forgets to revoke an unused token.
+const OrgEnrollmentTokenTTL = 24 * time.Hour
+
 // OrgEnrollmentToken is the issued-once binding an owner commits at token-issue
 // time. It names the intended enrollee (owner + node label + org role) and pins
 // the org policy signing key the node's first policy MUST verify under — the
@@ -60,26 +65,37 @@ type OrgEnrollmentToken struct {
 	OwnerID      string    // owning agent (hex ed25519) that issued the token
 	NodeLabel    string    // operator-chosen label for the intended node
 	Role         string    // org role the node is admitted as
+	EnrolleePub  string    // exact hex ed25519 key allowed to redeem this token
+	Scope        string    // immutable org-policy scope this enrollment establishes
 	OrgSignerPub string    // hex ed25519: pinned org policy signing key (rotation root)
 	KeyEpoch     string    // expected key epoch of the first policy ("" = unpinned)
 	IssuedAt     time.Time // issuance time
+	ExpiresAt    time.Time // fixed short lifetime
 	RevokedAt    time.Time // zero unless revoked
 }
 
 // Revoked reports whether the token has been revoked.
 func (t *OrgEnrollmentToken) Revoked() bool { return t != nil && !t.RevokedAt.IsZero() }
 
+// Expired reports whether the token is outside its fixed lifetime at now.
+func (t *OrgEnrollmentToken) Expired(now time.Time) bool {
+	return t == nil || t.ExpiresAt.IsZero() || !now.Before(t.ExpiresAt)
+}
+
 // OrgEnrollmentTokenIssue is the one-shot result of IssueOrgEnrollmentToken.
 // Token is the plaintext bearer and is shown to the operator exactly once; it
 // is never persisted or logged — only its SHA-256 digest is stored.
 type OrgEnrollmentTokenIssue struct {
-	ID        string
-	Token     string
-	OrgID     string
-	OwnerID   string
-	NodeLabel string
-	Role      string
-	IssuedAt  time.Time
+	ID          string
+	Token       string
+	OrgID       string
+	OwnerID     string
+	NodeLabel   string
+	Role        string
+	EnrolleePub string
+	Scope       string
+	IssuedAt    time.Time
+	ExpiresAt   time.Time
 }
 
 // migrateOrgEnrollTokens creates the org_enroll_tokens table on first boot.
@@ -92,10 +108,13 @@ func (s *SQLiteStore) migrateOrgEnrollTokens(ctx context.Context) error {
 		owner_id       TEXT NOT NULL,
 		node_label     TEXT NOT NULL DEFAULT '',
 		role           TEXT NOT NULL DEFAULT '',
+		enrollee_pub   TEXT NOT NULL,
+		scope          TEXT NOT NULL,
 		org_signer_pub TEXT NOT NULL,
 		key_epoch      TEXT NOT NULL DEFAULT '',
 		token_sha256   TEXT NOT NULL UNIQUE,
 		issued_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+		expires_at     TEXT NOT NULL,
 		revoked_at     TEXT
 	)`); err != nil {
 		return fmt.Errorf("create org enrollment token table: %w", err)
@@ -118,15 +137,17 @@ func (s *SQLiteStore) migrateOrgEnrollTokens(ctx context.Context) error {
 // node is bound to at redeem time, and orgSignerPub pins the org policy signing
 // key the node's first policy must verify under. keyEpoch is optional ("" leaves
 // the epoch unpinned).
-func (s *SQLiteStore) IssueOrgEnrollmentToken(ctx context.Context, orgID, ownerID, nodeLabel, role, orgSignerPub, keyEpoch string) (*OrgEnrollmentTokenIssue, error) {
+func (s *SQLiteStore) IssueOrgEnrollmentToken(ctx context.Context, orgID, ownerID, nodeLabel, role, enrolleePub, scope, orgSignerPub, keyEpoch string) (*OrgEnrollmentTokenIssue, error) {
 	orgID = strings.TrimSpace(orgID)
 	ownerID = strings.TrimSpace(ownerID)
 	nodeLabel = strings.TrimSpace(nodeLabel)
 	role = strings.TrimSpace(role)
+	enrolleePub = strings.TrimSpace(enrolleePub)
+	scope = strings.TrimSpace(scope)
 	orgSignerPub = strings.TrimSpace(orgSignerPub)
 	keyEpoch = strings.TrimSpace(keyEpoch)
-	if orgID == "" || ownerID == "" || orgSignerPub == "" {
-		return nil, fmt.Errorf("org_id, owner_id and org_signer_pub are required")
+	if orgID == "" || ownerID == "" || enrolleePub == "" || scope == "" || orgSignerPub == "" {
+		return nil, fmt.Errorf("org_id, owner_id, enrollee_pub, scope and org_signer_pub are required")
 	}
 	if nodeLabel == "" || role == "" {
 		return nil, fmt.Errorf("node_label and role are required (they form the bound identity)")
@@ -139,21 +160,28 @@ func (s *SQLiteStore) IssueOrgEnrollmentToken(ctx context.Context, orgID, ownerI
 	plain := base64.RawURLEncoding.EncodeToString(raw)
 	digest := sha256.Sum256([]byte(plain))
 	digestHex := hex.EncodeToString(digest[:])
+	now := time.Now().UTC()
 
 	issued := &OrgEnrollmentTokenIssue{
-		ID:        uuid.NewString(),
-		Token:     plain,
-		OrgID:     orgID,
-		OwnerID:   ownerID,
-		NodeLabel: nodeLabel,
-		Role:      role,
-		IssuedAt:  time.Now().UTC(),
+		ID:          uuid.NewString(),
+		Token:       plain,
+		OrgID:       orgID,
+		OwnerID:     ownerID,
+		NodeLabel:   nodeLabel,
+		Role:        role,
+		EnrolleePub: enrolleePub,
+		Scope:       scope,
+		IssuedAt:    now,
+		ExpiresAt:   now.Add(OrgEnrollmentTokenTTL),
 	}
 	if _, err := s.writeExecContext(ctx, `
 		INSERT INTO org_enroll_tokens
-			(id, org_id, owner_id, node_label, role, org_signer_pub, key_epoch, token_sha256)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		issued.ID, orgID, ownerID, nodeLabel, role, orgSignerPub, keyEpoch, digestHex,
+			(id, org_id, owner_id, node_label, role, enrollee_pub, scope,
+			 org_signer_pub, key_epoch, token_sha256, issued_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		issued.ID, orgID, ownerID, nodeLabel, role, enrolleePub, scope,
+		orgSignerPub, keyEpoch, digestHex, issued.IssuedAt.Format(time.RFC3339Nano),
+		issued.ExpiresAt.Format(time.RFC3339Nano),
 	); err != nil {
 		return nil, fmt.Errorf("insert org enrollment token: %w", err)
 	}
@@ -168,16 +196,17 @@ func (s *SQLiteStore) IssueOrgEnrollmentToken(ctx context.Context, orgID, ownerI
 // this row.
 func (s *SQLiteStore) LookupOrgEnrollmentToken(ctx context.Context, tokenSHA256 string) (*OrgEnrollmentToken, error) {
 	row := s.conn.QueryRowContext(ctx, `
-		SELECT id, org_id, owner_id, node_label, role, org_signer_pub, key_epoch,
-		       issued_at, COALESCE(revoked_at, '')
+		SELECT id, org_id, owner_id, node_label, role, enrollee_pub, scope,
+		       org_signer_pub, key_epoch, issued_at, expires_at, COALESCE(revoked_at, '')
 		  FROM org_enroll_tokens
 		 WHERE token_sha256 = ?`, tokenSHA256)
 
 	var tok OrgEnrollmentToken
-	var issuedAt, revokedAt string
+	var issuedAt, expiresAt, revokedAt string
 	if err := row.Scan(
 		&tok.ID, &tok.OrgID, &tok.OwnerID, &tok.NodeLabel, &tok.Role,
-		&tok.OrgSignerPub, &tok.KeyEpoch, &issuedAt, &revokedAt,
+		&tok.EnrolleePub, &tok.Scope, &tok.OrgSignerPub, &tok.KeyEpoch,
+		&issuedAt, &expiresAt, &revokedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrOrgEnrollTokenNotFound
@@ -185,6 +214,7 @@ func (s *SQLiteStore) LookupOrgEnrollmentToken(ctx context.Context, tokenSHA256 
 		return nil, fmt.Errorf("lookup org enrollment token: %w", err)
 	}
 	tok.IssuedAt = parseTime(issuedAt)
+	tok.ExpiresAt = parseTime(expiresAt)
 	if revokedAt != "" {
 		tok.RevokedAt = parseTime(revokedAt)
 		return &tok, ErrOrgEnrollTokenRevoked
@@ -218,8 +248,8 @@ func (s *SQLiteStore) RevokeOrgEnrollmentToken(ctx context.Context, id string) e
 // Token plaintext is never returned (it is not stored). Newest first.
 func (s *SQLiteStore) ListOrgEnrollmentTokens(ctx context.Context, orgID string) ([]*OrgEnrollmentToken, error) {
 	query := `
-		SELECT id, org_id, owner_id, node_label, role, org_signer_pub, key_epoch,
-		       issued_at, COALESCE(revoked_at, '')
+		SELECT id, org_id, owner_id, node_label, role, enrollee_pub, scope,
+		       org_signer_pub, key_epoch, issued_at, expires_at, COALESCE(revoked_at, '')
 		  FROM org_enroll_tokens`
 	var args []any
 	if strings.TrimSpace(orgID) != "" {
@@ -237,14 +267,16 @@ func (s *SQLiteStore) ListOrgEnrollmentTokens(ctx context.Context, orgID string)
 	var out []*OrgEnrollmentToken
 	for rows.Next() {
 		var tok OrgEnrollmentToken
-		var issuedAt, revokedAt string
+		var issuedAt, expiresAt, revokedAt string
 		if scanErr := rows.Scan(
 			&tok.ID, &tok.OrgID, &tok.OwnerID, &tok.NodeLabel, &tok.Role,
-			&tok.OrgSignerPub, &tok.KeyEpoch, &issuedAt, &revokedAt,
+			&tok.EnrolleePub, &tok.Scope, &tok.OrgSignerPub, &tok.KeyEpoch,
+			&issuedAt, &expiresAt, &revokedAt,
 		); scanErr != nil {
 			return nil, fmt.Errorf("scan org enrollment token: %w", scanErr)
 		}
 		tok.IssuedAt = parseTime(issuedAt)
+		tok.ExpiresAt = parseTime(expiresAt)
 		if revokedAt != "" {
 			tok.RevokedAt = parseTime(revokedAt)
 		}

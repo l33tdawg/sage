@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/assert"
@@ -36,9 +37,13 @@ func TestOrgEnroll_ExpiredFirstPolicyRefusedButReplayRecovers(t *testing.T) {
 	const orgID = "org-acme"
 	_, orgPriv, orgHex := orgKeypair(t)
 	ts := newStubEnrollTokenStore()
-	ts.seed("bearer", &store.OrgEnrollmentToken{ID: "tok-1", OrgID: orgID, OwnerID: "o", NodeLabel: "n", Role: "member", OrgSignerPub: orgHex})
-	s := newEnrollServer(t, ts)
 	enrollee := strings.Repeat("a", 64)
+	ts.seed("bearer", &store.OrgEnrollmentToken{
+		ID: "tok-1", OrgID: orgID, OwnerID: "o", NodeLabel: "n", Role: "member",
+		EnrolleePub: enrollee, Scope: "fleet", OrgSignerPub: orgHex,
+		ExpiresAt: time.Unix(policyExpiredAt+1000, 0),
+	})
+	s := newEnrollServer(t, ts)
 	body := enrollBody(t, "bearer", signedOrgPolicy(t, orgPriv, orgID, "epoch-1", 1), nil)
 
 	// Enrollment is authority-granting: an expired first policy is refused and

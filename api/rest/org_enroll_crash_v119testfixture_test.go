@@ -5,7 +5,7 @@ package rest
 // Crash-durability matrix for org fleet enrollment (RFC #443 point 2).
 //
 // A worker subprocess redeems an enrollment token through the real handler and
-// is SIGKILLed while blocked at each SetStatesAtomic boundary, so no Go defer or
+// is SIGKILLed while blocked at each compare-and-set write boundary, so no Go defer or
 // Badger Close can mask a torn write. The parent then reopens the store and
 // proves the enrollment is either entirely absent (crash before commit) or
 // entirely present and consistent (crash after commit) — never a consume marker
@@ -14,7 +14,7 @@ package rest
 // second, and a refusal for any other identity in both.
 //
 // The state lives in the node's SQLite store (WAL, synchronous=FULL), whose
-// SetOrgPolicyStatesAtomic fires the same four hook stages; with
+// CompareAndSetOrgPolicyStatesAtomic fires the same four hook stages; with
 // synchronous=FULL the commit is fsynced, so after_atomic_commit and after_sync
 // coincide. Scope: this proves process-crash atomicity at every write boundary;
 // power-loss durability of a committed write rests on SQLite's FULL sync.
@@ -73,7 +73,9 @@ func newEnrollCrashFixture(t *testing.T) enrollCrashFixture {
 	tokens := newStubEnrollTokenStore()
 	tokens.seed(enrollCrashToken, &store.OrgEnrollmentToken{
 		ID: enrollCrashTokenID, OrgID: enrollCrashOrgID, OwnerID: "owner", NodeLabel: "edge-1",
-		Role: "member", OrgSignerPub: hexOf(orgKey), KeyEpoch: "e1",
+		Role: "member", EnrolleePub: hexOf(node), Scope: "fleet",
+		OrgSignerPub: hexOf(orgKey), KeyEpoch: "e1",
+		ExpiresAt: time.Now().Add(time.Hour),
 	})
 	policy := signedOrgPolicy(t, orgKey, enrollCrashOrgID, "e1", 1)
 	return enrollCrashFixture{
@@ -222,9 +224,10 @@ func TestOrgEnrollCrashBoundariesReopenAllOrNothingAndRetryConverges(t *testing.
 			require.True(t, ok)
 			assert.Equal(t, fx.nodeHex, after.EnrolleePub)
 
-			// Either way the token is now spent: another identity is refused.
+			// The token is bound to one key and is spent after the first outcome:
+			// another identity is refused before any new write.
 			other := fx.enroll(reopened, fx.otherHex)
-			assert.Equal(t, http.StatusConflict, other.Code, other.Body.String())
+			assert.Equal(t, http.StatusForbidden, other.Code, other.Body.String())
 		})
 	}
 }

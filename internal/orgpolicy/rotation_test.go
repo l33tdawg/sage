@@ -124,6 +124,39 @@ func TestAuthorizedKeysNoOverlap(t *testing.T) {
 	}
 }
 
+func TestAuthorizedSignersBindOrgTimeAndEpoch(t *testing.T) {
+	A, B := fixedKey(t, 1), fixedKey(t, 2)
+	att := signedAtt(t, A, pub(B), "epoch-2", 100, 0)
+
+	before, err := AuthorizedSigners(pub(A), "org-acme", "epoch-1", []RotationAttestation{att}, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 1 || !bytes.Equal(before[0].PublicKey, pub(A)) || before[0].KeyEpoch != "epoch-1" {
+		t.Fatalf("before NotBefore = %+v", before)
+	}
+
+	after, err := AuthorizedSigners(pub(A), "org-acme", "epoch-1", []RotationAttestation{att}, 150)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 || !bytes.Equal(after[0].PublicKey, pub(B)) || after[0].KeyEpoch != "epoch-2" {
+		t.Fatalf("after cutover = %+v", after)
+	}
+
+	if _, err := AuthorizedSigners(pub(A), "org-other", "epoch-1", []RotationAttestation{att}, 150); err == nil {
+		t.Fatal("cross-org rotation was accepted")
+	}
+
+	futurePolicy := signed(t, B, func(p *Policy) { p.OrgID = "org-acme"; p.KeyEpoch = "epoch-2" })
+	if err := VerifyPolicyUnderAuthorizedSigners(futurePolicy, before); err == nil {
+		t.Fatal("successor policy verified before rotation NotBefore")
+	}
+	if err := VerifyPolicyUnderAuthorizedSigners(futurePolicy, after); err != nil {
+		t.Fatalf("successor policy should verify after NotBefore: %v", err)
+	}
+}
+
 func keyHexes(keys []ed25519.PublicKey) []string {
 	out := make([]string, len(keys))
 	for i, k := range keys {

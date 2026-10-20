@@ -31,3 +31,30 @@ func TestOrgPolicyState_GetSetAtomic(t *testing.T) {
 
 	require.NoError(t, s.SetOrgPolicyStatesAtomic(ctx, nil), "an empty write set is a no-op")
 }
+
+func TestOrgPolicyState_CompareAndSetIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+
+	applied, err := s.CompareAndSetOrgPolicyStatesAtomic(ctx,
+		[]StateCondition{{Key: "orgpolicy/enroll/a"}, {Key: "orgpolicy/accepted/o"}},
+		[]StateWrite{
+			{Key: "orgpolicy/enroll/a", Value: []byte("first")},
+			{Key: "orgpolicy/accepted/o", Value: []byte("rev1")},
+		})
+	require.NoError(t, err)
+	require.True(t, applied)
+
+	applied, err = s.CompareAndSetOrgPolicyStatesAtomic(ctx,
+		[]StateCondition{{Key: "orgpolicy/enroll/a"}, {Key: "orgpolicy/accepted/o"}},
+		[]StateWrite{
+			{Key: "orgpolicy/enroll/a", Value: []byte("second")},
+			{Key: "orgpolicy/accepted/o", Value: []byte("rev2")},
+		})
+	require.NoError(t, err)
+	require.False(t, applied)
+
+	got, err := s.GetOrgPolicyState(ctx, "orgpolicy/enroll/a")
+	require.NoError(t, err)
+	require.Equal(t, []byte("first"), got, "a failed compare-and-set must write nothing")
+}

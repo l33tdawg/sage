@@ -62,12 +62,14 @@ func TestOrgTokenCreateValidatesBeforeCalling(t *testing.T) {
 		t.Errorf("invalid input must not call the node, got %s %s", r.Method, r.URL.Path)
 	})
 	for name, args := range map[string][]string{
-		"unknown flag":   {"--org", "o", "--node", "n", "--signer", "s", "--bogus", "x"},
-		"missing org":    {"--node", "n", "--signer", "s"},
-		"missing node":   {"--org", "o", "--signer", "s"},
-		"missing signer": {"--org", "o", "--node", "n"},
-		"dangling flag":  {"--org"},
-		"stray arg":      {"--org", "o", "--node", "n", "--signer", "s", "extra"},
+		"unknown flag":     {"--org", "o", "--node", "n", "--enrollee", "e", "--scope", "fleet", "--signer", "s", "--bogus", "x"},
+		"missing org":      {"--node", "n", "--enrollee", "e", "--scope", "fleet", "--signer", "s"},
+		"missing node":     {"--org", "o", "--enrollee", "e", "--scope", "fleet", "--signer", "s"},
+		"missing enrollee": {"--org", "o", "--node", "n", "--scope", "fleet", "--signer", "s"},
+		"missing scope":    {"--org", "o", "--node", "n", "--enrollee", "e", "--signer", "s"},
+		"missing signer":   {"--org", "o", "--node", "n", "--enrollee", "e", "--scope", "fleet"},
+		"dangling flag":    {"--org"},
+		"stray arg":        {"--org", "o", "--node", "n", "--enrollee", "e", "--scope", "fleet", "--signer", "s", "extra"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Error(t, runOrgTokenCreate(args))
@@ -84,16 +86,16 @@ func TestOrgTokenCreateSignedRequest(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":"tok-1","org_id":"org-x","node_label":"edge-7","role":"member","token":"PLAINTEXT-ONCE","issued_at":"2026-10-18T00:00:00Z","use_hint":"hint"}`))
+		_, _ = w.Write([]byte(`{"id":"tok-1","org_id":"org-x","node_label":"edge-7","role":"member","enrollee_pub":"ab12","scope":"fleet","token":"PLAINTEXT-ONCE","issued_at":"2026-10-18T00:00:00Z","expires_at":"2026-10-19T00:00:00Z","use_hint":"hint"}`))
 	})
 
 	out, err := captureOrgTokenStdout(t, func() error {
-		return runOrgTokenCreate([]string{"--org", "org-x", "--node=edge-7", "--signer", "ab12", "--epoch", "e1"})
+		return runOrgTokenCreate([]string{"--org", "org-x", "--node=edge-7", "--enrollee", "ab12", "--scope", "fleet", "--signer", "cd34", "--epoch", "e1"})
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "POST /v1/org/org-x/enroll-tokens", gotPath)
 	assert.Equal(t, agentID, gotAgent, "request must be signed by the CLI agent key")
-	assert.Equal(t, map[string]string{"node_label": "edge-7", "role": "", "org_signer_pub": "ab12", "key_epoch": "e1"}, gotBody)
+	assert.Equal(t, map[string]string{"node_label": "edge-7", "role": "", "enrollee_pub": "ab12", "scope": "fleet", "org_signer_pub": "cd34", "key_epoch": "e1"}, gotBody)
 	assert.Contains(t, out, "PLAINTEXT-ONCE")
 	assert.Contains(t, out, "tok-1")
 }
@@ -110,7 +112,7 @@ func TestOrgTokenRevokeAndList(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusNoContent)
 		case http.MethodGet:
-			_, _ = w.Write([]byte(`{"tokens":[{"id":"tok-1","node_label":"edge-7","role":"member","issued_at":"2026-10-18T00:00:00Z","revoked_at":"2026-10-18T01:00:00Z"}]}`))
+			_, _ = w.Write([]byte(`{"tokens":[{"id":"tok-1","node_label":"edge-7","role":"member","issued_at":"2026-10-18T00:00:00Z","expires_at":"2026-10-19T00:00:00Z","revoked_at":"2026-10-18T01:00:00Z"}]}`))
 		}
 	})
 

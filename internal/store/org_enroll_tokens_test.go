@@ -5,17 +5,19 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
 // newTokenStore and mkDigest are shared with mcp_tokens_test.go (same package).
+const orgTokenTestEnrollee = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 func TestOrgEnrollToken_IssueLookupByDigest(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
 
-	issued, err := s.IssueOrgEnrollmentToken(ctx, "org-1", "owner-hex", "edge-node-7", "operator", "signerpub-hex", "epoch-2")
+	issued, err := s.IssueOrgEnrollmentToken(ctx, "org-1", "owner-hex", "edge-node-7", "operator", orgTokenTestEnrollee, "fleet", "signerpub-hex", "epoch-2")
 	require.NoError(t, err)
 	require.NotEmpty(t, issued.ID)
 	require.NotEmpty(t, issued.Token)
@@ -29,9 +31,13 @@ func TestOrgEnrollToken_IssueLookupByDigest(t *testing.T) {
 	require.Equal(t, "owner-hex", tok.OwnerID)
 	require.Equal(t, "edge-node-7", tok.NodeLabel)
 	require.Equal(t, "operator", tok.Role)
+	require.Equal(t, orgTokenTestEnrollee, tok.EnrolleePub)
+	require.Equal(t, "fleet", tok.Scope)
 	require.Equal(t, "signerpub-hex", tok.OrgSignerPub)
 	require.Equal(t, "epoch-2", tok.KeyEpoch)
 	require.False(t, tok.IssuedAt.IsZero())
+	require.False(t, tok.ExpiresAt.IsZero())
+	require.WithinDuration(t, tok.IssuedAt.Add(OrgEnrollmentTokenTTL), tok.ExpiresAt, time.Millisecond)
 	require.False(t, tok.Revoked())
 }
 
@@ -39,7 +45,7 @@ func TestOrgEnrollToken_PlaintextNeverStored(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
 
-	issued, err := s.IssueOrgEnrollmentToken(ctx, "org-1", "owner", "node", "member", "signer", "")
+	issued, err := s.IssueOrgEnrollmentToken(ctx, "org-1", "owner", "node", "member", orgTokenTestEnrollee, "fleet", "signer", "")
 	require.NoError(t, err)
 
 	// The plaintext must not appear as a lookup key, and no column may hold it.
@@ -64,7 +70,7 @@ func TestOrgEnrollToken_RevokeThenLookupRevoked(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
 
-	issued, err := s.IssueOrgEnrollmentToken(ctx, "org-9", "owner", "node", "admin", "signer", "")
+	issued, err := s.IssueOrgEnrollmentToken(ctx, "org-9", "owner", "node", "admin", orgTokenTestEnrollee, "fleet", "signer", "")
 	require.NoError(t, err)
 
 	require.NoError(t, s.RevokeOrgEnrollmentToken(ctx, issued.ID))
@@ -90,11 +96,11 @@ func TestOrgEnrollToken_ListAllAndByOrg(t *testing.T) {
 	ctx := context.Background()
 	s := newTokenStore(t)
 
-	_, err := s.IssueOrgEnrollmentToken(ctx, "org-a", "owner", "n1", "member", "signer", "")
+	_, err := s.IssueOrgEnrollmentToken(ctx, "org-a", "owner", "n1", "member", orgTokenTestEnrollee, "fleet", "signer", "")
 	require.NoError(t, err)
-	_, err = s.IssueOrgEnrollmentToken(ctx, "org-a", "owner", "n2", "member", "signer", "")
+	_, err = s.IssueOrgEnrollmentToken(ctx, "org-a", "owner", "n2", "member", orgTokenTestEnrollee, "fleet", "signer", "")
 	require.NoError(t, err)
-	bIssued, err := s.IssueOrgEnrollmentToken(ctx, "org-b", "owner", "n3", "operator", "signer", "")
+	bIssued, err := s.IssueOrgEnrollmentToken(ctx, "org-b", "owner", "n3", "operator", orgTokenTestEnrollee, "fleet", "signer", "")
 	require.NoError(t, err)
 
 	all, err := s.ListOrgEnrollmentTokens(ctx, "")
@@ -113,15 +119,19 @@ func TestOrgEnrollToken_IssueRequiresCoreFields(t *testing.T) {
 	s := newTokenStore(t)
 
 	// Missing org/owner/signer.
-	_, err := s.IssueOrgEnrollmentToken(ctx, "", "owner", "node", "role", "signer", "")
+	_, err := s.IssueOrgEnrollmentToken(ctx, "", "owner", "node", "role", orgTokenTestEnrollee, "fleet", "signer", "")
 	require.Error(t, err)
-	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "", "node", "role", "signer", "")
+	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "", "node", "role", orgTokenTestEnrollee, "fleet", "signer", "")
 	require.Error(t, err)
-	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "owner", "node", "role", "", "")
+	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "owner", "node", "role", orgTokenTestEnrollee, "fleet", "", "")
 	require.Error(t, err)
 	// Missing identity components (node_label / role) that form the binding.
-	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "owner", "", "role", "signer", "")
+	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "owner", "", "role", orgTokenTestEnrollee, "fleet", "signer", "")
 	require.Error(t, err)
-	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "owner", "node", "", "signer", "")
+	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "owner", "node", "", orgTokenTestEnrollee, "fleet", "signer", "")
+	require.Error(t, err)
+	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "owner", "node", "member", "", "fleet", "signer", "")
+	require.Error(t, err)
+	_, err = s.IssueOrgEnrollmentToken(ctx, "org", "owner", "node", "member", orgTokenTestEnrollee, "", "signer", "")
 	require.Error(t, err)
 }

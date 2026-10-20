@@ -125,22 +125,52 @@ func (s *Server) handleOrgPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusConflict, "this node is not enrolled in the org; the first policy is set by enrollment")
 		return
 	}
+	if req.Policy.Scope != prev.Scope {
+		writeJSONError(w, http.StatusConflict, "policy scope does not match the enrolled node scope")
+		return
+	}
 
-	root, err := auth.AgentIDToPublicKey(prev.IssuerKeyID)
+	rootKeyID := prev.RootKeyID
+	rootKeyEpoch := prev.RootKeyEpoch
+	if rootKeyID == "" {
+		rootKeyID = prev.IssuerKeyID
+		rootKeyEpoch = prev.KeyEpoch
+	}
+	if rootKeyID == prev.IssuerKeyID && (prev.RotationChainJSON == "" || prev.RotationChainJSON == "null") {
+		rootKeyEpoch = prev.KeyEpoch
+	}
+	root, err := auth.AgentIDToPublicKey(rootKeyID)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "accepted policy has an invalid issuer key")
 		return
 	}
-	authorized, err := orgpolicy.ResolveSigner(root, req.Attestations)
+	history, err := prev.RotationHistory()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "accepted policy has invalid rotation history")
+		return
+	}
+	chain := append(append([]orgpolicy.RotationAttestation(nil), history...), req.Attestations...)
+	now := orgPolicyNow()
+	authorized, err := orgpolicy.AuthorizedSigners(root, orgID, rootKeyEpoch, chain, now)
 	if err != nil {
 		writeJSONError(w, http.StatusForbidden, "rotation chain is not rooted at the accepted policy signer")
 		return
 	}
-
-	accepted, decision, notice, err := ps.ApplyPolicy(req.Policy, authorized)
+	signer, err := orgpolicy.AuthorizedSignerForPolicy(req.Policy, authorized)
 	if err != nil {
-		if req.Policy.Verify(authorized) != nil {
-			writeJSONError(w, http.StatusForbidden, "policy is not signed by the org's current key")
+		writeJSONError(w, http.StatusForbidden, "policy is not signed by the org's currently authorized key/epoch")
+		return
+	}
+
+	accepted, decision, notice, err := ps.ApplyPolicyWithAuthority(req.Policy, orgpolicy.PolicyAuthority{
+		AuthorizedKey: signer.PublicKey,
+		RootKeyID:     rootKeyID,
+		RootKeyEpoch:  rootKeyEpoch,
+		RotationChain: chain,
+	})
+	if err != nil {
+		if err == orgpolicy.ErrPolicyStateConflict {
+			writeJSONError(w, http.StatusConflict, "accepted policy changed during delivery; reload and retry")
 			return
 		}
 		writeJSONError(w, http.StatusInternalServerError, "failed to apply org policy")

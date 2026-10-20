@@ -22,6 +22,7 @@ import (
 const (
 	orgTokAdminID  = "00000000000000000000000000000000000000000000000000000000000000a1"
 	orgTokMemberID = "00000000000000000000000000000000000000000000000000000000000000b2"
+	orgTokEnrollee = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	orgTokOrgID    = "org-fleet"
 )
 
@@ -73,15 +74,15 @@ func issueOrgToken(t *testing.T, h http.Handler, orgID, body string) *httptest.R
 	return rr
 }
 
-func issueBody(signerHex string) string {
-	return `{"node_label":"edge-7","role":"member","org_signer_pub":"` + signerHex + `","key_epoch":"e1"}`
+func issueBody(signerHex, enrolleeHex string) string {
+	return `{"node_label":"edge-7","role":"member","enrollee_pub":"` + enrolleeHex + `","scope":"fleet","org_signer_pub":"` + signerHex + `","key_epoch":"e1"}`
 }
 
 func TestOrgEnrollTokenIssue_AdminGetsOneShotToken(t *testing.T) {
 	s := newOrgTokenServer(t)
 	_, _, signerHex := orgKeypair(t)
 
-	rr := issueOrgToken(t, orgTokenRouterAs(s, orgTokAdminID), orgTokOrgID, issueBody(signerHex))
+	rr := issueOrgToken(t, orgTokenRouterAs(s, orgTokAdminID), orgTokOrgID, issueBody(signerHex, orgTokEnrollee))
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
 
 	var resp OrgEnrollTokenIssueResponse
@@ -92,13 +93,16 @@ func TestOrgEnrollTokenIssue_AdminGetsOneShotToken(t *testing.T) {
 	assert.Equal(t, orgTokAdminID, resp.OwnerID, "owner is the signed caller, not a body field")
 	assert.Equal(t, "edge-7", resp.NodeLabel)
 	assert.Equal(t, "member", resp.Role)
+	assert.Equal(t, orgTokEnrollee, resp.EnrolleePub)
+	assert.Equal(t, "fleet", resp.Scope)
+	assert.False(t, resp.ExpiresAt.IsZero())
 }
 
 func TestOrgEnrollTokenIssue_NonAdminForbidden(t *testing.T) {
 	s := newOrgTokenServer(t)
 	_, _, signerHex := orgKeypair(t)
 
-	rr := issueOrgToken(t, orgTokenRouterAs(s, orgTokMemberID), orgTokOrgID, issueBody(signerHex))
+	rr := issueOrgToken(t, orgTokenRouterAs(s, orgTokMemberID), orgTokOrgID, issueBody(signerHex, orgTokEnrollee))
 	require.Equal(t, http.StatusForbidden, rr.Code)
 
 	rows, err := s.store.(orgEnrollTokenAdminStore).ListOrgEnrollmentTokens(context.Background(), "")
@@ -110,7 +114,7 @@ func TestOrgEnrollTokenIssue_UnknownOrgNotFound(t *testing.T) {
 	s := newOrgTokenServer(t)
 	_, _, signerHex := orgKeypair(t)
 
-	rr := issueOrgToken(t, orgTokenRouterAs(s, orgTokAdminID), "no-such-org", issueBody(signerHex))
+	rr := issueOrgToken(t, orgTokenRouterAs(s, orgTokAdminID), "no-such-org", issueBody(signerHex, orgTokEnrollee))
 	require.Equal(t, http.StatusNotFound, rr.Code)
 }
 
@@ -120,12 +124,14 @@ func TestOrgEnrollTokenIssue_ValidatesBody(t *testing.T) {
 	_, _, signerHex := orgKeypair(t)
 
 	cases := map[string]string{
-		"missing label":  `{"role":"member","org_signer_pub":"` + signerHex + `"}`,
-		"admin role":     `{"node_label":"n","role":"admin","org_signer_pub":"` + signerHex + `"}`,
-		"unknown role":   `{"node_label":"n","role":"root","org_signer_pub":"` + signerHex + `"}`,
-		"short signer":   `{"node_label":"n","org_signer_pub":"abcd"}`,
-		"non-hex signer": `{"node_label":"n","org_signer_pub":"` + strings.Repeat("z", 64) + `"}`,
-		"bad json":       `{`,
+		"missing label":    `{"role":"member","enrollee_pub":"` + orgTokEnrollee + `","scope":"fleet","org_signer_pub":"` + signerHex + `"}`,
+		"missing enrollee": `{"node_label":"n","role":"member","scope":"fleet","org_signer_pub":"` + signerHex + `"}`,
+		"missing scope":    `{"node_label":"n","role":"member","enrollee_pub":"` + orgTokEnrollee + `","org_signer_pub":"` + signerHex + `"}`,
+		"admin role":       `{"node_label":"n","role":"admin","enrollee_pub":"` + orgTokEnrollee + `","scope":"fleet","org_signer_pub":"` + signerHex + `"}`,
+		"unknown role":     `{"node_label":"n","role":"root","enrollee_pub":"` + orgTokEnrollee + `","scope":"fleet","org_signer_pub":"` + signerHex + `"}`,
+		"short signer":     `{"node_label":"n","enrollee_pub":"` + orgTokEnrollee + `","scope":"fleet","org_signer_pub":"abcd"}`,
+		"non-hex signer":   `{"node_label":"n","enrollee_pub":"` + orgTokEnrollee + `","scope":"fleet","org_signer_pub":"` + strings.Repeat("z", 64) + `"}`,
+		"bad json":         `{`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -140,7 +146,7 @@ func TestOrgEnrollTokenIssue_RoleDefaultsToMember(t *testing.T) {
 	_, _, signerHex := orgKeypair(t)
 
 	rr := issueOrgToken(t, orgTokenRouterAs(s, orgTokAdminID), orgTokOrgID,
-		`{"node_label":"n","org_signer_pub":"`+signerHex+`"}`)
+		`{"node_label":"n","enrollee_pub":"`+orgTokEnrollee+`","scope":"fleet","org_signer_pub":"`+signerHex+`"}`)
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
 	var resp OrgEnrollTokenIssueResponse
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&resp))
@@ -152,7 +158,7 @@ func TestOrgEnrollTokenList_NeverReturnsPlaintext(t *testing.T) {
 	h := orgTokenRouterAs(s, orgTokAdminID)
 	_, _, signerHex := orgKeypair(t)
 
-	rr := issueOrgToken(t, h, orgTokOrgID, issueBody(signerHex))
+	rr := issueOrgToken(t, h, orgTokOrgID, issueBody(signerHex, orgTokEnrollee))
 	require.Equal(t, http.StatusCreated, rr.Code)
 	var issued OrgEnrollTokenIssueResponse
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&issued))
@@ -169,6 +175,8 @@ func TestOrgEnrollTokenList_NeverReturnsPlaintext(t *testing.T) {
 	require.Len(t, list.Tokens, 1)
 	assert.Equal(t, issued.ID, list.Tokens[0].ID)
 	assert.Equal(t, signerHex, list.Tokens[0].OrgSignerPub)
+	assert.Equal(t, orgTokEnrollee, list.Tokens[0].EnrolleePub)
+	assert.Equal(t, "fleet", list.Tokens[0].Scope)
 
 	// Non-admins cannot enumerate the org's tokens.
 	fr := httptest.NewRecorder()
@@ -183,7 +191,7 @@ func TestOrgEnrollTokenRevoke_ScopedToPathOrg(t *testing.T) {
 	h := orgTokenRouterAs(s, orgTokAdminID)
 	_, _, signerHex := orgKeypair(t)
 
-	rr := issueOrgToken(t, h, orgTokOrgID, issueBody(signerHex))
+	rr := issueOrgToken(t, h, orgTokOrgID, issueBody(signerHex, orgTokEnrollee))
 	require.Equal(t, http.StatusCreated, rr.Code)
 	var issued OrgEnrollTokenIssueResponse
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&issued))
@@ -217,7 +225,7 @@ func TestOrgEnrollToken_IssueThenRedeemEndToEnd(t *testing.T) {
 	_, orgPriv, orgPubHex := orgKeypair(t)
 	_, _, nodeHex := orgKeypair(t)
 
-	rr := issueOrgToken(t, orgTokenRouterAs(s, orgTokAdminID), orgTokOrgID, issueBody(orgPubHex))
+	rr := issueOrgToken(t, orgTokenRouterAs(s, orgTokAdminID), orgTokOrgID, issueBody(orgPubHex, nodeHex))
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
 	var issued OrgEnrollTokenIssueResponse
 	require.NoError(t, json.NewDecoder(rr.Body).Decode(&issued))
@@ -233,8 +241,23 @@ func TestOrgEnrollToken_IssueThenRedeemEndToEnd(t *testing.T) {
 	assert.Equal(t, nodeHex, out.EnrolleePub)
 	assert.Equal(t, orgTokAdminID+"/edge-7/member", out.BoundIdentity)
 
+	// Revoking the already-used bearer blocks new redemptions but not the bound
+	// node's retry/recovery replay.
+	drUsed := httptest.NewRecorder()
+	orgTokenRouterAs(s, orgTokAdminID).ServeHTTP(drUsed,
+		httptest.NewRequest(http.MethodDelete, "/v1/org/"+orgTokOrgID+"/enroll-tokens/"+issued.ID, nil))
+	require.Equal(t, http.StatusNoContent, drUsed.Code)
+	replay := httptest.NewRecorder()
+	node.ServeHTTP(replay, httptest.NewRequest(http.MethodPost, "/v1/org/"+orgTokOrgID+"/enroll",
+		bytes.NewReader(enrollBody(t, issued.Token, policy, nil))))
+	require.Equal(t, http.StatusOK, replay.Code, replay.Body.String())
+	var replayOut OrgEnrollResponse
+	require.NoError(t, json.NewDecoder(replay.Body).Decode(&replayOut))
+	assert.True(t, replayOut.Replayed)
+
 	// A second token, revoked before use, is refused at redeem.
-	rr2 := issueOrgToken(t, orgTokenRouterAs(s, orgTokAdminID), orgTokOrgID, issueBody(orgPubHex))
+	_, _, node2Hex := orgKeypair(t)
+	rr2 := issueOrgToken(t, orgTokenRouterAs(s, orgTokAdminID), orgTokOrgID, issueBody(orgPubHex, node2Hex))
 	require.Equal(t, http.StatusCreated, rr2.Code)
 	var issued2 OrgEnrollTokenIssueResponse
 	require.NoError(t, json.NewDecoder(rr2.Body).Decode(&issued2))
@@ -243,7 +266,6 @@ func TestOrgEnrollToken_IssueThenRedeemEndToEnd(t *testing.T) {
 		httptest.NewRequest(http.MethodDelete, "/v1/org/"+orgTokOrgID+"/enroll-tokens/"+issued2.ID, nil))
 	require.Equal(t, http.StatusNoContent, dr.Code)
 
-	_, _, node2Hex := orgKeypair(t)
 	er2 := httptest.NewRecorder()
 	orgTokenRouterAs(s, node2Hex).ServeHTTP(er2, httptest.NewRequest(http.MethodPost, "/v1/org/"+orgTokOrgID+"/enroll",
 		bytes.NewReader(enrollBody(t, issued2.Token, policy, nil))))

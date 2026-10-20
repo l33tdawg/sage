@@ -2,12 +2,12 @@ package orgpolicy
 
 // Persistence for the org-policy accepted chain and the retry-safe enrollment
 // outcome. This file keeps the package's PURE discipline: it depends on a small
-// KV abstraction (GetState + SetStatesAtomic) rather than importing
+// KV abstraction (GetState + transactional compare-and-set) rather than importing
 // internal/store, so the ordering/equivocation/enrollment durability contract
-// stays unit-testable in isolation (an in-memory fake KV) with no badger in the
-// build. The caller (api/rest) adapts *store.BadgerStore to KV — a one-line
+// stays unit-testable in isolation (an in-memory fake KV) with no SQLite in the
+// build. The caller (api/rest) adapts the node-local *store.SQLiteStore to KV — a one-line
 // bridge from orgpolicy.KVWrite to store.StateWrite — and nothing else here
-// knows about badger.
+// knows about SQLite.
 //
 // Durability model (answers RFC #443 point 2, retry-safe enrollment):
 //   - The enrollment OUTCOME record IS the single-use consume marker. Keyed by
@@ -15,7 +15,7 @@ package orgpolicy
 //     replayable result (bound identity + first policy). Its existence means
 //     "consumed, with this recoverable outcome".
 //   - Consume + bound identity + first policy + accepted high-water mark commit
-//     in ONE SetStatesAtomic transaction (one badger Update + one Sync). There is
+//     in ONE compare-and-set SQLite transaction. There is
 //     no two-phase window: either the whole outcome is durable or nothing is.
 //   - Crash BEFORE commit: nothing written, the token is still unconsumed, a
 //     retry re-verifies and commits cleanly. Crash AFTER commit but before the
@@ -35,6 +35,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -45,15 +46,34 @@ type KVWrite struct {
 	Value []byte
 }
 
+// KVCondition is one compare-and-set precondition. Value == nil requires the
+// key to be absent; otherwise the stored bytes must match exactly.
+type KVCondition struct {
+	Key   string
+	Value []byte
+}
+
+// ErrEnrollmentConflict means the token was already committed to another
+// identity, or the node already accepted a first policy for the org.
+var ErrEnrollmentConflict = errors.New("orgpolicy: enrollment already committed to another identity")
+
+// ErrPolicyStateConflict means another request changed the accepted policy
+// between the read and the compare-and-set write. The caller should reload and
+// retry rather than overwrite a concurrent decision.
+var ErrPolicyStateConflict = errors.New("orgpolicy: accepted policy changed concurrently")
+
 // KV is the minimal durable key/value surface this package needs. The contract
-// matches *store.BadgerStore exactly:
+// matches the node-local SQLite adapter:
 //   - GetState returns (nil, nil) for an absent key (never a sentinel error).
 //   - SetStatesAtomic persists every write in ONE transaction and fsyncs before
 //     returning; a returned error means NONE of the writes are durable (a sync
 //     error is the one exception the store documents, and the caller fail-stops).
+//   - CompareAndSetStatesAtomic checks every condition and applies every write
+//     in the same transaction. A mismatch applies nothing and returns false.
 type KV interface {
 	GetState(key string) ([]byte, error)
 	SetStatesAtomic(writes []KVWrite) error
+	CompareAndSetStatesAtomic(conditions []KVCondition, writes []KVWrite) (bool, error)
 }
 
 const keyPrefix = "orgpolicy/"
@@ -89,6 +109,20 @@ type EnrollmentOutcome struct {
 // rejects a nil first policy, so a nil here yields an outcome that fails to
 // commit rather than a panic.
 func NewEnrollmentOutcome(tokenID, enrolleePub, boundIdentity string, first *Policy, consumedAt int64) EnrollmentOutcome {
+	authority := PolicyAuthority{}
+	if first != nil {
+		authority = PolicyAuthority{
+			AuthorizedKey: mustPolicyKey(first),
+			RootKeyID:     first.IssuerKeyID,
+			RootKeyEpoch:  first.KeyEpoch,
+		}
+	}
+	return NewEnrollmentOutcomeWithAuthority(tokenID, enrolleePub, boundIdentity, first, authority, consumedAt)
+}
+
+// NewEnrollmentOutcomeWithAuthority records the token's pinned root and the
+// complete rotation chain alongside the first policy.
+func NewEnrollmentOutcomeWithAuthority(tokenID, enrolleePub, boundIdentity string, first *Policy, authority PolicyAuthority, consumedAt int64) EnrollmentOutcome {
 	out := EnrollmentOutcome{
 		TokenID:       tokenID,
 		EnrolleePub:   enrolleePub,
@@ -98,7 +132,7 @@ func NewEnrollmentOutcome(tokenID, enrolleePub, boundIdentity string, first *Pol
 	}
 	if first != nil {
 		out.OrgID = first.OrgID
-		out.Accepted = stateFrom(first)
+		out.Accepted = NewAcceptedStateWithAuthority(first, authority)
 	}
 	return out
 }
@@ -113,18 +147,23 @@ func NewStore(kv KV) *Store { return &Store{kv: kv} }
 // LoadAccepted returns the persisted high-water mark for orgID, or the zero
 // AcceptedState (Revision == 0) when the org has no accepted policy yet.
 func (s *Store) LoadAccepted(orgID string) (AcceptedState, error) {
+	st, _, err := s.loadAcceptedWithRaw(orgID)
+	return st, err
+}
+
+func (s *Store) loadAcceptedWithRaw(orgID string) (AcceptedState, []byte, error) {
 	var st AcceptedState
 	raw, err := s.kv.GetState(acceptedKey(orgID))
 	if err != nil {
-		return st, fmt.Errorf("orgpolicy store: load accepted: %w", err)
+		return st, nil, fmt.Errorf("orgpolicy store: load accepted: %w", err)
 	}
 	if raw == nil {
-		return st, nil // no policy accepted yet
+		return st, nil, nil // no policy accepted yet
 	}
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return AcceptedState{}, fmt.Errorf("orgpolicy store: decode accepted: %w", err)
+		return AcceptedState{}, nil, fmt.Errorf("orgpolicy store: decode accepted: %w", err)
 	}
-	return st, nil
+	return st, append([]byte(nil), raw...), nil
 }
 
 // LoadEnrollment returns the durable outcome for tokenID, reporting ok=false when
@@ -185,8 +224,7 @@ func (s *Store) CommitFirstEnrollment(outcome EnrollmentOutcome) error {
 	if outcome.OrgID != outcome.FirstPolicy.OrgID {
 		return fmt.Errorf("orgpolicy store: enrollment org %q != first policy org %q", outcome.OrgID, outcome.FirstPolicy.OrgID)
 	}
-	want := stateFrom(outcome.FirstPolicy)
-	if outcome.Accepted != want {
+	if !acceptedMatchesPolicy(outcome.Accepted, outcome.FirstPolicy) {
 		return fmt.Errorf("orgpolicy store: accepted state does not match first policy")
 	}
 	recBytes, err := json.Marshal(outcome)
@@ -197,11 +235,56 @@ func (s *Store) CommitFirstEnrollment(outcome EnrollmentOutcome) error {
 	if err != nil {
 		return fmt.Errorf("orgpolicy store: encode accepted state: %w", err)
 	}
-	// ONE transaction: consume marker (== outcome) and accepted high-water mark.
-	return s.kv.SetStatesAtomic([]KVWrite{
+	// ONE compare-and-set transaction: both keys must still be absent. This is
+	// what actually makes the bearer single-use under concurrent redemption;
+	// an unconditional upsert would let the last of two identities win.
+	applied, err := s.kv.CompareAndSetStatesAtomic([]KVCondition{
+		{Key: enrollKey(outcome.TokenID)},
+		{Key: acceptedKey(outcome.OrgID)},
+	}, []KVWrite{
 		{Key: enrollKey(outcome.TokenID), Value: recBytes},
 		{Key: acceptedKey(outcome.OrgID), Value: accBytes},
 	})
+	if err != nil {
+		return err
+	}
+	if applied {
+		return nil
+	}
+	prior, ok, err := s.LoadEnrollment(outcome.TokenID)
+	if err != nil {
+		return err
+	}
+	if ok && sameEnrollment(*prior, outcome) {
+		accepted, err := s.LoadAccepted(outcome.OrgID)
+		if err != nil {
+			return err
+		}
+		if accepted == outcome.Accepted {
+			return nil
+		}
+	}
+	return ErrEnrollmentConflict
+}
+
+func acceptedMatchesPolicy(st AcceptedState, p *Policy) bool {
+	return st.OrgID == p.OrgID &&
+		st.Scope == p.Scope &&
+		st.Revision == p.Revision &&
+		st.Digest == p.Digest() &&
+		st.KeyEpoch == p.KeyEpoch &&
+		st.IssuerKeyID == p.IssuerKeyID &&
+		st.NotBefore == p.NotBefore &&
+		st.Expiry == p.Expiry
+}
+
+func sameEnrollment(a, b EnrollmentOutcome) bool {
+	if a.TokenID != b.TokenID || a.EnrolleePub != b.EnrolleePub ||
+		a.OrgID != b.OrgID || a.BoundIdentity != b.BoundIdentity ||
+		a.Accepted != b.Accepted || a.FirstPolicy == nil || b.FirstPolicy == nil {
+		return false
+	}
+	return a.FirstPolicy.Digest() == b.FirstPolicy.Digest()
 }
 
 // ApplyPolicy admits a fetched policy against the persisted accepted state and
@@ -221,11 +304,27 @@ func (s *Store) CommitFirstEnrollment(outcome EnrollmentOutcome) error {
 // authorized is the signer the caller resolved as current (the pinned org key,
 // or a rotated successor proven by a verified attestation chain — see rotation.go).
 func (s *Store) ApplyPolicy(p *Policy, authorized ed25519.PublicKey) (AcceptedState, Decision, *EquivocationNotice, error) {
-	prev, err := s.LoadAccepted(p.OrgID)
+	return s.applyPolicy(p, nil, authorized)
+}
+
+// ApplyPolicyWithAuthority is the production form used after the caller resolves
+// the complete root-to-current rotation history for this policy.
+func (s *Store) ApplyPolicyWithAuthority(p *Policy, authority PolicyAuthority) (AcceptedState, Decision, *EquivocationNotice, error) {
+	return s.applyPolicy(p, &authority, authority.AuthorizedKey)
+}
+
+func (s *Store) applyPolicy(p *Policy, authority *PolicyAuthority, authorized ed25519.PublicKey) (AcceptedState, Decision, *EquivocationNotice, error) {
+	prev, raw, err := s.loadAcceptedWithRaw(p.OrgID)
 	if err != nil {
 		return AcceptedState{}, "", nil, err
 	}
-	next, decision, err := Admit(prev, p, authorized)
+	var next AcceptedState
+	var decision Decision
+	if authority == nil {
+		next, decision, err = Admit(prev, p, authorized)
+	} else {
+		next, decision, err = AdmitWithAuthority(prev, p, *authority)
+	}
 	if err != nil {
 		return prev, "", nil, err
 	}
@@ -235,8 +334,15 @@ func (s *Store) ApplyPolicy(p *Policy, authorized ed25519.PublicKey) (AcceptedSt
 		if mErr != nil {
 			return prev, "", nil, fmt.Errorf("orgpolicy store: encode accepted state: %w", mErr)
 		}
-		if wErr := s.kv.SetStatesAtomic([]KVWrite{{Key: acceptedKey(p.OrgID), Value: accBytes}}); wErr != nil {
+		applied, wErr := s.kv.CompareAndSetStatesAtomic(
+			[]KVCondition{{Key: acceptedKey(p.OrgID), Value: raw}},
+			[]KVWrite{{Key: acceptedKey(p.OrgID), Value: accBytes}},
+		)
+		if wErr != nil {
 			return prev, "", nil, wErr
+		}
+		if !applied {
+			return prev, "", nil, ErrPolicyStateConflict
 		}
 		return next, decision, nil, nil
 	case DecisionRejectedEquivocation:
@@ -245,8 +351,15 @@ func (s *Store) ApplyPolicy(p *Policy, authorized ed25519.PublicKey) (AcceptedSt
 		if mErr != nil {
 			return prev, "", nil, fmt.Errorf("orgpolicy store: encode equivocation notice: %w", mErr)
 		}
-		if wErr := s.kv.SetStatesAtomic([]KVWrite{{Key: equivKey(p.OrgID), Value: nBytes}}); wErr != nil {
+		applied, wErr := s.kv.CompareAndSetStatesAtomic(
+			[]KVCondition{{Key: acceptedKey(p.OrgID), Value: raw}},
+			[]KVWrite{{Key: equivKey(p.OrgID), Value: nBytes}},
+		)
+		if wErr != nil {
 			return prev, "", nil, wErr
+		}
+		if !applied {
+			return prev, "", nil, ErrPolicyStateConflict
 		}
 		return prev, decision, &notice, nil
 	default: // NoOpSameDigest, RejectedRollback — no state change

@@ -14,6 +14,8 @@ const RotationSchemaID = "sage.org-policy-rotation.v1"
 // and every other signature. ASCII label + NUL, matching the house convention.
 const rotationDomainSep = "sage-org-policy-rotation-v1\x00"
 
+const maxRotationChain = 32
+
 // RotationAttestation authorizes a replacement org signing key. It is signed by
 // the CURRENT (From) key — so authority to appoint a successor flows only from
 // the key that already holds it. A larger key_epoch ALONE authorizes nothing: a
@@ -28,6 +30,14 @@ type RotationAttestation struct {
 	NotBefore    int64  `json:"not_before"`    // unix seconds; successor authorized from here
 	OverlapUntil int64  `json:"overlap_until"` // unix seconds; From key honored until here (0 == no overlap)
 	Sig          string `json:"sig"`           // hex ed25519 by the From key over canonicalBytes()
+}
+
+// AuthorizedSigner is one key/epoch pair valid for an org at a specific time.
+// KeyEpoch may be empty only for an enrollment token that deliberately leaves
+// the first epoch unpinned.
+type AuthorizedSigner struct {
+	PublicKey ed25519.PublicKey
+	KeyEpoch  string
 }
 
 func (a *RotationAttestation) canonicalBytes() []byte {
@@ -170,6 +180,84 @@ func AuthorizedKeys(pinnedPub ed25519.PublicKey, atts []RotationAttestation, now
 	return dedupeKeys(append(overlaps, cur)), nil
 }
 
+// AuthorizedSigners is the time-aware, org-bound signer set used by enrollment
+// and policy delivery. It validates every attestation's org and ordering, keeps
+// a predecessor only during its explicit overlap, and never authorizes a
+// successor before that successor's NotBefore.
+func AuthorizedSigners(pinnedPub ed25519.PublicKey, orgID, currentEpoch string, atts []RotationAttestation, now int64) ([]AuthorizedSigner, error) {
+	if len(pinnedPub) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("rotation: invalid pinned key")
+	}
+	if orgID == "" {
+		return nil, fmt.Errorf("rotation: org_id required")
+	}
+	if len(atts) > maxRotationChain {
+		return nil, fmt.Errorf("rotation: chain length %d exceeds cap %d", len(atts), maxRotationChain)
+	}
+	cur := AuthorizedSigner{PublicKey: append(ed25519.PublicKey(nil), pinnedPub...), KeyEpoch: currentEpoch}
+	out := []AuthorizedSigner{cur}
+	var lastNotBefore int64
+	for i := range atts {
+		att := &atts[i]
+		if att.OrgID != orgID {
+			return nil, fmt.Errorf("rotation chain link %d: org_id %q does not match %q", i, att.OrgID, orgID)
+		}
+		nextPub, err := chainStep(cur.PublicKey, *att)
+		if err != nil {
+			return nil, fmt.Errorf("rotation chain link %d: %w", i, err)
+		}
+		if i > 0 && att.NotBefore < lastNotBefore {
+			return nil, fmt.Errorf("rotation chain link %d: not_before regresses", i)
+		}
+		lastNotBefore = att.NotBefore
+		if now < att.NotBefore {
+			return dedupeSigners(out), nil
+		}
+		if att.OverlapUntil != 0 && now <= att.OverlapUntil {
+			out = append(out, cur)
+		} else {
+			out = removeSigner(out, cur)
+		}
+		if cur.KeyEpoch != "" && att.NewKeyEpoch == cur.KeyEpoch {
+			return nil, fmt.Errorf("rotation chain link %d: new_key_epoch does not advance", i)
+		}
+		cur = AuthorizedSigner{
+			PublicKey: nextPub,
+			KeyEpoch:  att.NewKeyEpoch,
+		}
+		out = append(out, cur)
+	}
+	return dedupeSigners(out), nil
+}
+
+// AuthorizedSignerForPolicy requires both an authorized key and the matching key
+// epoch. An empty authorized epoch acts as a wildcard only for the initial
+// enrollment policy.
+func AuthorizedSignerForPolicy(p *Policy, signers []AuthorizedSigner) (AuthorizedSigner, error) {
+	var lastErr error
+	for _, signer := range signers {
+		if signer.KeyEpoch != "" && p.KeyEpoch != signer.KeyEpoch {
+			continue
+		}
+		if err := p.Verify(signer.PublicKey); err == nil {
+			return signer, nil
+		} else {
+			lastErr = err
+		}
+	}
+	if lastErr != nil {
+		return AuthorizedSigner{}, lastErr
+	}
+	return AuthorizedSigner{}, fmt.Errorf("org policy: issuer key/epoch is not currently authorized")
+}
+
+// VerifyPolicyUnderAuthorizedSigners is the verification-only form of
+// AuthorizedSignerForPolicy.
+func VerifyPolicyUnderAuthorizedSigners(p *Policy, signers []AuthorizedSigner) error {
+	_, err := AuthorizedSignerForPolicy(p, signers)
+	return err
+}
+
 func dedupeKeys(keys []ed25519.PublicKey) []ed25519.PublicKey {
 	seen := make(map[string]struct{}, len(keys))
 	out := make([]ed25519.PublicKey, 0, len(keys))
@@ -180,6 +268,33 @@ func dedupeKeys(keys []ed25519.PublicKey) []ed25519.PublicKey {
 		}
 		seen[h] = struct{}{}
 		out = append(out, k)
+	}
+	return out
+}
+
+func dedupeSigners(signers []AuthorizedSigner) []AuthorizedSigner {
+	seen := make(map[string]struct{}, len(signers))
+	out := make([]AuthorizedSigner, 0, len(signers))
+	for _, signer := range signers {
+		key := hex.EncodeToString(signer.PublicKey) + "\x00" + signer.KeyEpoch
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		signer.PublicKey = append(ed25519.PublicKey(nil), signer.PublicKey...)
+		out = append(out, signer)
+	}
+	return out
+}
+
+func removeSigner(signers []AuthorizedSigner, remove AuthorizedSigner) []AuthorizedSigner {
+	removeKey := hex.EncodeToString(remove.PublicKey) + "\x00" + remove.KeyEpoch
+	out := signers[:0]
+	for _, signer := range signers {
+		key := hex.EncodeToString(signer.PublicKey) + "\x00" + signer.KeyEpoch
+		if key != removeKey {
+			out = append(out, signer)
+		}
 	}
 	return out
 }

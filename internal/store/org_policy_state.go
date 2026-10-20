@@ -19,6 +19,7 @@ package store
 // this path (no-ops outside the v119testfixture build).
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -93,4 +94,62 @@ func (s *SQLiteStore) SetOrgPolicyStatesAtomic(ctx context.Context, writes []Sta
 		return fmt.Errorf("org policy state write after sync: %w", err)
 	}
 	return nil
+}
+
+// CompareAndSetOrgPolicyStatesAtomic checks every condition and applies all
+// writes in one SQLite transaction. It is the concurrency fence for single-use
+// enrollment and policy high-water-mark updates.
+func (s *SQLiteStore) CompareAndSetOrgPolicyStatesAtomic(ctx context.Context, conditions []StateCondition, writes []StateWrite) (bool, error) {
+	if len(writes) == 0 {
+		return true, nil
+	}
+	if err := runAtomicStateWriteFaultHook(AtomicStateWriteBeforeTransaction); err != nil {
+		return false, fmt.Errorf("org policy compare-and-set before transaction: %w", err)
+	}
+	tx, unlock, err := s.beginTxLocked(ctx)
+	if err != nil {
+		return false, fmt.Errorf("begin org policy compare-and-set transaction: %w", err)
+	}
+	defer unlock()
+	for i := range conditions {
+		var current []byte
+		err := tx.QueryRowContext(ctx, `SELECT value FROM org_policy_state WHERE key = ?`, conditions[i].Key).Scan(&current)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if conditions[i].Value != nil {
+				_ = tx.Rollback()
+				return false, nil
+			}
+		case err != nil:
+			_ = tx.Rollback()
+			return false, fmt.Errorf("read org policy condition %d (%q): %w", i, conditions[i].Key, err)
+		case conditions[i].Value == nil || !bytes.Equal(current, conditions[i].Value):
+			_ = tx.Rollback()
+			return false, nil
+		}
+	}
+	for i := range writes {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO org_policy_state (key, value) VALUES (?, ?)
+			ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+				updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
+			writes[i].Key, writes[i].Value); err != nil {
+			_ = tx.Rollback()
+			return false, fmt.Errorf("set org policy state entry %d (%q): %w", i, writes[i].Key, err)
+		}
+	}
+	if err := runAtomicStateWriteFaultHook(AtomicStateWriteBeforeCommit); err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("org policy compare-and-set before commit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit org policy compare-and-set transaction: %w", err)
+	}
+	if err := runAtomicStateWriteFaultHook(AtomicStateWriteAfterCommit); err != nil {
+		return false, fmt.Errorf("org policy compare-and-set after commit: %w", err)
+	}
+	if err := runAtomicStateWriteFaultHook(AtomicStateWriteAfterSync); err != nil {
+		return false, fmt.Errorf("org policy compare-and-set after sync: %w", err)
+	}
+	return true, nil
 }

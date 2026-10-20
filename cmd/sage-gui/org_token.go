@@ -3,7 +3,7 @@ package main
 // CLI for managing org fleet-enrollment tokens.
 //
 // Usage:
-//   sage-gui org-token create --org <org-id> --node <label> --signer <org-signer-pub> [--role member|observer] [--epoch <key-epoch>]
+//   sage-gui org-token create --org <org-id> --node <label> --enrollee <pubkey> --scope <scope> --signer <org-signer-pub> [--role member|observer] [--epoch <key-epoch>]
 //   sage-gui org-token list --org <org-id>
 //   sage-gui org-token revoke --org <org-id> <id>
 //
@@ -46,15 +46,16 @@ func printOrgTokenUsage() {
 	fmt.Println(`Manage org fleet-enrollment tokens (single-use; redeemed at POST /v1/org/<org-id>/enroll).
 
 Usage:
-  sage-gui org-token create --org <org-id> --node <label> --signer <org-signer-pub> [--role member|observer] [--epoch <key-epoch>]
+  sage-gui org-token create --org <org-id> --node <label> --enrollee <pubkey> --scope <scope> --signer <org-signer-pub> [--role member|observer] [--epoch <key-epoch>]
   sage-gui org-token list --org <org-id>
   sage-gui org-token revoke --org <org-id> <id>
 
---signer pins the hex ed25519 org policy signing key the node's first policy
-must verify under; --epoch optionally pins that policy's key epoch.
+--enrollee pins the exact node key allowed to redeem; --scope is immutable for
+the enrollment; --signer pins the org policy signing key the first policy must
+verify under; --epoch optionally pins that policy's key epoch.
 
 Examples:
-  sage-gui org-token create --org 3f2a... --node edge-7 --signer 9c1d...
+  sage-gui org-token create --org 3f2a... --node edge-7 --enrollee 4a5b... --scope fleet --signer 9c1d...
   sage-gui org-token list --org 3f2a...
   sage-gui org-token revoke --org 3f2a... 6c5e9f8a-b21d-4d52-89c4-1a3a4d9e7c5a`)
 }
@@ -98,7 +99,7 @@ func orgTokenPath(orgID string) string {
 }
 
 func runOrgTokenCreate(args []string) error {
-	flags, positional, helped, err := parseOrgTokenFlags("create", args, "org", "node", "signer", "role", "epoch")
+	flags, positional, helped, err := parseOrgTokenFlags("create", args, "org", "node", "enrollee", "scope", "signer", "role", "epoch")
 	if err != nil {
 		return err
 	}
@@ -110,7 +111,7 @@ func runOrgTokenCreate(args []string) error {
 	if len(positional) > 0 {
 		return fmt.Errorf("unexpected argument %q for 'org-token create'", positional[0])
 	}
-	for _, req := range []string{"org", "node", "signer"} {
+	for _, req := range []string{"org", "node", "enrollee", "scope", "signer"} {
 		if strings.TrimSpace(flags[req]) == "" {
 			return fmt.Errorf("--%s is required; run 'sage-gui org-token --help'", req)
 		}
@@ -119,6 +120,8 @@ func runOrgTokenCreate(args []string) error {
 	body, _ := json.Marshal(map[string]string{
 		"node_label":     flags["node"],
 		"role":           flags["role"],
+		"enrollee_pub":   flags["enrollee"],
+		"scope":          flags["scope"],
 		"org_signer_pub": flags["signer"],
 		"key_epoch":      flags["epoch"],
 	})
@@ -133,13 +136,16 @@ func runOrgTokenCreate(args []string) error {
 	}
 
 	var out struct {
-		ID        string    `json:"id"`
-		OrgID     string    `json:"org_id"`
-		NodeLabel string    `json:"node_label"`
-		Role      string    `json:"role"`
-		Token     string    `json:"token"`
-		IssuedAt  time.Time `json:"issued_at"`
-		UseHint   string    `json:"use_hint"`
+		ID          string    `json:"id"`
+		OrgID       string    `json:"org_id"`
+		NodeLabel   string    `json:"node_label"`
+		Role        string    `json:"role"`
+		EnrolleePub string    `json:"enrollee_pub"`
+		Scope       string    `json:"scope"`
+		Token       string    `json:"token"`
+		IssuedAt    time.Time `json:"issued_at"`
+		ExpiresAt   time.Time `json:"expires_at"`
+		UseHint     string    `json:"use_hint"`
 	}
 	if err := json.Unmarshal(respBody, &out); err != nil {
 		return fmt.Errorf("parse response: %w", err)
@@ -150,7 +156,10 @@ func runOrgTokenCreate(args []string) error {
 	fmt.Printf("  Org:     %s\n", out.OrgID)
 	fmt.Printf("  Node:    %s\n", out.NodeLabel)
 	fmt.Printf("  Role:    %s\n", out.Role)
+	fmt.Printf("  Enrollee:%s\n", out.EnrolleePub)
+	fmt.Printf("  Scope:   %s\n", out.Scope)
 	fmt.Printf("  Issued:  %s\n", out.IssuedAt.Format(time.RFC3339))
+	fmt.Printf("  Expires: %s\n", out.ExpiresAt.Format(time.RFC3339))
 	fmt.Printf("  Token:   %s\n\n", out.Token)
 	fmt.Println(out.UseHint)
 	return nil
@@ -188,6 +197,7 @@ func runOrgTokenList(args []string) error {
 			NodeLabel string    `json:"node_label"`
 			Role      string    `json:"role"`
 			IssuedAt  time.Time `json:"issued_at"`
+			ExpiresAt time.Time `json:"expires_at"`
 			RevokedAt time.Time `json:"revoked_at,omitempty"`
 		} `json:"tokens"`
 	}
@@ -196,17 +206,19 @@ func runOrgTokenList(args []string) error {
 	}
 	if len(out.Tokens) == 0 {
 		fmt.Println("No enrollment tokens issued for this org yet. Mint one with:")
-		fmt.Println("  sage-gui org-token create --org <org-id> --node <label> --signer <org-signer-pub>")
+		fmt.Println("  sage-gui org-token create --org <org-id> --node <label> --enrollee <pubkey> --scope <scope> --signer <org-signer-pub>")
 		return nil
 	}
 
-	fmt.Printf("%-38s %-25s %-10s %-20s %s\n", "ID", "NODE", "ROLE", "ISSUED", "STATUS")
+	fmt.Printf("%-38s %-25s %-10s %-20s %-20s %s\n", "ID", "NODE", "ROLE", "ISSUED", "EXPIRES", "STATUS")
 	for _, t := range out.Tokens {
 		status := "active"
 		if !t.RevokedAt.IsZero() {
 			status = "revoked"
+		} else if !time.Now().UTC().Before(t.ExpiresAt) {
+			status = "expired"
 		}
-		fmt.Printf("%-38s %-25s %-10s %-20s %s\n", t.ID, t.NodeLabel, t.Role, t.IssuedAt.Format(time.RFC3339), status)
+		fmt.Printf("%-38s %-25s %-10s %-20s %-20s %s\n", t.ID, t.NodeLabel, t.Role, t.IssuedAt.Format(time.RFC3339), t.ExpiresAt.Format(time.RFC3339), status)
 	}
 	return nil
 }

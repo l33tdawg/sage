@@ -1,7 +1,7 @@
 # App-v29: architecture-independent PoE arithmetic
 
-**Status:** compiled and dormant. The auto-vote ceiling remains app-v28 until
-the activation evidence below lands.
+**Status:** compiled and dormant in SAGE v11.24.0. The auto-vote ceiling
+remains app-v28 until the activation evidence below lands.
 
 ## Why the fork exists
 

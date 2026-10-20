@@ -46,6 +46,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/l33tdawg/sage/api/rest/middleware"
@@ -68,6 +69,7 @@ type orgEnrollTokenStore interface {
 type orgPolicyStateStore interface {
 	GetOrgPolicyState(ctx context.Context, key string) ([]byte, error)
 	SetOrgPolicyStatesAtomic(ctx context.Context, writes []store.StateWrite) error
+	CompareAndSetOrgPolicyStatesAtomic(ctx context.Context, conditions []store.StateCondition, writes []store.StateWrite) (bool, error)
 }
 
 // orgKV adapts orgPolicyStateStore to orgpolicy.KV for one request. orgpolicy
@@ -86,6 +88,18 @@ func (k orgKV) SetStatesAtomic(writes []orgpolicy.KVWrite) error {
 		sw[i] = store.StateWrite{Key: e.Key, Value: e.Value}
 	}
 	return k.st.SetOrgPolicyStatesAtomic(k.ctx, sw)
+}
+
+func (k orgKV) CompareAndSetStatesAtomic(conditions []orgpolicy.KVCondition, writes []orgpolicy.KVWrite) (bool, error) {
+	sc := make([]store.StateCondition, len(conditions))
+	for i, e := range conditions {
+		sc[i] = store.StateCondition{Key: e.Key, Value: e.Value}
+	}
+	sw := make([]store.StateWrite, len(writes))
+	for i, e := range writes {
+		sw[i] = store.StateWrite{Key: e.Key, Value: e.Value}
+	}
+	return k.st.CompareAndSetOrgPolicyStatesAtomic(k.ctx, sc, sw)
 }
 
 // orgPolicyStore returns the orgpolicy store for this request, or nil when the
@@ -160,20 +174,21 @@ func (s *Server) handleOrgEnroll(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusUnauthorized, "request must be signed by the enrolling node")
 		return
 	}
+	nowUnix := orgPolicyNow()
 
 	// Resolve the bearer to its intended-enrollee binding. Not-found and revoked
 	// collapse to one opaque rejection so the endpoint is not an existence oracle.
 	digest := sha256.Sum256([]byte(req.Token))
 	tok, err := s.orgEnrollTokens.LookupOrgEnrollmentToken(r.Context(), hex.EncodeToString(digest[:]))
-	if err != nil {
-		if errors.Is(err, store.ErrOrgEnrollTokenNotFound) || errors.Is(err, store.ErrOrgEnrollTokenRevoked) {
+	if err != nil && !errors.Is(err, store.ErrOrgEnrollTokenRevoked) {
+		if errors.Is(err, store.ErrOrgEnrollTokenNotFound) {
 			writeJSONError(w, http.StatusForbidden, "invalid or revoked enrollment token")
 			return
 		}
 		writeJSONError(w, http.StatusServiceUnavailable, "enrollment token lookup unavailable")
 		return
 	}
-	if tok == nil || tok.Revoked() {
+	if tok == nil {
 		writeJSONError(w, http.StatusForbidden, "invalid or revoked enrollment token")
 		return
 	}
@@ -181,9 +196,14 @@ func (s *Server) handleOrgEnroll(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "enrollment token is not valid for this org")
 		return
 	}
+	if tok.EnrolleePub == "" || tok.EnrolleePub != enrolleePub {
+		writeJSONError(w, http.StatusForbidden, "enrollment token is bound to another node identity")
+		return
+	}
 
 	// Idempotent redemption: a prior outcome for this token is replayed to the
-	// same node and refused to any other.
+	// same node and refused to any other. Replay precedes revocation/expiry
+	// checks: it recovers an already-committed result and grants no new authority.
 	if prior, ok, loadErr := estore.LoadEnrollment(tok.ID); loadErr != nil {
 		writeJSONError(w, http.StatusInternalServerError, "enrollment lookup failed")
 		return
@@ -202,6 +222,10 @@ func (s *Server) handleOrgEnroll(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if tok.Revoked() || tok.Expired(time.Unix(nowUnix, 0).UTC()) {
+		writeJSONError(w, http.StatusForbidden, "invalid or expired enrollment token")
+		return
+	}
 
 	// First redeem. Resolve the authorized signer from the token's pinned org key
 	// (plus any presented rotation attestations), then verify the first policy
@@ -212,12 +236,17 @@ func (s *Server) handleOrgEnroll(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "enrollment token has an invalid org signer key")
 		return
 	}
-	authorized, err := orgpolicy.ResolveSigner(pinned, req.Attestations)
+	rootEpoch := ""
+	if len(req.Attestations) == 0 {
+		rootEpoch = tok.KeyEpoch
+	}
+	authorized, err := orgpolicy.AuthorizedSigners(pinned, orgID, rootEpoch, req.Attestations, nowUnix)
 	if err != nil {
 		writeJSONError(w, http.StatusForbidden, "rotation chain is not rooted at the org key pinned by the token")
 		return
 	}
-	if err := req.FirstPolicy.Verify(authorized); err != nil {
+	authorizedSigner, err := orgpolicy.AuthorizedSignerForPolicy(req.FirstPolicy, authorized)
+	if err != nil {
 		writeJSONError(w, http.StatusForbidden, "first policy is not signed by the org key pinned by the token")
 		return
 	}
@@ -229,18 +258,30 @@ func (s *Server) handleOrgEnroll(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "first policy key epoch does not match the enrollment token")
 		return
 	}
+	if req.FirstPolicy.Scope != tok.Scope {
+		writeJSONError(w, http.StatusForbidden, "first policy scope does not match the enrollment token")
+		return
+	}
 
 	boundIdentity := tok.OwnerID + "/" + tok.NodeLabel + "/" + tok.Role
-	now := orgPolicyNow()
-	outcome := orgpolicy.NewEnrollmentOutcome(tok.ID, enrolleePub, boundIdentity, req.FirstPolicy, now)
+	outcome := orgpolicy.NewEnrollmentOutcomeWithAuthority(tok.ID, enrolleePub, boundIdentity, req.FirstPolicy, orgpolicy.PolicyAuthority{
+		AuthorizedKey: authorizedSigner.PublicKey,
+		RootKeyID:     tok.OrgSignerPub,
+		RootKeyEpoch:  rootEpoch,
+		RotationChain: req.Attestations,
+	}, nowUnix)
 	// RFC #443 point 4: enrollment is authority-granting, so it needs a first
 	// policy that is valid now. A replay of an already-committed enrollment
 	// (above) is recovery, not new authority, and is not gated.
-	if g := orgpolicy.Gate(outcome.Accepted, orgpolicy.OpEnrollment, now, false); !g.Allowed {
+	if g := orgpolicy.Gate(outcome.Accepted, orgpolicy.OpEnrollment, nowUnix, false); !g.Allowed {
 		writeJSONError(w, http.StatusForbidden, "first policy is expired or not yet valid")
 		return
 	}
 	if err := estore.CommitFirstEnrollment(outcome); err != nil {
+		if errors.Is(err, orgpolicy.ErrEnrollmentConflict) {
+			writeJSONError(w, http.StatusConflict, "enrollment token already committed to another identity")
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "failed to persist enrollment")
 		return
 	}

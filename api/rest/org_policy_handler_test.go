@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
@@ -43,8 +44,11 @@ func newPolicyNode(t *testing.T) *policyNode {
 	t.Helper()
 	_, orgPriv, orgHex := orgKeypair(t)
 	ts := newStubEnrollTokenStore()
+	enrollee := strings.Repeat("a", 64)
 	ts.seed("bearer", &store.OrgEnrollmentToken{
-		ID: "tok-1", OrgID: policyOrgID, OwnerID: "owner-1", NodeLabel: "n1", Role: "member", OrgSignerPub: orgHex,
+		ID: "tok-1", OrgID: policyOrgID, OwnerID: "owner-1", NodeLabel: "n1", Role: "member",
+		EnrolleePub: enrollee, Scope: "fleet", OrgSignerPub: orgHex,
+		ExpiresAt: time.Now().Add(time.Hour),
 	})
 	n := &policyNode{dir: t.TempDir(), orgPriv: orgPriv}
 	bs, err := store.NewBadgerStore(filepath.Join(n.dir, "badger")) // chain reads (orgs) only
@@ -57,7 +61,6 @@ func newPolicyNode(t *testing.T) *policyNode {
 	}
 	t.Cleanup(func() { _ = n.s.badgerStore.CloseBadger(); _ = n.sq.Close() })
 
-	enrollee := strings.Repeat("a", 64)
 	rr := doEnroll(enrollRouterAs(n.s, enrollee), policyOrgID, enrollee,
 		enrollBody(t, "bearer", signedOrgPolicy(t, orgPriv, policyOrgID, "epoch-1", 1), nil))
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
@@ -211,6 +214,70 @@ func TestOrgPolicyUpdate_RotatedSuccessorAccepted(t *testing.T) {
 	assert.Equal(t, hex.EncodeToString(bPub), resp.Accepted.IssuerKeyID)
 }
 
+func TestOrgPolicyUpdate_RotationTimeOrgAndScopeAreEnforced(t *testing.T) {
+	n := newPolicyNode(t)
+	bPub, bPriv, _ := orgKeypair(t)
+
+	future := orgpolicy.RotationAttestation{
+		OrgID: policyOrgID, ToKeyID: hex.EncodeToString(bPub), NewKeyEpoch: "epoch-2",
+		NotBefore: orgPolicyNow() + 3600,
+	}
+	require.NoError(t, future.Sign(n.orgPriv))
+	p2 := signedOrgPolicy(t, bPriv, policyOrgID, "epoch-2", 2)
+	rr, _ := n.deliver(t, policyOrgID, p2, []orgpolicy.RotationAttestation{future})
+	assert.Equal(t, http.StatusForbidden, rr.Code, "successor cannot act before rotation NotBefore")
+
+	crossOrg := orgpolicy.RotationAttestation{
+		OrgID: "org-other", ToKeyID: hex.EncodeToString(bPub), NewKeyEpoch: "epoch-2",
+	}
+	require.NoError(t, crossOrg.Sign(n.orgPriv))
+	rr, _ = n.deliver(t, policyOrgID, p2, []orgpolicy.RotationAttestation{crossOrg})
+	assert.Equal(t, http.StatusForbidden, rr.Code, "rotation must be bound to the policy org")
+
+	sameKeyNewEpoch := signedOrgPolicy(t, n.orgPriv, policyOrgID, "epoch-2", 2)
+	rr, _ = n.deliver(t, policyOrgID, sameKeyNewEpoch, nil)
+	assert.Equal(t, http.StatusForbidden, rr.Code, "key_epoch cannot advance without a signed rotation")
+
+	changedScope := signedOrgPolicy(t, n.orgPriv, policyOrgID, "epoch-1", 2)
+	changedScope.Scope = "other-scope"
+	require.NoError(t, changedScope.Sign(n.orgPriv))
+	rr, _ = n.deliver(t, policyOrgID, changedScope, nil)
+	assert.Equal(t, http.StatusConflict, rr.Code, "an org policy cannot change the enrolled node scope")
+}
+
+func TestOrgPolicyUpdate_OverlapAndRotationHistoryPersist(t *testing.T) {
+	n := newPolicyNode(t)
+	bPub, bPriv, _ := orgKeypair(t)
+	now := orgPolicyNow()
+	att := orgpolicy.RotationAttestation{
+		OrgID: policyOrgID, ToKeyID: hex.EncodeToString(bPub), NewKeyEpoch: "epoch-2",
+		NotBefore: now - 10, OverlapUntil: now + 3600,
+	}
+	require.NoError(t, att.Sign(n.orgPriv))
+
+	rr, resp := n.deliver(t, policyOrgID, signedOrgPolicy(t, bPriv, policyOrgID, "epoch-2", 2),
+		[]orgpolicy.RotationAttestation{att})
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, orgpolicy.DecisionApplied, resp.Decision)
+
+	// The accepted state persists the root and full rotation chain, so an
+	// in-flight policy signed by the predecessor remains valid during overlap.
+	rr, resp = n.deliver(t, policyOrgID, signedOrgPolicy(t, n.orgPriv, policyOrgID, "epoch-1", 3), nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, orgpolicy.DecisionApplied, resp.Decision)
+	assert.NotEmpty(t, resp.Accepted.RootKeyID)
+
+	var history []orgpolicy.RotationAttestation
+	require.NoError(t, json.Unmarshal([]byte(resp.Accepted.RotationChainJSON), &history))
+	require.Len(t, history, 1)
+	assert.Equal(t, att.ToKeyID, history[0].ToKeyID)
+
+	// The successor remains authorized after accepting the overlapped policy.
+	rr, resp = n.deliver(t, policyOrgID, signedOrgPolicy(t, bPriv, policyOrgID, "epoch-2", 4), nil)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, orgpolicy.DecisionApplied, resp.Decision)
+}
+
 func TestOrgPolicyUpdate_Rejections(t *testing.T) {
 	n := newPolicyNode(t)
 
@@ -251,14 +318,18 @@ func TestOrgPolicyState_NeverTouchesConsensusAppHash(t *testing.T) {
 
 	_, orgPriv, orgHex := orgKeypair(t)
 	ts := newStubEnrollTokenStore()
-	ts.seed("bearer", &store.OrgEnrollmentToken{ID: "tok-1", OrgID: policyOrgID, OwnerID: "o", NodeLabel: "n", Role: "member", OrgSignerPub: orgHex})
+	enrollee := strings.Repeat("a", 64)
+	ts.seed("bearer", &store.OrgEnrollmentToken{
+		ID: "tok-1", OrgID: policyOrgID, OwnerID: "o", NodeLabel: "n", Role: "member",
+		EnrolleePub: enrollee, Scope: "fleet", OrgSignerPub: orgHex,
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
 	n := &policyNode{dir: dir, sq: sq, orgPriv: orgPriv}
 	n.s = &Server{badgerStore: bs, orgPolicyState: sq, orgEnrollTokens: ts, logger: zerolog.Nop()}
 
 	before, err := bs.ComputeAppHash()
 	require.NoError(t, err)
 
-	enrollee := strings.Repeat("a", 64)
 	rr := doEnroll(enrollRouterAs(n.s, enrollee), policyOrgID, enrollee,
 		enrollBody(t, "bearer", signedOrgPolicy(t, orgPriv, policyOrgID, "epoch-1", 1), nil))
 	require.Equal(t, http.StatusCreated, rr.Code, rr.Body.String())
