@@ -74,7 +74,7 @@ call `sage_inception` and follow its returned memory mode.
 <details>
 <summary>Build from source</summary>
 
-**From source (Go 1.26.9+):**
+**From source (Go 1.26.10+):**
 
 ```bash
 git clone https://github.com/l33tdawg/sage.git && cd sage
