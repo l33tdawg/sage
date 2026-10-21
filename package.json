@@ -24,6 +24,6 @@
   },
   "homepage": "https://github.com/l33tdawg/sage#readme",
   "devDependencies": {
-    "@playwright/test": "1.64.0"
+    "@playwright/test": "1.64.1"
   }
 }
