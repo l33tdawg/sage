@@ -199,6 +199,8 @@ func main() {
 		err = runCertStatus()
 	case "mcp-token":
 		err = runMCPToken()
+	case "org-token":
+		err = runOrgToken()
 	case "fence":
 		err = runFence()
 	case "version":
@@ -307,6 +309,7 @@ Commands:
   pair          Join a SAGE network on your LAN as a non-validator peer (sage-gui pair <token>)
   cert-status   Show TLS certificate status and expiry
   mcp-token     Manage HTTP MCP bearer tokens (create | list | revoke)
+  org-token     Manage org fleet-enrollment tokens (create | list | revoke)
   fence     Inspect or settle a held signer fence (list | abandon)
   status    Show node status
   version   Print version

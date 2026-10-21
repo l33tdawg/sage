@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/orgpolicy"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -520,6 +521,10 @@ func (s *Server) handleFederationPropose(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	if s.writeOrgPolicyHold(w, proposerOrg, orgpolicy.OpNewPeering) {
+		return
+	}
+
 	proposeTx := &tx.ParsedTx{
 		Type: tx.TxTypeFederationPropose,
 		FederationPropose: &tx.FederationPropose{
@@ -597,6 +602,10 @@ func (s *Server) handleFederationApprove(w http.ResponseWriter, r *http.Request)
 				"You must belong to the federation's target organization to approve it.")
 			return
 		}
+	}
+
+	if s.writeOrgPolicyHold(w, approverOrg, orgpolicy.OpNewPeering) {
+		return
 	}
 
 	approveTx := &tx.ParsedTx{

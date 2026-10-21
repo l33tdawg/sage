@@ -281,8 +281,8 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(evidence, /SAGE_DAEMON_VERSION/);
   assert.match(
     daemonStager,
-    /SEMVER_PATTERN='\^11\\\.\(10\|11\|12\|13\|14\|15\|16\|17\|18\|19\|20\|21\|22\|23\)\\\./,
-    'the tagged daemon stager must accept the current v11.23 release series',
+    /SEMVER_PATTERN='\^11\\\.\(10\|11\|12\|13\|14\|15\|16\|17\|18\|19\|20\|21\|22\|23\|24\)\\\./,
+    'the tagged daemon stager must accept the current v11.24 release series',
   );
   assert.match(evidence, /Repair v11\.12\.0 native staging helper for immutable-tag recovery/);
   assert.match(evidence, /github\.event_name == 'workflow_dispatch'.*RELEASE_TAG == 'v11\.12\.0'/);
@@ -449,15 +449,21 @@ test('PR and main CI require the same v11.9 composite proofs as release', () => 
     assert.match(raceJob, /-run 'Race\|Concurrent\|TOCTOU\|Linear'/);
     assert.match(raceJob, /\.\/internal\/abci \.\/web/);
   }
-  // The required "Test" context is the fan-in for both jobs, and it has to FAIL
-  // when either suite fails: without `if: always()` GitHub skips it when a
+  for (const crossArchJob of [ciJob('poe-cross-arch'), job('poe-cross-arch')]) {
+    assert.match(crossArchJob, /go test \.\/internal\/poe -run '\^TestDeterministic'/);
+    assert.match(crossArchJob, /go test \.\/internal\/store -run '\^TestUpdateVerdictStatsDeterministic_GoldenBits\$'/);
+    assert.match(crossArchJob, /runner: ubuntu-24\.04-arm/);
+  }
+  // The required "Test" context is the fan-in for all three jobs, and it has to
+  // FAIL when any suite fails: without `if: always()` GitHub skips it when a
   // dependency fails, which reports the required check as missing rather than as
   // the failure it is.
   for (const fanIn of [ciJob('test'), job('test')]) {
-    assert.match(fanIn, /needs: \[test-suite, test-race\]/);
+    assert.match(fanIn, /needs: \[test-suite, test-race, poe-cross-arch\]/);
     assert.match(fanIn, /if: always\(\)/);
     assert.match(fanIn, /needs\.test-suite\.result/);
     assert.match(fanIn, /needs\.test-race\.result/);
+    assert.match(fanIn, /needs\.poe-cross-arch\.result/);
   }
 });
 

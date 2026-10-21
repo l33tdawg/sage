@@ -49,10 +49,17 @@ type Server struct {
 	accessStore store.AccessStore  // PostgreSQL access control queries
 	orgStore    store.OrgStore     // Organization and federation queries
 	agentStore  store.AgentStore   // Network agent registry (domain access enforcement)
-	health      *metrics.HealthChecker
-	logger      zerolog.Logger
-	httpServer  *http.Server
-	signingKey  ed25519.PrivateKey // Node-level key for signing on-chain txs
+	// orgEnrollTokens resolves org fleet-enrollment bearer tokens for
+	// POST /v1/org/{org_id}/enroll. NewServer wires it when the store implements
+	// the lookup; the handler reports 503 while nil. See org_enroll_handler.go.
+	orgEnrollTokens orgEnrollTokenStore
+	// orgPolicyState is the node-local (SQLite, never Badger/AppHash) store for
+	// org enrollment outcomes, accepted policy chains and equivocation notices.
+	orgPolicyState orgPolicyStateStore
+	health         *metrics.HealthChecker
+	logger         zerolog.Logger
+	httpServer     *http.Server
+	signingKey     ed25519.PrivateKey // Node-level key for signing on-chain txs
 	// validatorSigningKeyConfigured is true only when signingKey came from the
 	// live CometBFT priv-validator key (environment or explicit runtime wiring).
 	// The legacy random fallback keeps non-governance embedded/test callers
@@ -235,6 +242,19 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 		agentStore = as
 	}
 
+	// Type-assert memStore to the org-enrollment token lookup. When the backing
+	// store implements it (the node's *store.SQLiteStore does), the enroll
+	// endpoint goes live automatically; otherwise it stays nil and the handler
+	// reports 503. Tests inject a stub into this field directly.
+	var orgEnrollTokens orgEnrollTokenStore
+	if ts, ok := memStore.(orgEnrollTokenStore); ok {
+		orgEnrollTokens = ts
+	}
+	var orgPolicyState orgPolicyStateStore
+	if ps, ok := memStore.(orgPolicyStateStore); ok {
+		orgPolicyState = ps
+	}
+
 	s := &Server{
 		cometbftRPC:                   cometbftRPC,
 		store:                         memStore,
@@ -243,6 +263,8 @@ func NewServer(cometbftRPC string, memStore store.MemoryStore, scoreStore store.
 		accessStore:                   accessStore,
 		orgStore:                      orgStore,
 		agentStore:                    agentStore,
+		orgEnrollTokens:               orgEnrollTokens,
+		orgPolicyState:                orgPolicyState,
 		health:                        health,
 		logger:                        logger,
 		signingKey:                    signingKey,
@@ -839,6 +861,12 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/org/{org_id}", s.handleGetOrg)
 		r.Get("/v1/org/{org_id}/members", s.handleListOrgMembers)
 		r.Post("/v1/org/{org_id}/member", s.handleOrgAddMember)
+		r.Post("/v1/org/{org_id}/enroll", s.handleOrgEnroll)
+		r.Post("/v1/org/{org_id}/enroll-tokens", s.handleOrgEnrollTokenIssue)
+		r.Get("/v1/org/{org_id}/enroll-tokens", s.handleOrgEnrollTokenList)
+		r.Delete("/v1/org/{org_id}/enroll-tokens/{id}", s.handleOrgEnrollTokenRevoke)
+		r.Post("/v1/org/{org_id}/policy", s.handleOrgPolicyUpdate)
+		r.Get("/v1/org/{org_id}/policy", s.handleOrgPolicyStatus)
 		r.Delete("/v1/org/{org_id}/member/{agent_id}", s.handleOrgRemoveMember)
 		r.Post("/v1/org/{org_id}/clearance", s.handleOrgSetClearance)
 

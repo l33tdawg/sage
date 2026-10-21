@@ -36,7 +36,7 @@ func TestSubcommandHelpHasNoSideEffects(t *testing.T) {
 		{"restore", "--from", "missing.tar.gz", "--help"}, {"snapshot", "prune", "--help"},
 		{"recover", "--help"}, {"quorum-init", "--help"}, {"quorum-join", "--help"},
 		{"pair", "--help"}, {"fence", "abandon", "--help"},
-		{"mcp-token", "create", "--help"}, {"nevercompact", "enable", "--help"},
+		{"mcp-token", "create", "--help"}, {"org-token", "create", "--help"}, {"nevercompact", "enable", "--help"},
 		{"upgrade", "propose", "--help"}, {"hook", "session-start", "--help"},
 		{"init-fresh-personal-sage", "--help"}, {"check-private-config", "--help"}, {"repair-chain", "--help"},
 	} {

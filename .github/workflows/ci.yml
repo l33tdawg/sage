@@ -143,19 +143,45 @@ jobs:
           cd natter
           go test ./... -v -count=1 -race
 
+  poe-cross-arch:
+    name: PoE Cross-Architecture
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify deterministic PoE golden vectors
+        run: |
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+          go test ./internal/poe -run '^TestDeterministic' -v -count=1
+          go test ./internal/store -run '^TestUpdateVerdictStatsDeterministic_GoldenBits$' -v -count=1
+
   test:
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [test-suite, test-race]
+    needs: [test-suite, test-race, poe-cross-arch]
     if: always()
     steps:
-      - name: Both test suites passed
+      - name: All consensus test suites passed
         run: |
-          echo "test-suite: ${{ needs.test-suite.result }}"
-          echo "test-race:  ${{ needs.test-race.result }}"
+          echo "test-suite:      ${{ needs.test-suite.result }}"
+          echo "test-race:       ${{ needs.test-race.result }}"
+          echo "poe-cross-arch:  ${{ needs.poe-cross-arch.result }}"
           test "${{ needs.test-suite.result }}" = "success"
           test "${{ needs.test-race.result }}" = "success"
+          test "${{ needs.poe-cross-arch.result }}" = "success"
 
   v119-fault-gates:
     name: Consensus Fault Gates

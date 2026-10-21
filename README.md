@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.23.27`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.24.0`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,15 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.23.27 and earlier)</summary>
+<summary>Recent release notes (v11.24.0 and earlier)</summary>
+
+## What's New in v11.24.0
+
+**PoE weights now have an architecture-independent path.** App-v29 compiles a new consensus form of the proof-of-experience arithmetic: EWMA state updates, recency, corroboration and final weights use explicitly rounded operations that produce the same float64 bits on arm64 and amd64. The gate remains dormant above the app-v28 auto-vote ceiling, so existing chains keep their current app version and historical blocks keep replaying under their original arithmetic until the mixed-architecture, replay, snapshot and state-sync evidence is complete. CI and release workflows now run exact golden vectors on native amd64 and arm64.
+
+**Org fleet enrollment Phase 1 lands.** Organizations can issue 24-hour, single-use tokens bound to one exact node key and immutable policy scope. Redemption atomically stores the consume marker, replayable result and first signed policy in node-local SQLite; concurrent attempts cannot overwrite the winner, and a lost response can be replayed even after token expiry or revocation. Signed policy delivery adds monotonic revisions, rollback protection, persisted rotation history and overlap, a durable owner-visible equivocation alarm, and per-operation offline/expiry gates for enrollment and new peering. `sage-gui org-token create|list|revoke` exposes the operator flow.
+
+**No chain migration.** App-v28 remains active and app-v29 remains compiled but dormant. Existing memories, identities, governance state and chain history are preserved. Container: `ghcr.io/l33tdawg/sage:11.24.0`. SDK 11.24.0.
 
 ## What's New in v11.23.27
 

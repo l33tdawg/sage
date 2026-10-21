@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.23.27. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.24.0. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -1476,6 +1476,49 @@ Change an agent's clearance within the org. Admin only on-chain.
 
 ---
 
+### `POST /v1/org/{org_id}/enroll-tokens`
+
+Issue a single-use fleet-enrollment bearer for one exact node identity. Global Admin only; the org must exist on chain. Only the token's SHA-256 digest is stored. The plaintext is returned once and expires after 24 hours.
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `node_label` | string | yes | Operator-facing name recorded with the enrollment |
+| `role` | string | no | `member` or `observer`; tokens cannot grant org `admin` |
+| `enrollee_pub` | string | yes | Exact 64-char hex Ed25519 public key permitted to redeem |
+| `scope` | string | yes | Immutable policy scope established by this enrollment |
+| `org_signer_pub` | string | yes | Org policy signer pinned as the enrollment trust root |
+| `key_epoch` | string | no | Optional initial policy epoch pin |
+
+**Response** (HTTP 201): includes `id`, `token`, `issued_at`, and `expires_at`. Treat `token` as a credential.
+
+`GET /v1/org/{org_id}/enroll-tokens` lists active/revoked/expired metadata without plaintext. `DELETE /v1/org/{org_id}/enroll-tokens/{id}` revokes an unused token; revoking an already-redeemed token does not erase its replayable enrollment outcome.
+
+---
+
+### `POST /v1/org/{org_id}/enroll`
+
+Redeem a bearer enrollment token. The request must be signed by exactly the token's `enrollee_pub`; a valid bearer held by another key is refused. The body carries `token`, a signed `first_policy`, and optional rotation `attestations`.
+
+The first policy must match the token's org, scope, and pinned signer/epoch. Its rotation chain must be rooted at the pinned signer and valid at the current time. A successful redemption atomically records the consume marker, replayable result, and accepted-policy high-water mark in node-local SQLite. Concurrent first redemptions use compare-and-set, so one outcome cannot overwrite another.
+
+HTTP 201 is a first redemption. Re-presenting the same token with the same enrollee key returns HTTP 200 with `"replayed": true`, including after the token expires or is revoked, because replay recovers an already-committed result without granting new authority. Another key, an unused expired/revoked token, or a conflicting enrollment returns an error.
+
+---
+
+### `POST /v1/org/{org_id}/policy`
+
+Deliver a newer signed org policy to an enrolled node. Any authenticated caller may relay it; authority comes from the policy signature. Without rotation, the issuer key and `key_epoch` must match the accepted policy. Rotation requires an attestation chain rooted at the accepted signer, bound to this org, ordered by time, and valid at the request's current time.
+
+The policy scope is immutable after enrollment. The accepted state persists the pinned root and complete signed rotation history, so predecessor policies remain verifiable during their overlap window and after restart. Strictly newer revisions are accepted unless another request changed the high-water mark concurrently; identical redelivery is a no-op; lower revisions are rollback errors; the same revision with a different valid signature is persisted as an owner-visible equivocation without overwriting the accepted policy.
+
+---
+
+### `GET /v1/org/{org_id}/policy`
+
+Return the accepted high-water mark, whether it is currently valid, the per-operation gate verdicts, and any durable equivocation notice. This state is node-local and never enters the consensus AppHash.
+
+---
+
 ### `POST /v1/org/{org_id}/dept`
 
 Register a department. `dept_id` is deterministic: `hex(SHA256(orgID + name)[:8])`.
@@ -2713,7 +2756,7 @@ address resolved from a bounded legacy-status offline cache can be accepted
 locally while the peer is down. Delivery waits for that peer to return and pass
 the fresh live authorization preflight above.
 
-**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:771-777`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6623` declaration, `:6625` payload, `:6628` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:792-794`) to 413.
+**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:771-777`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6636` declaration, `:6638` payload, `:6641` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:792-794`) to 413.
 
 **Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`). An index-backed COUNT and its INSERT run under the same write critical section, so parallel sends cannot race past either cap. Over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
 
@@ -2921,7 +2964,7 @@ the result over the original agreement-bound return route
 | `source_chain_id` | string | for foreign work | Exact local reply-source chain returned as `reply_source_chain_id` by the pipe status preflight; prevents another node relabeling the signed result |
 | `claimant_session_id` | string | for foreign work; recommended for provider-addressed compatibility work | Opaque 1–128-byte session currently holding the claim. A provider-addressed row claimed by an older sessionless caller is fenced as `legacy`, and an omitted result session selects only that exact fence; it cannot bypass a named sibling session. |
 
-`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6889`, mapping `ErrPipeResultTooLarge` at `:6891-6892`).
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6902`, mapping `ErrPipeResultTooLarge` at `:6904-6905`).
 
 **Response** (HTTP 200):
 `{"status":"completed","journal_id":"<memory_id or empty>","journaled":true|false}`.

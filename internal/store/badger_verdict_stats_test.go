@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/binary"
+	"math"
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -116,6 +117,42 @@ func TestUpdateVerdictStats_Math(t *testing.T) {
 	// Pre-existing counters untouched.
 	assert.Equal(t, uint64(3), got.TotalVotes)
 	assert.Equal(t, uint64(2), got.AcceptVotes)
+}
+
+func TestUpdateVerdictStatsDeterministic_GoldenBits(t *testing.T) {
+	s := newTestBadger(t)
+	const vid = "v-deterministic"
+	const domain = "cryptography"
+
+	require.NoError(t, s.UpdateVerdictStatsDeterministic(map[string]bool{vid: true}))
+	require.NoError(t, s.UpdateVerdictStatsDeterministic(map[string]bool{vid: false}))
+	require.NoError(t, s.UpdateVerdictStatsDeterministic(map[string]bool{vid: true}))
+	require.NoError(t, s.UpdateVerdictStatsDeterministic(map[string]bool{vid: true}))
+	require.NoError(t, s.UpdateDomainVerdictStatsDeterministic(domain, map[string]bool{vid: true}))
+	require.NoError(t, s.UpdateDomainVerdictStatsDeterministic(domain, map[string]bool{vid: false}))
+	require.NoError(t, s.UpdateDomainVerdictStatsDeterministic(domain, map[string]bool{vid: true}))
+	require.NoError(t, s.UpdateDomainVerdictStatsDeterministic(domain, map[string]bool{vid: true}))
+
+	global, err := s.GetValidatorStats(vid)
+	require.NoError(t, err)
+	scoped, err := s.GetValidatorDomainStats(vid, domain)
+	require.NoError(t, err)
+
+	for name, stats := range map[string]*ValidatorStats{
+		"global": global,
+		"domain": scoped,
+	} {
+		assert.Equal(t, uint64(0x4005083126e978d5), math.Float64bits(stats.EWMAWeightedSum), name+" weighted sum")
+		assert.Equal(t, uint64(0x400b83126e978d50), math.Float64bits(stats.EWMAWeightDenom), name+" weight denominator")
+		assert.Equal(t, uint64(4), stats.EWMACount, name+" count")
+		assert.Equal(t, uint64(3), stats.CorrCount, name+" corroboration count")
+		tracker := &poe.EWMATracker{
+			WeightedSum: stats.EWMAWeightedSum,
+			WeightDenom: stats.EWMAWeightDenom,
+			Count:       int64(stats.EWMACount),
+		}
+		assert.Equal(t, uint64(0x3fe3629a82177e4c), math.Float64bits(tracker.AccuracyDeterministic()), name+" accuracy")
+	}
 }
 
 // V5 — atomicity: a batch error leaves no record changed. We trigger a decode

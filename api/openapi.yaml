@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: (S)AGE API
-  version: 11.23.27
+  version: 11.24.0
   description: |-
     (Sovereign) Agent Governed Experience — network REST API for memory
     submission, validation, and query.
@@ -1641,6 +1641,375 @@ components:
           type: integer
           minimum: 0
           maximum: 4
+
+    OrgEnrollTokenIssueRequest:
+      type: object
+      required:
+        - node_label
+        - enrollee_pub
+        - scope
+        - org_signer_pub
+      properties:
+        node_label:
+          type: string
+          minLength: 1
+        role:
+          type: string
+          enum: [member, observer]
+          default: member
+        enrollee_pub:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Exact Ed25519 node key allowed to redeem the bearer.
+        scope:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: Immutable org-policy scope established by enrollment.
+        org_signer_pub:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        key_epoch:
+          type: string
+          description: Optional initial policy epoch pin.
+
+    OrgEnrollTokenSummary:
+      type: object
+      required:
+        - id
+        - org_id
+        - owner_id
+        - node_label
+        - role
+        - enrollee_pub
+        - scope
+        - org_signer_pub
+        - issued_at
+        - expires_at
+      properties:
+        id:
+          type: string
+        org_id:
+          type: string
+        owner_id:
+          type: string
+        node_label:
+          type: string
+        role:
+          type: string
+          enum: [member, observer]
+        enrollee_pub:
+          type: string
+        scope:
+          type: string
+        org_signer_pub:
+          type: string
+        key_epoch:
+          type: string
+        issued_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+
+    OrgEnrollTokenIssueResponse:
+      allOf:
+        - $ref: "#/components/schemas/OrgEnrollTokenSummary"
+        - type: object
+          required:
+            - token
+            - use_hint
+          properties:
+            token:
+              type: string
+              description: Plaintext bearer shown exactly once.
+            use_hint:
+              type: string
+
+    OrgPolicyPayload:
+      type: object
+      required:
+        - judge
+        - checks_version
+        - peer_allow_list
+        - retention
+      properties:
+        judge:
+          type: object
+          required: [model_tag, gguf_sha256, blob_sha256]
+          properties:
+            model_tag:
+              type: string
+            gguf_sha256:
+              type: string
+            blob_sha256:
+              type: string
+        checks_version:
+          type: string
+        peer_allow_list:
+          type: array
+          items:
+            type: string
+        retention:
+          type: object
+          required: [max_age_days, max_items]
+          properties:
+            max_age_days:
+              type: integer
+              format: int64
+              minimum: 0
+            max_items:
+              type: integer
+              format: int64
+              minimum: 0
+
+    OrgPolicy:
+      type: object
+      required:
+        - schema
+        - org_id
+        - scope
+        - revision
+        - issuer_key_id
+        - key_epoch
+        - issued_at
+        - not_before
+        - expiry
+        - payload
+        - sig
+      properties:
+        schema:
+          type: string
+          const: sage.org-policy.v1
+        org_id:
+          type: string
+        scope:
+          type: string
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+        issuer_key_id:
+          type: string
+        key_epoch:
+          type: string
+        issued_at:
+          type: integer
+          format: int64
+        not_before:
+          type: integer
+          format: int64
+        expiry:
+          type: integer
+          format: int64
+          description: Unix seconds; 0 means no expiry.
+        payload:
+          $ref: "#/components/schemas/OrgPolicyPayload"
+        sig:
+          type: string
+
+    OrgRotationAttestation:
+      type: object
+      required:
+        - schema
+        - org_id
+        - from_key_id
+        - to_key_id
+        - new_key_epoch
+        - not_before
+        - overlap_until
+        - sig
+      properties:
+        schema:
+          type: string
+          const: sage.org-policy-rotation.v1
+        org_id:
+          type: string
+        from_key_id:
+          type: string
+        to_key_id:
+          type: string
+        new_key_epoch:
+          type: string
+        not_before:
+          type: integer
+          format: int64
+        overlap_until:
+          type: integer
+          format: int64
+        sig:
+          type: string
+
+    OrgEnrollRequest:
+      type: object
+      required:
+        - token
+        - first_policy
+      properties:
+        token:
+          type: string
+        first_policy:
+          $ref: "#/components/schemas/OrgPolicy"
+        attestations:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrgRotationAttestation"
+
+    OrgPolicyAcceptedState:
+      type: object
+      required:
+        - org_id
+        - scope
+        - revision
+        - digest
+        - key_epoch
+        - issuer_key_id
+        - root_key_id
+        - root_key_epoch
+        - not_before
+        - expiry
+      properties:
+        org_id:
+          type: string
+        scope:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        digest:
+          type: string
+        key_epoch:
+          type: string
+        issuer_key_id:
+          type: string
+        root_key_id:
+          type: string
+          description: Trust anchor pinned by the enrollment token.
+        root_key_epoch:
+          type: string
+        rotation_chain:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrgRotationAttestation"
+        not_before:
+          type: integer
+          format: int64
+        expiry:
+          type: integer
+          format: int64
+
+    OrgEnrollResponse:
+      type: object
+      required:
+        - org_id
+        - enrollee_pub
+        - bound_identity
+        - first_policy
+        - accepted
+        - replayed
+      properties:
+        org_id:
+          type: string
+        enrollee_pub:
+          type: string
+        bound_identity:
+          type: string
+        first_policy:
+          $ref: "#/components/schemas/OrgPolicy"
+        accepted:
+          $ref: "#/components/schemas/OrgPolicyAcceptedState"
+        replayed:
+          type: boolean
+
+    OrgPolicyUpdateRequest:
+      type: object
+      required:
+        - policy
+      properties:
+        policy:
+          $ref: "#/components/schemas/OrgPolicy"
+        attestations:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrgRotationAttestation"
+
+    OrgPolicyEquivocationNotice:
+      type: object
+      required:
+        - org_id
+        - revision
+        - accepted_digest
+        - conflict_digest
+        - issuer_key_id
+        - key_epoch
+      properties:
+        org_id:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        accepted_digest:
+          type: string
+        conflict_digest:
+          type: string
+        issuer_key_id:
+          type: string
+        key_epoch:
+          type: string
+
+    OrgPolicyUpdateResponse:
+      type: object
+      required:
+        - decision
+        - accepted
+      properties:
+        decision:
+          type: string
+          enum: [applied, noop_same_digest, rejected_rollback, rejected_equivocation]
+        accepted:
+          $ref: "#/components/schemas/OrgPolicyAcceptedState"
+        equivocation:
+          $ref: "#/components/schemas/OrgPolicyEquivocationNotice"
+
+    OrgPolicyGateResult:
+      type: object
+      required:
+        - operation
+        - allowed
+        - mode
+      properties:
+        operation:
+          type: string
+          enum: [local_access, enrollment, new_peering, admission, retention, retention_purge]
+        allowed:
+          type: boolean
+        mode:
+          type: string
+          enum: [current, last_valid, independent, owner_present, hold]
+        reason:
+          type: string
+
+    OrgPolicyStatus:
+      type: object
+      required:
+        - accepted
+        - current
+        - operations
+      properties:
+        accepted:
+          $ref: "#/components/schemas/OrgPolicyAcceptedState"
+        current:
+          type: boolean
+        operations:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrgPolicyGateResult"
+        equivocation:
+          $ref: "#/components/schemas/OrgPolicyEquivocationNotice"
 
     FederationProposeRequest:
       type: object
@@ -4422,6 +4791,214 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/enroll-tokens:
+    post:
+      operationId: issueOrgEnrollToken
+      summary: Issue a short-lived, node-bound org enrollment token.
+      description: Global Admin only. The plaintext token is returned once; only its SHA-256 digest is stored. Tokens expire after 24 hours and may grant only member or observer org membership.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrgEnrollTokenIssueRequest"
+      responses:
+        "201":
+          description: Token issued. The plaintext is present only in this response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgEnrollTokenIssueResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listOrgEnrollTokens
+      summary: List org enrollment-token metadata without bearer plaintext.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Token metadata, including issuance/expiry/revocation state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - tokens
+                properties:
+                  tokens:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/OrgEnrollTokenSummary"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/enroll-tokens/{id}:
+    delete:
+      operationId: revokeOrgEnrollToken
+      summary: Revoke an unused org enrollment token.
+      description: Revocation blocks a first redemption but never erases a committed enrollment outcome, so the bound enrollee can still replay a lost enrollment response.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Token revoked or already revoked.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/enroll:
+    post:
+      operationId: redeemOrgEnrollment
+      summary: Redeem a node-bound org enrollment token and accept its first policy.
+      description: The signed request must use exactly the token's enrollee_pub. The first policy must match the token org, scope, and pinned signer/epoch. Consume marker, replayable outcome, and accepted policy commit together.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrgEnrollRequest"
+      responses:
+        "201":
+          description: First enrollment committed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgEnrollResponse"
+        "200":
+          description: Idempotent replay of an already-committed enrollment.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgEnrollResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Token or org already committed to a conflicting enrollment.
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /v1/org/{org_id}/policy:
+    get:
+      operationId: getOrgPolicyStatus
+      summary: Read this node's accepted org policy state and per-operation gate.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Accepted policy metadata, gate verdicts, and durable equivocation notice.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgPolicyStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: deliverOrgPolicy
+      summary: Deliver a newer signed org policy.
+      description: Authority comes from the org signature and an optional time-valid rotation chain. Scope is immutable after enrollment. Same-revision conflicts are persisted as equivocation without replacing the accepted policy.
+      tags:
+        - Org
+      parameters:
+        - name: org_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OrgPolicyUpdateRequest"
+      responses:
+        "200":
+          description: Policy applied or identical revision no-op.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgPolicyUpdateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Rollback, immutable-scope conflict, or same-revision equivocation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrgPolicyUpdateResponse"
         "500":
           $ref: "#/components/responses/InternalError"
 

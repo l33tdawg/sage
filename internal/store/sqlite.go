@@ -1005,6 +1005,19 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		return fmt.Errorf("migrate MCP tokens: %w", err)
 	}
 
+	// Migration: add org_enroll_tokens table for org fleet-enrollment bearer
+	// tokens (RFC #443 Phase 1). Backs LookupOrgEnrollmentToken for the
+	// POST /v1/org/{org_id}/enroll handler and the sage-gui issuance command.
+	if err := s.migrateOrgEnrollTokens(ctx); err != nil {
+		return fmt.Errorf("migrate org enrollment tokens: %w", err)
+	}
+	// Migration: node-local org policy state (RFC #443) — enrollment outcomes,
+	// accepted policy high-water marks and equivocation notices. Kept out of
+	// BadgerDB because every Badger key feeds the consensus AppHash.
+	if err := s.migrateOrgPolicyState(ctx); err != nil {
+		return fmt.Errorf("migrate org policy state: %w", err)
+	}
+
 	// Migration: add mcp_auth_codes table for the OAuth 2.0 + PKCE wrapper
 	// in front of bearer auth (v6.7.2 — ChatGPT MCP connector compat).
 	if err := s.migrateMCPAuthCodes(ctx); err != nil {

@@ -114,7 +114,7 @@ post-fork rule: a pre-fork block replays exactly as it did before.
 
 The `maxSupportedAppVersion` ceiling in `internal/abci` is the version the
 auto-voter will not vote past, and `currentAppVersion`
-(`internal/abci/app.go:2608`) is the ladder that reports it. In personal mode
+(`internal/abci/app.go:2684`) is the ladder that reports it. In personal mode
 `personalAutoAdvanceCeiling` (`cmd/sage-gui/upgrade_watchdog.go:271`) returns
 that ceiling, so bumping it is not a constant update: a personal node advances
 its own chain to the new version on upgrade with no governance ceremony,
