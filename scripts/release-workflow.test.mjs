@@ -48,6 +48,14 @@ const v119StateSync = readFileSync(
   new URL('../deploy/scripts/run-v11.9-state-sync.sh', import.meta.url),
   'utf8',
 );
+const determinismHarness = readFileSync(
+  new URL('../deploy/scripts/run-determinism.sh', import.meta.url),
+  'utf8',
+);
+const mixedArchitectureCompose = readFileSync(
+  new URL('../deploy/docker-compose.det-mixed.yml', import.meta.url),
+  'utf8',
+);
 const stateSyncRuntime = readFileSync(
   new URL('../cmd/sage-gui/state_sync_runtime.go', import.meta.url),
   'utf8',
@@ -495,18 +503,18 @@ test('the Linux cold gate proves the closed placeholder through the real Comet d
   assert.doesNotMatch(v119StateSync, /busybox nslookup provider-p2p/);
 });
 
-test('the mandatory cold gate transfers one exact app-v28 session', () => {
+test('the mandatory cold gate transfers one exact app-v29 session', () => {
   const realCometChaos = faultJob('real-comet-chaos');
   assert.match(
     realCometChaos,
-    /name: App-v28 real Comet\/ABCI crash, partition, and state-sync gate/,
+    /name: App-v29 real Comet\/ABCI crash, partition, and state-sync gate/,
   );
   assert.equal(
     (realCometChaos.match(/^    timeout-minutes: 40$/gm) || []).length,
     1,
     'the bounded job ceiling must cover pinned image builds, the real-process gate, and cleanup',
   );
-  assert.match(v119StateSync, /^TARGET_APP_VERSION=28$/m);
+  assert.match(v119StateSync, /^TARGET_APP_VERSION=29$/m);
   assert.match(v119StateSync, /"app_version": \$\{TARGET_APP_VERSION\}/);
   assert.doesNotMatch(v119StateSync, /"app_version": (?:20|21|22|23)/);
   assert.match(
@@ -545,6 +553,40 @@ test('the mandatory cold gate transfers one exact app-v28 session', () => {
     stateSyncRuntime,
     /Uint64\("app_version", expectedAppVersion\)[\s\S]*?Msg\("authorized state-sync session assembled and exact-version candidate verified"\)/,
   );
+});
+
+test('the app-v29 evidence harness can run a genuinely mixed architecture quorum', () => {
+  assert.match(determinismHarness, /DET_MIXED_ARCH/);
+  assert.match(
+    determinismHarness,
+    /DET_TEST=TestAppHashDeterminism_AppV29Activation/,
+  );
+  assert.match(determinismHarness, /docker build --platform "\$\{platform\}"/);
+  assert.match(determinismHarness, /"abci0 aarch64" "abci1 x86_64"/);
+  assert.match(determinismHarness, /docker exec "\$\{PROJECT\}-\$\{service\}-1" uname -m/);
+  for (const [node, arch] of [
+    ['abci0', 'arm64'],
+    ['abci1', 'amd64'],
+    ['abci2', 'arm64'],
+    ['abci3', 'amd64'],
+    ['cometbft0', 'arm64'],
+    ['cometbft1', 'amd64'],
+    ['cometbft2', 'arm64'],
+    ['cometbft3', 'amd64'],
+  ]) {
+    const service = mixedArchitectureCompose.match(
+      new RegExp(`  ${node}:\\n[\\s\\S]*?platform: linux/${arch}\\n`),
+    );
+    assert.ok(service, `${node} must run linux/${arch} in the mixed quorum`);
+  }
+});
+
+test('CI and release require the app-v29 mixed-architecture quorum gate', () => {
+  const mixed = faultJob('app-v29-mixed-architecture');
+  assert.match(mixed, /docker\/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1/);
+  assert.match(mixed, /DET_MIXED_ARCH: '1'/);
+  assert.match(mixed, /DET_TEST: TestAppHashDeterminism_AppV29Activation/);
+  assert.match(mixed, /bash deploy\/scripts\/run-determinism\.sh/);
 });
 
 test('the cold gate pins and exercises two independent RPC origins without trusting Docker DNS', () => {
@@ -670,12 +712,12 @@ test('the mandatory cold gate fails closed unless every seed reports its exact s
   assert.match(seedMemories, /lines\[-1\] != summary/);
   assert.match(seedMemories, /matches\[0\] != summary/);
   assert.doesNotMatch(seedMemories, />\/dev\/null/);
-  assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/post-v28\.txt 1/);
+  assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/post-v29\.txt 1/);
   assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/advance\.txt 2/);
   assert.match(v119StateSync, /seed_memories "\$\{PROVIDER\}" \/sage\/restart\.txt 1/);
   assert.match(
     v119StateSync,
-    /seed_memories "\$\{PROVIDER\}" \/sage\/post-v28\.txt 1\nwait_height_at_least/,
+    /seed_memories "\$\{PROVIDER\}" \/sage\/post-v29\.txt 1\nwait_height_at_least/,
   );
   assert.match(
     v119StateSync,

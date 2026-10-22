@@ -1,4 +1,4 @@
-.PHONY: build build-all test test-cometbft-patch lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine determinism v119-chaos v119-state-sync v119-multiprocess-app benchmark benchmark-k6 sdk-test native-shell-quality acceptance-guard clean help
+.PHONY: build build-all test test-cometbft-patch lint fmt proto init up up-full down down-clean status logs logs-abci integration byzantine determinism determinism-mixed v119-chaos v119-state-sync v119-multiprocess-app benchmark benchmark-k6 sdk-test native-shell-quality acceptance-guard clean help
 
 BINARY=bin/amid
 COMPOSE_FILE=deploy/docker-compose.yml
@@ -83,6 +83,11 @@ byzantine: ## Run Byzantine fault tolerance tests (requires running network)
 
 determinism: ## Stand up an isolated 4-node devnet and assert byte-identical AppHash across nodes (audit residual #6; ~15-20 min, cold build)
 	bash deploy/scripts/run-determinism.sh
+
+determinism-mixed: ## Rehearse app-v29 across two arm64 and two amd64 validators (~25-45 min)
+	DET_MIXED_ARCH=1 DET_REBUILD=1 DET_BLOCK_TIME=300ms DET_TIMEOUT=7200s \
+		DET_TEST=TestAppHashDeterminism_AppV29Activation \
+		bash deploy/scripts/run-determinism.sh
 
 v119-chaos: ## Run isolated real Comet/ABCI SIGKILL and P2P-firewall fault gates
 	bash deploy/scripts/run-v11.9-chaos.sh

@@ -127,8 +127,8 @@ every earlier rung.
 
 ## Evidence that landed with the ceiling bump
 
-- `TestAppHashDeterminism_AppV28Activation`
-  (`test/integration/apphash_determinism_appv28_test.go`), run through
+- `TestAppHashDeterminism_AppV29Activation`
+  (`test/integration/apphash_determinism_appv29_test.go`), run through
   `deploy/scripts/run-determinism.sh`: a fresh four-validator devnet walks
   app-v2 → app-v28 one rung at a time, asserting byte-identical AppHash at
   H-1/H/H+1 of every seam. The final rung casts explicit validator votes only

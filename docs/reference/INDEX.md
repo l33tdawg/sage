@@ -1,4 +1,4 @@
-<!-- Reference index reconciled for SAGE v11.24.0. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
+<!-- Reference index reconciled for SAGE v11.24.1. Core REST, MCP, concepts, Python SDK, federation/brain graph, reranker, and environment references are current-facing for v11. -->
 
 
 # SAGE Reference — Agent Integration Index
@@ -32,7 +32,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`concepts/app-v26-access-groups.md`](concepts/app-v26-access-groups.md) | The local Access Group contract: explicit Read / Read+Write / Read+Write+Modify member authority, ownership-preserving join/leave semantics, CAS revisions, hard-deny intersections, and the app-v25 → app-v26 migration boundary. |
 | [`concepts/app-v27-lifecycle.md`](concepts/app-v27-lifecycle.md) | The current consensus boundary: static reserved shared-domain record-author challenge/reinstate authority with hard denials preserved, and omitted new-task `task_status` canonicalization to `planned`. |
 | [`concepts/app-v28-lifecycle.md`](concepts/app-v28-lifecycle.md) | The app-v28 design contract, **activated in v11.23.0**: the public-memory Merkle commitment and the consensus-side co-commit tombstone rule both land in one fork, the ceiling bump is what activates them, and the evidence that landed with it. |
-| [`concepts/app-v29-poe-determinism.md`](concepts/app-v29-poe-determinism.md) | The dormant app-v29 contract for architecture-independent PoE arithmetic: deterministic EWMA updates, portable explicitly-rounded log/exp, cross-architecture golden vectors, and the evidence required before activation. |
+| [`concepts/app-v29-poe-determinism.md`](concepts/app-v29-poe-determinism.md) | The app-v29 contract for architecture-independent PoE arithmetic: deterministic EWMA updates, portable explicitly-rounded log/exp, native cross-architecture golden vectors, mixed-architecture activation evidence, and the strict H+1 replay boundary. |
 | [`app-v23-access-control-design.md`](app-v23-access-control-design.md) | The v11.16.0 contract for Root, Member/Manager/Admin roles, named security profiles, Access Groups, atomic enrollment, linked federated readers, app-v24 readiness and memory integrity, migration, replay, and state sync. |
 | [`app-v25-upgrade-recovery.md`](app-v25-upgrade-recovery.md) | The v11.16.2 strict App-v25 upgrade: immutable new-memory envelopes, automatic historical repair, local writer continuity, record-local quarantine, Root retry/deprecation controls, and readiness semantics. |
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
@@ -213,7 +213,7 @@ are recorded here because agents may have cached them.
   `sage_message_replies`, or `sage_message_history(folder="outbox")` for the
   untruncated text.
 
-## Related docs (reconciled through v11.24.0)
+## Related docs (reconciled through v11.24.1)
 
 These were stale earlier in v8 and have now been reconciled against the code. Where any of them still disagrees with this reference, this reference wins.
 

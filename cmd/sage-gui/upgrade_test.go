@@ -459,23 +459,21 @@ func TestUpgradeStatusReportsAuthoritativePlanAndBallot(t *testing.T) {
 	}
 }
 
-// TestUpgradeVoteCarriesBallotsAtAndAboveTheCeiling pins the deliberate-vote
-// path. A target above the readiness ceiling is a compiled-but-dormant gate:
-// the auto-voter abstains, so only a validator vote here (or CEREBRUM's
-// governance surface) can carry it, and the command must say so. A ballot at
-// the converged ceiling is an ordinary ballot and must not claim dormancy. This
-// drives the real command against a fake CometBFT RPC and asserts the
-// transaction that reaches the wire.
-func TestUpgradeVoteCarriesBallotsAtAndAboveTheCeiling(t *testing.T) {
+// TestUpgradeVoteCarriesCeilingBallotAndRefusesUnsupportedTarget pins the
+// deliberate-vote boundary. App-v29 is the converged ceiling, so its ballot is
+// carried normally; a target above the compiled ceiling must be refused before
+// any vote reaches the wire because this binary cannot execute it.
+func TestUpgradeVoteCarriesCeilingBallotAndRefusesUnsupportedTarget(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		current     uint64
-		target      uint64
-		proposalID  string
-		wantDormant bool
+		name               string
+		current            uint64
+		target             uint64
+		proposalID         string
+		wantDormant        bool
+		wantUnsupportedErr bool
 	}{
-		{name: "ballot at the converged ceiling", current: 27, target: 28, proposalID: "proposal-28"},
-		{name: "ballot above the ceiling", current: 28, target: 29, proposalID: "proposal-29", wantDormant: true},
+		{name: "ballot at the converged ceiling", current: 28, target: 29, proposalID: "proposal-29"},
+		{name: "ballot above the compiled ceiling", current: 29, target: 30, proposalID: "proposal-30", wantUnsupportedErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target := tc.target
@@ -542,11 +540,18 @@ func TestUpgradeVoteCarriesBallotsAtAndAboveTheCeiling(t *testing.T) {
 			server := httptest.NewServer(mux)
 			defer server.Close()
 
+			var runErr error
 			output := captureStdout(t, func() {
-				if runErr := runUpgradeVote([]string{"--rpc", server.URL, "--yes", "--agent-key", keyPath}); runErr != nil {
-					t.Fatalf("runUpgradeVote: %v", runErr)
-				}
+				runErr = runUpgradeVote([]string{"--rpc", server.URL, "--yes", "--agent-key", keyPath})
 			})
+			if tc.wantUnsupportedErr {
+				require.ErrorContains(t, runErr, "above this binary's compiled ceiling")
+				require.Empty(t, votedProposal, "an unsupported target must not reach the wire")
+				require.NoError(t, handlerErr)
+				require.NotContains(t, output, "Vote accept recorded")
+				return
+			}
+			require.NoError(t, runErr)
 			require.NoError(t, handlerErr)
 			require.Equal(t, tc.proposalID, votedProposal, "the vote must name the active upgrade ballot")
 			require.Equal(t, tx.VoteDecisionAccept, votedDecision, "the default decision is accept")

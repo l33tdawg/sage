@@ -10,10 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAppV29CompiledDormantAndStrictBoundary(t *testing.T) {
+func TestAppV29AutoVoteCeilingAndStrictBoundary(t *testing.T) {
 	require.Equal(t, tx.CanonicalUpgradeName(29), appV29UpgradeName)
 	require.Equal(t, uint64(29), MaxCompiledAppVersion())
-	require.Equal(t, uint64(28), MaxSupportedAppVersion())
+	require.Equal(t, uint64(29), MaxSupportedAppVersion())
 
 	app := setupTestApp(t)
 	app.state.Height = 101

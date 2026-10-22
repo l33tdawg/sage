@@ -24,12 +24,10 @@ const (
 	RequiredAppVersion uint64 = 20
 	// LatestSupportedAppVersion is the highest app protocol version this binary
 	// can serve or restore in a state-sync ceremony. It tracks the highest
-	// COMPILED fork gate, not the auto-vote readiness ceiling: a gate compiled
-	// ahead of its activation evidence (app-v29) still means a node carrying it
-	// can run the exact version it restores, which is the only question an
-	// authorization's exact-version pin asks. A joining node never sees a chain
-	// at a version its own binary cannot execute, because the receiver verifies
-	// the served bundle at that exact version.
+	// COMPILED fork gate, not the auto-vote readiness ceiling. The two currently
+	// converge at app-v29, but an exact-version join authorization asks only
+	// whether this binary can execute the restored version; the receiver still
+	// verifies the served bundle at that exact version.
 	LatestSupportedAppVersion uint64 = 29
 	cometNodeIDBytes                 = 20
 	maxJoinAuthorizationBytes        = 64 << 10

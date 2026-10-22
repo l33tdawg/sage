@@ -1,7 +1,8 @@
 # App-v29: architecture-independent PoE arithmetic
 
-**Status:** compiled and dormant in SAGE v11.24.0. The auto-vote ceiling
-remains app-v28 until the activation evidence below lands.
+**Status:** compiled and auto-vote ready. The compiled and auto-vote ceilings
+converge at app-v29; activation remains a consensus transition strictly after
+the activation height, and the release gates below must stay green.
 
 ## Why the fork exists
 
@@ -66,8 +67,7 @@ activation; it prevents new divergence after a chain crosses the gate.
 
 ## Activation evidence
 
-The gate ships dormant above the app-v28 auto-vote ceiling. Before raising the
-ceiling to 29, the change needs:
+The app-v29 ceiling change is gated on the complete evidence set:
 
 1. The exact golden-vector suite passing on native linux/amd64 and linux/arm64
    runners.
@@ -78,5 +78,11 @@ ceiling to 29, the change needs:
    activation.
 5. The normal snapshot, restart and state-sync acceptance gates.
 
-Until then, an explicitly governed app-v29 plan remains supported by a binary
-that carries the gate, but the automatic voter abstains.
+The four-validator determinism ladder now crosses app-v29 and continues through
+the first post-activation PoE epoch boundary, and the mandatory real-Comet
+state-sync gate targets app-v29 so a pristine receiver, restart, and provider
+SIGKILL are exercised against the active state machine. The cross-architecture
+golden vectors run on native amd64 and arm64. A separate mixed-quorum gate runs
+two validators and their CometBFT processes on each architecture against one
+chain (`make determinism-mixed`). A ceiling change must not merge if any of
+these gates regress.

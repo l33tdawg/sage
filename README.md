@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.24.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.24.1`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,17 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.24.0 and earlier)</summary>
+<summary>Recent release notes (v11.24.1 and earlier)</summary>
+
+## What's New in v11.24.1
+
+**App-v29 now activates automatically after its evidence gates pass.** The auto-vote readiness ceiling moves from app-v28 to app-v29, so personal nodes converge on the architecture-independent PoE arithmetic already compiled in v11.24.0. The activation block keeps app-v28 behavior; deterministic EWMA, recency, corroboration, logarithm, exponential and final-weight calculations begin at H+1. Historical blocks continue to replay under their original app versions.
+
+**The app-v29 evidence spans the real failure surfaces.** A four-validator ladder crosses app-v2 through app-v29 with byte-identical AppHash at H-1, H and H+1, then continues through the first post-activation PoE epoch. A separate quorum runs two validators and CometBFT processes on arm64 and two on amd64 against one chain. The real-process crash, partition, restart and state-sync gate targets exact app-v29 state.
+
+**The patch closes the release security gaps.** Go 1.26.10 fixes GO-2026-6809 in `crypto/x509`; certifi 2026.10.19 removes the compromised emSign intermediate CA bundle from all benchmark environments; and the dependency group updates chi, klauspost/compress, go-winio, Playwright and pinned GitHub Actions.
+
+**No chain migration.** Existing memories, identities, governance state and chain history are preserved. Container: `ghcr.io/l33tdawg/sage:11.24.1`. SDK 11.24.1.
 
 ## What's New in v11.24.0
 

@@ -62,7 +62,7 @@ jobs:
         run: make test-cometbft-patch
 
   real-comet-chaos:
-    name: App-v28 real Comet/ABCI crash, partition, and state-sync gate
+    name: App-v29 real Comet/ABCI crash, partition, and state-sync gate
     runs-on: ubuntu-latest
     timeout-minutes: 40
     # Independent of app-multiprocess: no needs.app-multiprocess.* reference
@@ -113,8 +113,30 @@ jobs:
             V119_STATE_SYNC_SOURCE_ID=${{ steps.source-id.outputs.value }}
           cache-from: type=gha,scope=v119-chaos-node
           cache-to: type=gha,mode=max,scope=v119-chaos-node
-      - name: Run bounded app-v24 real process fault gate
+      - name: Run bounded app-v29 real process fault gate
         env:
           V119_CHAOS_REBUILD: '0'
           V119_REQUIRE_AUTHORIZED_STATE_SYNC: ${{ inputs.require_authorized_state_sync && '1' || '0' }}
         run: bash deploy/scripts/run-v11.9-chaos.sh
+
+  app-v29-mixed-architecture:
+    name: App-v29 mixed amd64/arm64 quorum
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_ref || github.ref }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - name: Rehearse app-v29 across two arm64 and two amd64 validators
+        env:
+          DET_MIXED_ARCH: '1'
+          DET_REBUILD: '1'
+          DET_BLOCK_TIME: 300ms
+          DET_TIMEOUT: 7200s
+          DET_TEST: TestAppHashDeterminism_AppV29Activation
+        run: bash deploy/scripts/run-determinism.sh
