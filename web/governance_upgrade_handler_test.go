@@ -32,15 +32,15 @@ func upgradeStatusServer(t *testing.T, status sageabci.UpgradeGovernanceStatus) 
 }
 
 // The dashboard reads the same authoritative status the CLI does, and reports
-// the two ceilings. App-v29 is compiled but dormant, so a v28 ballot is still
-// carried by the auto-voter while a v29 ballot requires explicit votes.
+// the two ceilings. They converge at app-v29, so a v29 ballot is carried by the
+// auto-voter while a hypothetical v30 ballot requires explicit votes.
 func TestDashboardUpgradeStatusReportsCeilingsAndExplicitVoteRequirement(t *testing.T) {
-	target := uint64(28)
+	target := uint64(29)
 	server := upgradeStatusServer(t, sageabci.UpgradeGovernanceStatus{
 		Schema:            upgradeGovernanceStatusSchema,
-		CurrentAppVersion: 27,
+		CurrentAppVersion: 28,
 		ActiveProposal: &sageabci.UpgradeGovernanceActiveProposal{
-			ProposalID: "proposal-28", Operation: "upgrade", TargetID: "app-v28",
+			ProposalID: "proposal-29", Operation: "upgrade", TargetID: "app-v29",
 			Status: "voting", TargetAppVersion: &target,
 		},
 	})
@@ -52,21 +52,20 @@ func TestDashboardUpgradeStatusReportsCeilingsAndExplicitVoteRequirement(t *test
 
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
-	require.Equal(t, float64(28), body["next_target_app_version"], "next rung is current+1")
+	require.Equal(t, float64(29), body["next_target_app_version"], "next rung is current+1")
 	require.Equal(t, float64(sageabci.MaxSupportedAppVersion()), body["auto_vote_ceiling"])
 	require.Equal(t, float64(sageabci.MaxCompiledAppVersion()), body["compiled_app_version"])
 	require.Equal(t, false, body["explicit_vote_required_now"],
-		"app-v28 remains within the auto-vote ceiling")
-	require.Equal(t, true, body["dormant_below_ceiling_gap"])
-	require.Contains(t, body, "dormant_note",
-		"the note describes the compiled-ahead app-v29 gate")
+		"app-v29 is within the auto-vote ceiling")
+	require.Equal(t, false, body["dormant_below_ceiling_gap"])
+	require.NotContains(t, body, "dormant_note")
 
-	aboveCeiling := uint64(29)
+	aboveCeiling := uint64(30)
 	server = upgradeStatusServer(t, sageabci.UpgradeGovernanceStatus{
 		Schema:            upgradeGovernanceStatusSchema,
-		CurrentAppVersion: 28,
+		CurrentAppVersion: 29,
 		ActiveProposal: &sageabci.UpgradeGovernanceActiveProposal{
-			ProposalID: "proposal-29", Operation: "upgrade", TargetID: "app-v29",
+			ProposalID: "proposal-30", Operation: "upgrade", TargetID: "app-v30",
 			Status: "voting", TargetAppVersion: &aboveCeiling,
 		},
 	})
@@ -77,8 +76,8 @@ func TestDashboardUpgradeStatusReportsCeilingsAndExplicitVoteRequirement(t *test
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 	require.Equal(t, true, body["explicit_vote_required_now"],
 		"a ballot above the auto-vote ceiling can only move on explicit votes")
-	require.Equal(t, true, body["dormant_below_ceiling_gap"],
-		"app-v29 is compiled ahead of the app-v28 auto-vote ceiling")
+	require.Equal(t, false, body["dormant_below_ceiling_gap"],
+		"the compiled and auto-vote ceilings currently converge")
 }
 
 // A chain with no ballot still reports the rung it is on and what comes next,
