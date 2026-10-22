@@ -1,4 +1,5 @@
 -r ../requirements-test.txt
+certifi==2026.10.19
 # Optional HF download and uncached expansion; versions also belong in the run environment archive.
 datasets==5.0.1
 openai==2.5.0
