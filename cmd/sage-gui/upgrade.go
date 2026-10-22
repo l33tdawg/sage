@@ -563,6 +563,16 @@ func runUpgradeVote(args []string) error {
 		}
 		id = status.ActiveProposal.ProposalID
 	}
+	if status.ActiveProposal != nil &&
+		status.ActiveProposal.TargetAppVersion != nil &&
+		*status.ActiveProposal.TargetAppVersion > sageabci.MaxCompiledAppVersion() {
+		return fmt.Errorf(
+			"active upgrade ballot %s targets app-v%d, above this binary's compiled ceiling app-v%d; run a supporting binary before voting",
+			status.ActiveProposal.ProposalID,
+			*status.ActiveProposal.TargetAppVersion,
+			sageabci.MaxCompiledAppVersion(),
+		)
+	}
 
 	key, keySource, err := resolveUpgradeVoteSigningKey(*agentKeyPath, logger)
 	if err != nil {

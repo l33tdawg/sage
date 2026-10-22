@@ -256,9 +256,9 @@ func TestBootStateSyncRuntimeHoldsPendingBlockExecutionUntilSeal(t *testing.T) {
 }
 
 func TestBootStateSyncRuntimeSupportsV20ThroughV29WithExactSessionVersion(t *testing.T) {
-	// The allowlist follows the highest COMPILED fork gate. App-v29 is compiled
-	// but remains dormant below the auto-vote ceiling, so a node carrying the
-	// gate can restore a v29 image even though its auto-voter abstains on v29.
+	// The allowlist follows the highest COMPILED fork gate. App-v29 currently
+	// converges the compiled and auto-vote ceilings, so a node carrying the
+	// gate can both restore and advance the exact v29 session version.
 	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29} {
 		t.Run(fmt.Sprintf("app-v%d", version), func(t *testing.T) {
 			oldHash := sha256.Sum256([]byte("old-versioned-state"))
