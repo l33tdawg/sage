@@ -107,8 +107,8 @@ func runUpgradePreflight(args []string) error {
 	}
 	// Two different questions, two different ceilings: can this binary SERVE
 	// this chain (compiled gates), and how far will its auto-voter go on its own
-	// (the readiness ceiling)? A dormant gate is compiled and servable while the
-	// auto-voter still abstains (app-v29 before its ceiling bump), so
+	// (the readiness ceiling)? They currently converge at app-v29, but a future
+	// gate could be compiled and servable while the auto-voter still abstains, so
 	// compatibility must use the compiled ceiling or a node that CAN run the
 	// chain is reported incompatible.
 	maxSupported := sageabci.MaxSupportedAppVersion()

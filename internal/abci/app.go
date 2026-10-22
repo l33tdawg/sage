@@ -2747,7 +2747,7 @@ func (app *SageApp) currentAppVersion() uint64 {
 }
 
 // maxSupportedAppVersion is the readiness ceiling for upgrade auto-voting
-// (currently app-v28): a validator must never vote to activate an upgrade it
+// (currently app-v29): a validator must never vote to activate an upgrade it
 // cannot execute — doing so would commit consensus version.app=N while the
 // binary still runs at N-1, halting the chain on the next CometBFT handshake
 // (the maxSupportedAppVersion footgun). Bump this in lockstep with every new
@@ -2755,13 +2755,13 @@ func (app *SageApp) currentAppVersion() uint64 {
 // dormant: a gate may be compiled ahead of its activation evidence, in which
 // case the auto-voter must abstain on it and only the quorum-approved explicit
 // path can activate it, until this ceiling is raised in the change that carries
-// the evidence (app-v28 travelled exactly that path; see
-// docs/reference/concepts/app-v28-lifecycle.md).
-const maxSupportedAppVersion uint64 = 28
+// the evidence (app-v29 travelled exactly that path; see
+// docs/reference/concepts/app-v29-poe-determinism.md).
+const maxSupportedAppVersion uint64 = 29
 
 // maxCompiledAppVersion is the highest app version this binary has a compiled
-// fork gate for. app-v29 ships dormant above the auto-vote ceiling until
-// mixed-architecture golden vectors and chain-replay evidence land.
+// fork gate for. The compiled and auto-vote ceilings converge at app-v29 after
+// mixed-architecture golden vectors and chain-level activation evidence land.
 const maxCompiledAppVersion uint64 = 29
 
 // MaxSupportedAppVersion returns the auto-vote readiness ceiling, which is the

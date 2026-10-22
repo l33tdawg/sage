@@ -474,8 +474,8 @@ func TestUpgradeVoteCarriesBallotsAtAndAboveTheCeiling(t *testing.T) {
 		proposalID  string
 		wantDormant bool
 	}{
-		{name: "ballot at the converged ceiling", current: 27, target: 28, proposalID: "proposal-28"},
-		{name: "ballot above the ceiling", current: 28, target: 29, proposalID: "proposal-29", wantDormant: true},
+		{name: "ballot at the converged ceiling", current: 28, target: 29, proposalID: "proposal-29"},
+		{name: "ballot above the ceiling", current: 29, target: 30, proposalID: "proposal-30", wantDormant: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target := tc.target

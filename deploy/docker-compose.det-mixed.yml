@@ -1,0 +1,32 @@
+# Mixed-architecture app-v29 determinism harness.
+#
+# Layered after docker-compose.det.yml by run-determinism.sh when
+# DET_MIXED_ARCH=1. Validators 0 and 2 run linux/arm64; validators 1 and 3 run
+# linux/amd64. Every ABCI and CometBFT process therefore participates in the
+# same consensus network with the other architecture, including epoch writes.
+services:
+  abci0:
+    image: sage-det-abci:local-arm64
+    platform: linux/arm64
+  abci1:
+    image: sage-det-abci:local-amd64
+    platform: linux/amd64
+  abci2:
+    image: sage-det-abci:local-arm64
+    platform: linux/arm64
+  abci3:
+    image: sage-det-abci:local-amd64
+    platform: linux/amd64
+
+  cometbft0:
+    image: sage-det-node:local-arm64
+    platform: linux/arm64
+  cometbft1:
+    image: sage-det-node:local-amd64
+    platform: linux/amd64
+  cometbft2:
+    image: sage-det-node:local-arm64
+    platform: linux/arm64
+  cometbft3:
+    image: sage-det-node:local-amd64
+    platform: linux/amd64

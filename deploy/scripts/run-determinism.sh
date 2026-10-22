@@ -19,13 +19,16 @@
 #
 # Set DET_SHORT=1 to skip the slow fork-activation phase (epoch-boundary phase only).
 #
-# For the app-v28 ladder run (DET_TEST=TestAppHashDeterminism_AppV28Activation):
+# For the app-v29 ladder run (DET_TEST=TestAppHashDeterminism_AppV29Activation):
 #   DET_BLOCK_TIME=300ms  devnet block time (default 3s). The 200-block
 #     consensus activation floor is NOT overridable — it is a governance rule —
-#     but block time is a devnet knob, and the ladder walks app-v2..app-v27 one
-#     rung at a time, so at the default 3s the run is ~4.5h and at 300ms ~25min.
+#     but block time is a devnet knob, and the ladder walks app-v2..app-v28 one
+#     rung at a time, so at the default 3s the run is ~4.5h and at 300ms ~45min.
 #     Every validator carries the same value, so AppHash agreement is unaffected.
 #   DET_TIMEOUT=5400s     go test ceiling (default 1800s); the ladder needs more.
+#   DET_MIXED_ARCH=1      run validators 0/2 as linux/arm64 and 1/3 as
+#     linux/amd64. This is the mixed-architecture quorum rehearsal app-v29
+#     requires; Docker must support both through native execution or emulation.
 
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -35,6 +38,9 @@ COMPOSE=(docker compose -p "${PROJECT}"
   -f deploy/docker-compose.yml
   -f deploy/docker-compose.test.yml
   -f deploy/docker-compose.det.yml)
+if [ "${DET_MIXED_ARCH:-0}" = "1" ]; then
+  COMPOSE+=(-f deploy/docker-compose.det-mixed.yml)
+fi
 
 cleanup() {
   echo "--- tearing down ${PROJECT} ---"
@@ -56,18 +62,34 @@ bash deploy/init-testnet.sh
 # build blocks — 8 independent cold builds exhausted Docker's VM disk). Sequential
 # on purpose: one builder cache peak at a time. Skipped when the tag already
 # exists; set DET_REBUILD=1 after code changes so the run tests the CURRENT tree.
-for spec in "sage-det-abci:local deploy/Dockerfile.abci" \
-            "sage-det-node:local deploy/Dockerfile.node"; do
-  tag=${spec%% *}; dockerfile=${spec##* }
+build_det_image() {
+  tag=$1
+  dockerfile=$2
+  platform=${3:-}
   if [ "${DET_REBUILD:-0}" != "1" ] && docker image inspect "${tag}" >/dev/null 2>&1; then
     created=$(docker image inspect --format '{{.Created}}' "${tag}")
     echo "!!! ${tag} already exists (built ${created}) — REUSING a possibly stale"
     echo "!!! binary. Set DET_REBUILD=1 to rebuild from the current tree."
+    return
+  fi
+  echo "--- building ${tag} (${dockerfile}${platform:+, ${platform}}) ---"
+  if [ -n "${platform}" ]; then
+    docker build --platform "${platform}" -f "${dockerfile}" -t "${tag}" .
   else
-    echo "--- building ${tag} (${dockerfile}) ---"
     docker build -f "${dockerfile}" -t "${tag}" .
   fi
-done
+}
+
+if [ "${DET_MIXED_ARCH:-0}" = "1" ]; then
+  echo "--- mixed architecture: node0/node2 arm64, node1/node3 amd64 ---"
+  for arch in arm64 amd64; do
+    build_det_image "sage-det-abci:local-${arch}" deploy/Dockerfile.abci "linux/${arch}"
+    build_det_image "sage-det-node:local-${arch}" deploy/Dockerfile.node "linux/${arch}"
+  done
+else
+  build_det_image "sage-det-abci:local" deploy/Dockerfile.abci
+  build_det_image "sage-det-node:local" deploy/Dockerfile.node
+fi
 
 echo "--- starting the isolated cluster ---"
 # Only the services the determinism test needs: it submits NO memories, so the
@@ -95,6 +117,22 @@ if [ "${healthy}" -ne 4 ]; then
   echo "ERROR: cluster did not become healthy in time"
   "${COMPOSE[@]}" ps
   exit 1
+fi
+
+if [ "${DET_MIXED_ARCH:-0}" = "1" ]; then
+  echo "--- verifying live validator architectures ---"
+  for spec in "abci0 aarch64" "abci1 x86_64" "abci2 aarch64" "abci3 x86_64" \
+              "cometbft0 aarch64" "cometbft1 x86_64" \
+              "cometbft2 aarch64" "cometbft3 x86_64"; do
+    service=${spec%% *}
+    want=${spec##* }
+    got=$(docker exec "${PROJECT}-${service}-1" uname -m)
+    if [ "${got}" != "${want}" ]; then
+      echo "ERROR: ${service} is running ${got}, want ${want}" >&2
+      exit 1
+    fi
+    echo "${service}: ${got}"
+  done
 fi
 
 # Plain string, not an array: macOS bash 3.2 + `set -u` errors on an empty

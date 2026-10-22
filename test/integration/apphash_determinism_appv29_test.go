@@ -28,16 +28,16 @@ import (
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
-// TestAppHashDeterminism_AppV28Activation is the determinism half of the
-// app-v28 evidence bar (docs/reference/concepts/app-v28-lifecycle.md): walk the
+// TestAppHashDeterminism_AppV29Activation is the determinism half of the
+// app-v29 evidence bar (docs/reference/concepts/app-v29-poe-determinism.md): walk the
 // FULL app-v2..app-v27 ladder on the four-validator devnet with real
-// governance-approved activations, cross the app-v28 seam, and assert every
+// governance-approved activations, cross the app-v29 seam, and assert every
 // node's committed AppHash is byte-identical at H-1, H and H+1 of EVERY rung.
 //
 // The ladder cannot be shortened. app-v20 requires app-v19 as its immediate
-// predecessor, app-v21..app-v28 each require their immediate predecessor, and
+// predecessor, app-v21..app-v29 each require their immediate predecessor, and
 // app-v22/app-v23 validate the persisted applied-upgrade records behind them,
-// so app-v28 is unreachable by a skip-ahead. That is exactly why the run needs
+// so app-v29 is unreachable by a skip-ahead. That is exactly why the run needs
 // the fast-block devnet knob: the 200-block consensus activation floor is NOT
 // env-overridable (it is a governance rule), but block time is a devnet knob,
 // so a 300ms block time turns the ~4.5h ladder into ~25min.
@@ -52,16 +52,16 @@ import (
 //   - the validator keys the devnet genesis generated under
 //     deploy/genesis/node{0..3}/config (override with SAGE_TEST_GENESIS_DIR).
 //   - run it through deploy/scripts/run-determinism.sh with
-//     DET_TEST=TestAppHashDeterminism_AppV28Activation and a short
+//     DET_TEST=TestAppHashDeterminism_AppV29Activation and a short
 //     SAGE_TESTNET_TIMEOUT_COMMIT.
-func TestAppHashDeterminism_AppV28Activation(t *testing.T) {
+func TestAppHashDeterminism_AppV29Activation(t *testing.T) {
 	requireNetwork(t)
 	rpcs := allCometRPCs()
 	if len(rpcs) < cometRPCCount {
 		t.Skipf("need %d validator RPCs, have %d", cometRPCCount, len(rpcs))
 	}
 	if testing.Short() {
-		t.Skip("skipping the app-v2..app-v28 ladder in -short mode")
+		t.Skip("skipping the app-v2..app-v29 ladder in -short mode")
 	}
 
 	preVer := readAppVersion(t, rpcs[0])
@@ -83,28 +83,39 @@ func TestAppHashDeterminism_AppV28Activation(t *testing.T) {
 	registerDevnetOperatorAdmin(t, rpcs[0], adminKey)
 
 	started := time.Now()
-	for target := uint64(6); target <= 28; target++ {
-		climbRung(t, rpcs, adminKey, target, govDomain)
+	var appV29ActivationHeight int64
+	for target := uint64(6); target <= 29; target++ {
+		activation := climbRung(t, rpcs, adminKey, target, govDomain)
+		if target == 29 {
+			appV29ActivationHeight = activation
+		}
 	}
-	t.Logf("LADDER PASS: app-v2..app-v28 activated one rung at a time in %s with byte-identical AppHash at every seam",
-		time.Since(started).Round(time.Second))
+	nextEpochBoundary := ((appV29ActivationHeight / 100) + 1) * 100
+	waitForAllNodesHeight(t, rpcs, nextEpochBoundary+1, ladderRungTimeout())
+	for _, h := range []int64{nextEpochBoundary, nextEpochBoundary + 1} {
+		agreed := assertAppHashAgreement(t, rpcs, h)
+		t.Logf("post-app-v29 epoch boundary: all %d nodes byte-identical at height %d (%s)",
+			cometRPCCount, h, shortHash(agreed))
+	}
+	t.Logf("LADDER PASS: app-v2..app-v29 activated one rung at a time and crossed post-activation epoch %d in %s",
+		nextEpochBoundary/100, time.Since(started).Round(time.Second))
 }
 
-// appV28ActivationFloorBlocks mirrors the chain's defaultUpgradeDelayBlocks: the
+// appV29ActivationFloorBlocks mirrors the chain's defaultUpgradeDelayBlocks: the
 // consensus floor between a quorum-approved plan and its activation height. It
 // is a governance rule, not a knob, so the harness waits it out honestly.
-const appV28ActivationFloorBlocks = 200
+const appV29ActivationFloorBlocks = 200
 
 // climbRung drives one rung (target-1 -> target) and asserts the seam.
-func climbRung(t *testing.T, rpcs []string, adminKey ed25519.PrivateKey, target uint64, govDomain string) {
+func climbRung(t *testing.T, rpcs []string, adminKey ed25519.PrivateKey, target uint64, govDomain string) int64 {
 	t.Helper()
 	cur := readAppVersion(t, rpcs[0])
 	if cur >= target {
 		t.Logf("app-v%d already active — rung skipped", target)
-		return
+		return readLatestHeight(t, rpcs[0])
 	}
 	// app-v6 is the one legal jump (it backfills app-v2..app-v5); every later
-	// rung is strictly next (app-v20..app-v28 require their immediate
+	// rung is strictly next (app-v20..app-v29 require their immediate
 	// predecessor outright, and the harness walks the rest in order).
 	require.Greaterf(t, target, cur, "chain is at app-v%d, asked to climb to app-v%d", cur, target)
 
@@ -116,24 +127,19 @@ func climbRung(t *testing.T, rpcs []string, adminKey ed25519.PrivateKey, target 
 		domain = govDomain
 	}
 
-	ptx, err := buildUpgradeProposeTx(adminKey, name, target, appV28ActivationFloorBlocks, domain)
+	ptx, err := buildUpgradeProposeTx(adminKey, name, target, appV29ActivationFloorBlocks, domain)
 	require.NoError(t, err, "build upgrade propose %s", name)
 
 	rungStart := time.Now()
 	res := broadcastParsedTxCommit(t, rpcs[0], ptx)
 	require.Equalf(t, uint32(0), res.CheckCode, "upgrade propose %s rejected in CheckTx: %s", name, res.CheckLog)
 	require.Equalf(t, uint32(0), res.TxCode, "upgrade propose %s rejected at execution: %s", name, res.TxLog)
-	activation := res.Height + appV28ActivationFloorBlocks
+	activation := res.Height + appV29ActivationFloorBlocks
 
 	// From app-v8 on the propose runs the governance ballot; each node's
-	// auto-voter accepts every target at or below its auto-vote ceiling. While
-	// app-v28's gate was dormant that ceiling sat at 27, so the final rung was
-	// the deliberate case: the auto-voter abstained and quorum was cast
-	// explicitly — one validator vote per node — which is exactly what the
-	// operator vote surfaces exist for. The release that carries the fork's
-	// evidence raises the ceiling to meet the gate, so the harness follows the
-	// binary it is built with: explicit votes only while the target sits above
-	// the auto-vote ceiling.
+	// auto-voter accepts every target at or below its auto-vote ceiling. The
+	// harness follows the binary it is built with: if a future target sits above
+	// that ceiling, it casts explicit validator votes instead.
 	if target > sageabci.MaxSupportedAppVersion() {
 		proposalID := governance.ComputeProposalID(agentIDFor(adminKey), res.Height, governance.OpUpgrade, name)
 		t.Logf("app-v%d ballot %s opened at height %d; casting explicit accept votes (target is above the auto-vote ceiling %d)", target, proposalID, res.Height, sageabci.MaxSupportedAppVersion())
@@ -152,6 +158,7 @@ func climbRung(t *testing.T, rpcs []string, adminKey ed25519.PrivateKey, target 
 		agreed := assertAppHashAgreement(t, rpcs, h)
 		t.Logf("app-v%d seam: all %d nodes byte-identical at height %d (%s)", target, cometRPCCount, h, shortHash(agreed))
 	}
+	return activation
 }
 
 func shortHash(h string) string {
@@ -200,6 +207,49 @@ func waitForAllNodesAppVersion(t *testing.T, rpcs []string, target uint64, timeo
 		}
 		time.Sleep(2 * time.Second)
 	}
+}
+
+func waitForAllNodesHeight(t *testing.T, rpcs []string, target int64, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		heights := make([]int64, 0, len(rpcs))
+		all := true
+		for _, rpc := range rpcs {
+			height := readLatestHeight(t, rpc)
+			heights = append(heights, height)
+			if height < target {
+				all = false
+			}
+		}
+		if all {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out after %s waiting for height %d on all nodes (have %v)",
+				timeout, target, heights)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func readLatestHeight(t *testing.T, rpc string) int64 {
+	t.Helper()
+	resp, err := http.Get(rpc + "/status") //nolint:noctx
+	require.NoError(t, err, "GET %s/status", rpc)
+	defer resp.Body.Close()
+	var out struct {
+		Result struct {
+			SyncInfo struct {
+				LatestBlockHeight string `json:"latest_block_height"`
+			} `json:"sync_info"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	height, err := strconv.ParseInt(out.Result.SyncInfo.LatestBlockHeight, 10, 64)
+	require.NoError(t, err, "parse latest block height from %s", rpc)
+	require.Positive(t, height, "latest block height from %s", rpc)
+	return height
 }
 
 // readChainID returns the CometBFT chain id from /status.
@@ -385,7 +435,7 @@ func buildUpgradeProposeTx(key ed25519.PrivateKey, name string, target uint64, d
 	return ptx, nil
 }
 
-// castValidatorUpgradeVote casts an explicit ACCEPT on the active app-v28
+// castValidatorUpgradeVote casts an explicit ACCEPT on the active app-v29
 // ballot, signed by a validator key. A direct GovVote is a validator vote
 // (routed by the outer signature), which is what gives it quorum weight.
 func castValidatorUpgradeVote(t *testing.T, rpc string, key ed25519.PrivateKey, proposalID string) parsedTxCommit {
