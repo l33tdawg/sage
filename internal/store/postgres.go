@@ -2234,15 +2234,17 @@ func (s *PostgresStore) getStats(ctx context.Context, excludedPrefixes []string)
 		excludedSQL += fmt.Sprintf(" AND LOWER(domain_tag) NOT LIKE $%d", len(excludedArgs))
 	}
 
+	// Totals exclude deprecated memories; status counts and last activity below
+	// retain the full audit history, matching SQLite's aggregate contract.
 	if err := s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM memories WHERE 1=1`+excludedSQL,
+		`SELECT COUNT(*) FROM memories WHERE status != 'deprecated'`+excludedSQL,
 		excludedArgs...,
 	).Scan(&stats.TotalMemories); err != nil {
 		return nil, fmt.Errorf("count total: %w", err)
 	}
 
 	rows, err := s.db.Query(ctx,
-		`SELECT domain_tag, COUNT(*) FROM memories WHERE 1=1`+excludedSQL+` GROUP BY domain_tag`,
+		`SELECT domain_tag, COUNT(*) FROM memories WHERE status != 'deprecated'`+excludedSQL+` GROUP BY domain_tag`,
 		excludedArgs...,
 	)
 	if err != nil {
