@@ -1656,6 +1656,69 @@ func TestAppV23PartialGraphReportsVerifiedTotalNotRenderedSample(t *testing.T) {
 	require.Equal(t, 13869, response.DomainCounts["sample-domain"])
 }
 
+func TestAppV23CerebrumTimelinePreservesExactTimeBounds(t *testing.T) {
+	fixture := newAppV23ProjectionRouteFixture(t, false)
+	ctx := context.Background()
+	start := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	const domain = "timeline-boundaries"
+	insert := func(id, recordDomain string, offset time.Duration) {
+		t.Helper()
+		content := "timeline boundary record " + id
+		hash := sha256.Sum256([]byte(content))
+		record := &memory.MemoryRecord{
+			MemoryID: id, SubmittingAgent: "agent1",
+			Content: content, ContentHash: hash[:], MemoryType: memory.TypeObservation,
+			DomainTag: recordDomain, ConfidenceScore: 0.85,
+			Status: memory.StatusCommitted, CreatedAt: start.Add(offset),
+		}
+		require.NoError(t, fixture.sql.InsertMemory(ctx, record))
+		publishAppV23DashboardRecord(
+			t, fixture.sql, fixture.badger, id, uint8(store.ClearanceInternal), true,
+		)
+	}
+	for i, offset := range []time.Duration{
+		-100 * time.Millisecond, 0, 100 * time.Millisecond, 150 * time.Millisecond,
+		500 * time.Millisecond, time.Second, 1100 * time.Millisecond,
+	} {
+		insert(fmt.Sprintf("timeline-boundary-%d", i), domain, offset)
+	}
+	insert("timeline-other-domain", "other-domain", 500*time.Millisecond)
+	require.NoError(t, fixture.handler.AuditAppV23CanonicalMemoryProjection(ctx))
+
+	for _, tc := range []struct {
+		name     string
+		from, to time.Duration
+		count    int
+	}{
+		{"whole-second bounds include fractional records", 0, time.Second, 5},
+		{"fractional lower bound includes longer precision", 100 * time.Millisecond, 500 * time.Millisecond, 3},
+		{"fractional upper bound includes whole-second record", -time.Second, 100 * time.Millisecond, 3},
+		{"exact fractional endpoint", 150 * time.Millisecond, 150 * time.Millisecond, 1},
+		{"exact whole-second endpoint", 0, 0, 1},
+		{"widened candidates stay outside exact range", 200 * time.Millisecond, 300 * time.Millisecond, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := fmt.Sprintf(
+				"/v1/dashboard/memory/timeline?domain=%s&bucket=day&from=%s&to=%s",
+				domain, start.Add(tc.from).Format(time.RFC3339Nano), start.Add(tc.to).Format(time.RFC3339Nano),
+			)
+			rec := requestLocalProjectionRoute(t, fixture, path)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var response struct {
+				Buckets []store.TimelineBucket `json:"buckets"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+			if tc.count == 0 {
+				require.Empty(t, response.Buckets)
+				return
+			}
+			require.Equal(t, []store.TimelineBucket{{
+				Period: "2026-10-01", Count: tc.count, Domain: domain,
+			}}, response.Buckets)
+		})
+	}
+}
+
 func TestAppV23CerebrumTimelineOmitsFilteredDomainAfterHealthyProjection(t *testing.T) {
 	fixture := newAppV23ProjectionRouteFixture(t, false)
 	insertTestMemory(t, fixture.sql, "timeline-filtered-memory", "timeline-domain")

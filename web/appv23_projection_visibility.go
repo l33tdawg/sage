@@ -1527,17 +1527,20 @@ func (h *DashboardHandler) appV23CanonicalTimeline(
 ) ([]store.TimelineBucket, error) {
 	counts := make(map[string]int)
 	formatter, _ := h.store.(store.TimelinePeriodFormatter)
+	// SQLite's RFC3339Nano text timestamps do not sort chronologically at
+	// fractional-second boundaries. Widen SQL candidates and enforce the
+	// exact public range below, as the REST timeline does.
 	_, err := h.walkAppV23BroadDashboardRecords(
 		ctx,
 		cerebrumListOptions(store.ListOptions{
 			DomainTag:   domain,
-			CreatedFrom: from.UTC().Format(time.RFC3339Nano),
-			CreatedTo:   to.UTC().Format(time.RFC3339Nano),
+			CreatedFrom: from.UTC().Add(-time.Second).Format(time.RFC3339Nano),
+			CreatedTo:   to.UTC().Add(time.Second).Format(time.RFC3339Nano),
 			Sort:        "oldest",
 		}),
 		func(record *memory.MemoryRecord) error {
-			// Keep the exact public time bounds even for a custom store whose
-			// ListOptions implementation does not support CreatedFrom/CreatedTo.
+			// Exclude widened candidates outside the exact public time bounds,
+			// including for custom stores without CreatedFrom/CreatedTo support.
 			if record.CreatedAt.Before(from) || record.CreatedAt.After(to) {
 				return nil
 			}
