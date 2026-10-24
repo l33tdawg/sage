@@ -27,7 +27,7 @@ sudo mv sage-gui /usr/local/bin/  # or add to your PATH
 
 ```bash
 sage-gui version
-# sage-gui v11.24.1
+# sage-gui v11.24.2
 ```
 
 ---
@@ -211,7 +211,7 @@ sage-gui setup
 
 ### 3. Start using it
 
-Just chat normally. SAGE v11.24.1 advertises 38 MCP tools. Use `sage_message_close(message_id, reason)` for reviewed notices that need no answer; closing keeps history and clears future inbox reminders without sending a reply. The core workflow is:
+Just chat normally. SAGE v11.24.2 advertises 38 MCP tools. Use `sage_message_close(message_id, reason)` for reviewed notices that need no answer; closing keeps history and clears future inbox reminders without sending a reply. The core workflow is:
 
 | Tool | What it does |
 |------|-------------|
