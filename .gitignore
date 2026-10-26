@@ -140,6 +140,8 @@ docs/*
 !docs/design/
 docs/design/*
 !docs/design/agent-message-receipts.md
+!docs/design/noesis-outcome-receipt-v1.schema.json
+!docs/design/noesis-outcome-receipts.md
 !docs/design/sage-commons-lantern-v12-support.md
 scratchpad/
 # Agent-facing code reference (public)
