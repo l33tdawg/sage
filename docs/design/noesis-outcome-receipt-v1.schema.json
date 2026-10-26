@@ -1,0 +1,441 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/l33tdawg/sage/main/docs/design/noesis-outcome-receipt-v1.schema.json",
+  "title": "SAGE-Noesis outcome receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["receipt", "signatures"],
+  "properties": {
+    "receipt": {
+      "$ref": "#/$defs/receipt"
+    },
+    "signatures": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/signature"
+      }
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "utc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chain_id",
+        "memory_id",
+        "content_hash",
+        "domain",
+        "author_agent_id",
+        "classification"
+      ],
+      "properties": {
+        "chain_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "memory_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "content_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "domain": {
+          "$ref": "#/$defs/text"
+        },
+        "author_agent_id": {
+          "$ref": "#/$defs/hash"
+        },
+        "classification": {
+          "const": 0
+        }
+      }
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "created_at",
+        "producer",
+        "task_set",
+        "candidate",
+        "evaluation",
+        "runs",
+        "summary",
+        "evidence"
+      ],
+      "properties": {
+        "version": {
+          "const": "sage.noesis.outcome-receipt/v1"
+        },
+        "created_at": {
+          "$ref": "#/$defs/utc"
+        },
+        "producer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version", "implementation_hash"],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/text"
+            },
+            "version": {
+              "$ref": "#/$defs/text"
+            },
+            "implementation_hash": {
+              "$ref": "#/$defs/hash"
+            }
+          }
+        },
+        "task_set": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "digest", "tasks"],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "version": {
+              "$ref": "#/$defs/text"
+            },
+            "digest": {
+              "$ref": "#/$defs/hash"
+            },
+            "tasks": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/task"
+              }
+            }
+          }
+        },
+        "candidate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "chain_id",
+            "memory_id",
+            "content_hash",
+            "domain",
+            "author_agent_id",
+            "classification"
+          ],
+          "properties": {
+            "chain_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "memory_id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "content_hash": {
+              "$ref": "#/$defs/hash"
+            },
+            "domain": {
+              "$ref": "#/$defs/text"
+            },
+            "author_agent_id": {
+              "$ref": "#/$defs/hash"
+            },
+            "classification": {
+              "const": 0
+            }
+          }
+        },
+        "evaluation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "judge",
+            "retrieval",
+            "metric",
+            "unit",
+            "higher_is_better",
+            "repeats",
+            "forced_context",
+            "started_at",
+            "completed_at"
+          ],
+          "properties": {
+            "judge": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "model_id",
+                "model_hash",
+                "rubric_hash",
+                "prompt_hash",
+                "environment_hash"
+              ],
+              "properties": {
+                "model_id": {
+                  "$ref": "#/$defs/text"
+                },
+                "model_hash": {
+                  "$ref": "#/$defs/hash"
+                },
+                "rubric_hash": {
+                  "$ref": "#/$defs/hash"
+                },
+                "prompt_hash": {
+                  "$ref": "#/$defs/hash"
+                },
+                "environment_hash": {
+                  "$ref": "#/$defs/hash"
+                }
+              }
+            },
+            "retrieval": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["id", "version", "top_k"],
+              "properties": {
+                "id": {
+                  "$ref": "#/$defs/identifier"
+                },
+                "version": {
+                  "$ref": "#/$defs/text"
+                },
+                "top_k": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1000
+                }
+              }
+            },
+            "metric": {
+              "$ref": "#/$defs/text"
+            },
+            "unit": {
+              "$ref": "#/$defs/text"
+            },
+            "higher_is_better": {
+              "type": "boolean"
+            },
+            "repeats": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "forced_context": {
+              "type": "boolean"
+            },
+            "started_at": {
+              "$ref": "#/$defs/utc"
+            },
+            "completed_at": {
+              "$ref": "#/$defs/utc"
+            }
+          }
+        },
+        "runs": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/run"
+          }
+        },
+        "summary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "pairs"],
+          "properties": {
+            "status": {
+              "enum": ["positive", "neutral", "negative", "inconclusive", "failed"]
+            },
+            "pairs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "control_mean": {
+              "$ref": "#/$defs/decimal"
+            },
+            "treatment_mean": {
+              "$ref": "#/$defs/decimal"
+            },
+            "delta": {
+              "$ref": "#/$defs/decimal"
+            },
+            "ci95_lower": {
+              "$ref": "#/$defs/decimal"
+            },
+            "ci95_upper": {
+              "$ref": "#/$defs/decimal"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "status": {
+                    "not": {
+                      "const": "failed"
+                    }
+                  }
+                },
+                "required": ["status"]
+              },
+              "then": {
+                "required": [
+                  "control_mean",
+                  "treatment_mean",
+                  "delta",
+                  "ci95_lower",
+                  "ci95_upper"
+                ]
+              }
+            }
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "caveats": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/text"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_memory_id", "trial", "arm", "seed", "query_hash"],
+      "properties": {
+        "task_memory_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "trial": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "arm": {
+          "enum": ["control", "treatment"]
+        },
+        "seed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "query_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "context_memory_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "masked_memory_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/identifier"
+          }
+        },
+        "score": {
+          "$ref": "#/$defs/decimal"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "latency_micros": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "artifact_hashes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/hash"
+          }
+        },
+        "error": {
+          "$ref": "#/$defs/text"
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["score"]
+        },
+        {
+          "required": ["passed"]
+        },
+        {
+          "required": ["error"]
+        }
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "media_type", "digest"],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/identifier"
+        },
+        "media_type": {
+          "$ref": "#/$defs/text"
+        },
+        "digest": {
+          "$ref": "#/$defs/hash"
+        },
+        "uri": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme", "role", "signer_id", "public_key", "signature"],
+      "properties": {
+        "scheme": {
+          "const": "ed25519"
+        },
+        "role": {
+          "enum": ["sage_agent", "evaluator", "noesis"]
+        },
+        "signer_id": {
+          "$ref": "#/$defs/text"
+        },
+        "public_key": {
+          "$ref": "#/$defs/hash"
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{128}$"
+        }
+      }
+    }
+  }
+}

@@ -44,6 +44,11 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`federation-and-brain-api.md`](federation-and-brain-api.md) | The v11 HTTP surface: trust-only JOIN over direct HTTPS or libp2p relay/NAT traversal; explicit pairwise agent exports with default borrowed Read of their owned trees and receiver-side narrowing; independent manual Read/Copy grants; receiver-controlled Copy subscriptions; authenticated agent messaging; and `/fed/v1/pipe/event`. Transport, peer policy, contacts, and pipeline work are off-consensus; tx-33/34 preserves agreement compatibility. The Write field/route remains reserved and fails closed. |
 | [`reranker-and-setup.md`](reranker-and-setup.md) | The v11 local-engine and setup surface: create-or-join/private-or-shared onboarding, Synaptic Ledger recovery acknowledgement, portable memory-backup boundaries, recall-tuning clamps, managed semantic memory setup (`/v1/dashboard/embeddings/*`, pinned Ollama runtime + readiness-gated model pull), the reranker config endpoint (`kind` field + verify-on-enable), the managed llama.cpp sidecar (`/v1/dashboard/reranker/setup/*`, pinned assets + sha256 + adopt-not-respawn), the TEI vs llama.cpp rerank dialects, and `embedding_provider` stamped at insert. Mostly off-consensus; imported memories re-enter the normal consensus lifecycle. |
 
+**Experimental interoperability:** [`../design/noesis-outcome-receipts.md`](../design/noesis-outcome-receipts.md)
+defines the public-only, off-consensus outcome receipt used to exchange
+reproducible memory-evaluation evidence with external value systems. It adds no
+stable REST or MCP route and grants no memory or governance authority.
+
 ---
 
 ## Quick answers
