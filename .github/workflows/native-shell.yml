@@ -96,7 +96,7 @@ jobs:
         with:
           targets: ${{ matrix.rust-target }}
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 2026-07-19
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2 2026-07-19
         with:
           workspaces: desktop/sage-shell
       - name: Install Linux WebView build dependencies
@@ -258,7 +258,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable 2026-07-19
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 2026-07-19
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2 2026-07-19
         with:
           workspaces: desktop/sage-shell
       - name: Guard acceptance tests from the global Codex endpoint
