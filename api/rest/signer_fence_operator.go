@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,10 @@ import (
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
-const maxSignerFenceOperatorBody = 4 << 10
+const (
+	maxSignerFenceOperatorBody = 4 << 10
+	signerFenceRecoveryTimeout = 10 * time.Second
+)
 
 type signerFenceStatusResponse struct {
 	Active           int                       `json:"active"`
@@ -179,8 +183,10 @@ func (s *Server) handleSignerFenceLift(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	recoveryCtx, cancel := context.WithTimeout(r.Context(), signerFenceRecoveryTimeout)
+	defer cancel()
 	proof, err := tx.ProveFenceLiftFromChain(
-		r.Context(),
+		recoveryCtx,
 		s.cometbftRPC,
 		s.signerFenceNonceFloor(),
 		*target,
@@ -201,7 +207,7 @@ func (s *Server) handleSignerFenceLift(w http.ResponseWriter, r *http.Request) {
 	if reason != "" {
 		proof.Detail += " | operator note: " + reason
 	}
-	if err := tx.LiftFenceWithProof(r.Context(), target.SignerPubKeyHex, proof); err != nil {
+	if err := tx.LiftFenceWithProof(recoveryCtx, target.SignerPubKeyHex, proof); err != nil {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":  "the fence refused the proof",
 			"detail": err.Error(),
@@ -290,8 +296,10 @@ func (s *Server) handleSignerFenceAbandon(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	recoveryCtx, cancel := context.WithTimeout(r.Context(), signerFenceRecoveryTimeout)
+	defer cancel()
 	evidence, err := tx.ReadFenceAbandonEvidence(
-		r.Context(),
+		recoveryCtx,
 		s.cometbftRPC,
 		s.signerFenceNonceFloor(),
 		*target,
@@ -304,7 +312,7 @@ func (s *Server) handleSignerFenceAbandon(w http.ResponseWriter, r *http.Request
 	evidence.PeerRedeliveryAcknowledged = request.PeerRedeliveryAcknowledged
 
 	if err := tx.AbandonUnprovableFence(
-		r.Context(),
+		recoveryCtx,
 		target.SignerPubKeyHex,
 		reason,
 		evidence,
@@ -395,10 +403,11 @@ func signerFenceOperatorExplanation(held []tx.FencedSigner) string {
 	switch {
 	case reconciling > 0 && proofOrOperator > 0:
 		return "Some fences still hold their signed bytes and are reconciling; the others can lift only " +
-			"on proof that this node reads from the chain."
+			"on proof that this node reads from the chain or through an explicitly acknowledged operator " +
+			"abandonment."
 	case proofOrOperator > 0:
 		return "These fences were restored without their signed bytes and can lift only on proof that this " +
-			"node reads from the chain."
+			"node reads from the chain or through an explicitly acknowledged operator abandonment."
 	default:
 		return "The node is reconciling the exact signed bytes and will lift a fence only after consensus " +
 			"proves the transaction's fate."
