@@ -216,5 +216,5 @@ func (s *Server) signerFencedPublicMessage() string {
 		detail += fmt.Sprintf(", unproven for %s", held.HeldFor.Round(time.Second))
 	}
 	return base + detail + ". The node re-reads the chain for a proof on its own; the operator view is " +
-		"GET /v1/dashboard/health (signer_fences). Retry shortly."
+		"GET /v1/dashboard/signer-fence/status. Retry shortly."
 }

@@ -549,6 +549,14 @@ per-fence `signer`, `tx_hash`, `nonce`, `held_seconds`, `attempts`, `cause`,
 `resolution`, `last_cause` and `last_detail`. Everything in it is public-on-chain
 data, but do not mistake the gate for credential-only access.
 
+AMID-only cluster nodes expose the detailed view at
+`GET /v1/dashboard/signer-fence/status` and the same proof-read recovery path
+the desktop surface uses, `POST /v1/dashboard/signer-fence/lift`. Both require an Ed25519-authenticated
+request from the exact configured governance operator. The lift request names
+the held signer and an optional bounded reason; it cannot carry a proof. The
+node reads the exact transaction or committed nonce itself, preserving the same
+proof rule as the dashboard route.
+
 **Dashboard** — CEREBRUM's System Status panel renders that block
 (`web/static/js/signer-fences.js`): a row that appears only while a key is held,
 the server's explanation of why, and one line per fence naming its `resolution`

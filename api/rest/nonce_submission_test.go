@@ -220,5 +220,5 @@ func TestSubmitConsensusTxRefusesImmediatelyWhileFenced(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), "Nothing was signed or sent")
 	require.Contains(t, recorder.Body.String(), strings.ToUpper(hex.EncodeToString(hash[:])),
 		"the answer must name the transaction the key is held on")
-	require.Contains(t, recorder.Body.String(), "signer_fences")
+	require.Contains(t, recorder.Body.String(), "/v1/dashboard/signer-fence/status")
 }
