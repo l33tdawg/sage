@@ -597,8 +597,9 @@ broken; the status row now answers "why is this not clearing itself?" directly.
 **Metrics** — `sage_nonce_fences_active`,
 `sage_nonce_fence_oldest_age_seconds`, `sage_nonce_fence_indeterminate_total`,
 `sage_nonce_fence_reconcile_failures_total{cause}`,
-`sage_nonce_fence_resolved_total{fate}`. Alarm on
-`sage_nonce_fence_oldest_age_seconds` climbing without bound.
+`sage_nonce_fence_resolved_total{fate}`. The shipped Prometheus rules page on
+`SignerFenceHeld` once `sage_nonce_fence_oldest_age_seconds` exceeds five
+minutes, then repeat while the fence remains held.
 
 ### What a caller sees
 
