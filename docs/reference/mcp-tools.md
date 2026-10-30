@@ -923,6 +923,11 @@ carry a fresh caller-chosen key, such as
 `idempotency_key: "check-hdmi-2026-08-01"`. This preserves lost-response
 recovery while making recurrence an explicit decision.
 
+Task creation does not participate in global memory-content dedup. The
+caller/domain/content idempotency key is authoritative: identical task content
+in another domain is a distinct task, and an explicit new key intentionally
+creates another occurrence even when its content matches an existing task.
+
 ---
 
 ### sage_backlog

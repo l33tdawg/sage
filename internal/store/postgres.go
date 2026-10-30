@@ -2433,6 +2433,7 @@ func (s *PostgresStore) ClaimTask(ctx context.Context, memoryID, agentID string)
 		      ELSE m.task_picked_up_at END
 		FROM agents a
 		WHERE m.memory_id = $1 AND m.memory_type = 'task'
+		  AND m.status != 'deprecated'
 		  AND m.task_status IN ('planned','in_progress')
 		  AND m.task_requires_handoff = FALSE
 		  AND m.assignee = $2
@@ -2455,7 +2456,7 @@ func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, t
 		assignee = CASE WHEN task_status IN ('done','dropped') AND $2 IN ('planned','in_progress') THEN '' ELSE assignee END,
 		task_board_position = CASE WHEN task_status != $2 THEN 0 ELSE task_board_position END,
 		task_status_updated_at = CASE WHEN task_status != $2 THEN NOW() ELSE task_status_updated_at END,
-		task_status = $2 WHERE memory_id = $1 AND memory_type = 'task'
+		task_status = $2 WHERE memory_id = $1 AND memory_type = 'task' AND status != 'deprecated'
 		AND ($2 != 'in_progress' OR (task_status NOT IN ('done','dropped') AND COALESCE(assignee, '') != ''))`
 	if terminal {
 		query = `UPDATE memories SET task_status = $2,
@@ -2467,14 +2468,14 @@ func (s *PostgresStore) UpdateTaskStatus(ctx context.Context, memoryID string, t
 			  WHEN EXISTS (SELECT 1 FROM agents a WHERE a.agent_id = memories.submitting_agent) THEN submitting_agent
 			  ELSE '' END,
 			task_requires_handoff = TRUE
-			WHERE memory_id = $1 AND memory_type = 'task'`
+			WHERE memory_id = $1 AND memory_type = 'task' AND status != 'deprecated'`
 	}
 	result, err := s.db.Exec(ctx, query, memoryID, string(taskStatus))
 	if err != nil {
 		return fmt.Errorf("update task status: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("task not found or in_progress requires an assignee: %s", memoryID)
+		return fmt.Errorf("task not found, deprecated, or in_progress requires an assignee: %s", memoryID)
 	}
 	if terminal {
 		if _, err := s.db.Exec(ctx, `UPDATE agent_notifications SET state = 'superseded'
@@ -2596,6 +2597,7 @@ func (s *PostgresStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agent
 		task_requires_handoff = TRUE
 		FROM agents a
 		WHERE m.memory_id = $1 AND m.memory_type = 'task'
+		  AND m.status != 'deprecated'
 		  AND m.task_status IN ('planned','in_progress') AND m.assignee = $2
 		  AND a.agent_id = $2 AND a.status = 'active' AND a.removed_at IS NULL`,
 		memoryID, agentID, string(status))

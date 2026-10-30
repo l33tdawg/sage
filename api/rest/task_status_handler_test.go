@@ -75,3 +75,39 @@ func TestRESTTaskStatusEnforcesActiveCurrentOwnerAndNoAgentReopen(t *testing.T) 
 	require.Equal(t, memory.TaskStatusDone, tasks[0].TaskStatus)
 	require.Equal(t, "agent-a", tasks[0].Assignee)
 }
+
+func TestRESTTaskStatusRejectsDeprecatedTask(t *testing.T) {
+	s, sqliteStore := newPipeServer(t)
+	ctx := context.Background()
+	hash := sha256.Sum256([]byte("deprecated REST task"))
+	require.NoError(t, sqliteStore.InsertMemory(ctx, &memory.MemoryRecord{
+		MemoryID: "rest-deprecated-task", SubmittingAgent: "author", Content: "[TASK] deprecated REST task",
+		ContentHash: hash[:], MemoryType: memory.TypeTask, DomainTag: "work", Provider: "codex",
+		ConfidenceScore: 0.9, Status: memory.StatusCommitted, TaskStatus: memory.TaskStatusPlanned,
+		CreatedAt: time.Now().UTC(),
+	}))
+	require.NoError(t, sqliteStore.UpdateMemoryClassification(ctx, "rest-deprecated-task", store.ClearancePublic))
+	require.NoError(t, sqliteStore.CreateAgent(ctx, &store.AgentEntry{
+		AgentID: "agent-a", Name: "agent-a", RegisteredName: "agent-a", Status: "active",
+	}))
+	_, err := sqliteStore.AssignTaskAndNotify(ctx, "rest-deprecated-task", "agent-a")
+	require.NoError(t, err)
+	require.NoError(t, sqliteStore.UpdateStatus(
+		ctx, "rest-deprecated-task", memory.StatusDeprecated, time.Now().UTC(),
+	))
+
+	body := bytes.NewBufferString(`{"task_status":"done"}`)
+	req := httptest.NewRequest(
+		http.MethodPut, "/v1/memory/rest-deprecated-task/task-status", body,
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	taskStatusRouterAs(s, "agent-a").ServeHTTP(rr, req)
+
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	require.Contains(t, rr.Body.String(), "deprecated")
+	rec, err := sqliteStore.GetMemory(ctx, "rest-deprecated-task")
+	require.NoError(t, err)
+	require.Equal(t, memory.StatusDeprecated, rec.Status)
+	require.Equal(t, memory.TaskStatusInProgress, rec.TaskStatus)
+}

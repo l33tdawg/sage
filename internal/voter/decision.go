@@ -15,6 +15,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/l33tdawg/sage/internal/memory"
 )
 
 // Decision is one node's verdict on a proposed memory: accept iff every check
@@ -94,6 +96,14 @@ func DecideVerbose(ctx context.Context, dup DupChecker, m MemoryInput) (Decision
 }
 
 func dedupCheck(ctx context.Context, dup DupChecker, m MemoryInput) CheckResult {
+	// Tasks have their own permanent creation identity. App-v23 derives that
+	// identity from caller + exact domain + content (or uses an explicit
+	// occurrence key), so applying the global memory-content tombstone would
+	// reject a valid cross-domain task or an intentional recurrence even though
+	// the idempotency contract says it is distinct.
+	if m.MemType == string(memory.TypeTask) {
+		return CheckResult{Name: "dedup", Pass: true, Reason: "task identity is governed by its idempotency key"}
+	}
 	// On lookup error, treat as non-duplicate (accept) — matches the legacy
 	// `err == nil && exists` reject condition. A node never blocks a memory on its
 	// own store hiccup; the quorum still decides.
