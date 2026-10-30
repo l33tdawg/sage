@@ -424,7 +424,7 @@ func runABCIServer(app *sageabci.SageApp, badgerPath, abciAddr, restAddr, metric
 			governanceDomainRetryMax,
 			logger,
 		); bindErr == nil {
-			health.SetCometBFTHealth(true)
+			monitorExternalCometHealth(ctx, client, cometRPC, health, 10*time.Second)
 		} else if !errors.Is(bindErr, context.Canceled) {
 			logger.Warn().Err(bindErr).Msg("CometBFT chain-id binding stopped; app-v20 upgrade voter remains fail-closed")
 		}
