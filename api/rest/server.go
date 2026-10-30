@@ -764,6 +764,16 @@ func (s *Server) setupRouter() chi.Router {
 		r.With(s.appV23PipelineAgentBoundary).Get("/v1/agents/directory", s.handleListAgentDirectory)
 		r.With(s.appV23PipelineAgentBoundary).Get("/v1/agents/lookup", s.handleFindRegisteredAgents)
 
+		// Cluster-node signer-fence recovery. The detailed state and proof-based
+		// lift are operator-only; public health and Prometheus retain the coarse
+		// active-count and oldest-age alarm. The proof is always read locally.
+		r.With(s.requireSignerFenceOperator).
+			Get("/v1/dashboard/signer-fence/status", s.handleSignerFenceStatus)
+		r.With(s.requireSignerFenceOperator).
+			Post("/v1/dashboard/signer-fence/lift", s.handleSignerFenceLift)
+		r.With(s.requireSignerFenceOperator).
+			Post("/v1/dashboard/signer-fence/abandon", s.handleSignerFenceAbandon)
+
 		// Memory endpoints
 		r.Post("/v1/memory/submit", s.handleSubmitMemory)
 		r.Post("/v1/memory/evidence", s.handleUploadEvidence)

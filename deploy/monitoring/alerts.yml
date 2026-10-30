@@ -45,3 +45,12 @@ groups:
         annotations:
           summary: "Low validator participation"
           description: "More than 1 validator is missing from consensus for over 1 minute."
+
+      - alert: SignerFenceHeld
+        expr: sage_nonce_fence_oldest_age_seconds > 300
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "A signing key has been fenced for more than five minutes"
+          description: "The oldest signer fence on {{ $labels.instance }} has remained unresolved for over five minutes. Reads may continue, but writes signed by that key are refused until the node proves the transaction's fate or an operator performs the reviewed recovery."
