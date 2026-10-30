@@ -71,7 +71,7 @@ func (s *Server) requireSignerFenceOperator(next http.Handler) http.Handler {
 		callerPub, err := auth.AgentIDToPublicKey(callerID)
 		if err != nil || auth.PublicKeyToAgentID(callerPub) != s.governanceOperatorID {
 			writeProblem(w, http.StatusForbidden, "Fence controls denied",
-				"Only the configured local governance operator may inspect or lift signer fences.")
+				"Only the configured local governance operator may inspect or recover signer fences.")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -175,7 +175,12 @@ func (s *Server) handleSignerFenceLift(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, heldCount := signerFenceForSigner(signer)
+	target, heldCount, ambiguous := signerFenceForSigner(signer)
+	if ambiguous {
+		writeProblem(w, http.StatusConflict, "Ambiguous signer prefix",
+			"The displayed signer prefix matches more than one held fence; use the full signer_public_key.")
+		return
+	}
 	if target == nil {
 		writeProblem(w, http.StatusNotFound, "No matching signer fence",
 			"No signer fence is held for that key or prefix (held fences: "+
@@ -288,7 +293,12 @@ func (s *Server) handleSignerFenceAbandon(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	target, heldCount := signerFenceForSigner(signer)
+	target, heldCount, ambiguous := signerFenceForSigner(signer)
+	if ambiguous {
+		writeProblem(w, http.StatusConflict, "Ambiguous signer prefix",
+			"The displayed signer prefix matches more than one held fence; use the full signer_public_key.")
+		return
+	}
 	if target == nil {
 		writeProblem(w, http.StatusNotFound, "No matching signer fence",
 			"No signer fence is held for that key or prefix (held fences: "+
@@ -351,15 +361,24 @@ func (s *Server) handleSignerFenceAbandon(w http.ResponseWriter, r *http.Request
 	})
 }
 
-func signerFenceForSigner(signer string) (*tx.FencedSigner, int) {
-	held := tx.FencedSigners()
+func signerFenceForSigner(signer string) (*tx.FencedSigner, int, bool) {
+	return signerFenceMatch(signer, tx.FencedSigners())
+}
+
+func signerFenceMatch(signer string, held []tx.FencedSigner) (*tx.FencedSigner, int, bool) {
+	var prefixMatch *tx.FencedSigner
 	for i := range held {
-		if strings.EqualFold(held[i].SignerPubKeyHex, signer) ||
-			strings.EqualFold(held[i].SignerPubKeyPrefix, signer) {
-			return &held[i], len(held)
+		if strings.EqualFold(held[i].SignerPubKeyHex, signer) {
+			return &held[i], len(held), false
+		}
+		if strings.EqualFold(held[i].SignerPubKeyPrefix, signer) {
+			if prefixMatch != nil {
+				return nil, len(held), true
+			}
+			prefixMatch = &held[i]
 		}
 	}
-	return nil, len(held)
+	return prefixMatch, len(held), false
 }
 
 func (s *Server) signerFenceNonceFloor() func(ed25519.PublicKey) (uint64, bool) {

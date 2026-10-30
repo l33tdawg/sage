@@ -180,6 +180,24 @@ func TestSignerFenceOperatorStatusExposesHeldFence(t *testing.T) {
 	require.NotEmpty(t, response.Explanation)
 }
 
+func TestSignerFenceOperatorSignerMatchRejectsAmbiguousPrefix(t *testing.T) {
+	held := []tx.FencedSigner{
+		{SignerPubKeyHex: strings.Repeat("A", 64), SignerPubKeyPrefix: strings.Repeat("A", 16)},
+		{SignerPubKeyHex: strings.Repeat("B", 64), SignerPubKeyPrefix: strings.Repeat("A", 16)},
+	}
+
+	target, count, ambiguous := signerFenceMatch(strings.Repeat("a", 16), held)
+	require.Nil(t, target)
+	require.Equal(t, 2, count)
+	require.True(t, ambiguous)
+
+	target, count, ambiguous = signerFenceMatch(strings.Repeat("A", 64), held)
+	require.NotNil(t, target)
+	require.Equal(t, 2, count)
+	require.False(t, ambiguous)
+	require.Equal(t, strings.Repeat("A", 64), target.SignerPubKeyHex)
+}
+
 func TestSignerFenceOperatorLiftRejectsNoFenceAndOversizedBody(t *testing.T) {
 	server, operatorKey, operatorID := signerFenceOperatorServer(t, "")
 
