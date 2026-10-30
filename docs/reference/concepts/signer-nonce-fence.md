@@ -549,6 +549,16 @@ per-fence `signer`, `tx_hash`, `nonce`, `held_seconds`, `attempts`, `cause`,
 `resolution`, `last_cause` and `last_detail`. Everything in it is public-on-chain
 data, but do not mistake the gate for credential-only access.
 
+AMID-only cluster nodes expose the detailed view at
+`GET /v1/dashboard/signer-fence/status`, plus the same proof-read `POST
+/v1/dashboard/signer-fence/lift` and explicitly acknowledged `POST
+/v1/dashboard/signer-fence/abandon` recovery paths the desktop surface uses.
+All require an Ed25519-authenticated request from the exact configured
+governance operator. The recovery requests name the held signer and a bounded
+reason; neither can carry a proof or claim evidence. The node reads the exact
+transaction, committed nonce, mempool and peer state itself, preserving the
+same proof-or-acknowledged-abandonment rule as the dashboard routes.
+
 **Dashboard** — CEREBRUM's System Status panel renders that block
 (`web/static/js/signer-fences.js`): a row that appears only while a key is held,
 the server's explanation of why, and one line per fence naming its `resolution`
@@ -589,8 +599,9 @@ broken; the status row now answers "why is this not clearing itself?" directly.
 **Metrics** — `sage_nonce_fences_active`,
 `sage_nonce_fence_oldest_age_seconds`, `sage_nonce_fence_indeterminate_total`,
 `sage_nonce_fence_reconcile_failures_total{cause}`,
-`sage_nonce_fence_resolved_total{fate}`. Alarm on
-`sage_nonce_fence_oldest_age_seconds` climbing without bound.
+`sage_nonce_fence_resolved_total{fate}`. The shipped Prometheus rules page on
+`SignerFenceHeld` once `sage_nonce_fence_oldest_age_seconds` exceeds five
+minutes, then repeat while the fence remains held.
 
 ### What a caller sees
 
