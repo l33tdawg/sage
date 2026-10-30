@@ -166,6 +166,7 @@ services:
   # CometBFT Validator Nodes (consensus layer)
   # ─────────────────────────────────────────────
   cometbft0:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: deploy/Dockerfile.node
@@ -184,6 +185,7 @@ services:
       - sagenet
 
   cometbft1:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: deploy/Dockerfile.node
@@ -201,6 +203,7 @@ services:
       - sagenet
 
   cometbft2:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: deploy/Dockerfile.node
@@ -218,6 +221,7 @@ services:
       - sagenet
 
   cometbft3:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: deploy/Dockerfile.node
