@@ -771,6 +771,8 @@ func (s *Server) setupRouter() chi.Router {
 			Get("/v1/dashboard/signer-fence/status", s.handleSignerFenceStatus)
 		r.With(s.requireSignerFenceOperator).
 			Post("/v1/dashboard/signer-fence/lift", s.handleSignerFenceLift)
+		r.With(s.requireSignerFenceOperator).
+			Post("/v1/dashboard/signer-fence/abandon", s.handleSignerFenceAbandon)
 
 		// Memory endpoints
 		r.Post("/v1/memory/submit", s.handleSubmitMemory)

@@ -15,7 +15,7 @@ import (
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
-const maxSignerFenceLiftBody = 4 << 10
+const maxSignerFenceOperatorBody = 4 << 10
 
 type signerFenceStatusResponse struct {
 	Active           int                       `json:"active"`
@@ -132,7 +132,7 @@ func (s *Server) handleSignerFenceStatus(w http.ResponseWriter, _ *http.Request)
 // handleSignerFenceLift reads the proof from this node rather than trusting the
 // request. The request names at most a held signer and an operator note.
 func (s *Server) handleSignerFenceLift(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxSignerFenceLiftBody)
+	r.Body = http.MaxBytesReader(w, r.Body, maxSignerFenceOperatorBody)
 	var request struct {
 		Signer string `json:"signer"`
 		Reason string `json:"reason"`
@@ -220,6 +220,126 @@ func (s *Server) handleSignerFenceLift(w http.ResponseWriter, r *http.Request) {
 		},
 		"note": "the fence is lifted and its durable intent retired; a superseded lift means the fenced " +
 			"transaction can never commit and its payload is permanently lost",
+	})
+}
+
+// handleSignerFenceAbandon is the AMID equivalent of the CEREBRUM operator's
+// exit for the one fence no proof can settle: a restored fence with no signed
+// bytes, no committed or rejected fate, no mempool copy, and no spendable
+// allocation. It deliberately leaves every precondition to the node-side
+// evidence reader and tx.AbandonUnprovableFence; the request can only accept
+// the possible payload loss and acknowledge any live peer redelivery route.
+func (s *Server) handleSignerFenceAbandon(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSignerFenceOperatorBody)
+	var request struct {
+		Signer                     string `json:"signer"`
+		Reason                     string `json:"reason"`
+		AcknowledgePayloadLoss     bool   `json:"acknowledge_payload_loss"`
+		PeerRedeliveryAcknowledged bool   `json:"peer_redelivery_acknowledged"`
+	}
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		switch {
+		case errors.As(err, &maxBytesErr):
+			writeProblem(w, http.StatusRequestEntityTooLarge, "Fence abandon request too large",
+				"The signer-fence abandon body must be 4 KiB or smaller.")
+		case errors.Is(err, io.EOF):
+			writeProblem(w, http.StatusBadRequest, "Invalid fence abandon request",
+				"Request body must name the held signer and acknowledge payload loss.")
+		default:
+			writeProblem(w, http.StatusBadRequest, "Invalid fence abandon request", err.Error())
+		}
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeProblem(w, http.StatusBadRequest, "Invalid fence abandon request",
+			"Request body must contain exactly one JSON object.")
+		return
+	}
+
+	signer := strings.TrimSpace(request.Signer)
+	if signer == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing signer",
+			"signer must be the held fence's full public key or its displayed prefix.")
+		return
+	}
+	if !request.AcknowledgePayloadLoss {
+		writeProblem(w, http.StatusBadRequest, "Payload loss acknowledgement required",
+			"acknowledge_payload_loss must be true: this route abandons a transaction whose fate was never "+
+				"proven, and a late copy of its payload can still be lost or refused as a replay.")
+		return
+	}
+	reason, err := normalizeSignerFenceReason(request.Reason)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid operator reason", err.Error())
+		return
+	}
+	if reason == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing operator reason",
+			"reason is required: the abandonment decision and its evidence are recorded.")
+		return
+	}
+
+	target, heldCount := signerFenceForSigner(signer)
+	if target == nil {
+		writeProblem(w, http.StatusNotFound, "No matching signer fence",
+			"No signer fence is held for that key or prefix (held fences: "+
+				strconv.Itoa(heldCount)+").")
+		return
+	}
+
+	evidence, err := tx.ReadFenceAbandonEvidence(
+		r.Context(),
+		s.cometbftRPC,
+		s.signerFenceNonceFloor(),
+		*target,
+	)
+	if err != nil {
+		writeProblem(w, http.StatusBadGateway, "Fence evidence unavailable",
+			"The node's own abandonment evidence could not be read, so nothing was abandoned: "+err.Error())
+		return
+	}
+	evidence.PeerRedeliveryAcknowledged = request.PeerRedeliveryAcknowledged
+
+	if err := tx.AbandonUnprovableFence(
+		r.Context(),
+		target.SignerPubKeyHex,
+		reason,
+		evidence,
+	); err != nil {
+		var refused *tx.FenceAbandonRefusedError
+		if errors.As(err, &refused) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":    "the fence was not abandoned",
+				"detail":   refused.Reason,
+				"signer":   target.SignerPubKeyPrefix,
+				"evidence": evidence,
+			})
+			return
+		}
+		writeProblem(w, http.StatusInternalServerError, "Fence abandon failed",
+			"The fence was not abandoned: "+err.Error())
+		return
+	}
+
+	nonce := ""
+	if target.HasNonce {
+		nonce = strconv.FormatUint(target.Nonce, 10)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"abandoned": true,
+		"signer":    target.SignerPubKeyPrefix,
+		"tx_hash":   target.TxHash,
+		"nonce":     nonce,
+		"evidence":  evidence,
+		"recorded": "the decision is in the node log as a fence_abandoned event and in " +
+			"sage_nonce_fence_resolved_total{fate=\"abandoned\"}; the durable intent is retired, and the " +
+			"abandoned nonce is reserved so the next allocation for this signer is above it",
+		"warning": "the transaction this fence protected was never proven: if a copy of it still exists " +
+			"anywhere and lands before the signer's next commit, it can still commit, and a later transaction " +
+			"would then be refused as a replay. Verify the effect on-chain before redoing that action by hand.",
 	})
 }
 

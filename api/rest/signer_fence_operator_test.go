@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -197,7 +199,7 @@ func TestSignerFenceOperatorLiftRejectsNoFenceAndOversizedBody(t *testing.T) {
 
 	var body bytes.Buffer
 	body.WriteString(`{"signer":"0000000000000000","reason":"`)
-	body.WriteString(strings.Repeat("x", maxSignerFenceLiftBody))
+	body.WriteString(strings.Repeat("x", maxSignerFenceOperatorBody))
 	body.WriteString(`"}`)
 	req = signedRequestAs(t, operatorKey, operatorID, http.MethodPost,
 		"/v1/dashboard/signer-fence/lift", body.Bytes())
@@ -267,4 +269,233 @@ func TestSignerFenceOperatorLiftReadsProofAndRetiresFence(t *testing.T) {
 	rec = httptest.NewRecorder()
 	server.Router().ServeHTTP(rec, retry)
 	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}
+
+type signerFenceOperatorIntentStore struct {
+	mu      sync.Mutex
+	intents map[string]tx.FenceIntent
+}
+
+func newSignerFenceOperatorIntentStore() *signerFenceOperatorIntentStore {
+	return &signerFenceOperatorIntentStore{intents: make(map[string]tx.FenceIntent)}
+}
+
+func (s *signerFenceOperatorIntentStore) SaveFenceIntent(_ context.Context, intent tx.FenceIntent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.intents[strings.ToLower(intent.SignerPubKeyHex)] = intent
+	return nil
+}
+
+func (s *signerFenceOperatorIntentStore) DeleteFenceIntent(_ context.Context, signer string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.intents, strings.ToLower(signer))
+	return nil
+}
+
+func (s *signerFenceOperatorIntentStore) ListFenceIntents(_ context.Context) ([]tx.FenceIntent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]tx.FenceIntent, 0, len(s.intents))
+	for _, intent := range s.intents {
+		result = append(result, intent)
+	}
+	return result, nil
+}
+
+func (s *signerFenceOperatorIntentStore) held(signer string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.intents[strings.ToLower(signer)]
+	return ok
+}
+
+func signerFenceAbandonRPC(t *testing.T, peers *atomic.Int32) *httptest.Server {
+	t.Helper()
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/status":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"result": map[string]any{"sync_info": map[string]any{"catching_up": false}},
+			})
+		case "/net_info":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"result": map[string]any{"n_peers": peers.Load()},
+			})
+		case "/unconfirmed_txs":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"result": map[string]any{"n_txs": 0, "total": 0, "txs": []string{}},
+			})
+		case "/tx":
+			w.WriteHeader(http.StatusInternalServerError)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{"code": -32603, "message": "Internal error", "data": "tx not found"},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(rpc.Close)
+	return rpc
+}
+
+type signerFenceAbandonFixture struct {
+	server      *Server
+	operatorKey ed25519.PrivateKey
+	operatorID  string
+	store       *signerFenceOperatorIntentStore
+	signer      string
+	txHash      string
+	peers       *atomic.Int32
+}
+
+func newSignerFenceAbandonFixture(t *testing.T) signerFenceAbandonFixture {
+	t.Helper()
+	peers := &atomic.Int32{}
+	rpc := signerFenceAbandonRPC(t, peers)
+	server, operatorKey, operatorID := signerFenceOperatorServer(t, rpc.URL)
+
+	tx.SetFenceProverFunc(nil)
+	tx.SetFenceAutoResolverFunc(nil)
+	store := newSignerFenceOperatorIntentStore()
+	tx.SetFenceIntentStore(store)
+
+	_, signingKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	publicKey := signingKey.Public().(ed25519.PublicKey)
+	signer := auth.PublicKeyToAgentID(publicKey)
+	txHash := strings.Repeat("AB", 32)
+	require.NoError(t, store.SaveFenceIntent(context.Background(), tx.FenceIntent{
+		SignerPubKeyHex: signer,
+		TxHash:          txHash,
+		Nonce:           41,
+		HasNonce:        true,
+	}))
+	restored, err := tx.RestoreFencesFromIntents(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, restored)
+
+	fixture := signerFenceAbandonFixture{
+		server:      server,
+		operatorKey: operatorKey,
+		operatorID:  operatorID,
+		store:       store,
+		signer:      signer,
+		txHash:      txHash,
+		peers:       peers,
+	}
+	t.Cleanup(func() {
+		tx.SetFenceAutoResolverFunc(nil)
+		tx.SetFenceProverFunc(nil)
+		for _, held := range tx.FencedSigners() {
+			if held.SignerPubKeyHex != signer {
+				continue
+			}
+			_ = tx.LiftFenceWithProof(context.Background(), signer, tx.FenceLiftProof{
+				Kind:   "committed",
+				TxHash: txHash,
+				Detail: "REST signer-fence abandon test teardown",
+			})
+		}
+		tx.SetFenceIntentStore(nil)
+	})
+	return fixture
+}
+
+func (f signerFenceAbandonFixture) post(t *testing.T, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	encoded, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := signedRequestAs(t, f.operatorKey, f.operatorID, http.MethodPost,
+		"/v1/dashboard/signer-fence/abandon", encoded)
+	rec := httptest.NewRecorder()
+	f.server.Router().ServeHTTP(rec, req)
+	return rec
+}
+
+func signerFenceIsHeld(signer string) bool {
+	for _, held := range tx.FencedSigners() {
+		if held.SignerPubKeyHex == signer {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSignerFenceOperatorAbandonRequiresBothAcknowledgementAndReason(t *testing.T) {
+	fixture := newSignerFenceAbandonFixture(t)
+
+	rec := fixture.post(t, map[string]any{"signer": fixture.signer, "reason": "operator decision"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.True(t, signerFenceIsHeld(fixture.signer))
+
+	rec = fixture.post(t, map[string]any{
+		"signer": fixture.signer, "acknowledge_payload_loss": true,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.True(t, signerFenceIsHeld(fixture.signer))
+
+	rec = fixture.post(t, map[string]any{
+		"signer": fixture.signer, "reason": "operator decision", "acknowledge_payload_loss": true,
+		"proof": map[string]any{"kind": "committed"},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.True(t, signerFenceIsHeld(fixture.signer))
+}
+
+func TestSignerFenceOperatorAbandonRequiresPeerAcknowledgement(t *testing.T) {
+	fixture := newSignerFenceAbandonFixture(t)
+	fixture.peers.Store(2)
+
+	rec := fixture.post(t, map[string]any{
+		"signer": fixture.signer, "reason": "peer came up after the failed submission",
+		"acknowledge_payload_loss": true,
+	})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "peer_redelivery_acknowledged")
+	require.True(t, signerFenceIsHeld(fixture.signer))
+	require.True(t, fixture.store.held(fixture.signer))
+
+	rec = fixture.post(t, map[string]any{
+		"signer": fixture.signer, "reason": "peer came up after the failed submission",
+		"acknowledge_payload_loss": true, "peer_redelivery_acknowledged": true,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"abandoned":true`)
+	require.False(t, signerFenceIsHeld(fixture.signer))
+	require.False(t, fixture.store.held(fixture.signer))
+}
+
+func TestSignerFenceOperatorAbandonLiftsRestoredProoflessFence(t *testing.T) {
+	fixture := newSignerFenceAbandonFixture(t)
+	rec := fixture.post(t, map[string]any{
+		"signer":                   fixture.signer,
+		"reason":                   "no committed fate, no mempool copy, and no connected peer",
+		"acknowledge_payload_loss": true,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"abandoned":true`)
+	require.Contains(t, rec.Body.String(), fixture.txHash)
+	require.False(t, signerFenceIsHeld(fixture.signer))
+	require.False(t, fixture.store.held(fixture.signer))
+}
+
+func TestSignerFenceOperatorAbandonRefusesLiveFence(t *testing.T) {
+	rpc := signerFenceAbandonRPC(t, &atomic.Int32{})
+	server, operatorKey, operatorID := signerFenceOperatorServer(t, rpc.URL)
+	held := holdSignerFenceForRESTTest(t)
+	body, err := json.Marshal(map[string]any{
+		"signer": held.SignerPubKeyHex, "reason": "not safe to discard live bytes",
+		"acknowledge_payload_loss": true,
+	})
+	require.NoError(t, err)
+	req := signedRequestAs(t, operatorKey, operatorID, http.MethodPost,
+		"/v1/dashboard/signer-fence/abandon", body)
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "still holds the signed bytes")
+	require.True(t, signerFenceIsHeld(held.SignerPubKeyHex))
 }

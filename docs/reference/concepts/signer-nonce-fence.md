@@ -550,12 +550,14 @@ per-fence `signer`, `tx_hash`, `nonce`, `held_seconds`, `attempts`, `cause`,
 data, but do not mistake the gate for credential-only access.
 
 AMID-only cluster nodes expose the detailed view at
-`GET /v1/dashboard/signer-fence/status` and the same proof-read recovery path
-the desktop surface uses, `POST /v1/dashboard/signer-fence/lift`. Both require an Ed25519-authenticated
-request from the exact configured governance operator. The lift request names
-the held signer and an optional bounded reason; it cannot carry a proof. The
-node reads the exact transaction or committed nonce itself, preserving the same
-proof rule as the dashboard route.
+`GET /v1/dashboard/signer-fence/status`, plus the same proof-read `POST
+/v1/dashboard/signer-fence/lift` and explicitly acknowledged `POST
+/v1/dashboard/signer-fence/abandon` recovery paths the desktop surface uses.
+All require an Ed25519-authenticated request from the exact configured
+governance operator. The recovery requests name the held signer and a bounded
+reason; neither can carry a proof or claim evidence. The node reads the exact
+transaction, committed nonce, mempool and peer state itself, preserving the
+same proof-or-acknowledged-abandonment rule as the dashboard routes.
 
 **Dashboard** — CEREBRUM's System Status panel renders that block
 (`web/static/js/signer-fences.js`): a row that appears only while a key is held,
