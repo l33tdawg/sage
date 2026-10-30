@@ -443,6 +443,13 @@ func TestSignerFenceOperatorAbandonRequiresBothAcknowledgementAndReason(t *testi
 	})
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 	require.True(t, signerFenceIsHeld(fixture.signer))
+
+	rec = fixture.post(t, map[string]any{
+		"signer": fixture.signer, "reason": strings.Repeat("x", maxSignerFenceOperatorBody),
+		"acknowledge_payload_loss": true,
+	})
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+	require.True(t, signerFenceIsHeld(fixture.signer))
 }
 
 func TestSignerFenceOperatorAbandonRequiresPeerAcknowledgement(t *testing.T) {
