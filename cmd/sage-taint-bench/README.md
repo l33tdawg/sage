@@ -18,6 +18,7 @@ make bench-taint BENCH_ARGS="-profile smoke -data-dir /path/on/real/disk"
 | `-repeats` | timing repeats per scenario |
 | `-out` | result path. `make bench-taint` writes `bench/results/taint-<sha>-<goarch>.json` |
 | `-node-copy` | read-only counts from a **copy** of a stopped node's Badger directory. Never point it at a running node |
+| `-receipt` | with `-node-copy`, `-node-label` and `-snapshot-date`, writes a counts-only receipt and skips the benchmark. It records the label, never the path |
 
 The `Taint Benchmark` workflow runs the same command on `ubuntu-24.04`, fails unless the runner is x86_64 and amd64, and uploads the JSON as an artifact.
 

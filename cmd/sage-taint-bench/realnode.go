@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
+	"os"
 	"strings"
+	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
 )
@@ -63,4 +67,38 @@ func eachKey(txn *badger.Txn, prefix []byte, visit func([]byte)) error {
 		visit(it.Item().Key())
 	}
 	return nil
+}
+
+// nodeReceipt is the committed evidence for real-node counts. It records a
+// label instead of the copy's path, and no key or memory content.
+type nodeReceipt struct {
+	Schema       string         `json:"schema"`
+	SourceLabel  string         `json:"source_label"`
+	SnapshotDate string         `json:"snapshot_date"`
+	Command      string         `json:"command"`
+	Commit       commitContext  `json:"commit"`
+	Counts       realNodeCounts `json:"counts"`
+}
+
+func writeReceipt(out, nodeCopy, label, snapshotDate string) error {
+	if nodeCopy == "" || label == "" {
+		return errors.New("-receipt needs -node-copy and -node-label")
+	}
+	if _, err := time.Parse(time.DateOnly, snapshotDate); err != nil {
+		return errors.New("-snapshot-date must be YYYY-MM-DD")
+	}
+	counts, err := countRealNode(nodeCopy)
+	if err != nil {
+		return err
+	}
+	receipt := nodeReceipt{
+		Schema: "sage-taint-bench/node-receipt/v1", SourceLabel: label, SnapshotDate: snapshotDate,
+		Command: "sage-taint-bench -receipt <out> -node-copy <redacted> -node-label <label> -snapshot-date <date>",
+		Commit:  detectCommit(), Counts: counts,
+	}
+	encoded, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(out, append(encoded, '\n'), 0o600)
 }

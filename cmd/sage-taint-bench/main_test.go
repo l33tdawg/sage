@@ -1,8 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -422,6 +425,29 @@ func TestRealNodeCountsReadACopyAndNeverGuessMigrated(t *testing.T) {
 	missing := notMeasured()
 	assert.False(t, missing.Measured)
 	assert.Nil(t, missing.Records)
+}
+
+func TestReceiptRecordsLabelAndNeverThePath(t *testing.T) {
+	path := t.TempDir()
+	db, err := openBadger(path)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	out := filepath.Join(t.TempDir(), "receipt.json")
+	require.Error(t, writeReceipt(out, path, "", "2026-09-30"))
+	require.Error(t, writeReceipt(out, path, "operator-node", "yesterday"))
+	require.NoError(t, writeReceipt(out, path, "operator-node", "2026-09-30"))
+	raw, err := os.ReadFile(out)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), path)
+	assert.Contains(t, string(raw), "operator-node")
+	assert.Contains(t, string(raw), "2026-09-30")
+}
+
+func TestResultJSONOmitsLocalPaths(t *testing.T) {
+	encoded, err := json.Marshal(config{DataDir: "/local/data", NodeCopy: "/local/copy"})
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "/local/")
 }
 
 func TestSmokeRunIsLabelledAndRepeatable(t *testing.T) {

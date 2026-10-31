@@ -19,7 +19,7 @@ const standInNotice = "STAND-IN MEASUREMENT: the taint protocol is not implement
 
 type config struct {
 	Profile           string
-	DataDir           string
+	DataDir           string `json:"-"`
 	Repeats           int
 	BackgroundRecords int
 	Chains            int
@@ -29,7 +29,7 @@ type config struct {
 	ContentBytes      int
 	UnitCeiling       int64
 	BlockCeiling      int64
-	NodeCopy          string
+	NodeCopy          string `json:"-"`
 }
 
 type timing struct {

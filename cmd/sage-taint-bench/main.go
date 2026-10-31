@@ -135,8 +135,18 @@ func main() {
 	requireArch := flag.String("require-arch", "", "fail unless both GOARCH and uname -m match: amd64 or arm64")
 	repeats := flag.Int("repeats", 0, "timing repeats per scenario (default from profile)")
 	nodeCopy := flag.String("node-copy", "", "read-only: COPY of a stopped node's Badger directory, for real-node counts")
+	receipt := flag.String("receipt", "", "write a counts-only receipt for -node-copy to this path and skip the benchmark")
+	nodeLabel := flag.String("node-label", "", "redacted source label recorded in the receipt")
+	snapshotDate := flag.String("snapshot-date", "", "date the node copy was taken, YYYY-MM-DD, recorded in the receipt")
 	flag.Parse()
 
+	if *receipt != "" {
+		if err := writeReceipt(*receipt, *nodeCopy, *nodeLabel, *snapshotDate); err != nil {
+			fmt.Fprintln(os.Stderr, "receipt failed:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := execute(*profile, *out, *dataDir, *requireArch, *repeats, *nodeCopy); err != nil {
 		fmt.Fprintln(os.Stderr, "benchmark failed:", err)
 		os.Exit(1)
