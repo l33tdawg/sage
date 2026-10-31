@@ -661,7 +661,7 @@ mod tests {
         assert!(supported_daemon_version("11.19.0"));
         assert!(supported_daemon_version("11.21.0"));
         assert!(supported_daemon_version("11.23.10"));
-        assert!(supported_daemon_version("11.24.4"));
+        assert!(supported_daemon_version("11.24.5"));
         assert!(!supported_daemon_version("11.25.0"));
         assert!(!supported_daemon_version("eleven"));
         assert!(valid_generation(&"A".repeat(43)));
