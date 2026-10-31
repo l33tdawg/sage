@@ -12,7 +12,13 @@ chatGPTTunnelStatus, chatGPTTunnelSetup, chatGPTTunnelStop,
 fedConnections, fedPause, fedRevoke, fedPeerStatus, fedGetNetworkName, fedSetNetworkName, fedLanEndpoint, fedReadiness, fedSettingGet, fedSettingSet, fedShareableDomains, fedPermissionsGet, fedPermissionsSet, fedAgentExportsGet, fedAgentExportSet, fedAgentExposureGet, fedAgentExposureSet, fedReaderRestrictionsGet, fedReaderRestrictionSet, fedPipeContactsGet, fedPipeContactSet, fedSyncGet, fedSyncSet, fedSyncStatus, fedGroups, fedGroupsRefresh, fedGroupCreate, fedGroupDomainAdd, fedGroupDomainRemove, fedGroupSelfRole, fedGroupRename, fedGroupMemberInvite, fedGroupMemberRemove, fedGroupDissolve, fedJoinRoutes, fedHostCreate, fedHostScanReturn, fedHostStatus, fedHostApprove, fedHostAbort, fedGuestScan, fedGuestRequest, fedGuestStatus, fedGuestAbort, fedGuestConfirm } from './api.js';
 
 import { mountMriBrain } from './mri-brain.js';
-import { restartBaselineBootID, requestedRestartIsReady } from './restart-proof.js';
+import {
+    RESTART_WAIT_MS,
+    formatRestartCountdown,
+    restartBaselineBootID,
+    restartProgressMessage,
+    requestedRestartIsReady,
+} from './restart-proof.js';
 import { buildUpdateBanner } from './update-banner.js';
 import { describeSignerFences, describeLastFenceResolution, fenceSummary } from './signer-fences.js';
 import { describeMemoryGate, reviewItemState } from './memory-gate.js';
@@ -4828,36 +4834,59 @@ function neutralizeCheckedRestartAdvice(data) {
     return { ...data, update_instructions: INSTALLED_RESTART_SAFETY_MESSAGE };
 }
 
-async function restartAndWaitForNewBoot(expectedVersion = '') {
-    const restart = await restartServer();
-    if (!restart?.ok) {
-        return { ok: false, manual: !!restart?.restart_required, message: restart?.message || restart?.error || 'SAGE could not begin a clean restart.' };
-    }
-    // The process that accepted POST /restart is the process we must observe
-    // leaving. A health preflight can race with some other restart (A health,
-    // B accepts POST); using A would incorrectly accept still-running B.
-    const previousBootID = restartBaselineBootID(restart);
-    if (!previousBootID) {
-        return { ok: false, message: RESTART_SAFETY_RECHECK_MESSAGE };
-    }
-    // The daemon can spend up to three minutes draining in-flight signing,
-    // followed by listener teardown and a verified final snapshot. A one-minute
-    // browser timeout reports failure while the restart is still healthy.
-    const restartDeadline = Date.now() + 5 * 60 * 1000;
-    while (Date.now() < restartDeadline) {
-        await new Promise(resolve => setTimeout(resolve, 500));
-        try {
-            const response = await fetch('/v1/dashboard/health', { cache: 'no-store' });
-            if (!response.ok) continue;
-            const health = await response.json();
-            if (requestedRestartIsReady(previousBootID, health, expectedVersion)) {
-                return { ok: true, health };
-            }
-        } catch (_) {
-            // Expected while the old listener is down and the new process is starting.
+async function restartAndWaitForNewBoot(expectedVersion = '', onProgress = null) {
+    const reportProgress = progress => {
+        if (typeof onProgress !== 'function') return;
+        try { onProgress(progress); } catch (_) {}
+    };
+    const restartDeadline = Date.now() + RESTART_WAIT_MS;
+    let currentPhase = 'requesting';
+    const publishProgress = (phase = currentPhase, remainingMs = Math.max(0, restartDeadline - Date.now())) => {
+        currentPhase = phase;
+        reportProgress({ phase, remainingMs });
+    };
+    publishProgress('requesting', RESTART_WAIT_MS);
+    // Keep the visible countdown moving even while the restart request or a
+    // single health probe is still waiting for a network response.
+    const countdownTimer = setInterval(() => publishProgress(), 500);
+    try {
+        const restart = await restartServer();
+        if (!restart?.ok) {
+            return { ok: false, manual: !!restart?.restart_required, message: restart?.message || restart?.error || 'SAGE could not begin a clean restart.' };
         }
+        // The process that accepted POST /restart is the process we must observe
+        // leaving. A health preflight can race with some other restart (A health,
+        // B accepts POST); using A would incorrectly accept still-running B.
+        const previousBootID = restartBaselineBootID(restart);
+        if (!previousBootID) {
+            return { ok: false, message: RESTART_SAFETY_RECHECK_MESSAGE };
+        }
+        publishProgress('waiting');
+        // The daemon can spend up to three minutes draining in-flight signing,
+        // followed by listener teardown and a verified final snapshot. A one-minute
+        // browser timeout reports failure while the restart is still healthy.
+        while (Date.now() < restartDeadline) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            let listenerReachable = false;
+            try {
+                const response = await fetch('/v1/dashboard/health', { cache: 'no-store' });
+                if (response.ok) {
+                    listenerReachable = true;
+                    const health = await response.json();
+                    if (requestedRestartIsReady(previousBootID, health, expectedVersion)) {
+                        return { ok: true, health };
+                    }
+                }
+            } catch (_) {
+                // Expected while the old listener is down and the new process is starting.
+            }
+            publishProgress(listenerReachable ? 'draining' : 'restarting');
+        }
+        publishProgress('timeout', 0);
+        return { ok: false, message: RESTART_SAFETY_RECHECK_MESSAGE };
+    } finally {
+        clearInterval(countdownTimer);
     }
-	return { ok: false, message: RESTART_SAFETY_RECHECK_MESSAGE };
 }
 
 function SoftwareUpdate() {
@@ -4867,6 +4896,7 @@ function SoftwareUpdate() {
     const [error, setError] = useState(null);
     const [installed, setInstalled] = useState(false);
     const [restarting, setRestarting] = useState(false);
+    const [restartProgress, setRestartProgress] = useState(null);
 
     // Step-by-step progress from SSE
     const [steps, setSteps] = useState([]);
@@ -4998,8 +5028,12 @@ function SoftwareUpdate() {
     const doRestart = async () => {
         setRestarting(true);
 		setError(null);
+		setRestartProgress({ phase: 'requesting', remainingMs: RESTART_WAIT_MS });
 		try {
-			const result = await restartAndWaitForNewBoot(updateInfo?.disk_version || updateInfo?.latest_version || '');
+			const result = await restartAndWaitForNewBoot(
+				updateInfo?.disk_version || updateInfo?.latest_version || '',
+				setRestartProgress,
+			);
 			if (result.ok) {
 				try { sessionStorage.setItem('sage-update-restarted', result.health?.version || 'updated'); } catch (_) {}
 				window.location.reload();
@@ -5009,6 +5043,7 @@ function SoftwareUpdate() {
 		} catch (e) {
 			setError('SAGE could not restart: ' + (e.message || 'unknown error'));
 		}
+		setRestartProgress(null);
 		setRestarting(false);
     };
 
@@ -5062,6 +5097,22 @@ function SoftwareUpdate() {
             </div>
 
             ${error && html`<div class="update-error">${error}</div>`}
+
+            ${restarting && html`
+                <div class="update-restart-progress">
+                    <div class="update-restart-progress-head" role="status" aria-live="polite" aria-atomic="true">
+                        <span class="spinner update-restart-spinner"></span>
+                        <strong>${restartProgressMessage(restartProgress?.phase)}</strong>
+                    </div>
+                    <div class="update-restart-progress-detail">
+                        <span aria-hidden="true">
+                            Safety window: <span class="mono">${formatRestartCountdown(restartProgress?.remainingMs ?? RESTART_WAIT_MS)}</span> remaining
+                        </span>
+                        <span class="sr-only">SAGE may take up to five minutes to finish in-flight writes, close safely, and start the replacement process.</span>
+                        <span>Keep this page open. CEREBRUM will reconnect automatically when the new process is ready.</span>
+                    </div>
+                </div>
+            `}
 
             ${!updateInfo?.update_available && updateInfo?.latest_version && !error && !installed && !updateInfo?.restart_required && html`
                 <div class="update-current">You're up to date.</div>

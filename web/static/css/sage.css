@@ -3695,6 +3695,24 @@ input[type="range"]::-moz-range-thumb {
     background: var(--danger-tint); border-radius: 8px;
     border: 1px solid rgba(239, 68, 68, 0.2); margin-bottom: 8px;
 }
+.update-restart-progress {
+    padding: 12px; background: var(--bg-elevated); border-radius: 8px;
+    border: 1px solid var(--primary-dim); margin-bottom: 12px;
+}
+.update-restart-progress-head {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--text); font-size: 13px;
+}
+.update-restart-spinner { margin-right: 0; }
+.update-restart-progress-detail {
+    display: flex; flex-direction: column; gap: 4px;
+    margin-top: 7px; padding-left: 22px;
+    color: var(--text-muted); font-size: 12px;
+}
+.update-restart-progress-detail .mono {
+    color: var(--primary); font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+}
 .update-progress {
     color: var(--primary); font-size: 13px; padding: 8px 0;
 }

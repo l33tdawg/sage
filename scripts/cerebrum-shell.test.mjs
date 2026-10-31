@@ -1794,7 +1794,7 @@ test('macOS tray supervises daemon exits and preserves restart diagnostics', () 
 });
 
 test('CEREBRUM waits beyond the daemon signing-drain budget before reporting restart failure', () => {
-    assert.match(appSource, /const restartDeadline = Date\.now\(\) \+ 5 \* 60 \* 1000/,
+    assert.match(appSource, /const restartDeadline = Date\.now\(\) \+ RESTART_WAIT_MS/,
         'the browser deadline must outlast the three-minute signing drain plus teardown and startup');
     assert.match(appSource, /while \(Date\.now\(\) < restartDeadline\)/);
 });
