@@ -106,16 +106,22 @@ func (r *request) header(decision string) (decisionHeader, error) {
 	return header, nil
 }
 
-// effective reports whether a memory has an effective membership.
+// effective reports whether a memory has an effective membership: its decision
+// is live and the membership's generation matches the header. The value comes
+// with the charged entry, so it costs no further read.
 func (r *request) effective(memory string) (bool, error) {
 	found := false
 	prefix := memberPrefix(memory)
-	err := r.scan(prefix, func(key, _ []byte) error {
+	err := r.scan(prefix, func(key, value []byte) error {
 		header, err := r.header(string(bytes.TrimPrefix(key, prefix)))
 		if err != nil {
 			return err
 		}
-		if header.Status <= statusDepthExhausted {
+		generation, err := decodeMemberGeneration(value)
+		if err != nil {
+			return err
+		}
+		if header.Status <= statusDepthExhausted && generation == header.Generation {
 			found = true
 		}
 		return nil

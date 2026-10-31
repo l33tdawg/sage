@@ -158,6 +158,13 @@ func encodeMember(generation uint64, depth uint16, origin byte) []byte {
 	return append(out, origin)
 }
 
+func decodeMemberGeneration(raw []byte) (uint64, error) {
+	if len(raw) != memberValueLen {
+		return 0, fmt.Errorf("membership length mismatch: %d bytes", len(raw))
+	}
+	return binary.BigEndian.Uint64(raw), nil
+}
+
 func encodeQueueEntry(memory string, depth uint16) []byte {
 	out := binary.BigEndian.AppendUint16(make([]byte, 0, len(memory)+4), uint16(len(memory)))
 	out = append(out, memory...)

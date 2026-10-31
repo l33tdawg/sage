@@ -116,12 +116,13 @@ func printSummary(w io.Writer, result *benchResult) {
 		det := read.Deterministic
 		fmt.Fprintf(w, "%-8s %-28s %10d %12d %8v %10.2f\n", det.IDProfile, det.Name, det.UnitsCharged, det.DemandUnits, det.FailedClosed, read.Timing.P95MS)
 	}
-	fmt.Fprintf(w, "\n%-8s %-20s %5s %7s %10s %10s %10s %10s %8s %8s %9s\n", "ids", "block", "txs", "units", "taint B", "E B", "other B", "v30 B", "verdict", "with v30", "p95 ms")
+	fmt.Fprintf(w, "\n%-8s %-20s %5s %7s %10s %10s %10s %10s %8s %8s %9s\n", "ids", "block", "txs", "units", "taint B", "v30 B", "E B", "other B", "verdict", "selected", "p95 ms")
 	for _, block := range result.Blocks {
 		det := block.Deterministic
-		fmt.Fprintf(w, "%-8s %-20s %5d %7d %10d %10d %10d %10d %8s %8s %9.2f\n", block.IDProfile, block.Name, det.Txs, det.Units, det.GeneratedTaint, det.Estimate, det.OtherWrites, det.V30Writes, det.ProcessProposal, det.ProposalWithV30, block.Total.P95MS)
+		fmt.Fprintf(w, "%-8s %-20s %5d %7d %10d %10d %10d %10d %8s %8d %9.2f\n", block.IDProfile, block.Name, det.Txs, det.Units, det.GeneratedTaint, det.V30Writes, det.Estimate, det.OtherWrites, det.ProcessProposal, det.SelectedByPrepare, block.Total.P95MS)
 	}
-	fmt.Fprintf(w, "\ninvariants passed: %v\n", result.Invariants.Passed)
+	fmt.Fprintf(w, "\nworst submit: E %d bytes, %d fit the block ceiling\n", constants.Block.WorstSubmitE, constants.Block.WorstSubmits)
+	fmt.Fprintf(w, "invariants passed: %v\n", result.Invariants.Passed)
 	for _, failure := range result.Invariants.Failures {
 		fmt.Fprintln(w, "  FAIL:", failure)
 	}

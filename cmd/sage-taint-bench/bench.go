@@ -90,7 +90,8 @@ type blockCeilingReport struct {
 	Provisional   int64    `json:"provisional_bytes"`
 	WorstEstimate int64    `json:"worst_valid_block_estimate_bytes"`
 	WorstActual   int64    `json:"worst_valid_block_actual_bytes"`
-	RejectedV30   []string `json:"scenarios_rejected_counting_v30_writes"`
+	WorstSubmitE  int64    `json:"estimate_bytes_per_worst_submit"`
+	WorstSubmits  int64    `json:"worst_submits_that_fit_block_ceiling"`
 	Rejected      []string `json:"scenarios_rejected_by_process_proposal"`
 }
 
@@ -427,14 +428,15 @@ func summarizeConstants(result *benchResult, cfg config, tombstone int64) consta
 		if det.ProcessProposal == "reject" {
 			constants.Block.Rejected = append(constants.Block.Rejected, block.IDProfile+"/"+block.Name)
 		}
-		if det.ProposalWithV30 == "reject" {
-			constants.Block.RejectedV30 = append(constants.Block.RejectedV30, block.IDProfile+"/"+block.Name)
-		}
 		if det.ProcessProposal == "accept" && (block.Name == "full_admission" || block.Name == "mixed_expand" || block.Name == "mixed_cleanup" || block.Name == "cleanup_only") {
 			constants.Block.WorstEstimate = max(constants.Block.WorstEstimate, det.Estimate)
-			constants.Block.WorstActual = max(constants.Block.WorstActual, det.GeneratedTaint)
+			constants.Block.WorstActual = max(constants.Block.WorstActual, det.GeneratedTaint+det.V30Writes)
 		}
 	}
+	worst := est
+	worst.activeDecisions = maxActiveDecisions
+	constants.Block.WorstSubmitE = worst.estimate(worstSubmit())
+	constants.Block.WorstSubmits = cfg.BlockCeiling / constants.Block.WorstSubmitE
 	// A batch resuming a parent pays no queue pop, so it is the larger one.
 	reachable := int64(min(maxNewPerExecution, (txUnitBudget-3)/5))
 	perTx := est.estimate(txSpec{Kind: txExpand})
@@ -449,6 +451,15 @@ func summarizeConstants(result *benchResult, cfg config, tombstone int64) consta
 		HeaderActual: est.sizes.header, HeaderRFC: 1280,
 	}
 	return constants
+}
+
+// worstSubmit has the largest shape the protocol limits allow.
+func worstSubmit() txSpec {
+	parents := make([]string, maxParents)
+	for i := range parents {
+		parents[i] = makeID(memoryIDCap, "worst/parent", i)
+	}
+	return txSpec{Kind: txSubmit, Memory: makeID(memoryIDCap, "worst/child", 0), Parents: parents}
 }
 
 func checkInvariants(result *benchResult) invariants {
@@ -473,7 +484,7 @@ func checkInvariants(result *benchResult) invariants {
 	for _, block := range result.Blocks {
 		det := block.Deterministic
 		label := block.IDProfile + "/" + block.Name
-		if !det.ActualWithinBudget || det.OverflowedTxs > 0 || det.GeneratedTaint > det.Estimate {
+		if !det.ActualWithinBudget || det.OverflowedTxs > 0 || det.GeneratedTaint+det.V30Writes > det.Estimate {
 			fail("%s: actual bytes exceeded the estimate", label)
 		}
 		if det.MaxUnitsByKind[txSubmit] > submitUnitBound {

@@ -45,25 +45,24 @@ type readFixture struct {
 }
 
 // seedRead builds the read worst cases. Deep: 16-parent ancestries whose nodes
-// have 64 signers and memberships in 31 decisions that are cleared and so not
-// effective, so the walk never stops early. One decision stays expanding,
-// which is what keeps the walk switched on.
+// have 64 signers and memberships in all 32 decisions, none of them effective,
+// so the walk never stops early. 31 decisions are cleared. One stays expanding,
+// which keeps the walk switched on, and its memberships are a stale generation.
 func seedRead(s seeder, p idProfile, chains, frontier, frontierDecisions, flat int) (readFixture, error) {
 	var fixture readFixture
 	ns := p.Name + "/deep"
 	if err := s.set(activeKey, make([]byte, 8)); err != nil {
 		return fixture, err
 	}
-	var cleared []string
+	var ineffective []string
 	for i := range maxActiveDecisions {
 		decision := makeID(decisionIDLen, ns+"/decision", i)
-		status := statusCleaning
+		header := decisionHeader{Status: statusCleaning, Generation: 1}
 		if i == 0 {
-			status = statusExpanding
-		} else {
-			cleared = append(cleared, decision)
+			header = decisionHeader{Status: statusExpanding, Generation: 2}
 		}
-		if err := s.header(decision, decisionHeader{Status: status, Generation: 1}); err != nil {
+		ineffective = append(ineffective, decision)
+		if err := s.header(decision, header); err != nil {
 			return fixture, err
 		}
 	}
@@ -83,7 +82,7 @@ func seedRead(s seeder, p idProfile, chains, frontier, frontierDecisions, flat i
 					return fixture, err
 				}
 			}
-			for _, decision := range cleared {
+			for _, decision := range ineffective {
 				if err := s.set(memberKey(id, decision), member); err != nil {
 					return fixture, err
 				}
@@ -232,7 +231,7 @@ func seedFullAdmission(s seeder, ns string, p idProfile) (blockFixture, error) {
 	return blockFixture{txs: submits(ns, p, maxBlockTxs, parents), active: maxActiveDecisions}, nil
 }
 
-// seedMixed is the worst valid mixed block: one apply, four expand or cleanup
+// seedMixed is the worst mixed block by tx shape: one apply, four expand or cleanup
 // txs and 59 submits. The apply target is a parent of every submit, so its
 // membership is inherited in the same block it was created.
 func seedMixed(s seeder, ns string, p idProfile, cleanup bool) (blockFixture, error) {

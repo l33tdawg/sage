@@ -80,8 +80,8 @@ func (s *stage) putOther(key, value []byte) {
 	s.record(key, append([]byte{}, value...))
 }
 
-// putV30 is a write app-v30 adds on submit but E does not bound: the memprov
-// marker and the lineage edges. They are reported against the ceiling both ways.
+// putV30 is a write app-v30 adds on submit: the memprov marker and both lineage
+// directions. These count against E and the block ceiling like taint writes.
 func (s *stage) putV30(key, value []byte) {
 	s.v30Bytes += int64(len(key) + len(value))
 	s.putOther(key, value)
@@ -214,12 +214,20 @@ func (s *stage) expand(decision string, header *decisionHeader, budget int64) er
 			s.units += 2
 			budget -= 2
 			header.Scanned++
-			_, member, err := s.get(memberKey(child, decision))
+			raw, member, err := s.get(memberKey(child, decision))
 			if err != nil {
 				return err
 			}
+			current := false
+			if member {
+				generation, decodeErr := decodeMemberGeneration(raw)
+				if decodeErr != nil {
+					return decodeErr
+				}
+				current = generation == header.Generation
+			}
 			switch {
-			case member:
+			case current:
 			case header.ParentDepth+1 > maxDepth:
 				header.Status = statusDepthExhausted
 			default:
@@ -320,6 +328,15 @@ func (s *stage) execSubmit(tx txSpec, content, provenance []byte) error {
 		}
 		for _, key := range members {
 			s.units++
+			// The value comes with the charged entry.
+			raw, _, err := s.get(key)
+			if err != nil {
+				return err
+			}
+			generation, err := decodeMemberGeneration(raw)
+			if err != nil {
+				return err
+			}
 			decision := string(bytes.TrimPrefix(key, prefix))
 			header, ok := headers[decision]
 			if !ok {
@@ -329,7 +346,7 @@ func (s *stage) execSubmit(tx txSpec, content, provenance []byte) error {
 				s.units++
 				headers[decision] = header
 			}
-			if header.Status <= statusDepthExhausted {
+			if header.Status <= statusDepthExhausted && generation == header.Generation {
 				inherited[decision] = header
 			}
 		}
@@ -344,8 +361,9 @@ func (s *stage) execSubmit(tx txSpec, content, provenance []byte) error {
 	return nil
 }
 
-// estimator is the one bound used for proposal and execution. It reads only
-// the tx and committed facts, so every validator computes the same answer.
+// estimator is the one bound used by PrepareProposal, ProcessProposal and the
+// FinalizeBlock reservation. It reads only the tx and committed facts, so every
+// validator computes the same answer before voting.
 type estimator struct {
 	sizes     sizes
 	tombstone int64
@@ -377,6 +395,16 @@ func (e estimator) cleanup() int64 {
 	return e.sizes.header + e.sizes.revision + best
 }
 
+// v30Writes bounds the memprov marker and both lineage directions from the
+// submit's shape, taking the protocol's maximum signer count.
+func (e estimator) v30Writes(tx txSpec) int64 {
+	total := int64(len(memProvKey(tx.Memory))) + 1 + maxSigners*provenanceSignerLen
+	for _, parent := range tx.Parents {
+		total += int64(len(lineageKey(tx.Memory, parent)) + len(lineageRefKey(parent, tx.Memory)))
+	}
+	return total
+}
+
 func (e estimator) estimate(tx txSpec) int64 {
 	switch tx.Kind {
 	case txApply:
@@ -389,7 +417,7 @@ func (e estimator) estimate(tx txSpec) int64 {
 		decisions := min(e.activeDecisions, maxActiveDecisions)
 		pair := int64(len(memberKey(tx.Memory, strings.Repeat("d", decisionIDLen)))) + memberValueLen +
 			int64(len(indexKey(strings.Repeat("d", decisionIDLen), tx.Memory)))
-		return decisions*pair + e.sizes.revision
+		return decisions*pair + e.sizes.revision + e.v30Writes(tx)
 	}
 	return 0
 }
@@ -415,7 +443,6 @@ type blockDeterministic struct {
 	WriteSetEntries    int64            `json:"write_set_entries"`
 	WriteSetAccounted  int64            `json:"write_set_badger_accounted_bytes"`
 	ProcessProposal    string           `json:"process_proposal"`
-	ProposalWithV30    string           `json:"process_proposal_counting_v30_writes"`
 	SelectedByPrepare  int              `json:"txs_selected_by_prepare_proposal"`
 	OverflowedTxs      int              `json:"overflowed_txs"`
 	NewMemberships     int64            `json:"new_expansion_memberships"`
@@ -485,7 +512,7 @@ func runBlock(db *badger.DB, txs []txSpec, options blockOptions) (blockOutcome, 
 			return outcome, fmt.Errorf("tx %d (%s): %w", i, tx.Kind, err)
 		}
 		outcome.MaxUnitsByKind[tx.Kind] = max(outcome.MaxUnitsByKind[tx.Kind], s.units)
-		if s.taintBytes > estimates[i] {
+		if s.taintBytes+s.v30Bytes > estimates[i] {
 			// An estimator bug: this tx fails alone and the rest of the block
 			// commits. Its cursor is untouched because nothing was flushed.
 			outcome.OverflowedTxs++
@@ -506,10 +533,6 @@ func runBlock(db *badger.DB, txs []txSpec, options blockOptions) (blockOutcome, 
 		}
 	}
 	outcome.finalize = time.Since(started)
-	outcome.ProposalWithV30 = "accept"
-	if outcome.Estimate+outcome.V30Writes > options.ceiling {
-		outcome.ProposalWithV30 = "reject"
-	}
 	commitStarted := time.Now()
 	if err := txn.Commit(); err != nil {
 		return outcome, fmt.Errorf("commit block: %w", err)
