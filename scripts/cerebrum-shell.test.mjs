@@ -1771,6 +1771,25 @@ test('macOS tray focuses an existing CEREBRUM tab before opening a new one', () 
         'browser automation must be time-bounded so dock clicks cannot freeze the app');
 });
 
+test('macOS tray supervises daemon exits and preserves restart diagnostics', () => {
+    assert.match(traySource, /process\.terminationHandler = \{/,
+        'unexpected daemon exits must notify the tray supervisor');
+    assert.match(traySource, /applicationShouldTerminate\([\s\S]*?return \.terminateLater/,
+        'application quit must be asynchronous so a wedged daemon cannot freeze the tray');
+    assert.match(traySource, /private func serverDidExit\(_ process: Process\)/);
+    assert.match(traySource, /scheduleServerRestart\(afterFailure: true\)/);
+    assert.match(traySource, /unhealthyRestartGrace/);
+    assert.match(traySource, /sending SIGKILL/);
+    assert.doesNotMatch(traySource, /waitUntilExit\(\)/,
+        'the tray must never wait forever on the daemon during termination');
+    assert.doesNotMatch(traySource, /vaultPassphrase = nil \/\/ clear from memory after passing/,
+        'a supervised restart must retain the unlocked passphrase until the app quits');
+    assert.match(traySource, /O_WRONLY \| O_CREAT \| O_APPEND/,
+        'starting a replacement daemon must append to the existing log instead of erasing the failed restart');
+    assert.doesNotMatch(traySource, /FileManager\.default\.createFile\(atPath: logPath/,
+        'the tray must not recreate or truncate the daemon log on every launch');
+});
+
 test('MRI uses one dense shared memory sample limit', () => {
     assert.match(mriSource, /export const DEFAULT_MRI_NODE_LIMIT = 1500/);
     assert.match(mriSource, /limit=\$\{DEFAULT_MRI_NODE_LIMIT\}/);

@@ -2587,14 +2587,25 @@ func runServe(startupProof string) (rerr error) {
 	if nativeControl != nil {
 		_ = nativeControl.SetState(shellcontrol.StateDraining)
 	}
-	// Stop MCP admission and cancel/join active tool calls first. A slow quorum
-	// call must not outlive the stores it is using or consume the entire listener
-	// shutdown budget.
+	var shutdownErrs []error
+	// Stop MCP admission and cancel/join active tool calls first. Close cancels
+	// every admitted handler before waiting, but the wait itself must be bounded:
+	// this machine can carry long-lived stdio bridges and remote MCP sessions,
+	// and a wedged handler must not leave the tray supervising a daemon forever.
 	if mcpHTTPTransport != nil {
-		// Never close stores under a live MCP tool call. Close has already canceled
-		// every admitted handler; joining without a short timeout favors a clean
-		// restart over an unsafe partial teardown.
-		_ = mcpHTTPTransport.Close(context.Background())
+		if err := runShutdownStage(
+			context.Background(),
+			logger,
+			"MCP HTTP transport",
+			mcpHTTPShutdownBudget,
+			mcpHTTPTransport.Close,
+		); err != nil {
+			// Close has already stopped admission, canceled every admitted
+			// handler, and closed its streams. A remaining handler is logged by
+			// runShutdownStage but cannot veto the process handoff forever; the
+			// tray supervisor or exec is the bounded fallback.
+			logger.Warn().Err(err).Msg("MCP transport did not finish draining before its restart budget")
+		}
 	}
 	// Disconnect dashboard event streams before Shutdown. The dashboard keeps
 	// an EventSource open for the whole tab lifetime, so without an explicit
@@ -2620,7 +2631,6 @@ func runServe(startupProof string) (rerr error) {
 	}
 	var shutdownWG sync.WaitGroup
 	var shutdownMu sync.Mutex
-	var shutdownErrs []error
 	for _, item := range servers {
 		if item.server == nil {
 			continue
@@ -2646,8 +2656,17 @@ func runServe(startupProof string) (rerr error) {
 	}
 	shutdownWG.Wait()
 	if fedP2P != nil {
-		if err := fedP2P.Close(); err != nil {
-			shutdownErrs = append(shutdownErrs, fmt.Errorf("federation P2P transport: %w", err))
+		if err := runShutdownStage(
+			context.Background(),
+			logger,
+			"federation P2P transport",
+			federationP2PShutdownBudget,
+			func(context.Context) error { return fedP2P.Close() },
+		); err != nil {
+			// Federation transport state is process-local. If libp2p cannot
+			// finish closing within the budget, the process handoff terminates
+			// it; this must not roll back an otherwise valid update.
+			logger.Warn().Err(err).Msg("federation P2P transport did not stop before its restart budget")
 		}
 	}
 	listenerWG.Wait()
