@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	mcpHTTPShutdownBudget       = 30 * time.Second
-	federationP2PShutdownBudget = 15 * time.Second
+	mcpHTTPShutdownBudget       = 15 * time.Second
+	federationP2PShutdownBudget = 10 * time.Second
 )
 
 // runShutdownStage gives a potentially blocking cleanup routine its own

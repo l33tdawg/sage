@@ -1793,6 +1793,12 @@ test('macOS tray supervises daemon exits and preserves restart diagnostics', () 
         'macOS CI must compile the tray source that supervises the daemon');
 });
 
+test('CEREBRUM waits beyond the daemon signing-drain budget before reporting restart failure', () => {
+    assert.match(appSource, /const restartDeadline = Date\.now\(\) \+ 5 \* 60 \* 1000/,
+        'the browser deadline must outlast the three-minute signing drain plus teardown and startup');
+    assert.match(appSource, /while \(Date\.now\(\) < restartDeadline\)/);
+});
+
 test('MRI uses one dense shared memory sample limit', () => {
     assert.match(mriSource, /export const DEFAULT_MRI_NODE_LIMIT = 1500/);
     assert.match(mriSource, /limit=\$\{DEFAULT_MRI_NODE_LIMIT\}/);

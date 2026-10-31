@@ -4840,19 +4840,23 @@ async function restartAndWaitForNewBoot(expectedVersion = '') {
     if (!previousBootID) {
         return { ok: false, message: RESTART_SAFETY_RECHECK_MESSAGE };
     }
-    for (let attempt = 0; attempt < 120; attempt++) {
-		await new Promise(resolve => setTimeout(resolve, 500));
-		try {
-			const response = await fetch('/v1/dashboard/health', { cache: 'no-store' });
-                if (!response.ok) continue;
-                const health = await response.json();
-                if (requestedRestartIsReady(previousBootID, health, expectedVersion)) {
-                    return { ok: true, health };
-                }
-		} catch (_) {
-			// Expected while the old listener is down and the new process is starting.
-		}
-	}
+    // The daemon can spend up to three minutes draining in-flight signing,
+    // followed by listener teardown and a verified final snapshot. A one-minute
+    // browser timeout reports failure while the restart is still healthy.
+    const restartDeadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < restartDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        try {
+            const response = await fetch('/v1/dashboard/health', { cache: 'no-store' });
+            if (!response.ok) continue;
+            const health = await response.json();
+            if (requestedRestartIsReady(previousBootID, health, expectedVersion)) {
+                return { ok: true, health };
+            }
+        } catch (_) {
+            // Expected while the old listener is down and the new process is starting.
+        }
+    }
 	return { ok: false, message: RESTART_SAFETY_RECHECK_MESSAGE };
 }
 
