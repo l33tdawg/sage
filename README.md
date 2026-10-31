@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.24.3`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.24.4`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,17 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.24.3 and earlier)</summary>
+<summary>Recent release notes (v11.24.4 and earlier)</summary>
+
+## What's New in v11.24.4
+
+**macOS restarts now recover without Activity Monitor cleanup.** The tray keeps `sage-gui serve` supervised, restarts unexpected exits with bounded backoff, detects a live child that stops answering health checks, and retains the unlocked passphrase for the replacement process. Daemon logs are appended so a failed restart keeps its evidence.
+
+**Shutdown no longer lets transport teardown strand an update.** MCP HTTP and federation P2P close stages are bounded. A timeout is logged without rolling back an otherwise valid update or preventing the replacement process from starting.
+
+**CEREBRUM makes the restart wait visible.** The updater now shows a live five-minute countdown and phase-specific status while SAGE finishes in-flight work, closes its listener, starts the replacement, and reconnects. The countdown keeps moving even while a request or health probe is waiting on the network.
+
+**No consensus change or chain migration.** App-v29 remains active. Container: `ghcr.io/l33tdawg/sage:11.24.4`. SDK 11.24.4.
 
 ## What's New in v11.24.3
 

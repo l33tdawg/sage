@@ -1,4 +1,5 @@
 import Cocoa
+import Darwin
 
 // SAGE Dock App — launches the SAGE server and manages it from the dock.
 // Double-click: starts SAGE, opens CEREBRUM dashboard
@@ -8,6 +9,23 @@ class SAGEApp: NSObject, NSApplicationDelegate {
     var serverProcess: Process?
     var vaultPassphrase: String?
     private let dashboardOpenQueue = DispatchQueue(label: "com.sage.dashboard-open", qos: .userInitiated)
+    private let serverLogQueue = DispatchQueue(label: "com.sage.server-log", qos: .utility)
+    private var serverLogHandle: FileHandle?
+    private var serverStartedAt: Date?
+    private var healthTimer: Timer?
+    private var healthProbeInFlight = false
+    private var unhealthySince: Date?
+    private var pendingServerRestart: DispatchWorkItem?
+    private var stableServerReset: DispatchWorkItem?
+    private var consecutiveServerFailures = 0
+    private var isTerminating = false
+
+    private let healthCheckInterval: TimeInterval = 5
+    private let serverStartupGrace: TimeInterval = 45
+    private let unhealthyRestartGrace: TimeInterval = 90
+    private let terminationGrace: TimeInterval = 45
+    private let maximumAutomaticRestarts = 5
+    private let restartDelays: [TimeInterval] = [1, 2, 4, 8, 16, 30]
 
     let sageHome: String = {
         ProcessInfo.processInfo.environment["SAGE_HOME"] ?? NSHomeDirectory() + "/.sage"
@@ -30,6 +48,7 @@ class SAGEApp: NSObject, NSApplicationDelegate {
         }
 
         startServer()
+        startHealthMonitor()
 
         // Open dashboard after server has a moment to start
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
@@ -63,13 +82,55 @@ class SAGEApp: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        isTerminating = true
+        pendingServerRestart?.cancel()
+        pendingServerRestart = nil
+        stableServerReset?.cancel()
+        stableServerReset = nil
+        healthTimer?.invalidate()
+        healthTimer = nil
+        vaultPassphrase = nil
         serverProcess?.terminate()
-        serverProcess?.waitUntilExit()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        isTerminating = true
+        pendingServerRestart?.cancel()
+        pendingServerRestart = nil
+        guard let process = serverProcess, process.isRunning else {
+            return .terminateNow
+        }
+
+        appendServerLog("application quitting; asking daemon pid \(process.processIdentifier) to stop")
+        process.terminate()
+        let pid = process.processIdentifier
+        let grace = terminationGrace
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let deadline = Date().addingTimeInterval(grace)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            if process.isRunning {
+                self?.appendServerLog(
+                    "daemon pid \(pid) did not stop within \(Int(grace))s; sending SIGKILL"
+                )
+                kill(pid, SIGKILL)
+            }
+            DispatchQueue.main.async {
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 
     // MARK: - Server Management
 
     func startServer() {
+        pendingServerRestart?.cancel()
+        pendingServerRestart = nil
+        stableServerReset?.cancel()
+        stableServerReset = nil
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: sageBinary)
         process.arguments = ["serve"]
@@ -78,23 +139,170 @@ class SAGEApp: NSObject, NSApplicationDelegate {
         env["SAGE_NO_BROWSER"] = "1"
         if let passphrase = vaultPassphrase {
             env["SAGE_PASSPHRASE"] = passphrase
-            vaultPassphrase = nil // clear from memory after passing to server
         }
         process.environment = env
+        process.terminationHandler = { [weak self] terminated in
+            DispatchQueue.main.async {
+                self?.serverDidExit(terminated)
+            }
+        }
 
-        FileManager.default.createFile(atPath: logPath, contents: nil)
-        if let logHandle = FileHandle(forWritingAtPath: logPath) {
-            logHandle.seekToEndOfFile()
+        if let logHandle = openAppendLogHandle() {
             process.standardOutput = logHandle
             process.standardError = logHandle
+            serverLogHandle = logHandle
         }
 
         do {
+            appendServerLog("starting daemon \(sageBinary)")
             try process.run()
             serverProcess = process
+            serverStartedAt = Date()
+            unhealthySince = nil
+            scheduleStableServerReset(for: process)
         } catch {
             NSLog("Failed to start SAGE server: \(error)")
+            appendServerLog("failed to start daemon: \(error)")
+            serverProcess = nil
+            serverStartedAt = nil
+            scheduleServerRestart(afterFailure: true)
         }
+    }
+
+    private func serverDidExit(_ process: Process) {
+        guard serverProcess === process else { return }
+        let reason = process.terminationReason == .uncaughtSignal ? "signal" : "exit"
+        appendServerLog(
+            "daemon pid \(process.processIdentifier) ended (\(reason) \(process.terminationStatus))"
+        )
+        serverLogHandle?.closeFile()
+        serverLogHandle = nil
+        serverProcess = nil
+        serverStartedAt = nil
+        unhealthySince = nil
+        stableServerReset?.cancel()
+        stableServerReset = nil
+
+        guard !isTerminating else { return }
+        if process.terminationStatus == 73 {
+            appendServerLog("another SAGE daemon already owns the instance lock; supervisor will not respawn")
+            return
+        }
+        scheduleServerRestart(afterFailure: true)
+    }
+
+    private func scheduleServerRestart(afterFailure: Bool) {
+        guard !isTerminating else { return }
+        pendingServerRestart?.cancel()
+        if afterFailure {
+            consecutiveServerFailures += 1
+        }
+        guard consecutiveServerFailures <= maximumAutomaticRestarts else {
+            appendServerLog(
+                "daemon restart budget exhausted after \(maximumAutomaticRestarts) attempts; leaving SAGE stopped"
+            )
+            return
+        }
+        let index = min(max(consecutiveServerFailures - 1, 0), restartDelays.count - 1)
+        let delay = restartDelays[index]
+        appendServerLog("restarting daemon in \(delay)s (attempt \(consecutiveServerFailures)/\(maximumAutomaticRestarts))")
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.isTerminating else { return }
+            self.startServer()
+        }
+        pendingServerRestart = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func scheduleStableServerReset(for process: Process) {
+        stableServerReset?.cancel()
+        let work = DispatchWorkItem { [weak self, weak process] in
+            guard let self, let process, self.serverProcess === process else { return }
+            self.consecutiveServerFailures = 0
+            self.appendServerLog("daemon remained running for 60s; automatic restart budget reset")
+        }
+        stableServerReset = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
+    }
+
+    private func startHealthMonitor() {
+        healthTimer?.invalidate()
+        let timer = Timer(timeInterval: healthCheckInterval, repeats: true) { [weak self] _ in
+            self?.checkServerHealth()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        healthTimer = timer
+    }
+
+    private func checkServerHealth() {
+        guard !isTerminating,
+              !healthProbeInFlight,
+              let process = serverProcess,
+              process.isRunning,
+              let startedAt = serverStartedAt,
+              Date().timeIntervalSince(startedAt) >= serverStartupGrace,
+              let url = URL(string: "http://127.0.0.1:8080/health") else {
+            return
+        }
+
+        healthProbeInFlight = true
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.healthProbeInFlight = false
+                guard self.serverProcess === process, process.isRunning, !self.isTerminating else {
+                    return
+                }
+                if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
+                    self.unhealthySince = nil
+                    return
+                }
+
+                if self.unhealthySince == nil {
+                    self.unhealthySince = Date()
+                    self.appendServerLog("daemon pid \(process.processIdentifier) stopped answering health checks")
+                    return
+                }
+                if let since = self.unhealthySince,
+                   Date().timeIntervalSince(since) >= self.unhealthyRestartGrace {
+                    self.recoverUnresponsiveServer(process)
+                }
+            }
+        }.resume()
+    }
+
+    private func recoverUnresponsiveServer(_ process: Process) {
+        guard serverProcess === process, process.isRunning, !isTerminating else { return }
+        unhealthySince = nil
+        let pid = process.processIdentifier
+        appendServerLog(
+            "daemon pid \(pid) did not recover after \(Int(unhealthyRestartGrace))s; terminating it so the supervisor can restart"
+        )
+        process.terminate()
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15) { [weak self] in
+            guard process.isRunning else { return }
+            self?.appendServerLog("unresponsive daemon pid \(pid) ignored SIGTERM; sending SIGKILL")
+            kill(pid, SIGKILL)
+        }
+    }
+
+    private func appendServerLog(_ message: String) {
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] [sage-tray] \(message)\n"
+        serverLogQueue.async { [weak self] in
+            guard let self, let handle = self.openAppendLogHandle() else { return }
+            defer { try? handle.close() }
+            if let data = line.data(using: .utf8) {
+                try? handle.write(contentsOf: data)
+            }
+        }
+    }
+
+    private func openAppendLogHandle() -> FileHandle? {
+        let descriptor = open(logPath, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR)
+        guard descriptor >= 0 else { return nil }
+        return FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
     }
 
     /// Show a native macOS dialog to collect the vault passphrase.
