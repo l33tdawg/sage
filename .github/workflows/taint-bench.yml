@@ -1,0 +1,46 @@
+name: Taint Benchmark
+
+# Collects the amd64 side of the governance taint constants. See
+# cmd/sage-taint-bench/README.md; the numbers come from a stand-in until the
+# protocol is implemented.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Benchmark profile
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - smoke
+
+permissions:
+  contents: read
+
+jobs:
+  amd64:
+    name: Measure taint constants on x86_64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Refuse anything but x86_64
+        run: |
+          uname -m
+          go env GOARCH
+          test "$(uname -m)" = x86_64
+          test "$(go env GOARCH)" = amd64
+      - name: Run benchmark
+        env:
+          PROFILE: ${{ inputs.profile }}
+        run: make bench-taint BENCH_ARGS="-profile $PROFILE -require-arch amd64 -data-dir $RUNNER_TEMP"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: taint-bench-amd64
+          path: bench/results/taint-*.json
+          if-no-files-found: error
