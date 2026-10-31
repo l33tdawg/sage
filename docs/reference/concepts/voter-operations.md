@@ -136,14 +136,20 @@ disclosure one. If no replacement is needed, the removal path is
 committed before challenging the old memory, so an interrupted correction may
 leave both records but never neither.
 
-The `dedup` check matches any **other** memory that has left `proposed` (validated,
-committed, challenged, or deprecated) carrying the same content hash. The candidate's
-own row is always excluded, and other still-`proposed` rows are ignored so two in-flight
-identical submissions cannot reject each other. Consequences: identical bytes are
-rejected again after a rejection or deprecation (sticky rejection — the removal path is
-`sage_forget`, and a corrected body must actually change the content to pass dedup), and
-a correction submitted via `sage_remember(replaces_memory_id=...)` therefore carries a
-new content hash.
+For non-task memories, the `dedup` check matches any **other** memory that has left
+`proposed` (validated, committed, challenged, or deprecated) carrying the same content
+hash. The candidate's own row is always excluded, and other still-`proposed` rows are
+ignored so two in-flight identical submissions cannot reject each other. Consequences:
+identical bytes are rejected again after a rejection or deprecation (sticky rejection —
+the removal path is `sage_forget`, and a corrected body must actually change the content
+to pass dedup), and a correction submitted via
+`sage_remember(replaces_memory_id=...)` therefore carries a new content hash.
+
+Tasks are deliberately excluded from this content-hash tombstone. Their permanent
+app-v23 idempotency identity covers caller, exact domain, and canonical `[TASK]` content,
+or an explicit occurrence key. Applying global content dedup would reject a valid move
+of unchanged task content to another domain and would contradict the documented explicit
+key recurrence contract.
 
 That check lives in the voter, so it only covers paths that vote. A co-commit
 (`POST /v1/cocommit/submit`) commits on block inclusion and never consults the

@@ -196,7 +196,8 @@ response is already on-chain even though the governed memory lifecycle remains
 - `idempotency_key`: app-v23 task identity, 1–128 visible ASCII bytes without
   spaces. If omitted, the node derives a permanent semantic key from the exact
   signed agent, resolved domain, and content. Supply a new explicit key only for
-  an intentional recurring occurrence.
+  an intentional recurring occurrence. Task identity, rather than global
+  memory-content dedup, therefore permits identical content in another domain.
 - App-v23 task creation rejects `knowledge_triples` and `linked_memories`;
   create links after the task receipt is confirmed.
 

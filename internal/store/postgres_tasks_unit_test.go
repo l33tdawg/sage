@@ -257,13 +257,45 @@ func TestPostgresClaimTaskBindsActiveAgentAndOwnership(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(mock.Close)
 	store := &PostgresStore{db: mock}
-	mock.ExpectExec(`(?s)UPDATE memories m.*SET assignee = \$2.*FROM agents a.*m\.task_requires_handoff = FALSE.*m\.assignee = \$2.*a\.agent_id = \$2`).
+	mock.ExpectExec(`(?s)UPDATE memories m.*SET assignee = \$2.*FROM agents a.*m\.status != 'deprecated'.*m\.task_requires_handoff = FALSE.*m\.assignee = \$2.*a\.agent_id = \$2`).
 		WithArgs("task-1", "agent-1").
 		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
 
 	claimed, err := store.ClaimTask(context.Background(), "task-1", "agent-1")
 	require.NoError(t, err)
 	require.True(t, claimed)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestPostgresTaskMutationsGuardDeprecatedState(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	t.Cleanup(mock.Close)
+	store := &PostgresStore{db: mock}
+
+	mock.ExpectExec(`(?s)UPDATE memories m.*m\.status != 'deprecated'.*m\.task_status IN \('planned','in_progress'\).*m\.assignee = \$2`).
+		WithArgs("deprecated-task", "agent-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	claimed, err := store.ClaimTask(context.Background(), "deprecated-task", "agent-1")
+	require.NoError(t, err)
+	require.False(t, claimed)
+
+	mock.ExpectExec(`(?s)UPDATE memories SET task_status = \$2.*WHERE memory_id = \$1 AND memory_type = 'task' AND status != 'deprecated'`).
+		WithArgs("deprecated-task", string(memory.TaskStatusDone)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	require.ErrorContains(t,
+		store.UpdateTaskStatus(context.Background(), "deprecated-task", memory.TaskStatusDone),
+		"deprecated",
+	)
+
+	mock.ExpectExec(`(?s)UPDATE memories m SET task_status = \$3.*m\.status != 'deprecated'.*m\.assignee = \$2`).
+		WithArgs("deprecated-task", "agent-1", string(memory.TaskStatusDone)).
+		WillReturnResult(pgxmock.NewResult("UPDATE", 0))
+	completed, err := store.CompleteTaskAsAgent(
+		context.Background(), "deprecated-task", "agent-1", memory.TaskStatusDone,
+	)
+	require.NoError(t, err)
+	require.False(t, completed)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
