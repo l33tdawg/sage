@@ -1,0 +1,1246 @@
+{
+  "schema": "sage-taint-bench/v1",
+  "stand_in": true,
+  "notice": "STAND-IN MEASUREMENT: the taint protocol is not implemented yet. These numbers come from a stand-in over real Badger using the key layouts and costs planned in RFC #460, not from SAGE consensus code. There is no AppHash, CometBFT, SQL mirror or real node here. All constants stay provisional.",
+  "machine": {
+    "os": "linux",
+    "goarch": "amd64",
+    "uname_m": "x86_64",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+    "logical_cpus": 4,
+    "go_version": "go1.26.10"
+  },
+  "commit": {
+    "sha": "cc773aeb1b6ee38f78a9e0f3e05e6db64259d110",
+    "dirty": false
+  },
+  "config": {
+    "Profile": "full",
+    "Repeats": 20,
+    "BackgroundRecords": 100000,
+    "Chains": 8,
+    "FrontierEntries": 16384,
+    "FrontierDecisions": 4,
+    "FlatRecords": 600,
+    "ContentBytes": 4096,
+    "UnitCeiling": 65536,
+    "BlockCeiling": 4194304
+  },
+  "tombstone": {
+    "samples": [
+      {
+        "key_bytes": 128,
+        "deletes_fit_in_one_txn": 71902,
+        "txn_accounted_overhead_bytes": 12
+      },
+      {
+        "key_bytes": 256,
+        "deletes_fit_in_one_txn": 37560,
+        "txn_accounted_overhead_bytes": 12
+      },
+      {
+        "key_bytes": 584,
+        "deletes_fit_in_one_txn": 16889,
+        "txn_accounted_overhead_bytes": 12
+      }
+    ],
+    "proposed_constant_bytes": 20,
+    "disk_cross_check": [
+      {
+        "key_bytes": 128,
+        "sst_bytes_per_delete": 143.94315,
+        "sst_overhead_bytes": 15.943150000000003
+      },
+      {
+        "key_bytes": 256,
+        "sst_bytes_per_delete": 296.9569,
+        "sst_overhead_bytes": 40.95690000000002
+      },
+      {
+        "key_bytes": 584,
+        "sst_bytes_per_delete": 708.8991,
+        "sst_overhead_bytes": 124.89909999999998
+      }
+    ],
+    "note": "proposed constant = txn accounted overhead + 8-byte version suffix. Disk figures are snappy-compressed and include SST index and bloom data, so they are a cross-check and stay out of the digest."
+  },
+  "constants": {
+    "unit_ceiling": {
+      "provisional": 65536,
+      "worst_seeded_demand": 235553,
+      "worst_extrapolated_demand_at_8192_candidates": 241206272,
+      "scenarios_failed_closed": [
+        "uuid/deep_walk_64_coauthors",
+        "uuid/flat_pre_v30_64_coauthors",
+        "uuid/wide_frontier",
+        "cap512/deep_walk_64_coauthors",
+        "cap512/flat_pre_v30_64_coauthors",
+        "cap512/wide_frontier"
+      ],
+      "worst_p95_ms_at_ceiling": 246.13699
+    },
+    "block_write_ceiling": {
+      "provisional_bytes": 4194304,
+      "worst_valid_block_estimate_bytes": 3119292,
+      "worst_valid_block_actual_bytes": 1643536,
+      "estimate_bytes_per_worst_submit": 80157,
+      "worst_submits_that_fit_block_ceiling": 52,
+      "scenarios_rejected_by_process_proposal": [
+        "uuid/expand_sweep_12",
+        "cap512/full_admission",
+        "cap512/mixed_expand",
+        "cap512/mixed_cleanup",
+        "cap512/expand_sweep_12"
+      ]
+    },
+    "tombstone_constant_bytes": 20,
+    "expansion": {
+      "new_memberships_per_execution_ceiling": 256,
+      "new_memberships_per_execution_reachable": 204,
+      "estimate_bytes_per_expand_tx": 365124,
+      "expand_txs_that_fit_block_ceiling": 11,
+      "planned_expand_cleanup_txs_per_block": 4,
+      "new_memberships_per_block_at_planned_limit": 816,
+      "new_memberships_per_block_at_byte_ceiling": 2244,
+      "expansion_cap_per_decision_provisional": 16384
+    },
+    "encoded_sizes": {
+      "membership_triple_bytes_actual": 1784,
+      "membership_triple_bytes_rfc_derivation": 1728,
+      "header_entry_bytes_actual": 1172,
+      "header_entry_bytes_rfc_derivation": 1280
+    }
+  },
+  "reads": [
+    {
+      "deterministic": {
+        "name": "deep_walk_64_coauthors",
+        "id_profile": "uuid",
+        "candidates": 8,
+        "units_charged": 65502,
+        "failed_closed_at_ceiling": true,
+        "demand_units_uncapped": 235553,
+        "extrapolated_demand_at_8192_candidates": 241206272,
+        "ceiling_equal_to_demand_succeeds": true,
+        "ceiling_one_below_demand_fails_closed": true
+      },
+      "timing_at_ceiling": {
+        "samples": 20,
+        "p50_ms": 47.400371,
+        "p95_ms": 61.212521,
+        "max_ms": 69.688602
+      },
+      "uncapped_ms": 286.929246
+    },
+    {
+      "deterministic": {
+        "name": "flat_pre_v30_64_coauthors",
+        "id_profile": "uuid",
+        "candidates": 600,
+        "units_charged": 65536,
+        "failed_closed_at_ceiling": true,
+        "demand_units_uncapped": 81601,
+        "extrapolated_demand_at_8192_candidates": 1114125,
+        "ceiling_equal_to_demand_succeeds": true,
+        "ceiling_one_below_demand_fails_closed": true
+      },
+      "timing_at_ceiling": {
+        "samples": 20,
+        "p50_ms": 117.138057,
+        "p95_ms": 246.13699,
+        "max_ms": 262.186866
+      },
+      "uncapped_ms": 149.215463
+    },
+    {
+      "deterministic": {
+        "name": "wide_frontier",
+        "id_profile": "uuid",
+        "candidates": 0,
+        "units_charged": 65536,
+        "failed_closed_at_ceiling": true,
+        "demand_units_uncapped": 65545,
+        "ceiling_equal_to_demand_succeeds": true,
+        "ceiling_one_below_demand_fails_closed": true
+      },
+      "timing_at_ceiling": {
+        "samples": 20,
+        "p50_ms": 24.699752,
+        "p95_ms": 25.348534,
+        "max_ms": 31.402454
+      },
+      "uncapped_ms": 24.262924
+    },
+    {
+      "deterministic": {
+        "name": "deep_walk_64_coauthors",
+        "id_profile": "cap512",
+        "candidates": 8,
+        "units_charged": 65502,
+        "failed_closed_at_ceiling": true,
+        "demand_units_uncapped": 235553,
+        "extrapolated_demand_at_8192_candidates": 241206272,
+        "ceiling_equal_to_demand_succeeds": true,
+        "ceiling_one_below_demand_fails_closed": true
+      },
+      "timing_at_ceiling": {
+        "samples": 20,
+        "p50_ms": 35.51565,
+        "p95_ms": 41.960639,
+        "max_ms": 44.926942
+      },
+      "uncapped_ms": 144.591525
+    },
+    {
+      "deterministic": {
+        "name": "flat_pre_v30_64_coauthors",
+        "id_profile": "cap512",
+        "candidates": 600,
+        "units_charged": 65536,
+        "failed_closed_at_ceiling": true,
+        "demand_units_uncapped": 81601,
+        "extrapolated_demand_at_8192_candidates": 1114125,
+        "ceiling_equal_to_demand_succeeds": true,
+        "ceiling_one_below_demand_fails_closed": true
+      },
+      "timing_at_ceiling": {
+        "samples": 20,
+        "p50_ms": 120.35434,
+        "p95_ms": 127.917786,
+        "max_ms": 138.770487
+      },
+      "uncapped_ms": 151.59235
+    },
+    {
+      "deterministic": {
+        "name": "wide_frontier",
+        "id_profile": "cap512",
+        "candidates": 0,
+        "units_charged": 65536,
+        "failed_closed_at_ceiling": true,
+        "demand_units_uncapped": 65545,
+        "ceiling_equal_to_demand_succeeds": true,
+        "ceiling_one_below_demand_fails_closed": true
+      },
+      "timing_at_ceiling": {
+        "samples": 20,
+        "p50_ms": 43.314098,
+        "p95_ms": 49.644757,
+        "max_ms": 57.554193
+      },
+      "uncapped_ms": 43.617875
+    }
+  ],
+  "blocks": [
+    {
+      "name": "full_admission",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 64,
+        "txs_by_kind": {
+          "submit": 64
+        },
+        "units": 40000,
+        "max_units_by_kind": {
+          "submit": 625
+        },
+        "generated_taint_bytes": 465920,
+        "other_write_bytes": 1017280,
+        "v30_write_bytes": 734272,
+        "estimate_bytes": 1200192,
+        "write_set_entries": 6528,
+        "write_set_badger_accounted_bytes": 1561536,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 64,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 0,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 976.141735,
+        "p95_ms": 998.437901,
+        "max_ms": 1029.451448
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 10.04632,
+        "p95_ms": 11.264572,
+        "max_ms": 12.43067
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 1.670657,
+        "p95_ms": 3.439692,
+        "max_ms": 3.965401
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 987.018007,
+        "p95_ms": 1010.391472,
+        "max_ms": 1045.847519
+      }
+    },
+    {
+      "name": "mixed_expand",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 64,
+        "txs_by_kind": {
+          "apply": 1,
+          "expand": 4,
+          "submit": 59
+        },
+        "units": 39264,
+        "max_units_by_kind": {
+          "apply": 1023,
+          "expand": 1020,
+          "submit": 579
+        },
+        "generated_taint_bytes": 792941,
+        "other_write_bytes": 937805,
+        "v30_write_bytes": 676907,
+        "estimate_bytes": 2932156,
+        "write_set_entries": 9081,
+        "write_set_badger_accounted_bytes": 1839618,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 64,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 1016,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 1673.27033,
+        "p95_ms": 1692.730906,
+        "max_ms": 1739.603926
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 16.018715,
+        "p95_ms": 18.467107,
+        "max_ms": 18.608358
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 1.973613,
+        "p95_ms": 2.308268,
+        "max_ms": 6.24491
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 1693.607802,
+        "p95_ms": 1712.197185,
+        "max_ms": 1754.029923
+      }
+    },
+    {
+      "name": "mixed_cleanup",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 64,
+        "txs_by_kind": {
+          "apply": 1,
+          "cleanup": 4,
+          "submit": 59
+        },
+        "units": 35028,
+        "max_units_by_kind": {
+          "apply": 1023,
+          "cleanup": 1023,
+          "submit": 507
+        },
+        "generated_taint_bytes": 797733,
+        "other_write_bytes": 937805,
+        "v30_write_bytes": 676907,
+        "estimate_bytes": 3119292,
+        "write_set_entries": 8889,
+        "write_set_badger_accounted_bytes": 1787786,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 64,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 204,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 1658.567351,
+        "p95_ms": 1693.447032,
+        "max_ms": 1697.062685
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 15.330041,
+        "p95_ms": 16.492983,
+        "max_ms": 17.618128
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 1.999569,
+        "p95_ms": 2.373401,
+        "max_ms": 2.409981
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 1676.141973,
+        "p95_ms": 1711.288457,
+        "max_ms": 1713.781907
+      }
+    },
+    {
+      "name": "cleanup_only",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 4,
+        "txs_by_kind": {
+          "cleanup": 4
+        },
+        "units": 4092,
+        "max_units_by_kind": {
+          "cleanup": 1023
+        },
+        "generated_taint_bytes": 348816,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 1647632,
+        "write_set_entries": 2728,
+        "write_set_badger_accounted_bytes": 327152,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 4,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 0,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 3.36659,
+        "p95_ms": 3.472969,
+        "max_ms": 3.498617
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 4.649631,
+        "p95_ms": 4.885582,
+        "max_ms": 4.973587
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 0.859929,
+        "p95_ms": 1.025589,
+        "max_ms": 1.06339
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 8.804444,
+        "p95_ms": 9.379392,
+        "max_ms": 9.448791
+      }
+    },
+    {
+      "name": "expand_sweep_1",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 1,
+        "txs_by_kind": {
+          "expand": 1
+        },
+        "units": 1020,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 72613,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 365124,
+        "write_set_entries": 612,
+        "write_set_badger_accounted_bytes": 79937,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 1,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 203,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 1.509214,
+        "p95_ms": 1.783488,
+        "max_ms": 1.834122
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 0.936182,
+        "p95_ms": 1.014929,
+        "max_ms": 1.070203
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 0.628887,
+        "p95_ms": 0.788606,
+        "max_ms": 0.889955
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 3.081776,
+        "p95_ms": 3.327856,
+        "max_ms": 3.402087
+      }
+    },
+    {
+      "name": "expand_sweep_2",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 2,
+        "txs_by_kind": {
+          "expand": 2
+        },
+        "units": 2040,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 145226,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 730248,
+        "write_set_entries": 1224,
+        "write_set_badger_accounted_bytes": 159874,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 2,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 406,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 3.324511,
+        "p95_ms": 3.450406,
+        "max_ms": 3.468861
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 1.830556,
+        "p95_ms": 1.891149,
+        "max_ms": 1.907719
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 0.761074,
+        "p95_ms": 1.081243,
+        "max_ms": 1.525555
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 5.86742,
+        "p95_ms": 6.20951,
+        "max_ms": 6.687665
+      }
+    },
+    {
+      "name": "expand_sweep_4",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 4,
+        "txs_by_kind": {
+          "expand": 4
+        },
+        "units": 4080,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 290452,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 1460496,
+        "write_set_entries": 2448,
+        "write_set_badger_accounted_bytes": 319748,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 4,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 812,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 7.259754,
+        "p95_ms": 10.322316,
+        "max_ms": 11.815538
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 3.750158,
+        "p95_ms": 4.43027,
+        "max_ms": 47.304963
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 0.894504,
+        "p95_ms": 1.12209,
+        "max_ms": 1.137288
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 11.642987,
+        "p95_ms": 15.608768,
+        "max_ms": 60.257789
+      }
+    },
+    {
+      "name": "expand_sweep_8",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 8,
+        "txs_by_kind": {
+          "expand": 8
+        },
+        "units": 8160,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 580904,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 2920992,
+        "write_set_entries": 4896,
+        "write_set_badger_accounted_bytes": 639496,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 8,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 1624,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 18.991798,
+        "p95_ms": 19.849774,
+        "max_ms": 54.413859
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 7.508971,
+        "p95_ms": 8.379701,
+        "max_ms": 8.69465
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 1.087796,
+        "p95_ms": 1.281739,
+        "max_ms": 1.315001
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 27.551226,
+        "p95_ms": 29.290169,
+        "max_ms": 61.704301
+      }
+    },
+    {
+      "name": "expand_sweep_11",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 11,
+        "txs_by_kind": {
+          "expand": 11
+        },
+        "units": 11220,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 798743,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 4016364,
+        "write_set_entries": 6732,
+        "write_set_badger_accounted_bytes": 879307,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 11,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 2233,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 31.944636,
+        "p95_ms": 35.01837,
+        "max_ms": 35.160373
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 12.383372,
+        "p95_ms": 13.100855,
+        "max_ms": 13.136772
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 1.214903,
+        "p95_ms": 1.331672,
+        "max_ms": 1.360946
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 45.522062,
+        "p95_ms": 49.269497,
+        "max_ms": 49.540555
+      }
+    },
+    {
+      "name": "expand_sweep_12",
+      "id_profile": "uuid",
+      "deterministic": {
+        "txs": 12,
+        "txs_by_kind": {
+          "expand": 12
+        },
+        "units": 12240,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 871356,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 4381488,
+        "write_set_entries": 7344,
+        "write_set_badger_accounted_bytes": 959244,
+        "process_proposal": "reject",
+        "txs_selected_by_prepare_proposal": 11,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 2436,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 31.308997,
+        "p95_ms": 39.014224,
+        "max_ms": 41.118719
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 12.963238,
+        "p95_ms": 13.912287,
+        "max_ms": 17.098645
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 1.26615,
+        "p95_ms": 2.785222,
+        "max_ms": 3.187484
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 45.828627,
+        "p95_ms": 56.292848,
+        "max_ms": 57.306703
+      }
+    },
+    {
+      "name": "full_admission",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 64,
+        "txs_by_kind": {
+          "submit": 64
+        },
+        "units": 40000,
+        "max_units_by_kind": {
+          "submit": 625
+        },
+        "generated_taint_bytes": 2415616,
+        "other_write_bytes": 3119296,
+        "v30_write_bytes": 2714432,
+        "estimate_bytes": 5130048,
+        "write_set_entries": 6528,
+        "write_set_badger_accounted_bytes": 5613248,
+        "process_proposal": "reject",
+        "txs_selected_by_prepare_proposal": 52,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 0,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 1292.706769,
+        "p95_ms": 1344.330611,
+        "max_ms": 1347.332996
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 16.952886,
+        "p95_ms": 19.574148,
+        "max_ms": 24.943106
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 4.155275,
+        "p95_ms": 7.29505,
+        "max_ms": 7.662722
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 1315.984153,
+        "p95_ms": 1364.261556,
+        "max_ms": 1367.506546
+      }
+    },
+    {
+      "name": "mixed_expand",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 64,
+        "txs_by_kind": {
+          "apply": 1,
+          "expand": 4,
+          "submit": 59
+        },
+        "units": 39264,
+        "max_units_by_kind": {
+          "apply": 1023,
+          "expand": 1020,
+          "submit": 579
+        },
+        "generated_taint_bytes": 4045925,
+        "other_write_bytes": 2875601,
+        "v30_write_bytes": 2502367,
+        "estimate_bytes": 6554992,
+        "write_set_entries": 9081,
+        "write_set_badger_accounted_bytes": 7030398,
+        "process_proposal": "reject",
+        "txs_selected_by_prepare_proposal": 34,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 1016,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 1961.838876,
+        "p95_ms": 2821.896041,
+        "max_ms": 3548.921417
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 24.251489,
+        "p95_ms": 36.770224,
+        "max_ms": 38.074697
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 5.251026,
+        "p95_ms": 10.133873,
+        "max_ms": 14.529871
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 1993.773131,
+        "p95_ms": 2848.809237,
+        "max_ms": 3600.221512
+      }
+    },
+    {
+      "name": "mixed_cleanup",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 64,
+        "txs_by_kind": {
+          "apply": 1,
+          "cleanup": 4,
+          "submit": 59
+        },
+        "units": 35028,
+        "max_units_by_kind": {
+          "apply": 1023,
+          "cleanup": 1023,
+          "submit": 507
+        },
+        "generated_taint_bytes": 3957421,
+        "other_write_bytes": 2875601,
+        "v30_write_bytes": 2502367,
+        "estimate_bytes": 6742128,
+        "write_set_entries": 8889,
+        "write_set_badger_accounted_bytes": 6885270,
+        "process_proposal": "reject",
+        "txs_selected_by_prepare_proposal": 32,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 204,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 1995.446183,
+        "p95_ms": 2095.63019,
+        "max_ms": 2125.864885
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 24.992075,
+        "p95_ms": 29.742266,
+        "max_ms": 33.937839
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 4.897959,
+        "p95_ms": 8.894519,
+        "max_ms": 9.872974
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 2031.069328,
+        "p95_ms": 2124.490095,
+        "max_ms": 2153.428012
+      }
+    },
+    {
+      "name": "cleanup_only",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 4,
+        "txs_by_kind": {
+          "cleanup": 4
+        },
+        "units": 4092,
+        "max_units_by_kind": {
+          "cleanup": 1023
+        },
+        "generated_taint_bytes": 1643536,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 1647632,
+        "write_set_entries": 2728,
+        "write_set_badger_accounted_bytes": 1621872,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 4,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 0,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 5.803832,
+        "p95_ms": 7.982501,
+        "max_ms": 11.849191
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 7.023528,
+        "p95_ms": 9.328961,
+        "max_ms": 9.486762
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 2.037798,
+        "p95_ms": 3.160411,
+        "max_ms": 5.929208
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 14.779885,
+        "p95_ms": 18.795221,
+        "max_ms": 24.449013
+      }
+    },
+    {
+      "name": "expand_sweep_1",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 1,
+        "txs_by_kind": {
+          "expand": 1
+        },
+        "units": 1020,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 363449,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 365124,
+        "write_set_entries": 612,
+        "write_set_badger_accounted_bytes": 370773,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 1,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 203,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 4.355229,
+        "p95_ms": 7.406435,
+        "max_ms": 10.895992
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 1.829387,
+        "p95_ms": 2.001369,
+        "max_ms": 2.649594
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 1.028296,
+        "p95_ms": 2.275913,
+        "max_ms": 3.58729
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 7.363525,
+        "p95_ms": 12.668814,
+        "max_ms": 13.137762
+      }
+    },
+    {
+      "name": "expand_sweep_2",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 2,
+        "txs_by_kind": {
+          "expand": 2
+        },
+        "units": 2040,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 726898,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 730248,
+        "write_set_entries": 1224,
+        "write_set_badger_accounted_bytes": 741546,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 2,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 406,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 7.006175,
+        "p95_ms": 8.171338,
+        "max_ms": 8.838459
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 2.847995,
+        "p95_ms": 2.982617,
+        "max_ms": 3.576142
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 1.084913,
+        "p95_ms": 1.476876,
+        "max_ms": 1.606069
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 10.892436,
+        "p95_ms": 12.223418,
+        "max_ms": 14.02067
+      }
+    },
+    {
+      "name": "expand_sweep_4",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 4,
+        "txs_by_kind": {
+          "expand": 4
+        },
+        "units": 4080,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 1453796,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 1460496,
+        "write_set_entries": 2448,
+        "write_set_badger_accounted_bytes": 1483092,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 4,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 812,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 21.305252,
+        "p95_ms": 25.257745,
+        "max_ms": 27.537367
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 6.677519,
+        "p95_ms": 7.19537,
+        "max_ms": 7.810131
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 1.46289,
+        "p95_ms": 1.627408,
+        "max_ms": 1.996314
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 29.742738,
+        "p95_ms": 33.354625,
+        "max_ms": 35.773616
+      }
+    },
+    {
+      "name": "expand_sweep_8",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 8,
+        "txs_by_kind": {
+          "expand": 8
+        },
+        "units": 8160,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 2907592,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 2920992,
+        "write_set_entries": 4896,
+        "write_set_badger_accounted_bytes": 2966184,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 8,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 1624,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 43.215368,
+        "p95_ms": 60.954141,
+        "max_ms": 61.258871
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 14.711731,
+        "p95_ms": 23.060582,
+        "max_ms": 23.961158
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 4.080163,
+        "p95_ms": 4.593025,
+        "max_ms": 6.864177
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 62.75376,
+        "p95_ms": 84.544966,
+        "max_ms": 86.511668
+      }
+    },
+    {
+      "name": "expand_sweep_11",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 11,
+        "txs_by_kind": {
+          "expand": 11
+        },
+        "units": 11220,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 3997939,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 4016364,
+        "write_set_entries": 6732,
+        "write_set_badger_accounted_bytes": 4078503,
+        "process_proposal": "accept",
+        "txs_selected_by_prepare_proposal": 11,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 2233,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 95.84186,
+        "p95_ms": 135.699107,
+        "max_ms": 157.574744
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 29.034692,
+        "p95_ms": 53.909373,
+        "max_ms": 59.087996
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 9.065895,
+        "p95_ms": 27.062432,
+        "max_ms": 33.746141
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 141.811715,
+        "p95_ms": 193.76749,
+        "max_ms": 209.11059
+      }
+    },
+    {
+      "name": "expand_sweep_12",
+      "id_profile": "cap512",
+      "deterministic": {
+        "txs": 12,
+        "txs_by_kind": {
+          "expand": 12
+        },
+        "units": 12240,
+        "max_units_by_kind": {
+          "expand": 1020
+        },
+        "generated_taint_bytes": 4361388,
+        "other_write_bytes": 0,
+        "v30_write_bytes": 0,
+        "estimate_bytes": 4381488,
+        "write_set_entries": 7344,
+        "write_set_badger_accounted_bytes": 4449276,
+        "process_proposal": "reject",
+        "txs_selected_by_prepare_proposal": 11,
+        "overflowed_txs": 0,
+        "new_expansion_memberships": 2436,
+        "actual_le_estimate_every_tx": true
+      },
+      "finalize_stage_flush": {
+        "samples": 20,
+        "p50_ms": 72.521314,
+        "p95_ms": 142.964606,
+        "max_ms": 157.121421
+      },
+      "commit": {
+        "samples": 20,
+        "p50_ms": 19.106435,
+        "p95_ms": 61.191142,
+        "max_ms": 65.657874
+      },
+      "sync": {
+        "samples": 20,
+        "p50_ms": 6.078411,
+        "p95_ms": 22.730702,
+        "max_ms": 25.208782
+      },
+      "total": {
+        "samples": 20,
+        "p50_ms": 94.670535,
+        "p95_ms": 213.29204,
+        "max_ms": 222.434996
+      }
+    }
+  ],
+  "real_node_counts": {
+    "measured": false,
+    "reason": "no node copy supplied; pass -node-copy with a copy of a stopped node's Badger directory",
+    "memory_records": null,
+    "over_cap_ids": null,
+    "adopted_records": null,
+    "migrated_records": null,
+    "migrated_reason": "no marker distinguishes a migrated record until app-v30 adds one, so this count cannot be taken from today's state"
+  },
+  "deterministic_digest": "7bb2df6399f3c581178f9c0821e0d825c33850a39e1f7eced163f03f3a6fcd58",
+  "invariants": {
+    "passed": true,
+    "failures": []
+  }
+}
