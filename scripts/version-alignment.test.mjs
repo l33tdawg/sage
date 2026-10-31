@@ -82,7 +82,7 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/UPGRADING.md', '| v11.23.23 | Close reviewed messages without replies'],
     ['docs/UPGRADING.md', '| v11.23.24 | Unified agent lookup'],
     ['docs/UPGRADING.md', '| v11.23.25 | A domainless '],
-    ['docs/UPGRADING.md', `| v${version} | AMID operator recovery for signer fences: `],
+    ['docs/UPGRADING.md', `| v${version} | macOS restart supervision: `],
     ['docs/ROADMAP.md', `## v${version} release`],
     ['docs/UPGRADING.md', 'The recovery commands in this guide require SAGE v11.18.0 or later.'],
     ['docs/UPGRADING.md', '`backup --full`, `restore --from`,'],
