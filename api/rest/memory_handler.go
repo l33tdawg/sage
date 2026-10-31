@@ -3841,6 +3841,10 @@ func (s *Server) handleUpdateTaskStatus(w http.ResponseWriter, r *http.Request) 
 		writeProblem(w, http.StatusServiceUnavailable, "Authorization unavailable", "This datastore cannot verify task classification for an agent status change.")
 		return
 	}
+	if rec.Status == memory.StatusDeprecated {
+		writeProblem(w, http.StatusConflict, "Task update conflict", "The task is deprecated and cannot change status.")
+		return
+	}
 
 	var changed bool
 	switch ts {

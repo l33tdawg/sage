@@ -168,6 +168,36 @@ func TestUpdateTaskStatusRejectsOwnerlessInProgress(t *testing.T) {
 	require.Equal(t, string(memory.TaskStatusPlanned), status)
 }
 
+func TestDeprecatedTasksRejectEveryStatusMutation(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	insertOpenTask(t, s, "deprecated-task", "codex")
+	insertActiveTestAgent(t, s, "agent-a", "codex")
+	_, err := s.AssignTaskAndNotify(ctx, "deprecated-task", "agent-a")
+	require.NoError(t, err)
+	_, err = s.writeExecContext(ctx,
+		`UPDATE memories SET status = 'deprecated' WHERE memory_id = 'deprecated-task'`)
+	require.NoError(t, err)
+
+	claimed, err := s.ClaimTask(ctx, "deprecated-task", "agent-a")
+	require.NoError(t, err)
+	require.False(t, claimed)
+	completed, err := s.CompleteTaskAsAgent(ctx, "deprecated-task", "agent-a", memory.TaskStatusDone)
+	require.NoError(t, err)
+	require.False(t, completed)
+	require.ErrorContains(t,
+		s.UpdateTaskStatus(ctx, "deprecated-task", memory.TaskStatusDone),
+		"deprecated",
+	)
+
+	var memoryStatus, taskStatus string
+	require.NoError(t, s.conn.QueryRowContext(ctx,
+		`SELECT status, task_status FROM memories WHERE memory_id = 'deprecated-task'`,
+	).Scan(&memoryStatus, &taskStatus))
+	require.Equal(t, string(memory.StatusDeprecated), memoryStatus)
+	require.Equal(t, string(memory.TaskStatusInProgress), taskStatus)
+}
+
 func TestAssignTaskAndNotify_IdempotentAndVersioned(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

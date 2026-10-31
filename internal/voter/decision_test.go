@@ -53,6 +53,30 @@ func TestDedupCheck_ExcludesCandidateOwnRow(t *testing.T) {
 	}
 }
 
+func TestTaskIdentityBypassesMemoryContentDedup(t *testing.T) {
+	ctx := context.Background()
+	const (
+		body = "[TASK] Move this exact task into another governed domain"
+		hash = "task-content-hash"
+	)
+
+	decision, checks := DecideVerbose(ctx, fakeDup{
+		dups: map[string]bool{hash: true},
+	}, MemoryInput{
+		MemoryID: "task-candidate", Content: body, ContentHash: hash,
+		Domain: "governed-operations", MemType: "task", Confidence: 0.9,
+	})
+	if !decision.Accept {
+		t.Fatalf("task with an app-v23 idempotency identity should accept despite an identical memory hash, got: %s", decision.Reason)
+	}
+	if len(checks) == 0 || checks[0].Name != "dedup" || !checks[0].Pass {
+		t.Fatalf("task dedup check should be an explicit pass, got %+v", checks)
+	}
+	if checks[0].Reason != "task identity is governed by its idempotency key" {
+		t.Fatalf("unexpected task dedup reason: %q", checks[0].Reason)
+	}
+}
+
 // TestDecide pins behavior parity with the legacy 4-archetype validators
 // (cmd/sage-gui/node.go before the per-node voter): the same dedup/quality/
 // consistency rules, now collapsed into one verdict.

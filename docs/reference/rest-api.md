@@ -724,9 +724,10 @@ CEREBRUM operator board. Agents cannot set `planned` or reopen terminal work.
 **Response** (HTTP 200): `{"memory_id": "...", "task_status": "..."}`
 
 The handler rechecks current domain write authority and classification/read
-authority before changing the row. `409` means the task is terminal or is not
-currently assigned to this exact agent. Current-generation Admins may act only
-from localhost; Root, historical Root, inactive/stale agents, and Managers
+authority before changing the row. `409` means the task is deprecated or
+otherwise terminal, or is not currently assigned to this exact agent. A
+deprecated task never changes `task_status`. Current-generation Admins may act
+only from localhost; Root, historical Root, inactive/stale agents, and Managers
 targeting another assignee are denied.
 
 ---

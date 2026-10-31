@@ -5532,7 +5532,7 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, tas
 		    task_status_updated_at = CASE WHEN task_status != ?
 		      THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE task_status_updated_at END,
 		    task_status = ?
-		WHERE memory_id = ? AND memory_type = 'task'
+		WHERE memory_id = ? AND memory_type = 'task' AND status != 'deprecated'
 		  AND (? != 'in_progress' OR (task_status NOT IN ('done','dropped') AND COALESCE(assignee, '') != ''))`
 	args := []any{string(taskStatus), string(taskStatus), string(taskStatus), string(taskStatus), memoryID, string(taskStatus)}
 	if terminal {
@@ -5549,7 +5549,7 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, tas
 			      WHEN EXISTS (SELECT 1 FROM network_agents a WHERE a.agent_id = memories.submitting_agent) THEN submitting_agent
 			      ELSE '' END,
 			    task_requires_handoff = 1
-			WHERE memory_id = ? AND memory_type = 'task'`
+			WHERE memory_id = ? AND memory_type = 'task' AND status != 'deprecated'`
 		args = []any{string(taskStatus), string(taskStatus), string(taskStatus), memoryID}
 	}
 	result, err := s.writeExecContext(ctx, query, args...)
@@ -5558,7 +5558,7 @@ func (s *SQLiteStore) UpdateTaskStatus(ctx context.Context, memoryID string, tas
 	}
 	n, _ := result.RowsAffected()
 	if n == 0 {
-		return fmt.Errorf("task not found or in_progress requires an assignee: %s", memoryID)
+		return fmt.Errorf("task not found, deprecated, or in_progress requires an assignee: %s", memoryID)
 	}
 	if terminal {
 		if _, err := s.writeExecContext(ctx,
@@ -5989,7 +5989,7 @@ func (s *SQLiteStore) ClaimTask(ctx context.Context, memoryID, agentID string) (
 		     task_picked_up_at = CASE
 		       WHEN COALESCE(assignee, '') = '' OR task_picked_up_at IS NULL
 		       THEN strftime('%Y-%m-%dT%H:%M:%fZ', 'now') ELSE task_picked_up_at END
-		 WHERE memory_id = ? AND memory_type = 'task'
+		 WHERE memory_id = ? AND memory_type = 'task' AND status != 'deprecated'
 		   AND task_status IN ('planned','in_progress')
 		   AND task_requires_handoff = 0
 		   AND assignee = ?
@@ -6026,7 +6026,7 @@ func (s *SQLiteStore) CompleteTaskAsAgent(ctx context.Context, memoryID, agentID
 		     task_board_position = 0,
 		     task_status_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
 		     task_requires_handoff = 1
-		 WHERE memory_id = ? AND memory_type = 'task'
+		 WHERE memory_id = ? AND memory_type = 'task' AND status != 'deprecated'
 		   AND task_status IN ('planned','in_progress') AND assignee = ?
 		   AND EXISTS (SELECT 1 FROM network_agents a
 		               WHERE a.agent_id = ? AND a.status = 'active' AND a.removed_at IS NULL)`,
