@@ -2590,7 +2590,7 @@ func runServe(startupProof string) (rerr error) {
 	var shutdownErrs []error
 	// Stop MCP admission and cancel/join active tool calls first. Close cancels
 	// every admitted handler before waiting, but the wait itself must be bounded:
-	// this machine can carry long-lived stdio bridges and remote MCP sessions,
+	// a desktop node can carry long-lived stdio bridges and remote MCP sessions,
 	// and a wedged handler must not leave the tray supervising a daemon forever.
 	if mcpHTTPTransport != nil {
 		if err := runShutdownStage(

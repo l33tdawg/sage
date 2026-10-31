@@ -23,6 +23,7 @@ class SAGEApp: NSObject, NSApplicationDelegate {
     private let healthCheckInterval: TimeInterval = 5
     private let serverStartupGrace: TimeInterval = 45
     private let unhealthyRestartGrace: TimeInterval = 90
+    private let terminationGrace: TimeInterval = 45
     private let maximumAutomaticRestarts = 5
     private let restartDelays: [TimeInterval] = [1, 2, 4, 8, 16, 30]
 
@@ -103,13 +104,16 @@ class SAGEApp: NSObject, NSApplicationDelegate {
         appendServerLog("application quitting; asking daemon pid \(process.processIdentifier) to stop")
         process.terminate()
         let pid = process.processIdentifier
+        let grace = terminationGrace
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let deadline = Date().addingTimeInterval(20)
+            let deadline = Date().addingTimeInterval(grace)
             while process.isRunning && Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.1)
             }
             if process.isRunning {
-                self?.appendServerLog("daemon pid \(pid) did not stop within 20s; sending SIGKILL")
+                self?.appendServerLog(
+                    "daemon pid \(pid) did not stop within \(Int(grace))s; sending SIGKILL"
+                )
                 kill(pid, SIGKILL)
             }
             DispatchQueue.main.async {
