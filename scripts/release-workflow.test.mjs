@@ -277,6 +277,10 @@ test('native shell evidence is version-locked, private, and cannot promote an un
   assert.match(evidence, /if: needs\.release-metadata\.outputs\.native_shell_required == 'true'/);
   assert.match(evidence, /id: macos-arm64/);
   assert.match(evidence, /id: windows-x64/);
+  assert.match(evidence, /id: macos-arm64\n\s+os: macos-15/);
+  assert.match(nativeShellWorkflow, /- os: macos-15/);
+  assert.doesNotMatch(workflow, /macos-14/);
+  assert.doesNotMatch(nativeShellWorkflow, /macos-14/);
   // macOS and Windows are the shell's target platforms; Linux is not. (v11.11
   // distributes no shell on any platform -- the shell is alpha -- so this is the
   // scope for the eventual v12 distribution and for what CI produces release
