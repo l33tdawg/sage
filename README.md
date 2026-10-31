@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.24.4`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.24.5`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,15 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.24.4 and earlier)</summary>
+<summary>Recent release notes (v11.24.5 and earlier)</summary>
+
+## What's New in v11.24.5
+
+**Task identity is now domain-aware.** App-v23 tasks use their permanent idempotency identity—caller, exact signed domain, canonical `[TASK]` content, or an explicit occurrence key—instead of the global memory-content tombstone. The same task body can exist as a distinct task in another governed domain without being deprecated after consensus.
+
+**Deprecated tasks can no longer mutate.** REST and the SQLite and PostgreSQL stores reject claim, completion, and status changes on deprecated task rows, so a full-ID update cannot report success against a task that has disappeared from the backlog.
+
+**No app-version or data migration.** App-v29 remains active. Container: `ghcr.io/l33tdawg/sage:11.24.5`. SDK 11.24.5.
 
 ## What's New in v11.24.4
 
