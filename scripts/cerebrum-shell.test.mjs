@@ -14,6 +14,7 @@ const federationRouteSource = await readFile(new URL('../web/static/js/federatio
 const federationPeerCapabilitiesSource = await readFile(new URL('../web/static/js/federation-peer-capabilities.js', import.meta.url), 'utf8');
 const bulkSequenceSource = await readFile(new URL('../web/static/js/bulk-sequence.js', import.meta.url), 'utf8');
 const traySource = await readFile(new URL('../cmd/sage-tray/main.swift', import.meta.url), 'utf8');
+const nativeShellWorkflowSource = await readFile(new URL('../.github/workflows/native-shell.yml', import.meta.url), 'utf8');
 const { MRI_LAYOUT, mriBrainstemBias, mriDepthForAge, mriVerticalPosition } = await import('../web/static/js/mri-layout.js');
 
 function inlineScriptBodies(source) {
@@ -1788,6 +1789,8 @@ test('macOS tray supervises daemon exits and preserves restart diagnostics', () 
         'starting a replacement daemon must append to the existing log instead of erasing the failed restart');
     assert.doesNotMatch(traySource, /FileManager\.default\.createFile\(atPath: logPath/,
         'the tray must not recreate or truncate the daemon log on every launch');
+    assert.match(nativeShellWorkflowSource, /swiftc -typecheck -framework Cocoa cmd\/sage-tray\/main\.swift/,
+        'macOS CI must compile the tray source that supervises the daemon');
 });
 
 test('MRI uses one dense shared memory sample limit', () => {
