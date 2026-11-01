@@ -1,0 +1,86 @@
+name: Taint Real Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Real-code benchmark profile
+        required: false
+        default: full
+        type: choice
+        options:
+          - full
+          - smoke
+  pull_request:
+    paths:
+      - ".github/workflows/taint-realbench.yml"
+      - "cmd/sage-taint-realbench/**"
+      - "internal/store/**"
+      - "internal/taint/**"
+      - "internal/tx/**"
+      - "Makefile"
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    name: Real taint code (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            uname: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            uname: aarch64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Assert runner architecture
+        env:
+          WANT_UNAME: ${{ matrix.uname }}
+          WANT_GOARCH: ${{ matrix.arch }}
+        run: |
+          uname -m
+          go env GOARCH
+          test "$(uname -m)" = "$WANT_UNAME"
+          test "$(go env GOARCH)" = "$WANT_GOARCH"
+      - name: Run real-code benchmark
+        env:
+          PROFILE: ${{ inputs.profile || 'full' }}
+          ARCH: ${{ matrix.arch }}
+        run: make bench-taint-real BENCH_ARGS="-profile $PROFILE -require-arch $ARCH -data-dir $RUNNER_TEMP"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: taint-real-${{ matrix.arch }}
+          path: bench/results/taint-real-*.json
+          if-no-files-found: error
+
+  compare:
+    name: Compare real-code arm64/amd64 digest
+    needs: measure
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: taint-real-*
+          path: bench/results
+          merge-multiple: true
+      - name: Compare deterministic digests
+        run: |
+          files=(bench/results/taint-real-*.json)
+          test "${#files[@]}" -eq 2
+          go run ./cmd/sage-taint-realbench -compare "${files[0]},${files[1]}"
