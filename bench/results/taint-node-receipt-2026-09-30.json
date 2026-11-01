@@ -1,0 +1,18 @@
+{
+  "schema": "sage-taint-bench/node-receipt/v1",
+  "source_label": "operator-node",
+  "snapshot_date": "2026-09-30",
+  "command": "sage-taint-bench -receipt \u003cout\u003e -node-copy \u003credacted\u003e -node-label \u003clabel\u003e -snapshot-date \u003cdate\u003e",
+  "commit": {
+    "sha": "cc773aeb1b6ee38f78a9e0f3e05e6db64259d110",
+    "dirty": false
+  },
+  "counts": {
+    "measured": true,
+    "memory_records": 22713,
+    "over_cap_ids": 0,
+    "adopted_records": 1315,
+    "migrated_records": null,
+    "migrated_reason": "no marker distinguishes a migrated record until app-v30 adds one, so this count cannot be taken from today's state"
+  }
+}

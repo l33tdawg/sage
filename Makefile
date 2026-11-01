@@ -121,6 +121,9 @@ bench-locomo: bench-locomo-fetch ## Run full LoCoMo benchmark; writes bench/resu
 	pip install -q -r bench/locomo/requirements.txt && \
 		LOCOMO_DATA_PATH=bench/locomo/data/locomo10.json PYTHONUNBUFFERED=1 python3 bench/locomo/run.py $(BENCH_ARGS)
 
+bench-taint: ## Measure governance taint constants (stand-in over Badger); writes bench/results/taint-<sha>-<goarch>.json
+	go run ./cmd/sage-taint-bench -out bench/results/taint-$$(git rev-parse --short HEAD)-$$(go env GOARCH).json $(BENCH_ARGS)
+
 sdk-test: ## Run Python SDK tests
 	cd sdk/python && pip install -e ".[dev]" && pytest -v
 
