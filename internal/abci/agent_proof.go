@@ -34,6 +34,12 @@ type signedAgentRequest struct {
 	body   []byte
 }
 
+type derivedFromProofParent struct {
+	SourceChainID string `json:"source_chain_id"`
+	MemoryID      string `json:"memory_id"`
+	ContentHash   string `json:"content_hash"`
+}
+
 // enforceDelegatedAgentProof closes the delegated-signing gap that existed in
 // the original app-v17 candidate. When the outer transaction signer is not the
 // agent, consensus must independently prove that the signed HTTP request maps
@@ -277,6 +283,35 @@ func parseSignedAgentRequest(raw []byte) (signedAgentRequest, error) {
 		return signedAgentRequest{}, fmt.Errorf("signed request line contains invalid characters")
 	}
 	return signedAgentRequest{method: method, path: path, body: body}, nil
+}
+
+func decodeDerivedFromProofParents(input []derivedFromProofParent) ([]tx.ParentRef, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	refs := make([]tx.ParentRef, 0, len(input))
+	for i, parent := range input {
+		decoded, err := hex.DecodeString(parent.ContentHash)
+		if err != nil || len(decoded) != sha256.Size ||
+			hex.EncodeToString(decoded) != parent.ContentHash {
+			return nil, fmt.Errorf(
+				"signed derived_from parent %d content_hash must be lowercase %d-byte hex",
+				i,
+				sha256.Size,
+			)
+		}
+		ref := tx.ParentRef{
+			SourceChainID: parent.SourceChainID,
+			MemoryID:      parent.MemoryID,
+		}
+		copy(ref.ContentHash[:], decoded)
+		refs = append(refs, ref)
+	}
+	tx.SortParentRefs(refs)
+	if _, err := tx.EncodeDerivedFromExtension(refs); err != nil {
+		return nil, fmt.Errorf("signed derived_from lineage is invalid: %w", err)
+	}
+	return refs, nil
 }
 
 func (r signedAgentRequest) pathParts() ([]string, error) {
@@ -531,15 +566,16 @@ func (app *SageApp) verifySignedAgentAction(
 			return err
 		}
 		var body struct {
-			Content         string          `json:"content"`
-			MemoryType      string          `json:"memory_type"`
-			DomainTag       string          `json:"domain_tag"`
-			ConfidenceScore float64         `json:"confidence_score"`
-			Classification  int             `json:"classification,omitempty"`
-			Embedding       []float32       `json:"embedding,omitempty"`
-			ParentHash      string          `json:"parent_hash,omitempty"`
-			TaskStatus      json.RawMessage `json:"task_status,omitempty"`
-			Tags            []string        `json:"tags,omitempty"`
+			Content         string                   `json:"content"`
+			MemoryType      string                   `json:"memory_type"`
+			DomainTag       string                   `json:"domain_tag"`
+			ConfidenceScore float64                  `json:"confidence_score"`
+			Classification  int                      `json:"classification,omitempty"`
+			Embedding       []float32                `json:"embedding,omitempty"`
+			ParentHash      string                   `json:"parent_hash,omitempty"`
+			TaskStatus      json.RawMessage          `json:"task_status,omitempty"`
+			Tags            []string                 `json:"tags,omitempty"`
+			DerivedFrom     []derivedFromProofParent `json:"derived_from,omitempty"`
 		}
 		if err := decodeSignedJSON(req.body, &body, false); err != nil {
 			return err
@@ -550,6 +586,10 @@ func (app *SageApp) verifySignedAgentAction(
 		}
 		if body.Content == "" || body.ConfidenceScore < 0 || body.ConfidenceScore > 1 || body.Classification < 0 || body.Classification > 4 {
 			return fmt.Errorf("signed memory submission fails the REST contract")
+		}
+		expectedDerivedFrom, err := decodeDerivedFromProofParents(body.DerivedFrom)
+		if err != nil {
+			return err
 		}
 		canonicalTaskStatus := ""
 		if len(body.TaskStatus) != 0 {
@@ -614,6 +654,7 @@ func (app *SageApp) verifySignedAgentAction(
 			Classification:  tx.ClearanceLevel(body.Classification), // #nosec G115 -- range checked above
 			TaskStatus:      canonicalTaskStatus,
 			Tags:            canonicalTags,
+			DerivedFrom:     expectedDerivedFrom,
 		}
 
 	case tx.TxTypeMemoryChallenge:
