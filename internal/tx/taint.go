@@ -208,9 +208,9 @@ func DecodeTaintApplyPayload(encoded []byte) (*TaintApplyPayload, error) {
 	if err := validateTaintApplyPayload(*payload); err != nil {
 		return nil, err
 	}
-	canonical, err := EncodeTaintApplyPayload(*payload)
-	if err != nil {
-		return nil, err
+	canonical, encodeErr := EncodeTaintApplyPayload(*payload)
+	if encodeErr != nil {
+		return nil, encodeErr
 	}
 	if !bytes.Equal(canonical, encoded) {
 		return nil, fmt.Errorf("%w: non-canonical encoding", errTaintPayload)
