@@ -33,7 +33,19 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-PROJECT=sage-det
+PROJECT="${DET_PROJECT:-sage-det}"
+case "${PROJECT}" in
+  sage-det|sage-fresh-v30) ;;
+  *) echo "ERROR: unsupported isolated determinism project '${PROJECT}'" >&2; exit 1 ;;
+esac
+FRESH_PROJECT=
+if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+  if [ "${PROJECT}" != "sage-fresh-v30" ]; then
+    echo "ERROR: fresh-v30 proof requires its own sage-fresh-v30 project" >&2
+    exit 1
+  fi
+  FRESH_PROJECT="${PROJECT}"
+fi
 COMPOSE=(docker compose -p "${PROJECT}"
   -f deploy/docker-compose.yml
   -f deploy/docker-compose.test.yml
@@ -44,6 +56,11 @@ fi
 
 cleanup() {
   echo "--- tearing down ${PROJECT} ---"
+  if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+    mkdir -p output/fresh-v30
+    POSTGRES_PASSWORD=ci_test_password "${COMPOSE[@]}" logs --no-color \
+      > output/fresh-v30/container.log 2>&1 || true
+  fi
   # The password is required at interpolation time even for `down`; without it
   # the teardown aborts and every container and volume of the run is left
   # behind. It is the same throwaway value `up` used, never a real secret.
@@ -57,6 +74,11 @@ echo "--- regenerating a fresh 4-node testnet genesis (app_version 0) ---"
 export SAGE_TESTNET_TIMEOUT_COMMIT="${DET_BLOCK_TIME:-3s}"
 echo "--- devnet block time: ${SAGE_TESTNET_TIMEOUT_COMMIT} ---"
 bash deploy/init-testnet.sh
+
+if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+  SAGE_TEST_PREPARE_FRESH_V30=1 go test ./test/integration/ \
+    -tags=integration -run '^TestPrepareAppV30FreshGenesisFixture$' -count=1 -v
+fi
 
 # Build the two shared images ONCE (docker-compose.det.yml resets the per-service
 # build blocks — 8 independent cold builds exhausted Docker's VM disk). Sequential
@@ -92,9 +114,8 @@ else
 fi
 
 echo "--- starting the isolated cluster ---"
-# Only the services the determinism test needs: it submits NO memories, so the
-# ollama embedding stack (which pulls ~1.3GB of models) is skipped — abci depends
-# only on postgres, not ollama.
+# The optional fresh-v30 proof submits memories; unavailable embeddings are
+# queued for repair. Neither proof needs the Ollama model-download service.
 POSTGRES_PASSWORD=ci_test_password "${COMPOSE[@]}" up -d --build \
   postgres abci0 abci1 abci2 abci3 cometbft0 cometbft1 cometbft2 cometbft3
 
@@ -154,6 +175,7 @@ SAGE_TEST_API0=http://localhost:18090 SAGE_TEST_API1=http://localhost:18091 \
 SAGE_TEST_API2=http://localhost:18092 SAGE_TEST_API3=http://localhost:18093 \
 SAGE_TEST_RPC0=http://localhost:36657 SAGE_TEST_RPC1=http://localhost:36757 \
 SAGE_TEST_RPC2=http://localhost:36857 SAGE_TEST_RPC3=http://localhost:36957 \
+SAGE_TEST_FRESH_V30_PROJECT="${FRESH_PROJECT}" \
 go test ./test/integration/ -run "${DET_TEST}" \
   -tags=integration -count=1 -v -timeout "${DET_TIMEOUT:-1800s}" $SHORT_FLAG
 

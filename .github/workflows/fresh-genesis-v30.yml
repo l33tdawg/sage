@@ -1,0 +1,49 @@
+name: Fresh app-v30 quorum
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/fresh-genesis-v30.yml"
+      - "internal/abci/fresh_genesis*"
+      - "internal/store/fresh_genesis*"
+      - "internal/governance/**"
+      - "internal/statesync/**"
+      - "cmd/sage-gui/fresh_genesis*"
+      - "test/integration/appv30_fresh_genesis_test.go"
+      - "deploy/scripts/run-determinism.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  mixed-quorum:
+    name: Fresh app30 mixed quorum, taint, and restart
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1
+      - name: Run fresh signed app-v30 genesis on two validators of each architecture
+        env:
+          DET_PROJECT: sage-fresh-v30
+          DET_FRESH_V30: '1'
+          DET_MIXED_ARCH: '1'
+          DET_REBUILD: '1'
+          DET_BLOCK_TIME: 300ms
+          DET_TIMEOUT: 1200s
+          DET_TEST: '^TestAppV30FreshGenesisFourValidators$'
+        run: |
+          mkdir -p output/fresh-v30
+          set -o pipefail
+          bash deploy/scripts/run-determinism.sh 2>&1 | tee output/fresh-v30/run.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: fresh-app-v30-quorum-evidence
+          path: output/fresh-v30/*.log
+          if-no-files-found: error
