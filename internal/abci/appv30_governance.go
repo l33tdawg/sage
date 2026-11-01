@@ -8,6 +8,7 @@ import (
 
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/governance"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -211,11 +212,12 @@ func (app *SageApp) applyAppV30TaintProposal(
 	switch parsed.Action {
 	case tx.TaintActionApply:
 		payloadHash := sha256.Sum256(proposal.Payload)
-		if _, err := app.badgerStore.ApplyTaintDecision(
+		if _, err := app.badgerStore.ApplyTaintDecisionWithScope(
 			parsed.LocalChain,
 			parsed.DecisionID,
 			parsed.Target,
 			payloadHash,
+			store.TaintDecisionScopeFromPayload(*parsed.Apply),
 		); err != nil {
 			return err
 		}

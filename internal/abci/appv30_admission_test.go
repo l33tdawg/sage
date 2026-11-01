@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -222,11 +223,14 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 
 	submit := makeMemorySubmitTx(t, member, "general", "unauthorized child")
 	submit.MemorySubmit.DerivedFrom = []tx.ParentRef{parent}
-	_, err = app.preflightAppV30Lineage(
+	memberSigners, err := app.appV30ProvenanceSigners(member.id, member.id, 20)
+	require.NoError(t, err)
+	_, err = app.preflightAppV30Admission(
 		submit,
 		member.id,
 		memoryIDForSubmit(submit.MemorySubmit, 20, member.id),
 		submit.MemorySubmit.DerivedFrom,
+		memberSigners,
 		20,
 		appV23BlockTime(),
 	)
@@ -235,11 +239,12 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 
 	wrongHash := parent
 	wrongHash.ContentHash = sha256.Sum256([]byte("wrong parent hash"))
-	_, wrongHashErr := app.preflightAppV30Lineage(
+	_, wrongHashErr := app.preflightAppV30Admission(
 		submit,
 		member.id,
 		memoryIDForSubmit(submit.MemorySubmit, 20, member.id),
 		[]tx.ParentRef{wrongHash},
+		memberSigners,
 		20,
 		appV23BlockTime(),
 	)
@@ -249,11 +254,12 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 
 	missing := parent
 	missing.MemoryID = "missing-parent"
-	_, missingErr := app.preflightAppV30Lineage(
+	_, missingErr := app.preflightAppV30Admission(
 		submit,
 		member.id,
 		memoryIDForSubmit(submit.MemorySubmit, 20, member.id),
 		[]tx.ParentRef{missing},
+		memberSigners,
 		20,
 		appV23BlockTime(),
 	)
@@ -303,4 +309,29 @@ func TestAppV30CoCommitWritesEverySignerProvenance(t *testing.T) {
 		PrincipalID:  foreignID,
 		Exact:        true,
 	}, byCredential[foreignID])
+}
+
+func TestAppV30MemorySubmitInheritsMatchingCredentialScope(t *testing.T) {
+	app, root, target, _ := setupAppV30TaintGovernance(t)
+
+	apply := appV30ApplyPayload(target)
+	apply.ScopeKind = tx.TaintScopeCredentialSet
+	apply.Credentials = []string{root.id}
+	payload, err := tx.EncodeTaintApplyPayload(apply)
+	require.NoError(t, err)
+	decisionID, err := tx.TaintApplyDecisionID(payload)
+	require.NoError(t, err)
+	require.NoError(t, app.applyAppV30TaintProposal(&governance.ProposalState{
+		Operation: governance.OpMemoryTaint,
+		TargetID:  decisionID,
+		Payload:   payload,
+	}, 20))
+
+	submit := makeMemorySubmitTx(t, root, "general", "scope admission child")
+	result := app.processMemorySubmit(submit, 20, appV23BlockTime())
+	require.Equal(t, uint32(0), result.Code, result.Log)
+	memoryID := memoryIDForSubmit(submit.MemorySubmit, 20, root.id)
+	decisions, err := app.badgerStore.GetEffectiveTaintDecisions(memoryID)
+	require.NoError(t, err)
+	require.Equal(t, []string{decisionID}, decisions)
 }

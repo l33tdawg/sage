@@ -23,6 +23,9 @@ const (
 	MaxMemoryIDBytes         = 512
 	MaxCursorBytes           = 512
 	DecisionIDBytes          = 64
+	// MaxProvenanceAdmissionTaintUnits includes parent membership inheritance,
+	// per-signer provenance matching and decision-scope reads.
+	MaxProvenanceAdmissionTaintUnits = 722
 )
 
 const minimumHeaderBytes = 79
@@ -108,6 +111,14 @@ var errState = errors.New("invalid taint state")
 
 func DecisionKey(decisionID string) []byte {
 	return []byte("taintdec:" + decisionID)
+}
+
+func ActiveDecisionPrefix() []byte {
+	return []byte("taintactivedec:")
+}
+
+func ActiveDecisionKey(decisionID string) []byte {
+	return []byte("taintactivedec:" + decisionID)
 }
 
 func MembershipPrefix(memoryID string) []byte {

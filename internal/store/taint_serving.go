@@ -1,13 +1,13 @@
 package store
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 
 	badger "github.com/dgraph-io/badger/v4"
 
 	"github.com/l33tdawg/sage/internal/taint"
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 var (
@@ -43,10 +43,13 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 		return verdict, fmt.Errorf("%w: invalid memory ID", ErrTaintServingState)
 	}
 	err := s.view(func(txn *badger.Txn) error {
-		reader := &BadgerStore{db: s.db, txn: txn}
+		meter := newTaintUnitMeter(taint.MaxServingRequestUnits, ErrTaintServingWalkBudget)
+		activeScopes, err := readActiveTaintDecisionScopesTxn(txn, meter)
+		if err != nil {
+			return err
+		}
 		queue := []string{memoryID}
 		visited := make(map[string]struct{}, taint.MaxServingAncestorWalk)
-		headers := make(map[string]taint.Header)
 		for len(queue) > 0 {
 			current := queue[0]
 			queue = queue[1:]
@@ -58,47 +61,52 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 			}
 			visited[current] = struct{}{}
 			verdict.Nodes++
-			verdict.Units++
 
-			decisions, err := reader.GetEffectiveTaintDecisions(current)
+			decisions, decisionHeaders, err := getEffectiveTaintDecisionsTxn(
+				txn,
+				current,
+				meter,
+			)
 			if err != nil {
 				return err
 			}
-			verdict.Units += len(decisions) + 1
-			if len(decisions) > 0 {
-				pendingOnly := current != memoryID
-				for _, decisionID := range decisions {
-					header, cached := headers[decisionID]
-					if !cached {
-						var found bool
-						header, found, err = readTaintHeaderTxn(txn, decisionID)
-						if err != nil {
-							return err
-						}
-						if !found {
-							return fmt.Errorf("%w: missing decision header", ErrTaintServingState)
-						}
-						headers[decisionID] = header
-						verdict.Units++
-					}
-					if !header.Status.Incomplete() {
-						pendingOnly = false
-					} else {
-						verdict.CoverageComplete = false
-					}
-					switch header.Status {
-					case taint.StatusDepthExhausted:
-						verdict.DepthExhausted = true
-					case taint.StatusWorkExhausted:
-						verdict.WorkExhausted = true
-					}
+			provenance, err := authorProvenanceTxn(txn, current, meter)
+			if err != nil {
+				return err
+			}
+
+			matched := append([]string(nil), decisions...)
+			directTainted := false
+			scopeTainted := false
+			for _, decisionID := range decisions {
+				header := decisionHeaders[decisionID]
+				if header.Status.Incomplete() {
+					verdict.CoverageComplete = false
 				}
-				verdict.DecisionIDs = append([]string(nil), decisions...)
-				if pendingOnly {
-					verdict.Outcome = TaintServingPending
-				} else {
+				if current == memoryID || !header.Status.Incomplete() {
+					directTainted = true
+				}
+				recordTaintExhaustion(&verdict, header.Status)
+			}
+			for _, active := range activeScopes {
+				if !active.Scope.Matches(provenance) {
+					continue
+				}
+				scopeTainted = true
+				matched = appendDecisionIDUnique(matched, active.DecisionID)
+				if active.Header.Status.Incomplete() {
+					verdict.CoverageComplete = false
+				}
+				recordTaintExhaustion(&verdict, active.Header.Status)
+			}
+			if len(matched) > 0 {
+				verdict.DecisionIDs = sortedUniqueDecisionIDs(matched)
+				if directTainted || scopeTainted {
 					verdict.Outcome = TaintServingTainted
+				} else {
+					verdict.Outcome = TaintServingPending
 				}
+				verdict.Units = meter.units
 				return nil
 			}
 
@@ -106,14 +114,11 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 			if err != nil {
 				return err
 			}
-			verdict.Units += len(parents)
+			if err := meter.charge(1 + len(parents)*2); err != nil {
+				return err
+			}
 			if len(parents) == 0 {
-				_, provenanceFound, provenanceErr := reader.GetAppV30Provenance(current)
-				verdict.Units++
-				if provenanceErr != nil {
-					return provenanceErr
-				}
-				if !provenanceFound {
+				if !provenance.Exact {
 					verdict.CoverageComplete = false
 					verdict.LineageMissing = true
 				}
@@ -125,9 +130,19 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 				queue = append(queue, parent.ref.MemoryID)
 			}
 		}
+		verdict.Units = meter.units
 		return nil
 	})
 	return verdict, err
+}
+
+func recordTaintExhaustion(verdict *TaintServingVerdict, status taint.Status) {
+	switch status {
+	case taint.StatusDepthExhausted:
+		verdict.DepthExhausted = true
+	case taint.StatusWorkExhausted:
+		verdict.WorkExhausted = true
+	}
 }
 
 // TaintServingCoverageComplete reports whether every active decision has
@@ -137,55 +152,15 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 func (s *BadgerStore) TaintServingCoverageComplete() (bool, error) {
 	complete := true
 	err := s.view(func(txn *badger.Txn) error {
-		active, err := readTaintUint64Txn(txn, taint.ActiveCountKey())
+		activeScopes, err := readActiveTaintDecisionScopesTxn(txn, nil)
 		if err != nil {
 			return err
 		}
-		if active == 0 {
-			return nil
-		}
-		if active > taint.MaxActiveDecisions {
-			return fmt.Errorf("%w: active decision count %d exceeds %d",
-				ErrTaintServingState, active, taint.MaxActiveDecisions)
-		}
-		prefix := []byte("taintdec:")
-		options := badger.DefaultIteratorOptions
-		options.Prefix = prefix
-		options.PrefetchValues = true
-		it := txn.NewIterator(options)
-		defer it.Close()
-		var retained uint64
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			decisionID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
-			if err := taint.ValidateDecisionID(decisionID); err != nil {
-				return fmt.Errorf("%w: %v", ErrTaintServingState, err)
-			}
-			raw, err := it.Item().ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			header, err := taint.DecodeHeader(raw)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrTaintServingState, err)
-			}
-			if header.Status.Active() || header.Status == taint.StatusCleaning {
-				retained++
-				if retained > active {
-					return fmt.Errorf("%w: retained decision count exceeds active count",
-						ErrTaintServingState)
-				}
-			}
-			if header.Status.Incomplete() {
+		for _, active := range activeScopes {
+			if active.Header.Status.Incomplete() || active.Scope.Kind != tx.TaintScopeDirect {
 				complete = false
 				return nil
 			}
-			if retained == active {
-				return nil
-			}
-		}
-		if retained != active {
-			return fmt.Errorf("%w: active count %d does not match %d retained decisions",
-				ErrTaintServingState, active, retained)
 		}
 		return nil
 	})

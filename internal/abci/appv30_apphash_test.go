@@ -56,11 +56,15 @@ func TestAppV30CanonicalStateAppHashGolden(t *testing.T) {
 		[]tx.ParentRef{parent},
 	))
 	decisionID := strings.Repeat("c", taint.DecisionIDBytes)
-	created, err := badgerStore.ApplyTaintDecision(
+	created, err := badgerStore.ApplyTaintDecisionWithScope(
 		parent.SourceChainID,
 		decisionID,
 		parent,
 		sha256.Sum256([]byte("app-v30 decision payload")),
+		store.TaintDecisionScope{
+			Kind:        tx.TaintScopeCredentialSet,
+			Credentials: []string{credentialID},
+		},
 	)
 	require.NoError(t, err)
 	require.True(t, created)
@@ -98,7 +102,7 @@ func TestAppV30CanonicalStateAppHashGolden(t *testing.T) {
 	t.Logf("app-v30 AppHash: %s", hex.EncodeToString(appHash))
 	require.Equal(
 		t,
-		"c900515adc1a455b307fe053d458664cb9fe04cd8400e0eef06b012b16aad253",
+		"74dd427e64b5416d5cd94b59c4ced1a81e94655f9fe5de0537dad5ea8043ba86",
 		hex.EncodeToString(appHash),
 	)
 }

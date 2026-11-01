@@ -87,6 +87,7 @@ func TestApplyTaintDecisionWritesCanonicalInitialState(t *testing.T) {
 		Origin:     taint.OriginTarget,
 	}, membership)
 	assert.Empty(t, readTaintValue(t, s, taint.DecisionIndexKey(decisionID, target.MemoryID)))
+	assert.Empty(t, readTaintValue(t, s, taint.ActiveDecisionKey(decisionID)))
 
 	targetRefID, err := tx.ParentRefIDHex(target)
 	require.NoError(t, err)
@@ -236,6 +237,14 @@ func TestClearTaintDecisionInvalidatesGenerationAndReplays(t *testing.T) {
 	assert.Empty(t, header.ParentMemoryID)
 	assert.Zero(t, header.ParentDepth)
 	assert.Empty(t, header.LastEdge)
+	require.NoError(t, s.view(func(txn *badger.Txn) error {
+		found, err := keyExistsTxn(txn, taint.ActiveDecisionKey(decisionID))
+		if err != nil {
+			return err
+		}
+		assert.False(t, found, "clear must immediately withdraw the active-decision index")
+		return nil
+	}))
 
 	for _, memoryID := range []string{target.MemoryID, "child"} {
 		decisions, err := s.GetEffectiveTaintDecisions(memoryID)
@@ -575,6 +584,8 @@ func TestTaintStoreRejectsMalformedAndInvalidInputs(t *testing.T) {
 func TestTaintKeysParticipateInCanonicalProjectionHealth(t *testing.T) {
 	for _, key := range [][]byte{
 		taint.DecisionKey(testTaintDecisionID("projection")),
+		TaintDecisionScopeKey(testTaintDecisionID("projection")),
+		taint.ActiveDecisionKey(testTaintDecisionID("projection")),
 		taint.MembershipKey("memory", testTaintDecisionID("projection")),
 		taint.DecisionIndexKey(testTaintDecisionID("projection"), "memory"),
 		taint.FrontierKey(testTaintDecisionID("projection"), 1, 0),
