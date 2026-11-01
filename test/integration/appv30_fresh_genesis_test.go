@@ -27,6 +27,7 @@ import (
 	sageabci "github.com/l33tdawg/sage/internal/abci"
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/governance"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -44,9 +45,15 @@ func TestPrepareAppV30FreshGenesisFixture(t *testing.T) {
 	require.Len(t, genesis.Validators, cometRPCCount)
 	_, root, err := ed25519.GenerateKey(rand.Reader)
 	require.NoError(t, err)
+	_, agent, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
 	manifest := sageabci.FreshGenesisManifest{
 		Version: sageabci.FreshGenesisManifestVersion, AppVersion: 30,
 		RootID: agentIDFor(root),
+		Agent: &sageabci.FreshGenesisAgent{
+			AgentID: agentIDFor(agent), Profile: store.AppV23ProfileCompanion,
+			Clearance: 1, Capabilities: 15, HomeDomain: "fresh-v30",
+		},
 	}
 	for _, validator := range genesis.Validators {
 		manifest.Validators = append(manifest.Validators, sageabci.FreshGenesisValidator{
@@ -57,6 +64,8 @@ func TestPrepareAppV30FreshGenesisFixture(t *testing.T) {
 		return manifest.Validators[i].ValidatorID < manifest.Validators[j].ValidatorID
 	})
 	manifest.RootSignature = hex.EncodeToString(ed25519.Sign(root,
+		sageabci.FreshGenesisManifestSignBytes(genesis.ChainID, manifest)))
+	manifest.Agent.Signature = hex.EncodeToString(ed25519.Sign(agent,
 		sageabci.FreshGenesisManifestSignBytes(genesis.ChainID, manifest)))
 	_, err = sageabci.VerifyFreshGenesisManifest(genesis.ChainID, manifest)
 	require.NoError(t, err)
@@ -69,6 +78,7 @@ func TestPrepareAppV30FreshGenesisFixture(t *testing.T) {
 		require.NoError(t, genesis.SaveAs(filepath.Join(dir, fmt.Sprintf("node%d/config/genesis.json", node))))
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "fresh-v30-root.key"), root, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "fresh-v30-agent.key"), agent, 0o600))
 	t.Log("prepared identical signed app-v30 genesis for four validators; no upgrade plan")
 }
 
@@ -87,6 +97,10 @@ func TestAppV30FreshGenesisFourValidators(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rootBytes, ed25519.PrivateKeySize)
 	root := ed25519.PrivateKey(rootBytes)
+	agentBytes, err := os.ReadFile(filepath.Join(devnetGenesisDir(), "fresh-v30-agent.key"))
+	require.NoError(t, err)
+	require.Len(t, agentBytes, ed25519.PrivateKeySize)
+	agent := ed25519.PrivateKey(agentBytes)
 	for _, rpc := range rpcs {
 		require.Equal(t, uint64(30), readAppVersion(t, rpc), "fresh node must start at app30")
 	}
@@ -96,12 +110,14 @@ func TestAppV30FreshGenesisFourValidators(t *testing.T) {
 	}
 
 	const parentContent = "fresh app-v30 live parent"
-	parent := freshV30Submit(t, root, apis[0], parentContent, nil)
-	freshV30WaitReadable(t, root, apis, parent, true)
+	// Root REST control is local-only; Docker port forwarding is a remote socket.
+	// Exercise the signed Companion's ordinary network boundary for memory I/O.
+	parent := freshV30Submit(t, agent, apis[0], parentContent, nil)
+	freshV30WaitReadable(t, agent, apis, parent, true)
 	hash := sha256.Sum256([]byte(parentContent))
 	parentRef := tx.ParentRef{SourceChainID: readChainID(t, rpcs[0]), MemoryID: parent, ContentHash: hash}
-	child := freshV30Submit(t, root, apis[1], "fresh app-v30 derived child", []tx.ParentRef{parentRef})
-	freshV30WaitReadable(t, root, apis, child, true)
+	child := freshV30Submit(t, agent, apis[1], "fresh app-v30 derived child", []tx.ParentRef{parentRef})
+	freshV30WaitReadable(t, agent, apis, child, true)
 
 	evidence := sha256.Sum256([]byte("fresh app30 process taint evidence"))
 	apply, err := tx.EncodeTaintApplyPayload(tx.TaintApplyPayload{
@@ -114,8 +130,8 @@ func TestAppV30FreshGenesisFourValidators(t *testing.T) {
 	decision, err := tx.TaintApplyDecisionID(apply)
 	require.NoError(t, err)
 	applyHeight := freshV30Govern(t, root, rpcs, decision, apply)
-	freshV30WaitReadable(t, root, apis, parent, false)
-	freshV30WaitReadable(t, root, apis, child, false)
+	freshV30WaitReadable(t, agent, apis, parent, false)
+	freshV30WaitReadable(t, agent, apis, child, false)
 	applyObserved := readLatestHeight(t, rpcs[0])
 	waitForAllNodesHeight(t, rpcs, applyObserved+1, 2*time.Minute)
 	t.Logf("app30 apply/lineage hold matched height%d AppHash=%s", applyObserved+1,
@@ -138,8 +154,8 @@ func TestAppV30FreshGenesisFourValidators(t *testing.T) {
 	joined := readLatestHeight(t, rpcs[0]) + 3
 	waitForAllNodesHeight(t, rpcs, joined, 2*time.Minute)
 	t.Logf("app30 crash/restart matched height%d AppHash=%s", joined, assertAppHashAgreement(t, rpcs, joined))
-	freshV30WaitReadable(t, root, apis, parent, false)
-	freshV30WaitReadable(t, root, apis, child, false)
+	freshV30WaitReadable(t, agent, apis, parent, false)
+	freshV30WaitReadable(t, agent, apis, child, false)
 
 	// Respect the real governance proposer cooldown rather than shortening it
 	// in the production binary used by this gate.
@@ -154,8 +170,8 @@ func TestAppV30FreshGenesisFourValidators(t *testing.T) {
 	clearTarget, err := tx.TaintClearTargetID(clear)
 	require.NoError(t, err)
 	freshV30Govern(t, root, rpcs, clearTarget, clear)
-	freshV30WaitReadable(t, root, apis, parent, true)
-	freshV30WaitReadable(t, root, apis, child, true)
+	freshV30WaitReadable(t, agent, apis, parent, true)
+	freshV30WaitReadable(t, agent, apis, child, true)
 	clearObserved := readLatestHeight(t, rpcs[0])
 	boundary := ((clearObserved / 100) + 1) * 100
 	waitForAllNodesHeight(t, rpcs, boundary+2, 3*time.Minute)
@@ -197,7 +213,7 @@ func freshV30Request(t *testing.T, root ed25519.PrivateKey, method, url string, 
 
 func freshV30Submit(t *testing.T, root ed25519.PrivateKey, api, content string, parents []tx.ParentRef) string {
 	t.Helper()
-	body := map[string]any{"content": content, "memory_type": "observation", "domain_tag": "general", "confidence_score": 0.9}
+	body := map[string]any{"content": content, "memory_type": "observation", "domain_tag": "fresh-v30", "confidence_score": 0.9}
 	if len(parents) > 0 {
 		refs := make([]map[string]string, 0, len(parents))
 		for _, parent := range parents {
