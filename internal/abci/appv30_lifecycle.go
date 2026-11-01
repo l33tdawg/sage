@@ -12,6 +12,8 @@ func (app *SageApp) postAppV30Fork(height int64) bool {
 // execute under app-v30 rules. REST uses this boundary when constructing the
 // optional authenticated-lineage extension.
 func (app *SageApp) IsAppV30ActiveForNextTx() bool {
+	app.runtimeViewMu.RLock()
+	defer app.runtimeViewMu.RUnlock()
 	return app.postAppV30Fork(app.state.Height + 1)
 }
 
