@@ -75,7 +75,7 @@ func (s *BadgerStore) ApplyTaintDecision(
 	}
 
 	created := false
-	err = s.update(func(txn *badger.Txn) error {
+	updateErr := s.update(func(txn *badger.Txn) error {
 		existing, found, err := readTaintHeaderTxn(txn, decisionID)
 		if err != nil {
 			return err
@@ -117,7 +117,7 @@ func (s *BadgerStore) ApplyTaintDecision(
 		created = true
 		return nil
 	})
-	return created, err
+	return created, updateErr
 }
 
 func (s *BadgerStore) GetTaintDecision(decisionID string) (taint.Header, bool, error) {
@@ -384,9 +384,9 @@ func planTaintInheritanceTxn(
 			}
 			header, cached := headers[decisionID]
 			if !cached {
-				if err := charge(1); err != nil {
+				if chargeErr := charge(1); chargeErr != nil {
 					it.Close()
-					return plan, err
+					return plan, chargeErr
 				}
 				var found bool
 				header, found, err = readTaintHeaderTxn(txn, decisionID)
