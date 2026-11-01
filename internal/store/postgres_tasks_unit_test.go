@@ -376,3 +376,29 @@ func TestPostgresTaskNoticePagingIsPassiveAndKeepsEqualTimestampRows(t *testing.
 	require.Empty(t, next)
 	require.NoError(t, mock.ExpectationsWereMet(), "passive paging permits no write")
 }
+
+func TestPostgresTaskNoticeTaintPrefilterRunsBeforeLimit(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	require.NoError(t, err)
+	t.Cleanup(mock.Close)
+	s := &PostgresStore{db: mock}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	columns := []string{"notification_id", "agent_id", "kind", "task_id", "assignment_version", "domain", "title", "state", "created_at"}
+	mock.ExpectQuery(`(?s)SELECT n\.notification_id.*NOT EXISTS \(\s*SELECT 1 FROM memory_taint_mirror tm.*LIMIT \$4`).
+		WithArgs("agent-a", time.Time{}, "", 2).
+		WillReturnRows(pgxmock.NewRows(columns).
+			AddRow("notice-clean", "agent-a", "task_assignment", "task-clean", int64(1), "work", "clean", "unread", now))
+
+	items, next, err := s.PeekAgentNotificationPageFiltered(
+		context.Background(),
+		"agent-a",
+		1,
+		"",
+		true,
+	)
+	require.NoError(t, err)
+	require.Empty(t, next)
+	require.Len(t, items, 1)
+	require.Equal(t, "task-clean", items[0].TaskID)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
