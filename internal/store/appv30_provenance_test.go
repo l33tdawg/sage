@@ -78,4 +78,20 @@ func TestAppV30ProvenanceValidation(t *testing.T) {
 	require.ErrorContains(t, err, "not exact")
 
 	assert.True(t, isCanonicalMemoryProjectionKey(AppV30ProvenanceKey("memory")))
+	assert.True(t, isCanonicalMemoryProjectionKey(appV30MigrationMarkerKey("memory")))
+}
+
+func TestAppV30MigrationMarkerIsExplicitAndBounded(t *testing.T) {
+	s := openTaintStore(t)
+	found, err := s.HasAppV30MigrationMarker("migrated")
+	require.NoError(t, err)
+	require.False(t, found)
+
+	require.NoError(t, s.copyAppV30MigrationMetadata("migrated", nil, nil))
+	found, err = s.HasAppV30MigrationMarker("migrated")
+	require.NoError(t, err)
+	require.True(t, found)
+
+	_, err = s.HasAppV30MigrationMarker(strings.Repeat("m", 513))
+	require.ErrorContains(t, err, "invalid")
 }
