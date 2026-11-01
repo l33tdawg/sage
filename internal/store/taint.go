@@ -252,6 +252,86 @@ func (s *BadgerStore) InheritTaintMemberships(
 	if _, err := tx.EncodeDerivedFromExtension(parents); err != nil {
 		return result, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 	}
+	err := s.update(func(txn *badger.Txn) error {
+		plan, err := planTaintInheritanceTxn(
+			txn,
+			localChainID,
+			childID,
+			parents,
+		)
+		if err != nil {
+			return err
+		}
+		for _, item := range plan.decisions {
+			value, err := taint.EncodeMembership(taint.Membership{
+				Generation: item.header.Generation,
+				Depth:      0,
+				Origin:     taint.OriginAdmit,
+			})
+			if err != nil {
+				return err
+			}
+			if err := s.txnSet(txn, taint.MembershipKey(childID, item.decisionID), value); err != nil {
+				return err
+			}
+			if err := s.txnSet(txn, taint.DecisionIndexKey(item.decisionID, childID), []byte{}); err != nil {
+				return err
+			}
+		}
+		if len(plan.decisions) > 0 {
+			if err := bumpTaintRevisionTxn(s, txn); err != nil {
+				return err
+			}
+		}
+		result.Decisions, result.Units = len(plan.decisions), plan.units
+		return nil
+	})
+	return result, err
+}
+
+// ValidateTaintInheritance performs the read-only admission preflight without
+// writing memberships or advancing the taint revision.
+func (s *BadgerStore) ValidateTaintInheritance(
+	localChainID, childID string,
+	parents []tx.ParentRef,
+) (InheritedTaintResult, error) {
+	var result InheritedTaintResult
+	if len(parents) == 0 {
+		return result, nil
+	}
+	if len(childID) == 0 || len(childID) > taint.MaxMemoryIDBytes {
+		return result, fmt.Errorf("%w: invalid child memory ID", ErrTaintStateMalformed)
+	}
+	if _, err := tx.EncodeDerivedFromExtension(parents); err != nil {
+		return result, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+	}
+	err := s.view(func(txn *badger.Txn) error {
+		plan, err := planTaintInheritanceTxn(txn, localChainID, childID, parents)
+		if err != nil {
+			return err
+		}
+		result.Decisions, result.Units = len(plan.decisions), plan.units
+		return nil
+	})
+	return result, err
+}
+
+type plannedTaintMembership struct {
+	decisionID string
+	header     taint.Header
+}
+
+type taintInheritancePlan struct {
+	decisions []plannedTaintMembership
+	units     int
+}
+
+func planTaintInheritanceTxn(
+	txn *badger.Txn,
+	localChainID, childID string,
+	parents []tx.ParentRef,
+) (taintInheritancePlan, error) {
+	var plan taintInheritancePlan
 	units := 0
 	charge := func(n int) error {
 		if units+n > taint.MaxAdmissionTaintUnits {
@@ -262,109 +342,93 @@ func (s *BadgerStore) InheritTaintMemberships(
 	}
 	headers := make(map[string]taint.Header)
 	effective := make(map[string]taint.Header)
-	err := s.update(func(txn *badger.Txn) error {
-		for _, parent := range parents {
-			if parent.SourceChainID != localChainID {
-				return fmt.Errorf("%w: cross-chain admission is not active", ErrTaintStateMalformed)
-			}
-			if parent.MemoryID == childID {
-				return fmt.Errorf("%w: self-reference is not allowed", ErrTaintStateMalformed)
+	for _, parent := range parents {
+		if parent.SourceChainID != localChainID {
+			return plan, fmt.Errorf("%w: cross-chain admission is not active", ErrTaintStateMalformed)
+		}
+		if parent.MemoryID == childID {
+			return plan, fmt.Errorf("%w: self-reference is not allowed", ErrTaintStateMalformed)
+		}
+		if err := charge(1); err != nil {
+			return plan, err
+		}
+		prefix := taint.MembershipPrefix(parent.MemoryID)
+		options := badger.DefaultIteratorOptions
+		options.Prefix = prefix
+		it := txn.NewIterator(options)
+		entries := 0
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			entries++
+			if entries > taint.MaxActiveDecisions {
+				it.Close()
+				return plan, fmt.Errorf("%w: parent membership cap exceeded", ErrTaintStateMalformed)
 			}
 			if err := charge(1); err != nil {
-				return err
+				it.Close()
+				return plan, err
 			}
-			prefix := taint.MembershipPrefix(parent.MemoryID)
-			options := badger.DefaultIteratorOptions
-			options.Prefix = prefix
-			it := txn.NewIterator(options)
-			entries := 0
-			for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-				entries++
-				if entries > taint.MaxActiveDecisions {
-					it.Close()
-					return fmt.Errorf("%w: parent membership cap exceeded", ErrTaintStateMalformed)
-				}
+			decisionID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
+			if err := taint.ValidateDecisionID(decisionID); err != nil {
+				it.Close()
+				return plan, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+			}
+			value, err := it.Item().ValueCopy(nil)
+			if err != nil {
+				it.Close()
+				return plan, err
+			}
+			membership, err := taint.DecodeMembership(value)
+			if err != nil {
+				it.Close()
+				return plan, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+			}
+			header, cached := headers[decisionID]
+			if !cached {
 				if err := charge(1); err != nil {
 					it.Close()
-					return err
+					return plan, err
 				}
-				decisionID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
-				if err := taint.ValidateDecisionID(decisionID); err != nil {
-					it.Close()
-					return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
-				}
-				value, err := it.Item().ValueCopy(nil)
+				var found bool
+				header, found, err = readTaintHeaderTxn(txn, decisionID)
 				if err != nil {
 					it.Close()
-					return err
+					return plan, err
 				}
-				membership, err := taint.DecodeMembership(value)
-				if err != nil {
+				if !found {
 					it.Close()
-					return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+					return plan, fmt.Errorf("%w: missing decision header", ErrTaintStateMalformed)
 				}
-				header, cached := headers[decisionID]
-				if !cached {
-					if err := charge(1); err != nil {
-						it.Close()
-						return err
-					}
-					var found bool
-					header, found, err = readTaintHeaderTxn(txn, decisionID)
-					if err != nil {
-						it.Close()
-						return err
-					}
-					if !found {
-						it.Close()
-						return fmt.Errorf("%w: missing decision header", ErrTaintStateMalformed)
-					}
-					headers[decisionID] = header
-				}
-				if header.MembershipEffective(membership) {
-					effective[decisionID] = header
-				}
+				headers[decisionID] = header
 			}
-			it.Close()
+			if header.MembershipEffective(membership) {
+				effective[decisionID] = header
+			}
 		}
+		it.Close()
+	}
 
-		decisions := make([]string, 0, len(effective))
-		for decisionID := range effective {
-			decisions = append(decisions, decisionID)
+	decisionIDs := make([]string, 0, len(effective))
+	for decisionID := range effective {
+		decisionIDs = append(decisionIDs, decisionID)
+	}
+	sort.Strings(decisionIDs)
+	plan.decisions = make([]plannedTaintMembership, 0, len(decisionIDs))
+	for _, decisionID := range decisionIDs {
+		if err := charge(2); err != nil {
+			return plan, err
 		}
-		sort.Strings(decisions)
-		for _, decisionID := range decisions {
-			header := effective[decisionID]
-			value, err := taint.EncodeMembership(taint.Membership{
-				Generation: header.Generation,
-				Depth:      0,
-				Origin:     taint.OriginAdmit,
-			})
-			if err != nil {
-				return err
-			}
-			if err := charge(2); err != nil {
-				return err
-			}
-			if err := s.txnSet(txn, taint.MembershipKey(childID, decisionID), value); err != nil {
-				return err
-			}
-			if err := s.txnSet(txn, taint.DecisionIndexKey(decisionID, childID), []byte{}); err != nil {
-				return err
-			}
+		plan.decisions = append(plan.decisions, plannedTaintMembership{
+			decisionID: decisionID,
+			header:     effective[decisionID],
+		})
+	}
+	if len(plan.decisions) > 0 {
+		if err := charge(1); err != nil {
+			return plan, err
 		}
-		if len(decisions) > 0 {
-			if err := charge(1); err != nil {
-				return err
-			}
-			if err := bumpTaintRevisionTxn(s, txn); err != nil {
-				return err
-			}
-		}
-		result.Decisions, result.Units = len(decisions), units
-		return nil
-	})
-	return result, err
+	}
+	plan.units = units
+	return plan, nil
 }
 
 func (s *BadgerStore) TaintRevision() (uint64, error) {

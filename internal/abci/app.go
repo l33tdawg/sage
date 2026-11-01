@@ -706,6 +706,7 @@ type SageApp struct {
 	// mutex makes that one-time runtime binding safe against the voter goroutine.
 	expectedGovernanceDomainMu sync.RWMutex
 	expectedGovernanceDomain   string
+	expectedConsensusChainID   string
 
 	// pendingAppV20Finalize is consensus-loop owned. It is non-nil only after a
 	// successful post-app-v20 FinalizeBlock and before its matching Commit.
@@ -2832,7 +2833,15 @@ func (app *SageApp) SetExpectedGovernanceDelegationDomain(chainID string) error 
 			domain,
 		)
 	}
+	if app.expectedConsensusChainID != "" && app.expectedConsensusChainID != chainID {
+		return fmt.Errorf(
+			"consensus chain ID already bound to %q; refusing rebind to %q",
+			app.expectedConsensusChainID,
+			chainID,
+		)
+	}
 	app.expectedGovernanceDomain = domain
+	app.expectedConsensusChainID = chainID
 	return nil
 }
 
@@ -2840,6 +2849,12 @@ func (app *SageApp) expectedGovernanceDelegationDomain() string {
 	app.expectedGovernanceDomainMu.RLock()
 	defer app.expectedGovernanceDomainMu.RUnlock()
 	return app.expectedGovernanceDomain
+}
+
+func (app *SageApp) expectedConsensusChainIDValue() string {
+	app.expectedGovernanceDomainMu.RLock()
+	defer app.expectedGovernanceDomainMu.RUnlock()
+	return app.expectedConsensusChainID
 }
 
 func (app *SageApp) appV20BoundedConsensusReadiness() error {
@@ -3874,6 +3889,7 @@ func (app *SageApp) cloneForAppV20Finalize(scopedStore *store.BadgerStore) *Sage
 		appV23GenesisActive:      app.appV23GenesisActive,
 		retainBlocks:             app.retainBlocks,
 		expectedGovernanceDomain: app.expectedGovernanceDelegationDomain(),
+		expectedConsensusChainID: app.expectedConsensusChainIDValue(),
 	}
 	if notifier := app.syncNotifier.Load(); notifier != nil {
 		clone.syncNotifier.Store(notifier)
@@ -5343,8 +5359,27 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	if err != nil {
 		return appV23ControlDenied()
 	}
-	var appV30Signers []store.AppV30ProvenanceSigner
+	var (
+		appV30Signers      []store.AppV30ProvenanceSigner
+		appV30MemoryID     string
+		appV30LocalChainID string
+	)
 	if app.postAppV30Fork(height) {
+		appV30MemoryID = memoryIDForSubmit(submit, height, credentialID)
+		appV30LocalChainID, err = app.preflightAppV30Lineage(
+			parsedTx,
+			credentialID,
+			appV30MemoryID,
+			submit.DerivedFrom,
+			height,
+			blockTime,
+		)
+		if err != nil {
+			return &abcitypes.ExecTxResult{
+				Code: 11,
+				Log:  "memory lineage rejected: " + err.Error(),
+			}
+		}
 		appV30Signers, err = app.appV30ProvenanceSigners(
 			credentialID,
 			authorityID,
@@ -5353,9 +5388,8 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		if err != nil {
 			return appV23ControlDenied()
 		}
-		provenanceMemoryID := memoryIDForSubmit(submit, height, credentialID)
 		if err := app.badgerStore.ValidateAppV30Provenance(
-			provenanceMemoryID,
+			appV30MemoryID,
 			appV30Signers,
 		); err != nil {
 			return &abcitypes.ExecTxResult{
@@ -5714,6 +5748,18 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		}
 	}
 
+	if len(submit.DerivedFrom) > 0 {
+		if _, err := app.applyAppV30Lineage(
+			appV30LocalChainID,
+			memoryID,
+			submit.DerivedFrom,
+		); err != nil {
+			return &abcitypes.ExecTxResult{
+				Code: 12,
+				Log:  "persist app-v30 lineage: " + err.Error(),
+			}
+		}
+	}
 	if len(appV30Signers) > 0 {
 		if err := app.badgerStore.SetAppV30Provenance(
 			memoryID,
