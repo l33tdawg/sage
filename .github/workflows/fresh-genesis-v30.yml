@@ -18,6 +18,8 @@ on:
       - "deploy/Dockerfile*"
       - "deploy/docker-compose.det*.yml"
       - "deploy/scripts/run-determinism.sh"
+      - "deploy/scripts/run-v11.9-state-sync.sh"
+      - "deploy/scripts/v11.9-source-id.py"
       - "deploy/init-testnet.sh"
       - "go.mod"
       - "go.sum"
@@ -27,6 +29,28 @@ permissions:
   contents: read
 
 jobs:
+  network-state-sync:
+    name: Fresh app30 authorized network state sync
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Transfer nonempty fresh app30 state to pristine non-validator receivers
+        env:
+          V119_STATE_SYNC_MODE: fresh-v30
+          V119_STATE_SYNC_REBUILD: '1'
+          V119_STATE_SYNC_TIMEOUT: '300'
+          V119_STATE_SYNC_EVIDENCE_DIR: output/fresh-v30-sync
+        run: |
+          mkdir -p output/fresh-v30-sync
+          set -o pipefail
+          bash deploy/scripts/run-v11.9-state-sync.sh 2>&1 | tee output/fresh-v30-sync/run.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: fresh-app-v30-network-state-sync-evidence
+          path: output/fresh-v30-sync
+          if-no-files-found: error
   mixed-quorum:
     name: Fresh app30 mixed quorum, taint, and restart
     runs-on: ubuntu-24.04

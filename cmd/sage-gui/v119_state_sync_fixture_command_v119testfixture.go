@@ -50,6 +50,17 @@ func runV119StateSyncFixtureCommand(args []string) (bool, error) {
 		return true, errors.New("fixture subcommand is required")
 	}
 	switch args[1] {
+	case "init-fresh-v30":
+		return true, initV30StateSyncFixture()
+	case "install-v30-proof":
+		return true, installV30StateSyncProof(context.Background())
+	case "verify-v30-serving":
+		return true, verifyV30StateSyncServing(context.Background())
+	case "verify-v30-canonical":
+		if len(args) != 3 {
+			return true, errors.New("verify-v30-canonical requires the expected AppHash")
+		}
+		return true, verifyV30StateSyncCanonical(context.Background(), args[2])
 	case "install-scoped-proof":
 		memoryID, err := installV119StateSyncScopedProof(context.Background())
 		if err != nil {
