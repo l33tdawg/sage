@@ -21,6 +21,7 @@ import (
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/authzdenial"
 	"github.com/l33tdawg/sage/internal/federation"
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/idfmt"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
@@ -1313,10 +1314,21 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid derived_from lineage", err.Error())
 		return
 	}
-	if len(derivedFrom) > 0 && s.governanceDomainFn != nil {
-		localChainID := s.governanceDomainFn()
+	if len(derivedFrom) > 0 {
+		var localDomain string
+		if s.governanceDomainFn != nil {
+			localDomain = s.governanceDomainFn()
+		}
+		if localDomain == "" {
+			writeProblem(w, http.StatusServiceUnavailable, "Consensus chain unavailable",
+				"The local consensus chain binding is unavailable. Retry after the node is ready.")
+			return
+		}
 		for _, parent := range derivedFrom {
-			if localChainID != "" && parent.SourceChainID != localChainID {
+			// The committed governance domain is a hash of the raw CometBFT
+			// chain ID. Bind the supplied ID through that same derivation.
+			parentDomain, domainErr := governance.DelegationDomainForChainID(parent.SourceChainID)
+			if domainErr != nil || parentDomain != localDomain {
 				writeProblem(w, http.StatusBadRequest, "Invalid derived_from lineage",
 					"source_chain_id must equal the local consensus chain ID; cross-chain refs are not active in app-v30.")
 				return
