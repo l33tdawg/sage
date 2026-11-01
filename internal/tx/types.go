@@ -193,8 +193,11 @@ type MemorySubmit struct {
 	// Tags is a canonical (sorted, unique, bounded) app-v20 extension. It is
 	// encoded only when non-empty, so every historical MemorySubmit retains its
 	// exact bytes. DecodeTx keeps the extension dormant until the caller knows
-	// the deterministic fork height and calls ActivateMemorySubmitTags.
+	// the deterministic fork heights and calls ActivateMemorySubmitExtensions.
 	Tags []string
+	// DerivedFrom is the app-v30 authenticated lineage extension. It stays
+	// dormant until the caller activates the app-v30 H+1 rules.
+	DerivedFrom []ParentRef
 
 	tagExtension []byte
 }
