@@ -81,8 +81,8 @@ func VerifyFreshGenesisManifest(chainID string, manifest FreshGenesisManifest) (
 	if err != nil {
 		return "", err
 	}
-	if err := store.ValidateFreshGenesisActivation(manifest.activation(scope, strings.Repeat("0", 64))); err != nil {
-		return "", err
+	if activationErr := store.ValidateFreshGenesisActivation(manifest.activation(scope, strings.Repeat("0", 64))); activationErr != nil {
+		return "", activationErr
 	}
 	if manifest.AppVersion > MaxCompiledAppVersion() {
 		return "", errors.New("fresh genesis app version is not compiled")
@@ -92,8 +92,8 @@ func VerifyFreshGenesisManifest(chainID string, manifest FreshGenesisManifest) (
 		return "", err
 	}
 	decodeSignature := func(name, value string) ([]byte, error) {
-		sig, err := hex.DecodeString(value)
-		if err != nil || len(sig) != ed25519.SignatureSize || hex.EncodeToString(sig) != value {
+		sig, signatureErr := hex.DecodeString(value)
+		if signatureErr != nil || len(sig) != ed25519.SignatureSize || hex.EncodeToString(sig) != value {
 			return nil, fmt.Errorf("fresh genesis %s must be canonical Ed25519 hex", name)
 		}
 		return sig, nil
@@ -238,8 +238,8 @@ func (app *SageApp) refreshFreshGenesis() error {
 		app.freshGenesisAppVersion = 0
 		return nil
 	}
-	if err := app.badgerStore.ValidateFreshGenesisLineage(); err != nil {
-		return err
+	if lineageErr := app.badgerStore.ValidateFreshGenesisLineage(); lineageErr != nil {
+		return lineageErr
 	}
 	root, err := app.badgerStore.GetAppV23Root()
 	if err != nil || root == nil || root.PrincipalID != origin.RootID || root.Scope != origin.Scope || root.BootstrapDigest != origin.BootstrapDigest {

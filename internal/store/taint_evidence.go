@@ -189,11 +189,11 @@ func (s *SQLiteStore) PutTaintEvidence(
 		if existingDomain != domain || existingDigest != digest {
 			return "", ErrTaintEvidenceConflict
 		}
-		if err := requireTaintEvidenceItem(ctx, transaction, domain, digest); err != nil {
-			return "", err
+		if itemErr := requireTaintEvidenceItem(ctx, transaction, domain, digest); itemErr != nil {
+			return "", itemErr
 		}
-		if err := transaction.Commit(); err != nil {
-			return "", fmt.Errorf("finish idempotent taint evidence write: %w", err)
+		if commitErr := transaction.Commit(); commitErr != nil {
+			return "", fmt.Errorf("finish idempotent taint evidence write: %w", commitErr)
 		}
 		return digest, nil
 	case !errors.Is(err, sql.ErrNoRows):
@@ -291,11 +291,11 @@ func (s *SQLiteStore) GetTaintEvidence(
 		return nil, fmt.Errorf("read taint evidence: %w", err)
 	}
 	var references int64
-	if err := transaction.QueryRowContext(ctx,
+	if referencesErr := transaction.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM taint_evidence_references WHERE domain = ? AND digest = ?`,
 		domain, digest,
-	).Scan(&references); err != nil {
-		return nil, fmt.Errorf("read taint evidence pins: %w", err)
+	).Scan(&references); referencesErr != nil {
+		return nil, fmt.Errorf("read taint evidence pins: %w", referencesErr)
 	}
 	if references == 0 && !now.UTC().Before(time.Unix(0, createdAt).Add(retention.MaxAge)) {
 		return nil, ErrTaintEvidenceNotFound
@@ -356,11 +356,11 @@ func (s *SQLiteStore) DeleteTaintEvidence(
 	}
 	defer unlock()
 	defer transaction.Rollback() //nolint:errcheck
-	if _, err := transaction.ExecContext(ctx,
+	if _, deleteErr := transaction.ExecContext(ctx,
 		`DELETE FROM taint_evidence_references WHERE domain = ? AND digest = ?`,
 		domain, digest,
-	); err != nil {
-		return false, fmt.Errorf("delete taint evidence references: %w", err)
+	); deleteErr != nil {
+		return false, fmt.Errorf("delete taint evidence references: %w", deleteErr)
 	}
 	result, err := transaction.ExecContext(ctx,
 		`DELETE FROM taint_evidence_items WHERE domain = ? AND digest = ?`,

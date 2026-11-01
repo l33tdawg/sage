@@ -110,8 +110,8 @@ func appHashRuleInputsForOfflineState(badgerStore *store.BadgerStore) (appHashRu
 		return appHashRuleInputs{}, err
 	}
 	if fresh != nil {
-		if err := badgerStore.ValidateFreshGenesisLineage(); err != nil {
-			return appHashRuleInputs{}, err
+		if lineageErr := badgerStore.ValidateFreshGenesisLineage(); lineageErr != nil {
+			return appHashRuleInputs{}, lineageErr
 		}
 		inputs.freshGenesisAppVersion = fresh.AppVersion
 	}

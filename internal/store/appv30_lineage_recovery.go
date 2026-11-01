@@ -41,8 +41,8 @@ func (s *BadgerStore) RebuildLineageReverseIndex() (int, error) {
 			if err != nil {
 				return err
 			}
-			if err := validateForwardLineageValue(childID, parentID, value); err != nil {
-				return err
+			if forwardErr := validateForwardLineageValue(childID, parentID, value); forwardErr != nil {
+				return forwardErr
 			}
 			reverseKey := lineage.ReverseKey(parentID, childID)
 			existing, found, err := readTaintValueTxn(txn, reverseKey)
@@ -81,9 +81,9 @@ func validateLineageIndexesTxn(txn *badger.Txn) error {
 			forward.Close()
 			return err
 		}
-		if err := validateForwardLineageValue(childID, parentID, value); err != nil {
+		if forwardErr := validateForwardLineageValue(childID, parentID, value); forwardErr != nil {
 			forward.Close()
-			return err
+			return forwardErr
 		}
 		reverseValue, found, err := readTaintValueTxn(
 			txn,

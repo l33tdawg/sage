@@ -287,9 +287,8 @@ func (s *BadgerStore) ValidateTaintState() error {
 		queues.Close()
 
 		for decisionID, header := range headers {
-			switch {
-			case header.Status == taint.StatusExpanding ||
-				header.Status == taint.StatusDepthExhausted:
+			switch header.Status {
+			case taint.StatusExpanding, taint.StatusDepthExhausted:
 				if header.FrontierTail-header.FrontierHead != queueCounts[decisionID] {
 					return fmt.Errorf(
 						"%w: frontier cardinality mismatch for %s",
@@ -297,7 +296,7 @@ func (s *BadgerStore) ValidateTaintState() error {
 						decisionID,
 					)
 				}
-			case header.Status == taint.StatusComplete:
+			case taint.StatusComplete:
 				if header.FrontierHead != header.FrontierTail || queueCounts[decisionID] != 0 {
 					return fmt.Errorf(
 						"%w: terminal active decision retains frontier for %s",

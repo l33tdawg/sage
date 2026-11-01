@@ -201,9 +201,9 @@ func (s *BadgerStore) appV25MemoryEnvelopeRequired(memoryID string) (bool, error
 		return false, err
 	}
 	if applied == nil {
-		fresh, err := s.GetFreshGenesisActivation()
-		if err != nil {
-			return false, err
+		fresh, freshErr := s.GetFreshGenesisActivation()
+		if freshErr != nil {
+			return false, freshErr
 		}
 		// A fresh-v25+ origin has no historical corpus eligible for the
 		// compatibility projection, and carries no synthetic applied record.

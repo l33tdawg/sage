@@ -420,13 +420,13 @@ func authorProvenanceTxn(
 		return provenance, err
 	}
 	if found {
-		signers, err := decodeAppV30Provenance(raw)
-		if err != nil {
-			return provenance, fmt.Errorf("%w: %v", ErrTaintServingState, err)
+		signers, provenanceErr := decodeAppV30Provenance(raw)
+		if provenanceErr != nil {
+			return provenance, fmt.Errorf("%w: %v", ErrTaintServingState, provenanceErr)
 		}
 		if meter != nil {
-			if err := meter.charge(len(signers)); err != nil {
-				return provenance, err
+			if chargeErr := meter.charge(len(signers)); chargeErr != nil {
+				return provenance, chargeErr
 			}
 		}
 		provenance.Signers = signers
@@ -478,16 +478,16 @@ func authorProvenanceTxn(
 		return provenance, err
 	}
 	if coauthorFound {
-		decoded, err := tx.DecodeCoauthorsCanonical(coauthors)
-		if err != nil {
-			return provenance, fmt.Errorf("%w: decode coauthors: %v", ErrTaintServingState, err)
+		decoded, coauthorsErr := tx.DecodeCoauthorsCanonical(coauthors)
+		if coauthorsErr != nil {
+			return provenance, fmt.Errorf("%w: decode coauthors: %v", ErrTaintServingState, coauthorsErr)
 		}
 		if len(decoded) == 0 || len(decoded) > taint.MaxSigners {
 			return provenance, fmt.Errorf("%w: invalid coauthor count", ErrTaintServingState)
 		}
 		if meter != nil {
-			if err := meter.charge(len(decoded)); err != nil {
-				return provenance, err
+			if chargeErr := meter.charge(len(decoded)); chargeErr != nil {
+				return provenance, chargeErr
 			}
 		}
 		provenance.Signers = make([]AppV30ProvenanceSigner, 0, len(decoded))
@@ -509,8 +509,8 @@ func authorProvenanceTxn(
 		return provenance, err
 	}
 	if scopedFound {
-		content, err := scope.DecodeContent(scopedRaw)
-		if err != nil || content.MemoryID != memoryID {
+		content, contentErr := scope.DecodeContent(scopedRaw)
+		if contentErr != nil || content.MemoryID != memoryID {
 			return provenance, fmt.Errorf("%w: invalid scoped author provenance", ErrTaintServingState)
 		}
 		if !isCanonicalAgentID(content.SubmittingAgentID) {

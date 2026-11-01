@@ -63,11 +63,11 @@ func (app *SageApp) validateAppV30TaintProposal(
 		if targetID != decisionID {
 			return proposal, fmt.Errorf("taint apply target_id does not match the canonical decision ID")
 		}
-		if err := app.validateAppV30TaintApplyScope(*apply); err != nil {
-			return proposal, err
+		if scopeErr := app.validateAppV30TaintApplyScope(*apply); scopeErr != nil {
+			return proposal, scopeErr
 		}
-		if err := app.validateAppV30TaintTarget(*apply); err != nil {
-			return proposal, err
+		if targetErr := app.validateAppV30TaintTarget(*apply); targetErr != nil {
+			return proposal, targetErr
 		}
 		payloadHash := sha256.Sum256(payload)
 		header, found, err := app.badgerStore.GetTaintDecision(decisionID)
@@ -150,7 +150,7 @@ func (app *SageApp) validateAppV30TaintApplyScope(
 	case tx.TaintScopeRootGeneration:
 		root, err := app.badgerStore.GetAppV23Root()
 		if err != nil || root == nil {
-			return fmt.Errorf("Root state is unavailable")
+			return fmt.Errorf("root state is unavailable")
 		}
 		if apply.PrincipalID != root.PrincipalID {
 			return fmt.Errorf("taint Root principal does not match the permanent Root principal")

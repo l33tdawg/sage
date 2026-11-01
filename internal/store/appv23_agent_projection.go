@@ -47,7 +47,7 @@ func (s *BadgerStore) ValidateAppV23StateForPreV26ProjectionRecovery() error {
 		var v25 AppliedUpgradeRecord
 		if err := appV23ReadJSON(txn, upgradeAppliedKey("app-v25"), &v25); errors.Is(err, badger.ErrKeyNotFound) {
 			var fresh FreshGenesisActivation
-			if err := appV23ReadJSON(txn, freshGenesisActivationKey(), &fresh); err != nil || ValidateFreshGenesisActivation(fresh) != nil || fresh.AppVersion != 25 {
+			if freshErr := appV23ReadJSON(txn, freshGenesisActivationKey(), &fresh); freshErr != nil || ValidateFreshGenesisActivation(fresh) != nil || fresh.AppVersion != 25 {
 				return errors.New("pre-app-v26 agent projection requires valid app-v25 origin")
 			}
 		} else if err != nil || v25.Name != "app-v25" || v25.TargetAppVersion != 25 || v25.AppliedHeight <= 0 {
