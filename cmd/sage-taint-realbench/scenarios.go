@@ -77,9 +77,9 @@ func (b *benchmarkStore) Close() error {
 }
 
 func runScopeScenario(config profile, parentDir string) (scenarioResult, error) {
-	b, err := openBenchmarkStore(parentDir)
-	if err != nil {
-		return scenarioResult{}, err
+	b, openErr := openBenchmarkStore(parentDir)
+	if openErr != nil {
+		return scenarioResult{}, openErr
 	}
 	defer b.Close() //nolint:errcheck
 	matchingCredential := benchmarkCredential("scope/matching", 0)
@@ -141,13 +141,13 @@ func runScopeScenario(config profile, parentDir string) (scenarioResult, error) 
 		Units:       verdict.Units,
 		Coverage:    verdict.CoverageComplete,
 	}
-	if err := finalizeDeterministic(b.store, &det); err != nil {
-		return scenarioResult{}, err
+	if finalizeErr := finalizeDeterministic(b.store, &det); finalizeErr != nil {
+		return scenarioResult{}, finalizeErr
 	}
 	timing, err := measureOperation(config.Repeats, func() error {
-		got, err := b.store.ClassifyMemoryTaint("scope-record")
-		if err != nil {
-			return err
+		got, classifyErr := b.store.ClassifyMemoryTaint("scope-record")
+		if classifyErr != nil {
+			return classifyErr
 		}
 		if got.Units != det.Units || len(got.DecisionIDs) != det.DecisionIDs {
 			return fmt.Errorf("scope classification changed: units %d/%d decisions %d/%d",
@@ -162,9 +162,9 @@ func runScopeScenario(config profile, parentDir string) (scenarioResult, error) 
 }
 
 func runLineageScenario(config profile, parentDir string) (scenarioResult, error) {
-	b, err := openBenchmarkStore(parentDir)
-	if err != nil {
-		return scenarioResult{}, err
+	b, openErr := openBenchmarkStore(parentDir)
+	if openErr != nil {
+		return scenarioResult{}, openErr
 	}
 	defer b.Close() //nolint:errcheck
 	nodes := config.ChainNodes
@@ -207,13 +207,13 @@ func runLineageScenario(config profile, parentDir string) (scenarioResult, error
 		Units:       verdict.Units,
 		Coverage:    verdict.CoverageComplete,
 	}
-	if err := finalizeDeterministic(b.store, &det); err != nil {
-		return scenarioResult{}, err
+	if finalizeErr := finalizeDeterministic(b.store, &det); finalizeErr != nil {
+		return scenarioResult{}, finalizeErr
 	}
 	timing, err := measureOperation(config.Repeats, func() error {
-		got, err := b.store.ClassifyMemoryTaint(leafID)
-		if err != nil {
-			return err
+		got, classifyErr := b.store.ClassifyMemoryTaint(leafID)
+		if classifyErr != nil {
+			return classifyErr
 		}
 		if got.Nodes != det.Nodes || got.Units != det.Units || got.Outcome != verdict.Outcome {
 			return fmt.Errorf("lineage classification changed")
@@ -227,9 +227,9 @@ func runLineageScenario(config profile, parentDir string) (scenarioResult, error
 }
 
 func runAdmissionScenario(config profile, parentDir string) (scenarioResult, error) {
-	b, err := openBenchmarkStore(parentDir)
-	if err != nil {
-		return scenarioResult{}, err
+	b, openErr := openBenchmarkStore(parentDir)
+	if openErr != nil {
+		return scenarioResult{}, openErr
 	}
 	defer b.Close() //nolint:errcheck
 	parents := make([]tx.ParentRef, taint.MaxParents)
@@ -295,18 +295,18 @@ func runAdmissionScenario(config profile, parentDir string) (scenarioResult, err
 	if applied.Decisions != planned.Decisions || applied.Units != planned.Units {
 		return scenarioResult{}, fmt.Errorf("admission apply disagrees with validation")
 	}
-	if err := finalizeDeterministic(b.store, &det); err != nil {
-		return scenarioResult{}, err
+	if finalizeErr := finalizeDeterministic(b.store, &det); finalizeErr != nil {
+		return scenarioResult{}, finalizeErr
 	}
 	timing, err := measureOperation(config.Repeats, func() error {
-		got, err := b.store.ValidateTaintAdmission(
+		got, admissionErr := b.store.ValidateTaintAdmission(
 			benchmarkChainID,
 			childID,
 			parents,
 			signers,
 		)
-		if err != nil {
-			return err
+		if admissionErr != nil {
+			return admissionErr
 		}
 		if got.Decisions != det.Decisions || got.Units != det.Units {
 			return fmt.Errorf("admission validation changed")
@@ -333,18 +333,18 @@ func runFanoutScenario(config profile, parentDir string) (scenarioResult, error)
 			return scenarioResult{}, err
 		}
 		for i := 0; i < config.Fanout; i++ {
-			child, err := seedBenchmarkMemory(
+			child, seedErr := seedBenchmarkMemory(
 				b.store,
 				fmt.Sprintf("fanout-child-%04d", i),
 				"fanout child",
 			)
-			if err != nil {
+			if seedErr != nil {
 				_ = b.Close()
-				return scenarioResult{}, err
+				return scenarioResult{}, seedErr
 			}
-			if err := b.store.SetMemoryLineage(child.MemoryID, []tx.ParentRef{root}); err != nil {
+			if lineageErr := b.store.SetMemoryLineage(child.MemoryID, []tx.ParentRef{root}); lineageErr != nil {
 				_ = b.Close()
-				return scenarioResult{}, err
+				return scenarioResult{}, lineageErr
 			}
 		}
 		decisionID := benchmarkDecisionID("fanout-decision")
@@ -456,11 +456,11 @@ func countBadgerState(db *badger.DB) (keys int, keyBytes, valueBytes int64, err 
 			item := it.Item()
 			keys++
 			keyBytes += int64(len(item.Key()))
-			if err := item.Value(func(value []byte) error {
+			if valueErr := item.Value(func(value []byte) error {
 				valueBytes += int64(len(value))
 				return nil
-			}); err != nil {
-				return err
+			}); valueErr != nil {
+				return valueErr
 			}
 		}
 		return nil

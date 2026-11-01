@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -141,8 +142,8 @@ func execute(profileName, out, dataDir, requireArch string, repeats int) error {
 	if err != nil {
 		return err
 	}
-	if err := assertArch(machine, requireArch); err != nil {
-		return err
+	if archErr := assertArch(machine, requireArch); archErr != nil {
+		return archErr
 	}
 	selected, err := profileDefaults(profileName)
 	if err != nil {
@@ -222,8 +223,8 @@ func compareResults(paths []string) error {
 			return fmt.Errorf("read %s: %w", path, err)
 		}
 		var result realBenchResult
-		if err := json.Unmarshal(raw, &result); err != nil {
-			return fmt.Errorf("decode %s: %w", path, err)
+		if decodeErr := json.Unmarshal(raw, &result); decodeErr != nil {
+			return fmt.Errorf("decode %s: %w", path, decodeErr)
 		}
 		if result.Schema != resultSchema || !result.RealCode {
 			return fmt.Errorf("%s is not a real-code benchmark result", path)
@@ -351,7 +352,9 @@ func checkInvariants(result *realBenchResult) invariants {
 }
 
 func commandOutput(name string, args ...string) (string, error) {
-	output, err := exec.Command(name, args...).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, name, args...).Output()
 	return strings.TrimSpace(string(output)), err
 }
 

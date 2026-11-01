@@ -662,45 +662,6 @@ func (h *DashboardHandler) AuditAppV23CanonicalMemoryProjection(
 	return err
 }
 
-// walkAppV23CanonicalDashboardRecords pages deterministically through one SQL
-// result set and validates each row before passing it to visit. It deliberately
-// returns no raw count: even aggregate metadata must be derived only from
-// canonically published records.
-func (h *DashboardHandler) walkAppV23CanonicalDashboardRecords(
-	ctx context.Context,
-	opts store.ListOptions,
-	visit func(*memory.MemoryRecord) error,
-) error {
-	if !h.appV23IsActive() {
-		return errors.New("app-v23 canonical dashboard walk requested before activation")
-	}
-	if h.BadgerStore == nil {
-		return appV23DashboardProjectionError(errors.New("canonical store is unavailable"))
-	}
-	return h.walkAppV23DashboardProjectionPages(ctx, opts, func(
-		records []*memory.MemoryRecord,
-	) error {
-		classifications, classifyErr :=
-			h.BadgerStore.ClassifyMemoryProjections(records)
-		if classifyErr != nil {
-			return appV23DashboardProjectionError(classifyErr)
-		}
-		for i, record := range records {
-			if classifications[i].Err != nil {
-				return appV23DashboardProjectionError(
-					classifications[i].Err,
-				)
-			}
-			if visit != nil {
-				if err := visit(record); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	})
-}
-
 // walkAppV23TaintFilteredDashboardRecords is the export-specific canonical walk.
 // Effective taint and pending taint holds are omitted as governed
 // non-disclosable rows; every other classification failure still aborts the
