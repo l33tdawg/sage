@@ -442,6 +442,15 @@ func (s *SQLiteStore) RequirePristineStateSyncProjection(ctx context.Context) er
 			}
 			continue
 		}
+		if table == "memory_taint_mirror_revision" {
+			var id, revision int64
+			if err := s.conn.QueryRowContext(ctx,
+				`SELECT singleton, revision FROM memory_taint_mirror_revision`,
+			).Scan(&id, &revision); err != nil || id != 1 || revision != 0 {
+				return errors.New("state sync receiving requires a pristine memory taint mirror revision")
+			}
+			continue
+		}
 		if table == "graph_projection_revision" {
 			var id, revision int64
 			if err := s.conn.QueryRowContext(ctx,
