@@ -169,6 +169,8 @@ func TestMembershipValidation(t *testing.T) {
 
 	_, err := EncodeMembership(Membership{Generation: 1, Origin: 0})
 	require.ErrorContains(t, err, "origin")
+	_, err = EncodeMembership(Membership{Generation: 0, Origin: OriginTarget})
+	require.ErrorContains(t, err, "generation must be positive")
 	_, err = EncodeMembership(Membership{Generation: 1, Depth: MaxDepth + 1, Origin: OriginTarget})
 	require.ErrorContains(t, err, "depth")
 	_, err = DecodeMembership([]byte{1, 2, 3})
@@ -179,6 +181,12 @@ func TestMembershipValidation(t *testing.T) {
 	binary.BigEndian.PutUint16(encoded[8:], MaxDepth+1)
 	_, err = DecodeMembership(encoded)
 	require.ErrorContains(t, err, "depth")
+
+	encoded, err = EncodeMembership(Membership{Generation: 1, Origin: OriginTarget})
+	require.NoError(t, err)
+	binary.BigEndian.PutUint64(encoded[:8], 0)
+	_, err = DecodeMembership(encoded)
+	require.ErrorContains(t, err, "generation must be positive")
 }
 
 func TestQueueEntryRoundTripAndValidation(t *testing.T) {

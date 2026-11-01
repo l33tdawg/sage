@@ -222,6 +222,9 @@ func DecodeHeader(encoded []byte) (Header, error) {
 }
 
 func EncodeMembership(membership Membership) ([]byte, error) {
+	if membership.Generation == 0 {
+		return nil, fmt.Errorf("%w: membership generation must be positive", errState)
+	}
 	if !membership.Origin.Valid() {
 		return nil, fmt.Errorf("%w: invalid membership origin %d", errState, membership.Origin)
 	}
@@ -242,6 +245,9 @@ func DecodeMembership(encoded []byte) (Membership, error) {
 		Generation: binary.BigEndian.Uint64(encoded),
 		Depth:      binary.BigEndian.Uint16(encoded[8:]),
 		Origin:     Origin(encoded[10]),
+	}
+	if membership.Generation == 0 {
+		return Membership{}, fmt.Errorf("%w: membership generation must be positive", errState)
 	}
 	if !membership.Origin.Valid() {
 		return Membership{}, fmt.Errorf("%w: invalid membership origin %d", errState, membership.Origin)
