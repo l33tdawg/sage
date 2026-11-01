@@ -1098,6 +1098,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	if err := s.ensureGraphProjectionRevision(ctx); err != nil {
 		return err
 	}
+	if err := ensureSQLiteMemoryTaintMirrorSchema(ctx, s); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -2171,6 +2174,9 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		query += " AND memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
 			strings.Join(placeholders, ",") + "))"
 	}
+	if opts.ExcludeTainted {
+		query += " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = memories.memory_id)"
+	}
 	hasCandidateFilter := opts.CandidateFilter != nil ||
 		opts.CandidateBatchFilter != nil
 	if hasCandidateFilter {
@@ -2363,6 +2369,9 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 		}
 		sqlStr += " AND m.memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
 			strings.Join(placeholders, ",") + "))"
+	}
+	if opts.ExcludeTainted {
+		sqlStr += " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = m.memory_id)"
 	}
 
 	orderBy := " ORDER BY rank"
@@ -3301,6 +3310,11 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 			args = append(args, a)
 		}
 		filter := " AND submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
+		query += filter
+		countQuery += filter
+	}
+	if opts.ExcludeTainted {
+		filter := " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = memories.memory_id)"
 		query += filter
 		countQuery += filter
 	}

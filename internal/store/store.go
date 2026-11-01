@@ -103,9 +103,12 @@ type QueryOptions struct {
 	// so every other caller's "committed" filter still means strictly committed —
 	// committed rows are returned byte-for-byte as before. Off-chain only; never a
 	// consensus input.
-	IncludeDisputed bool   `json:"-"`
-	TopK            int    `json:"top_k"`
-	Cursor          string `json:"cursor,omitempty"`
+	IncludeDisputed bool `json:"-"`
+	// ExcludeTainted applies the SQL taint prefilter only when the caller has
+	// proven the mirror revision matches canonical Badger state.
+	ExcludeTainted bool   `json:"-"`
+	TopK           int    `json:"top_k"`
+	Cursor         string `json:"cursor,omitempty"`
 	// DecayFloor, when > 0, drops records whose task-aware DECAYED confidence
 	// (memory.ComputeConfidenceForRecord — time decay + corroboration boost, open
 	// tasks exempt) is below the floor. Unlike MinConfidence it is applied in Go
@@ -267,6 +270,9 @@ type ListOptions struct {
 	// App-v23 authorization walks multiple raw pages and enables this flag;
 	// historical one-page callers retain their exact ordering.
 	StablePaging bool
+	// ExcludeTainted mirrors QueryOptions and must be enabled only while the
+	// SQL taint mirror is fresh.
+	ExcludeTainted bool
 	// SkipTotal avoids the separate COUNT query when a caller is walking
 	// additional presentation-only windows and already obtained the total from
 	// its first page. The returned total is zero when this is set.

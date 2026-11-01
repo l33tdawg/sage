@@ -2056,6 +2056,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		DomainTag:      req.DomainTag,
 		Provider:       req.Provider,
 		VectorProvider: activeVectorSpace,
+		ExcludeTainted: s.memoryTaintFilterEnabled(r.Context()),
 		MinConfidence:  req.MinConfidence,
 		StatusFilter:   req.StatusFilter,
 		TopK:           s.disclosureRecallTopK(req.TopK),
@@ -2859,12 +2860,13 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	opts := store.QueryOptions{
-		DomainTag:     req.DomainTag,
-		Provider:      req.Provider,
-		MinConfidence: req.MinConfidence,
-		StatusFilter:  req.StatusFilter,
-		TopK:          s.disclosureRecallTopK(req.TopK),
-		Tags:          req.Tags,
+		DomainTag:      req.DomainTag,
+		Provider:       req.Provider,
+		ExcludeTainted: s.memoryTaintFilterEnabled(r.Context()),
+		MinConfidence:  req.MinConfidence,
+		StatusFilter:   req.StatusFilter,
+		TopK:           s.disclosureRecallTopK(req.TopK),
+		Tags:           req.Tags,
 		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
 		// at serialize). A no-op unless the caller's filter is "committed".
 		IncludeDisputed: true,
@@ -3192,6 +3194,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		DomainTag:      req.DomainTag,
 		Provider:       req.Provider,
 		VectorProvider: s.activeEmbeddingProvider(),
+		ExcludeTainted: s.memoryTaintFilterEnabled(r.Context()),
 		MinConfidence:  req.MinConfidence,
 		StatusFilter:   req.StatusFilter,
 		TopK:           s.disclosureRecallTopK(req.TopK),
@@ -4548,13 +4551,14 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 	}
 
 	opts := store.ListOptions{
-		DomainTag: domainFilter,
-		Tag:       q.Get("tag"),
-		Provider:  q.Get("provider"),
-		Status:    q.Get("status"),
-		Limit:     limit,
-		Offset:    offset,
-		Sort:      q.Get("sort"),
+		DomainTag:      domainFilter,
+		Tag:            q.Get("tag"),
+		Provider:       q.Get("provider"),
+		Status:         q.Get("status"),
+		Limit:          limit,
+		Offset:         offset,
+		Sort:           q.Get("sort"),
+		ExcludeTainted: s.memoryTaintFilterEnabled(r.Context()),
 	}
 	// Apply single-agent filter from query param (only if allowed)
 	if agent := q.Get("agent"); agent != "" {
@@ -4741,12 +4745,13 @@ func (s *Server) getAppV23VisibleTimeline(
 	// not perfectly lexicographic at a whole-second boundary. Widen the SQL
 	// range by one second and apply the exact time predicate below.
 	opts := store.ListOptions{
-		DomainTag:    domain,
-		CreatedFrom:  from.UTC().Add(-time.Second).Format(time.RFC3339Nano),
-		CreatedTo:    to.UTC().Add(time.Second).Format(time.RFC3339Nano),
-		Limit:        pageSize,
-		Sort:         "oldest",
-		StablePaging: true,
+		DomainTag:      domain,
+		CreatedFrom:    from.UTC().Add(-time.Second).Format(time.RFC3339Nano),
+		CreatedTo:      to.UTC().Add(time.Second).Format(time.RFC3339Nano),
+		Limit:          pageSize,
+		Sort:           "oldest",
+		StablePaging:   true,
+		ExcludeTainted: s.memoryTaintFilterEnabled(ctx),
 	}
 	counts := make(map[string]int)
 	now := time.Now()
