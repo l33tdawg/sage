@@ -34,6 +34,19 @@ func makeAppV30WorkRawTx(t *testing.T, nonce uint64) []byte {
 	return encoded
 }
 
+func TestAppV30MembershipTripleMatchesProductionCodec(t *testing.T) {
+	memoryID := strings.Repeat("m", taint.MaxMemoryIDBytes)
+	decisionID := strings.Repeat("a", taint.DecisionIDBytes)
+	membership, err := taint.EncodeMembership(taint.Membership{Generation: 1, Origin: taint.OriginExpand})
+	require.NoError(t, err)
+	queue, err := taint.EncodeQueueEntry(taint.QueueEntry{ParentRefID: decisionID, MemoryID: memoryID})
+	require.NoError(t, err)
+	actual := len(taint.MembershipKey(memoryID, decisionID)) + len(membership) +
+		len(taint.DecisionIndexKey(decisionID, memoryID)) +
+		len(taint.FrontierKey(decisionID, 1, 1)) + len(queue)
+	require.EqualValues(t, actual, appV30MembershipTripleBytes)
+}
+
 func TestAppV30GeneratedWriteBudgetPrepareProcessAndFinalize(t *testing.T) {
 	app := setupTestApp(t)
 	app.state.Height = 19
@@ -54,9 +67,9 @@ func TestAppV30GeneratedWriteBudgetPrepareProcessAndFinalize(t *testing.T) {
 		txs[i] = makeAppV30WorkRawTx(t, uint64(i+1))
 	}
 	perTx := app.appV30EstimatedTxBytes(txs[0], 20)
-	require.EqualValues(t, 369_204, perTx)
-	require.LessOrEqual(t, perTx*11, appV30BlockWriteBudgetBytes)
-	require.Greater(t, perTx*12, appV30BlockWriteBudgetBytes)
+	require.EqualValues(t, 383_076, perTx)
+	require.LessOrEqual(t, perTx*10, appV30BlockWriteBudgetBytes)
+	require.Greater(t, perTx*11, appV30BlockWriteBudgetBytes)
 
 	prepared, err := app.PrepareProposal(context.Background(), &abcitypes.RequestPrepareProposal{
 		Height:     20,
@@ -65,11 +78,11 @@ func TestAppV30GeneratedWriteBudgetPrepareProcessAndFinalize(t *testing.T) {
 		MaxTxBytes: 2_000_000,
 	})
 	require.NoError(t, err)
-	require.Len(t, prepared.Txs, 11)
+	require.Len(t, prepared.Txs, 10)
 
 	accepted, err := app.ProcessProposal(context.Background(), &abcitypes.RequestProcessProposal{
 		Height: 20,
-		Txs:    txs[:11],
+		Txs:    txs[:10],
 	})
 	require.NoError(t, err)
 	require.Equal(t, abcitypes.ResponseProcessProposal_ACCEPT, accepted.Status)
@@ -113,7 +126,7 @@ func TestAppV30WorstSubmitEstimateMatchesBenchmarkBound(t *testing.T) {
 		Type:         tx.TxTypeMemorySubmit,
 		MemorySubmit: submit,
 	})
-	require.EqualValues(t, 80_157, estimate)
+	require.EqualValues(t, 80_253, estimate)
 	require.LessOrEqual(t, estimate*52, appV30BlockWriteBudgetBytes)
 	require.Greater(t, estimate*53, appV30BlockWriteBudgetBytes)
 }
@@ -158,7 +171,7 @@ func TestAppV30ActiveGovernanceReserveCountsBeforeExecutionVote(t *testing.T) {
 	}
 	selected, err := app.selectAppV30Proposal(txs, 20)
 	require.NoError(t, err)
-	require.Len(t, selected, 10, "the active execution reserve must remain outside proposal selection")
+	require.Len(t, selected, 9, "the active execution reserve must remain outside proposal selection")
 	_, err = app.appV30BlockGeneratedWriteEstimate(txs, 20)
 	require.ErrorContains(t, err, "exceed")
 }
@@ -220,7 +233,7 @@ func TestAppV30WorstSubmitActualGeneratedWritesStayWithinEstimate(t *testing.T) 
 	stats, err := scoped.CommitAppV30WriteStage()
 	require.NoError(t, err)
 	require.Positive(t, stats.Generated)
-	require.LessOrEqual(t, stats.Generated, int64(80_157))
+	require.LessOrEqual(t, stats.Generated, int64(80_253))
 }
 
 func testTaintDecisionIDForBudget(i int) string {

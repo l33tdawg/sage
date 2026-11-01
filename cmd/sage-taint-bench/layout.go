@@ -52,17 +52,24 @@ const (
 // The planned key layouts. Nothing below exists in the node yet.
 func memProvKey(id string) []byte       { return []byte("memprov:v30:" + id) }
 func migratedKey(id string) []byte      { return []byte("memprov:migrated:" + id) }
-func lineagePrefix(child string) []byte { return []byte("lineage:" + child + ":") }
+func lineagePrefix(child string) []byte { return identityPrefix("lineage:", child) }
 func lineageKey(child, parent string) []byte {
-	return []byte("lineage:" + child + ":" + parent)
+	return append(lineagePrefix(child), parent...)
 }
 func lineageRefPrefix(parent string) []byte { return []byte("lineage-ref:" + parent + ":") }
 func lineageRefKey(parent, child string) []byte {
 	return []byte("lineage-ref:" + parent + ":" + child)
 }
-func memberPrefix(memory string) []byte { return []byte("taintm:" + memory + ":") }
+func memberPrefix(memory string) []byte { return identityPrefix("taintm:", memory) }
 func memberKey(memory, decision string) []byte {
-	return []byte("taintm:" + memory + ":" + decision)
+	return append(memberPrefix(memory), decision...)
+}
+
+func identityPrefix(namespace, id string) []byte {
+	prefix := append(make([]byte, 0, len(namespace)+2+len(id)+1), namespace...)
+	prefix = binary.BigEndian.AppendUint16(prefix, uint16(len(id))) // #nosec G115 -- fixture IDs are bounded at memoryIDCap
+	prefix = append(prefix, id...)
+	return append(prefix, ':')
 }
 func indexPrefix(decision string) []byte { return []byte("taintd:" + decision + ":") }
 func indexKey(decision, memory string) []byte {
@@ -166,20 +173,26 @@ func decodeMemberGeneration(raw []byte) (uint64, error) {
 }
 
 func encodeQueueEntry(memory string, depth uint16) []byte {
-	out := binary.BigEndian.AppendUint16(make([]byte, 0, len(memory)+4), uint16(len(memory)))
+	// The stand-in does not resolve canonical content hashes. Its deterministic
+	// parent-ref surrogate nevertheless occupies the production codec's 64 bytes.
+	parent := sha256.Sum256([]byte(memory))
+	parentID := hex.EncodeToString(parent[:])
+	out := binary.BigEndian.AppendUint16(make([]byte, 0, len(memory)+70), uint16(len(parentID)))
+	out = append(out, parentID...)
+	out = binary.BigEndian.AppendUint16(out, uint16(len(memory)))
 	out = append(out, memory...)
 	return binary.BigEndian.AppendUint16(out, depth)
 }
 
 func decodeQueueEntry(raw []byte) (string, uint16, error) {
-	if len(raw) < 4 {
+	if len(raw) < 70 || binary.BigEndian.Uint16(raw) != decisionIDLen {
 		return "", 0, fmt.Errorf("short queue entry: %d bytes", len(raw))
 	}
-	idLen := int(binary.BigEndian.Uint16(raw))
-	if len(raw) != idLen+4 {
+	idLen := int(binary.BigEndian.Uint16(raw[66:]))
+	if len(raw) != idLen+70 {
 		return "", 0, fmt.Errorf("queue entry length mismatch: %d", len(raw))
 	}
-	return string(raw[2 : 2+idLen]), binary.BigEndian.Uint16(raw[2+idLen:]), nil
+	return string(raw[68 : 68+idLen]), binary.BigEndian.Uint16(raw[68+idLen:]), nil
 }
 
 // encodeProvenance is the planned memprov:v30 value: one fixed-size entry per

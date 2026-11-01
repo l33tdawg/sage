@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
@@ -145,12 +146,17 @@ func validateLineageIndexesTxn(txn *badger.Txn) error {
 }
 
 func parseLineageForwardKey(key string) (childID, parentID string, err error) {
-	key = strings.TrimPrefix(key, "lineage:")
-	separator := strings.LastIndexByte(key, ':')
-	if separator <= 0 || separator == len(key)-1 {
+	const prefix = "lineage:"
+	if !strings.HasPrefix(key, prefix) || len(key) < len(prefix)+2 {
 		return "", "", fmt.Errorf("%w: malformed forward key", ErrAppV30LineageIndex)
 	}
-	childID, parentID = key[:separator], key[separator+1:]
+	key = key[len(prefix):]
+	childLen := int(binary.BigEndian.Uint16([]byte(key[:2])))
+	if childLen == 0 || childLen > tx.MaxDerivedFromMemoryIDBytes ||
+		len(key) != 2+childLen+1+lineage.ParentIDBytes*2 || key[2+childLen] != ':' {
+		return "", "", fmt.Errorf("%w: malformed forward key", ErrAppV30LineageIndex)
+	}
+	childID, parentID = key[2:2+childLen], key[2+childLen+1:]
 	if err := lineage.ValidateIDs(childID, parentID); err != nil {
 		return "", "", fmt.Errorf("%w: %v", ErrAppV30LineageIndex, err)
 	}

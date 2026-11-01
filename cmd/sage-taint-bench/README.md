@@ -10,6 +10,32 @@ cross-architecture deterministic digest and AppHash evidence while still
 leaving live CometBFT, SQL mirror and restart/state-sync proof to their dedicated
 gates.
 
+The variable memory identity in membership and forward-lineage keys uses its
+two-byte big-endian **byte length**, followed by the raw ID and a colon:
+
+| key | encoding |
+|---|---|
+| membership | `taintm:` + `u16be(len(memory_id))` + memory ID + `:` + 64 hex decision ID |
+| forward lineage | `lineage:` + `u16be(len(child_id))` + child ID + `:` + 64 hex parent ID |
+
+The 1–512-byte ID contract includes colons, NUL bytes and multibyte text. These
+exact identity prefixes keep neighbours out of bounded scans. Fixed-hash-first
+decision and reverse-lineage indexes retain their layouts. Queue sizing includes
+the production codec's length-prefixed 64-byte parent reference; the stand-in
+uses a deterministic surrogate for that reference. The maximum membership,
+decision-index and queue triple is 1,852 bytes.
+
+The stand-in retains its provisional work costs and block estimator. Production
+also reserves transaction overhead: its maximum expansion reservation is
+383,076 bytes, permitting ten such reservations in 4 MiB. The stand-in's block
+selection result does not establish that production boundary.
+
+This corrects unreleased app-v30 state only. Experimental app-v30 AppHashes and
+snapshots made with the earlier ambiguous layout are incompatible; recovery
+does not fall back to it. Pre-app-v30 execution and state are unchanged, with no
+historical state rewrite or migration. The supported automatic upgrade ceiling
+remains app-v29.
+
 ## Running it
 
 ```sh

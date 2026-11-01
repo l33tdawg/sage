@@ -317,15 +317,19 @@ func (s *BadgerStore) ValidateTaintState() error {
 }
 
 func parseTaintMembershipKey(key string) (memoryID, decisionID string, err error) {
-	key = strings.TrimPrefix(key, "taintm:")
-	separator := strings.LastIndexByte(key, ':')
-	if separator <= 0 || len(key)-separator-1 != taint.DecisionIDBytes {
+	const prefix = "taintm:"
+	if !strings.HasPrefix(key, prefix) || len(key) < len(prefix)+2 {
 		return "", "", fmt.Errorf("%w: malformed membership key", ErrTaintStateMalformed)
 	}
-	memoryID, decisionID = key[:separator], key[separator+1:]
-	if len(memoryID) > taint.MaxMemoryIDBytes {
+	key = key[len(prefix):]
+	memoryLen := int(binary.BigEndian.Uint16([]byte(key[:2])))
+	if memoryLen == 0 || memoryLen > taint.MaxMemoryIDBytes {
 		return "", "", fmt.Errorf("%w: invalid membership memory ID", ErrTaintStateMalformed)
 	}
+	if len(key) != 2+memoryLen+1+taint.DecisionIDBytes || key[2+memoryLen] != ':' {
+		return "", "", fmt.Errorf("%w: malformed membership key", ErrTaintStateMalformed)
+	}
+	memoryID, decisionID = key[2:2+memoryLen], key[2+memoryLen+1:]
 	if err := taint.ValidateDecisionID(decisionID); err != nil {
 		return "", "", fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 	}

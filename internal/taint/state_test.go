@@ -1,6 +1,7 @@
 package taint
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
 	"strings"
@@ -39,8 +40,8 @@ func TestAcceptedLimits(t *testing.T) {
 func TestCanonicalKeys(t *testing.T) {
 	assert.Equal(t, "taintdec:decision", string(DecisionKey("decision")))
 	assert.Equal(t, "taintactivedec:decision", string(ActiveDecisionKey("decision")))
-	assert.Equal(t, "taintm:memory:decision", string(MembershipKey("memory", "decision")))
-	assert.Equal(t, "taintm:memory:", string(MembershipPrefix("memory")))
+	assert.Equal(t, "taintm:\x00\x06memory:decision", string(MembershipKey("memory", "decision")))
+	assert.Equal(t, "taintm:\x00\x06memory:", string(MembershipPrefix("memory")))
 	assert.Equal(t, "taintd:decision:memory", string(DecisionIndexKey("decision", "memory")))
 	assert.Equal(t, "taintd:decision:", string(DecisionIndexPrefix("decision")))
 	assert.Equal(t, "taintq:decision:", string(FrontierPrefix("decision")))
@@ -51,6 +52,21 @@ func TestCanonicalKeys(t *testing.T) {
 	expected := append([]byte("taintq:decision:"), 0, 0, 0, 0, 0, 0, 0, 7, ':')
 	expected = binary.BigEndian.AppendUint64(expected, 9)
 	assert.Equal(t, expected, key)
+}
+
+func TestMembershipPrefixesAreExactArbitraryIdentities(t *testing.T) {
+	ids := []string{"x", strings.Repeat("x", 255), strings.Repeat("x", 256), strings.Repeat("x", 511), strings.Repeat("é", 256), "victim", "victim:x", "victim\x00", "\x00:\xff", "é:", strings.Repeat("x", MaxMemoryIDBytes)}
+	for _, id := range ids {
+		for _, other := range ids {
+			assert.Equal(t, id == other, bytes.HasPrefix(MembershipKey(other, testDecisionID()), MembershipPrefix(id)),
+				"identity %q versus %q", id, other)
+		}
+	}
+	for _, invalid := range []string{strings.Repeat("x", MaxMemoryIDBytes+1), "victim:" + strings.Repeat("x", 65535)} {
+		for _, id := range ids {
+			assert.False(t, bytes.HasPrefix(MembershipKey(invalid, testDecisionID()), MembershipPrefix(id)))
+		}
+	}
 }
 
 func TestHeaderRoundTrip(t *testing.T) {
