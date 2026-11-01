@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	badger "github.com/dgraph-io/badger/v4"
 )
@@ -17,6 +18,15 @@ type PublicMemoryMigration struct {
 	SourceReadTimestamp uint64
 	Scanned             uint64
 	Public              uint64
+	Migrated            uint64
+	AppV30Provenance    uint64
+	AdoptionReceipts    uint64
+}
+
+type publicMigrationRecord struct {
+	leaf            *PublicMemoryLeaf
+	provenance      []byte
+	adoptionReceipt []byte
 }
 
 func (s *BadgerStore) BuildPublicMemoryMigration(ctx context.Context, target *BadgerStore) (*PublicMemoryMigration, error) {
@@ -54,14 +64,15 @@ func (s *BadgerStore) BuildPublicMemoryMigration(ctx context.Context, target *Ba
 	if commitErr := initial.CommitConsensusTransaction(); commitErr != nil {
 		return nil, commitErr
 	}
-	var batch []*PublicMemoryLeaf
+	var batch []publicMigrationRecord
 	flush := func() error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
 		transaction := target.BeginConsensusTransaction(nil)
 		defer transaction.DiscardConsensusTransaction()
-		for _, leaf := range batch {
+		for _, record := range batch {
+			leaf := record.leaf
 			if hashErr := transaction.SetMemoryHash(leaf.MemoryID, leaf.ContentHash[:], leaf.Status); hashErr != nil {
 				return hashErr
 			}
@@ -79,6 +90,13 @@ func (s *BadgerStore) BuildPublicMemoryMigration(ctx context.Context, target *Ba
 			}
 			if syncErr := transaction.SyncPublicMemoryIndex(leaf.MemoryID); syncErr != nil {
 				return syncErr
+			}
+			if metadataErr := transaction.copyAppV30MigrationMetadata(
+				leaf.MemoryID,
+				record.provenance,
+				record.adoptionReceipt,
+			); metadataErr != nil {
+				return metadataErr
 			}
 		}
 		if flushCommitErr := transaction.CommitConsensusTransaction(); flushCommitErr != nil {
@@ -104,7 +122,46 @@ func (s *BadgerStore) BuildPublicMemoryMigration(ctx context.Context, target *Ba
 		result.Scanned++
 		if leaf != nil {
 			result.Public++
-			batch = append(batch, leaf)
+			provenance, provenanceFound, provenanceErr := readTaintValueTxn(
+				snapshot,
+				AppV30ProvenanceKey(identifier),
+			)
+			if provenanceErr != nil {
+				return nil, provenanceErr
+			}
+			if provenanceFound {
+				if _, decodeErr := decodeAppV30Provenance(provenance); decodeErr != nil {
+					return nil, fmt.Errorf(
+						"app-v30 provenance for %s is malformed: %w",
+						identifier,
+						decodeErr,
+					)
+				}
+				result.AppV30Provenance++
+			}
+			adoptionReceipt, adoptionFound, adoptionErr := readTaintValueTxn(
+				snapshot,
+				memoryLegacyAdoptionReceiptKey(identifier),
+			)
+			if adoptionErr != nil {
+				return nil, adoptionErr
+			}
+			if adoptionFound {
+				if len(adoptionReceipt) != sha256.Size {
+					return nil, fmt.Errorf(
+						"adoption receipt for %s has invalid length %d",
+						identifier,
+						len(adoptionReceipt),
+					)
+				}
+				result.AdoptionReceipts++
+			}
+			result.Migrated++
+			batch = append(batch, publicMigrationRecord{
+				leaf:            leaf,
+				provenance:      provenance,
+				adoptionReceipt: adoptionReceipt,
+			})
 		}
 		if len(batch) == publicMigrationBatch {
 			if flushErr := flush(); flushErr != nil {
