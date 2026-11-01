@@ -201,6 +201,13 @@ func (app *SageApp) processAppV30MeteredTx(
 	if err := app.badgerStore.BeginAppV30WriteStage(estimate); err != nil {
 		return nil, fmt.Errorf("begin app-v30 write reservation: %w", err)
 	}
+	pendingWriteCount := len(app.pendingWrites)
+	stageCommitted := false
+	defer func() {
+		if !stageCommitted {
+			app.pendingWrites = app.pendingWrites[:pendingWriteCount]
+		}
+	}()
 
 	result := app.processTx(parsedTx, height, blockTime)
 	overflowed := app.badgerStore.AppV30WriteStageOverflowed()
@@ -231,6 +238,7 @@ func (app *SageApp) processAppV30MeteredTx(
 		}
 		return nil, fmt.Errorf("finish app-v30 write reservation: %w", err)
 	}
+	stageCommitted = true
 	return result, nil
 }
 
