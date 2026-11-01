@@ -33,6 +33,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+echo "--- source commit: $(git rev-parse HEAD) ---"
+if ! git diff --quiet HEAD --; then
+  echo "--- source has tracked local changes; images use the working tree ---"
+fi
+
 PROJECT="${DET_PROJECT:-sage-det}"
 case "${PROJECT}" in
   sage-det|sage-fresh-v30) ;;
