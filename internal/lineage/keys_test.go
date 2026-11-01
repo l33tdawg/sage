@@ -1,6 +1,7 @@
 package lineage
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -10,10 +11,25 @@ import (
 
 func TestCanonicalIndexKeys(t *testing.T) {
 	parentID := strings.Repeat("a", ParentIDBytes*2)
-	assert.Equal(t, "lineage:child:"+parentID, string(ForwardKey("child", parentID)))
-	assert.Equal(t, "lineage:child:", string(ForwardPrefix("child")))
+	assert.Equal(t, "lineage:\x00\x05child:"+parentID, string(ForwardKey("child", parentID)))
+	assert.Equal(t, "lineage:\x00\x05child:", string(ForwardPrefix("child")))
 	assert.Equal(t, "lineage-ref:"+parentID+":child", string(ReverseKey(parentID, "child")))
 	assert.Equal(t, "lineage-ref:"+parentID+":", string(ReversePrefix(parentID)))
+}
+
+func TestForwardPrefixesAreExactArbitraryIdentities(t *testing.T) {
+	ids := []string{"x", strings.Repeat("x", 255), strings.Repeat("x", 256), strings.Repeat("x", 511), strings.Repeat("é", 256), "victim", "victim:x", "victim\x00", "\x00:\xff", "é:", strings.Repeat("x", 512)}
+	for _, id := range ids {
+		for _, other := range ids {
+			assert.Equal(t, id == other, bytes.HasPrefix(ForwardKey(other, strings.Repeat("a", ParentIDBytes*2)), ForwardPrefix(id)),
+				"identity %q versus %q", id, other)
+		}
+	}
+	for _, invalid := range []string{strings.Repeat("x", 513), "victim:" + strings.Repeat("x", 65535)} {
+		for _, id := range ids {
+			assert.False(t, bytes.HasPrefix(ForwardKey(invalid, strings.Repeat("a", ParentIDBytes*2)), ForwardPrefix(id)))
+		}
+	}
 }
 
 func TestValidateIDs(t *testing.T) {
