@@ -24,17 +24,21 @@ const (
 )
 
 type TaintServingVerdict struct {
-	Outcome     TaintServingOutcome
-	DecisionIDs []string
-	Nodes       int
-	Units       int
+	Outcome          TaintServingOutcome
+	DecisionIDs      []string
+	Nodes            int
+	Units            int
+	CoverageComplete bool
+	LineageMissing   bool
+	DepthExhausted   bool
+	WorkExhausted    bool
 }
 
 // ClassifyMemoryTaint checks direct memberships and the authenticated ancestor
 // path in one Badger snapshot. It never treats an absent materialized
 // membership as proof that an incomplete ancestor decision is independent.
 func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict, error) {
-	var verdict TaintServingVerdict
+	verdict := TaintServingVerdict{CoverageComplete: true}
 	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
 		return verdict, fmt.Errorf("%w: invalid memory ID", ErrTaintServingState)
 	}
@@ -79,6 +83,14 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 					}
 					if !header.Status.Incomplete() {
 						pendingOnly = false
+					} else {
+						verdict.CoverageComplete = false
+					}
+					switch header.Status {
+					case taint.StatusDepthExhausted:
+						verdict.DepthExhausted = true
+					case taint.StatusWorkExhausted:
+						verdict.WorkExhausted = true
 					}
 				}
 				verdict.DecisionIDs = append([]string(nil), decisions...)
@@ -95,6 +107,17 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 				return err
 			}
 			verdict.Units += len(parents)
+			if len(parents) == 0 {
+				_, provenanceFound, provenanceErr := reader.GetAppV30Provenance(current)
+				verdict.Units++
+				if provenanceErr != nil {
+					return provenanceErr
+				}
+				if !provenanceFound {
+					verdict.CoverageComplete = false
+					verdict.LineageMissing = true
+				}
+			}
 			for _, parent := range parents {
 				if _, seen := visited[parent.ref.MemoryID]; seen {
 					continue
