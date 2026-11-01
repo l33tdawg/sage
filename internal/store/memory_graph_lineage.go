@@ -210,8 +210,8 @@ func (s *BadgerStore) memoryLineageTxn(txn *badger.Txn, childID string) ([]linea
 		if err != nil {
 			return nil, err
 		}
-		if err := lineage.ValidateIDs(childID, parentID); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrMemoryLineageMalformed, err)
+		if validateErr := lineage.ValidateIDs(childID, parentID); validateErr != nil {
+			return nil, fmt.Errorf("%w: %v", ErrMemoryLineageMalformed, validateErr)
 		}
 		ref, err := tx.DecodeParentRefValue(value)
 		if err != nil {

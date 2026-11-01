@@ -221,15 +221,16 @@ test('release and CI vulnerability gates scan the exact mandated Go floor', () =
   ]) {
     assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /^go 1\.26\.10$/m);
   }
-  for (const [path, stage] of [
+  for (const [path, stage, platform = ''] of [
     ['../Dockerfile', 'builder'],
-    ['../deploy/Dockerfile.node', 'builder'],
-    ['../deploy/Dockerfile.abci', 'source'],
+    ['../deploy/Dockerfile.node', 'builder', ' --platform=$BUILDPLATFORM'],
+    ['../deploy/Dockerfile.abci', 'source', ' --platform=$BUILDPLATFORM'],
     ['../deploy/federation-acceptance/Dockerfile.node', 'builder'],
     ['../deploy/federation-acceptance/Dockerfile.natter', 'build'],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), 'utf8');
-    assert.match(source, new RegExp(`^FROM golang:1\\.26\\.10-alpine AS ${stage}$`, 'm'));
+    const expected = `FROM${platform} golang:1.26.10-alpine AS ${stage}`;
+    assert.ok(source.split(/\r?\n/).includes(expected), `${path} must declare ${expected}`);
   }
   assert.match(
     readFileSync(new URL('../deploy/init-testnet.sh', import.meta.url), 'utf8'),
