@@ -12,7 +12,7 @@ import (
 
 func TestAppV29AutoVoteCeilingAndStrictBoundary(t *testing.T) {
 	require.Equal(t, tx.CanonicalUpgradeName(29), appV29UpgradeName)
-	require.Equal(t, uint64(29), MaxCompiledAppVersion())
+	require.Equal(t, uint64(30), MaxCompiledAppVersion())
 	require.Equal(t, uint64(29), MaxSupportedAppVersion())
 
 	app := setupTestApp(t)
