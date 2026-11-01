@@ -43,7 +43,7 @@ treated as frozen thereafter (`internal/contentvalidator/registry.go`):
   A nil receiver or empty registry is pass-through. (`registry.go:109`)
 
 The routing key is read from the submission body by `parseOutcomeClass`
-(`internal/abci/app.go:5265-5296`), which decodes ONLY the `outcome_class` field and
+(`internal/abci/app.go:5266-5297`), which decodes ONLY the `outcome_class` field and
 ignores every sibling.
 
 ### When enforcement is actually live
