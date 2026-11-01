@@ -49,7 +49,7 @@ def write_fixture_tree(root):
 
 
 class SourceIdentityTests(unittest.TestCase):
-    def test_state_sync_target_tracks_compiled_app_ceiling(self):
+    def test_state_sync_target_fits_auto_vote_and_restore_support(self):
         gate = (REPOSITORY_ROOT / "deploy/scripts/run-v11.9-state-sync.sh").read_text(
             encoding="utf-8"
         )
@@ -70,28 +70,31 @@ class SourceIdentityTests(unittest.TestCase):
             re.MULTILINE,
         )
         self.assertIsNotNone(gate_target, "state-sync gate target is not canonical")
-        self.assertIsNotNone(app_ceiling, "compiled app ceiling is not canonical")
+        self.assertIsNotNone(app_ceiling, "auto-vote readiness ceiling is not canonical")
         self.assertIsNotNone(
             state_sync_ceiling, "state-sync authorization ceiling is not canonical"
         )
         self.assertIsNotNone(
             compiled_ceiling, "compiled app version ceiling is not canonical"
         )
-        # The authorization ceiling follows what the binary can EXECUTE, and the
-        # acceptance gate follows what the auto-voter will do on its own. A gate
-        # compiled ahead of its activation evidence (app-v28 before its ceiling
-        # bump) therefore legitimately sits between the two: the gate never
-        # drives a version the binary cannot run, and the authorization accepts
-        # every version the binary can be asked to restore.
-        self.assertEqual(
-            compiled_ceiling.group(1),
-            state_sync_ceiling.group(1),
-            "the state-sync authorization ceiling must equal the highest compiled app version",
+        # A compiled dormant fork does not automatically expand the exact-version
+        # state-sync allowlist. This gate reaches its target by auto-advance, so
+        # the target must fit both auto-vote readiness and state-sync support.
+        # Neither support ceiling may exceed the code the binary can execute.
+        self.assertLessEqual(
+            int(state_sync_ceiling.group(1)),
+            int(compiled_ceiling.group(1)),
+            "state-sync support must not exceed the highest compiled app version",
         )
         self.assertLessEqual(
             int(gate_target.group(1)),
-            int(compiled_ceiling.group(1)),
-            "the state-sync acceptance gate must not drive a version this binary cannot run",
+            int(state_sync_ceiling.group(1)),
+            "the state-sync acceptance gate must not exceed restore support",
+        )
+        self.assertLessEqual(
+            int(gate_target.group(1)),
+            int(app_ceiling.group(1)),
+            "the state-sync acceptance gate must be reachable by auto-advance",
         )
         self.assertLessEqual(
             int(app_ceiling.group(1)),
