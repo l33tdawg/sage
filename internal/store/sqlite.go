@@ -1791,13 +1791,29 @@ func (s *SQLiteStore) CountMemoriesByProvider(ctx context.Context) (map[string]i
 func (s *SQLiteStore) DomainSpaceCompleteness(
 	ctx context.Context, domain, activeSpace string, cap int,
 ) (hasOutside, established bool, err error) {
-	rows, qerr := s.conn.QueryContext(ctx,
-		`SELECT CASE WHEN embedding IS NULL THEN 1 ELSE 0 END,
+	return s.DomainSpaceCompletenessFiltered(ctx, domain, activeSpace, cap, false)
+}
+
+func (s *SQLiteStore) DomainSpaceCompletenessFiltered(
+	ctx context.Context,
+	domain, activeSpace string,
+	cap int,
+	excludeTainted bool,
+) (hasOutside, established bool, err error) {
+	query := `SELECT CASE WHEN embedding IS NULL THEN 1 ELSE 0 END,
 		        COALESCE(embedding_provider, '')
 		 FROM memories
-		 WHERE domain_tag = ? AND status IN ('committed','challenged')
+		 WHERE domain_tag = ? AND status IN ('committed','challenged')`
+	if excludeTainted {
+		query += ` AND NOT EXISTS (
+			SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id=memories.memory_id
+		)`
+	}
+	query += `
 		 ORDER BY status, memory_id
-		 LIMIT ?`,
+		 LIMIT ?`
+	rows, qerr := s.conn.QueryContext(ctx,
+		query,
 		domain, cap+1)
 	if qerr != nil {
 		return false, false, fmt.Errorf("domain space-completeness scan: %w", qerr)

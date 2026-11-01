@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -104,4 +105,51 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 		return nil
 	})
 	return verdict, err
+}
+
+// TaintServingCoverageComplete reports whether every active decision has
+// completed authenticated-graph expansion. A false result means the SQL taint
+// mirror cannot be used for aggregate exclusion or completeness claims because
+// pending descendants may not have materialized memberships yet.
+func (s *BadgerStore) TaintServingCoverageComplete() (bool, error) {
+	complete := true
+	err := s.view(func(txn *badger.Txn) error {
+		active, err := readTaintUint64Txn(txn, taint.ActiveCountKey())
+		if err != nil {
+			return err
+		}
+		if active == 0 {
+			return nil
+		}
+		if active > taint.MaxActiveDecisions {
+			return fmt.Errorf("%w: active decision count %d exceeds %d",
+				ErrTaintServingState, active, taint.MaxActiveDecisions)
+		}
+		prefix := []byte("taintdec:")
+		options := badger.DefaultIteratorOptions
+		options.Prefix = prefix
+		options.PrefetchValues = true
+		it := txn.NewIterator(options)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			decisionID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
+			if err := taint.ValidateDecisionID(decisionID); err != nil {
+				return fmt.Errorf("%w: %v", ErrTaintServingState, err)
+			}
+			raw, err := it.Item().ValueCopy(nil)
+			if err != nil {
+				return err
+			}
+			header, err := taint.DecodeHeader(raw)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrTaintServingState, err)
+			}
+			if header.Status.Incomplete() {
+				complete = false
+				return nil
+			}
+		}
+		return nil
+	})
+	return complete, err
 }

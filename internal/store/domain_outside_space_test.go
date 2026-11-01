@@ -106,6 +106,22 @@ func TestDomainSpaceCompleteness(t *testing.T) {
 		assert.True(t, est)
 		assert.True(t, out)
 	})
+
+	t.Run("fresh taint mirror removes withheld rows from the probe", func(t *testing.T) {
+		mk("tainted-outside", "d9", "committed", "hash", true)
+		mk("clean-active", "d9", "committed", active, true)
+
+		out, est, err := s.DomainSpaceCompleteness(ctx, "d9", active, cap)
+		require.NoError(t, err)
+		assert.True(t, est)
+		assert.True(t, out, "without the mirror filter the withheld row makes the domain look incomplete")
+
+		require.NoError(t, s.ReplaceMemoryTaintMirror(ctx, 1, []string{"tainted-outside"}))
+		out, est, err = s.DomainSpaceCompletenessFiltered(ctx, "d9", active, cap, true)
+		require.NoError(t, err)
+		assert.True(t, est)
+		assert.False(t, out, "only servable rows participate in completeness")
+	})
 }
 
 func TestDomainSpaceCompletenessUsesLiveDomainIndex(t *testing.T) {

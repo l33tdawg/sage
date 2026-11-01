@@ -12,6 +12,8 @@ import (
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/taint"
+	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -119,6 +121,88 @@ func TestRecallIndexStatusEnumForFullVisibilityCaller(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRecallIndexStatusRejectsFirstTaintDuringProbe(t *testing.T) {
+	srv, badger, _, _, _ := setupAppV23RESTAccess(t)
+	srv.embedder = authoritativeTestEmbedder{vector: []float32{0.1, 0.2, 0.3}, name: "ollama"}
+	caller := fullVisibilityCaller(t, srv, badger, "fv.home")
+	mock := mockStoreOf(srv)
+	mock.outside = outsideSpaceProbe{hasOutside: false, established: true}
+	revision, err := badger.TaintRevision()
+	require.NoError(t, err)
+	require.Zero(t, revision)
+	_, before := queryEmptyRecall(t, srv, caller, "fv.home", "committed")
+	require.Equal(t, "complete", before.IndexStatus)
+	probeRan := false
+	mock.outside.after = func() {
+		probeRan = true
+		created, applyErr := badger.ApplyTaintDecision(
+			"sage",
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			tx.ParentRef{SourceChainID: "sage", MemoryID: "first-taint-during-probe"},
+			[32]byte{1},
+		)
+		require.NoError(t, applyErr)
+		require.True(t, created)
+	}
+	_, resp := queryEmptyRecall(t, srv, caller, "fv.home", "committed")
+	require.True(t, probeRan)
+	assert.Equal(t, "unavailable", resp.IndexStatus,
+		"the first taint invalidates a probe that began without a taint filter")
+}
+
+func TestRecallIndexStatusRequiresFreshTaintMirrorAndCompletedCoverage(t *testing.T) {
+	srv, badger, _, _, _ := setupAppV23RESTAccess(t)
+	srv.embedder = authoritativeTestEmbedder{vector: []float32{0.1, 0.2, 0.3}, name: "ollama"}
+	decisionID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	created, err := badger.ApplyTaintDecision(
+		"sage",
+		decisionID,
+		tx.ParentRef{SourceChainID: "sage", MemoryID: "tainted-empty-recall"},
+		[32]byte{1},
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	tsID := fullVisibilityCaller(t, srv, badger, "fv.home")
+	mockStoreOf(srv).outside = outsideSpaceProbe{hasOutside: false, established: true}
+	_, resp := queryEmptyRecall(t, srv, tsID, "fv.home", "committed")
+	require.Empty(t, resp.Results)
+	assert.Equal(t, "unavailable", resp.IndexStatus,
+		"a taint revision without a matching mirror cannot support a completeness claim")
+
+	mock := mockStoreOf(srv)
+	require.NoError(t, mock.ReplaceMemoryTaintMirror(context.Background(), 1, nil))
+	_, resp = queryEmptyRecall(t, srv, tsID, "fv.home", "committed")
+	assert.Equal(t, "unavailable", resp.IndexStatus,
+		"pending expansion means the materialized SQL mirror is not a complete serving set")
+
+	_, err = badger.ExpandTaintDecision("sage", decisionID, taint.PerExecutionUnitBudget)
+	require.NoError(t, err)
+	require.NoError(t, mock.ReplaceMemoryTaintMirror(context.Background(), 2, []string{"tainted-empty-recall"}))
+	projectionRevision, err := mock.MemoryProjectionRevision(context.Background())
+	require.NoError(t, err)
+	badger.PublishCanonicalMemoryProjectionAuditAt(
+		true,
+		false,
+		false,
+		projectionRevision,
+		badger.CanonicalMemoryProjectionRevision(),
+		mock.VaultGeneration(),
+	)
+	_, resp = queryEmptyRecall(t, srv, tsID, "fv.home", "committed")
+	assert.Equal(t, "complete", resp.IndexStatus)
+	assert.True(t, mock.sawTaintFilter, "the fresh, fully expanded mirror must prefilter the probe")
+
+	mock.outside.after = func() {
+		changed, clearErr := badger.ClearTaintDecision(decisionID)
+		require.NoError(t, clearErr)
+		require.True(t, changed)
+	}
+	_, resp = queryEmptyRecall(t, srv, tsID, "fv.home", "committed")
+	assert.Equal(t, "unavailable", resp.IndexStatus,
+		"a taint revision change during the bounded probe invalidates the completeness claim")
 }
 
 // P1#3 (Dhillon): the probe hard-codes committed/challenged, so the verdict may

@@ -80,6 +80,10 @@ type mockMemoryStore struct {
 	// every id — used to prove the link-read path surfaces a backend outage
 	// instead of collapsing it into a false empty result.
 	getMemoryErr error
+	// taintMirrorRevision drives the app-v30 mirror-freshness gate in recall
+	// index-status tests.
+	taintMirrorRevision uint64
+	sawTaintFilter      bool
 }
 
 func newMockMemoryStore() *mockMemoryStore {
@@ -140,6 +144,34 @@ type outsideSpaceProbe struct {
 }
 
 func (m *mockMemoryStore) DomainSpaceCompleteness(_ context.Context, _, activeSpace string, _ int) (bool, bool, error) {
+	if m.outside.sawSpace != nil {
+		*m.outside.sawSpace = activeSpace
+	}
+	if m.outside.after != nil {
+		m.outside.after()
+	}
+	return m.outside.hasOutside, m.outside.established, m.outside.err
+}
+
+func (m *mockMemoryStore) ReplaceMemoryTaintMirror(_ context.Context, revision uint64, _ []string) error {
+	m.taintMirrorRevision = revision
+	return nil
+}
+
+func (m *mockMemoryStore) MemoryTaintMirrorRevision(_ context.Context) (uint64, error) {
+	return m.taintMirrorRevision, nil
+}
+
+func (m *mockMemoryStore) DomainSpaceCompletenessFiltered(
+	ctx context.Context,
+	domain, activeSpace string,
+	cap int,
+	excludeTainted bool,
+) (bool, bool, error) {
+	m.sawTaintFilter = excludeTainted
+	if !excludeTainted {
+		return m.DomainSpaceCompleteness(ctx, domain, activeSpace, cap)
+	}
 	if m.outside.sawSpace != nil {
 		*m.outside.sawSpace = activeSpace
 	}

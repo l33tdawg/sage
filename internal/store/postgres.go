@@ -756,13 +756,29 @@ func (s *PostgresStore) CountMemoriesByProvider(ctx context.Context) (map[string
 func (s *PostgresStore) DomainSpaceCompleteness(
 	ctx context.Context, domain, activeSpace string, cap int,
 ) (hasOutside, established bool, err error) {
-	rows, qerr := s.db.Query(ctx,
-		`SELECT CASE WHEN embedding IS NULL THEN 1 ELSE 0 END,
+	return s.DomainSpaceCompletenessFiltered(ctx, domain, activeSpace, cap, false)
+}
+
+func (s *PostgresStore) DomainSpaceCompletenessFiltered(
+	ctx context.Context,
+	domain, activeSpace string,
+	cap int,
+	excludeTainted bool,
+) (hasOutside, established bool, err error) {
+	query := `SELECT CASE WHEN embedding IS NULL THEN 1 ELSE 0 END,
 		        COALESCE(embedding_provider, '')
 		 FROM memories
-		 WHERE domain_tag = $1 AND status IN ('committed','challenged')
+		 WHERE domain_tag = $1 AND status IN ('committed','challenged')`
+	if excludeTainted {
+		query += ` AND NOT EXISTS (
+			SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id=memories.memory_id
+		)`
+	}
+	query += `
 		 ORDER BY status, memory_id
-		 LIMIT $2`,
+		 LIMIT $2`
+	rows, qerr := s.db.Query(ctx,
+		query,
 		domain, cap+1)
 	if qerr != nil {
 		return false, false, fmt.Errorf("domain space-completeness scan: %w", qerr)
