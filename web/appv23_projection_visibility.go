@@ -811,6 +811,14 @@ func (h *DashboardHandler) walkAppV23BroadDashboardRecords(
 			disposition := classifications[i].Disposition
 			projectionErr := classifications[i].Err
 			if projectionErr != nil {
+				// The classifier verifies canonical envelope/content integrity
+				// before applying taint. A proven hold is normal visibility
+				// policy, not a damaged or missing SQL projection. Retain its
+				// inventory entry above, but omit it from visible aggregates.
+				if disposition == store.MemoryProjectionTainted &&
+					errors.Is(projectionErr, store.ErrMemoryProjectionTainted) {
+					continue
+				}
 				projectionErr = appV23DashboardProjectionError(projectionErr)
 				if isAppV23BroadOmittableDashboardRecord(disposition, projectionErr) {
 					audit.quarantined = true
