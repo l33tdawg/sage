@@ -86,3 +86,34 @@ func TestClassifyMemoryTaintHoldsIncompleteAuthenticatedAncestor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, MemoryProjectionExact, disposition)
 }
+
+func TestTaintServingCoverageCompleteRequiresFinishedExpansion(t *testing.T) {
+	s := openTaintStore(t)
+	target := testTaintParent("coverage-target")
+	decisionID := strings.Repeat("c", taint.DecisionIDBytes)
+	created, err := s.ApplyTaintDecision(
+		"sage",
+		decisionID,
+		target,
+		sha256.Sum256([]byte("coverage payload")),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	complete, err := s.TaintServingCoverageComplete()
+	require.NoError(t, err)
+	require.False(t, complete)
+
+	header, found, err := s.GetTaintDecision(decisionID)
+	require.NoError(t, err)
+	require.True(t, found)
+	header.Status = taint.StatusComplete
+	encoded, err := taint.EncodeHeader(header)
+	require.NoError(t, err)
+	require.NoError(t, s.update(func(txn *badger.Txn) error {
+		return s.txnSet(txn, taint.DecisionKey(decisionID), encoded)
+	}))
+	complete, err = s.TaintServingCoverageComplete()
+	require.NoError(t, err)
+	require.True(t, complete)
+}

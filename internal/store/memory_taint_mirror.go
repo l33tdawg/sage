@@ -18,6 +18,18 @@ type MemoryTaintMirrorStore interface {
 	MemoryTaintMirrorRevision(ctx context.Context) (uint64, error)
 }
 
+// TaintAwareDomainSpaceCompletenessStore applies the revision-fenced SQL taint
+// mirror before the bounded completeness scan. Callers must enable it only
+// while the mirror exactly matches canonical taint revision.
+type TaintAwareDomainSpaceCompletenessStore interface {
+	DomainSpaceCompletenessFiltered(
+		ctx context.Context,
+		domain, activeSpace string,
+		cap int,
+		excludeTainted bool,
+	) (hasOutside, established bool, err error)
+}
+
 func ensureSQLiteMemoryTaintMirrorSchema(ctx context.Context, s *SQLiteStore) error {
 	_, err := s.writeExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS memory_taint_mirror (

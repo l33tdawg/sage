@@ -2308,10 +2308,52 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		case !indexStatusSourceExact:
 			resp.IndexStatus = "unavailable"
 		default:
-			hasOutside, established, cErr := s.store.DomainSpaceCompleteness(
-				r.Context(), req.DomainTag, activeSpace, store.CandidateFilterScanBudget)
+			taintRevision, taintErr := s.badgerStore.TaintRevision()
+			if taintErr != nil {
+				s.logger.Warn().Err(taintErr).Str("domain", req.DomainTag).
+					Msg("recall index-status taint revision unavailable")
+				resp.IndexStatus = "unavailable"
+				break
+			}
+			excludeTainted := taintRevision > 0
+			var hasOutside, established bool
+			var cErr error
+			if excludeTainted {
+				taintStore, ok := s.store.(store.TaintAwareDomainSpaceCompletenessStore)
+				if !ok || !s.memoryTaintFilterEnabled(r.Context()) {
+					resp.IndexStatus = "unavailable"
+					break
+				}
+				coverageComplete, coverageErr := s.badgerStore.TaintServingCoverageComplete()
+				if coverageErr != nil || !coverageComplete {
+					if coverageErr != nil {
+						s.logger.Warn().Err(coverageErr).Str("domain", req.DomainTag).
+							Msg("recall index-status taint coverage unavailable")
+					}
+					resp.IndexStatus = "unavailable"
+					break
+				}
+				hasOutside, established, cErr = taintStore.DomainSpaceCompletenessFiltered(
+					r.Context(),
+					req.DomainTag,
+					activeSpace,
+					store.CandidateFilterScanBudget,
+					true,
+				)
+			} else {
+				hasOutside, established, cErr = s.store.DomainSpaceCompleteness(
+					r.Context(), req.DomainTag, activeSpace, store.CandidateFilterScanBudget)
+			}
+			taintSourceUnchanged := true
+			if excludeTainted {
+				currentTaintRevision, revisionErr := s.badgerStore.TaintRevision()
+				taintSourceUnchanged = revisionErr == nil &&
+					currentTaintRevision == taintRevision &&
+					s.memoryTaintFilterEnabled(r.Context())
+			}
 			switch {
-			case !s.canonicalMemoryProjectionSourceUnchanged(r.Context(), indexStatusSource):
+			case !s.canonicalMemoryProjectionSourceUnchanged(r.Context(), indexStatusSource),
+				!taintSourceUnchanged:
 				resp.IndexStatus = "unavailable"
 			case cErr != nil:
 				s.logger.Warn().Err(cErr).Str("domain", req.DomainTag).Msg("recall index-status disclosure unavailable")
