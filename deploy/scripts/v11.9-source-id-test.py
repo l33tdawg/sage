@@ -190,6 +190,25 @@ class SourceIdentityTests(unittest.TestCase):
             control.write_text("changed gate behavior\n", encoding="utf-8")
             self.assertNotEqual(before, SOURCE_ID.build_source_identity(root))
 
+    def test_fresh_workflow_mode_change_alters_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            write_fixture_tree(root)
+            relative = ".github/workflows/fresh-genesis-v30.yml"
+            workflow = Path(root, relative)
+            workflow.parent.mkdir(parents=True, exist_ok=True)
+            original = (REPOSITORY_ROOT / relative).read_text(encoding="utf-8")
+            workflow.write_text(original, encoding="utf-8")
+            before = SOURCE_ID.build_source_identity(root)
+
+            changed = original.replace(
+                "V119_STATE_SYNC_MODE: fresh-v30",
+                "V119_STATE_SYNC_MODE: app-v29",
+                1,
+            )
+            self.assertNotEqual(original, changed, "fresh workflow mode must be explicit")
+            workflow.write_text(changed, encoding="utf-8")
+            self.assertNotEqual(before, SOURCE_ID.build_source_identity(root))
+
     def test_global_git_exclude_cannot_hide_source(self):
         with tempfile.TemporaryDirectory() as root:
             write_fixture_tree(root)
