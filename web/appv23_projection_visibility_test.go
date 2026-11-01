@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +21,8 @@ import (
 
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/taint"
+	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/l33tdawg/sage/internal/vault"
 )
 
@@ -2092,6 +2095,35 @@ func TestAppV23CerebrumExportPreflightPreventsPartialBackup(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), "canonical-before-ghost")
 	require.NotContains(t, rec.Body.String(), "later-sql-only-ghost")
 	require.NotContains(t, rec.Header().Get("Content-Disposition"), "sage-backup-")
+}
+
+func TestAppV23CerebrumExportOmitsGovernanceTaintedMemory(t *testing.T) {
+	fixture := newAppV23ProjectionRouteFixture(t, false)
+	for _, memoryID := range []string{"clean-export", "tainted-export"} {
+		insertTestMemory(t, fixture.sql, memoryID, "backup-domain")
+		publishAppV23DashboardRecord(
+			t, fixture.sql, fixture.badger, memoryID,
+			uint8(store.ClearanceInternal), true,
+		)
+	}
+	contentHash := sha256.Sum256([]byte("content-tainted-export"))
+	created, err := fixture.badger.ApplyTaintDecision(
+		"sage",
+		strings.Repeat("a", taint.DecisionIDBytes),
+		tx.ParentRef{
+			SourceChainID: "sage",
+			MemoryID:      "tainted-export",
+			ContentHash:   contentHash,
+		},
+		[32]byte{1},
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	rec := requestLocalProjectionRoute(t, fixture, "/v1/dashboard/export")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "clean-export")
+	require.NotContains(t, rec.Body.String(), "tainted-export")
 }
 
 func TestAppV23CerebrumExportStreamsSealedSnapshotAcrossConcurrentProjectionMutation(
