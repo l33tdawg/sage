@@ -11,6 +11,8 @@ on:
       - "internal/governance/**"
       - "internal/statesync/**"
       - "internal/taint/**"
+      - "internal/lineage/**"
+      - "internal/tx/**"
       - "api/rest/**"
       - "cmd/sage-gui/**"
       - "cmd/amid/**"
