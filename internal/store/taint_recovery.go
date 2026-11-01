@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
 
@@ -259,7 +260,7 @@ func (s *BadgerStore) ValidateTaintState() error {
 		queues := txn.NewIterator(queueOptions)
 		queueCounts := make(map[string]uint64)
 		for queues.Seek(queuePrefix); queues.ValidForPrefix(queuePrefix); queues.Next() {
-			decisionID, err := parseTaintQueueDecision(string(queues.Item().Key()))
+			decisionID, generation, sequence, err := parseTaintQueueKey(string(queues.Item().Key()))
 			if err != nil {
 				queues.Close()
 				return err
@@ -272,6 +273,11 @@ func (s *BadgerStore) ValidateTaintState() error {
 			if header.Status == taint.StatusClean {
 				queues.Close()
 				return fmt.Errorf("%w: clean decision retains frontier", ErrTaintStateMalformed)
+			}
+			if header.Status.Active() &&
+				(generation != header.Generation || sequence < header.FrontierHead || sequence >= header.FrontierTail) {
+				queues.Close()
+				return fmt.Errorf("%w: frontier key does not match active decision cursor", ErrTaintStateMalformed)
 			}
 			raw, err := queues.Item().ValueCopy(nil)
 			if err != nil {
@@ -326,14 +332,17 @@ func parseTaintMembershipKey(key string) (memoryID, decisionID string, err error
 	return memoryID, decisionID, nil
 }
 
-func parseTaintQueueDecision(key string) (string, error) {
+func parseTaintQueueKey(key string) (decisionID string, generation, sequence uint64, err error) {
 	key = strings.TrimPrefix(key, "taintq:")
-	if len(key) < taint.DecisionIDBytes+18 || key[taint.DecisionIDBytes] != ':' {
-		return "", fmt.Errorf("%w: malformed frontier key", ErrTaintStateMalformed)
+	if len(key) != taint.DecisionIDBytes+18 || key[taint.DecisionIDBytes] != ':' ||
+		key[taint.DecisionIDBytes+9] != ':' {
+		return "", 0, 0, fmt.Errorf("%w: malformed frontier key", ErrTaintStateMalformed)
 	}
-	decisionID := key[:taint.DecisionIDBytes]
-	if err := taint.ValidateDecisionID(decisionID); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+	decisionID = key[:taint.DecisionIDBytes]
+	if decisionErr := taint.ValidateDecisionID(decisionID); decisionErr != nil {
+		return "", 0, 0, fmt.Errorf("%w: %v", ErrTaintStateMalformed, decisionErr)
 	}
-	return decisionID, nil
+	generation = binary.BigEndian.Uint64([]byte(key[taint.DecisionIDBytes+1 : taint.DecisionIDBytes+9]))
+	sequence = binary.BigEndian.Uint64([]byte(key[taint.DecisionIDBytes+10:]))
+	return decisionID, generation, sequence, nil
 }
