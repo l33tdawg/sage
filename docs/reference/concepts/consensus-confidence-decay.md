@@ -83,7 +83,7 @@ Commit called (after FinalizeBlock completes):
 
 ### Determinism Requirement
 
-`FinalizeBlock` delegates the historical deterministic state machine to `finalizeBlockUncommitted` (`app.go:4121`), whose declaration is preceded by the constraint: **"CRITICAL: No time.Now(), no map iteration without sorting, no goroutines, and no external I/O except the supplied BadgerStore view."** `req.Time` (block time from the proposer) is used for all timestamps.
+`FinalizeBlock` delegates the historical deterministic state machine to `finalizeBlockUncommitted` (`app.go:4128`), whose declaration is preceded by the constraint: **"CRITICAL: No time.Now(), no map iteration without sorting, no goroutines, and no external I/O except the supplied BadgerStore view."** `req.Time` (block time from the proposer) is used for all timestamps.
 
 ### Commit Ordering is Load-Bearing
 
@@ -160,7 +160,7 @@ PoE weights are computed at epoch boundaries and drive quorum vote weighting. Al
 const EpochInterval = 100  // blocks per epoch
 ```
 
-`IsEpochBoundary(height)` returns true when `height % 100 == 0 && height > 0`. At each boundary, `processEpoch` (`app.go:10129+`) recomputes weights for all validators.
+`IsEpochBoundary(height)` returns true when `height % 100 == 0 && height > 0`. At each boundary, `processEpoch` (`app.go:10139+`) recomputes weights for all validators.
 
 ### Weight Formula
 
@@ -258,7 +258,7 @@ Corroborations do not change the memory's `ConfidenceScore` column in PostgreSQL
 
 ## Corroboration via Consensus
 
-`POST /v1/memory/{id}/corroborate` → `TxTypeMemoryCorroborate` → `processMemoryCorroborate` (`app.go:8074+`):
+`POST /v1/memory/{id}/corroborate` → `TxTypeMemoryCorroborate` → `processMemoryCorroborate` (`app.go:8084+`):
 
 1. Verifies agent Ed25519 identity proof.
 2. Buffers a `Corroboration` row for PostgreSQL (via `pendingWrite{writeType:"corroborate"}`).
