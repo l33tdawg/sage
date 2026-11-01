@@ -43,7 +43,7 @@ treated as frozen thereafter (`internal/contentvalidator/registry.go`):
   A nil receiver or empty registry is pass-through. (`registry.go:109`)
 
 The routing key is read from the submission body by `parseOutcomeClass`
-(`internal/abci/app.go:5091-5106`), which decodes ONLY the `outcome_class` field and
+(`internal/abci/app.go:5159-5174`), which decodes ONLY the `outcome_class` field and
 ignores every sibling.
 
 ### When enforcement is actually live
@@ -176,7 +176,7 @@ What `ArmContext` exposes — and why it stays deterministic:
 context-aware one wins (it is the richer registration, consulted first at
 `app.go:917`) and the constructor logs a warning so the no-arg registration is
 never *silently* dropped. An explicit `SetContentValidators` still beats both —
-the early return in `armContentValidatorsFromProvider` (`app.go:2064-2085`)
+the early return in `armContentValidatorsFromProvider` (`app.go:2073-2107`)
 leaves a pre-wired registry untouched.
 
 ### Contract / gotchas

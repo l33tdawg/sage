@@ -2783,7 +2783,7 @@ func (app *SageApp) currentAppVersion() uint64 {
 const maxSupportedAppVersion uint64 = 29
 
 // maxCompiledAppVersion is the highest app version this binary has a compiled
-// fork gate for. app-v30 stays below the auto-vote ceiling until its real-code
+// fork gate for. app-v30 stays outside the auto-vote ceiling until its real-code
 // activation evidence is complete.
 const maxCompiledAppVersion uint64 = 30
 
@@ -5388,13 +5388,13 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		if err != nil {
 			return appV23ControlDenied()
 		}
-		if err := app.badgerStore.ValidateAppV30Provenance(
+		if provenanceErr := app.badgerStore.ValidateAppV30Provenance(
 			appV30MemoryID,
 			appV30Signers,
-		); err != nil {
+		); provenanceErr != nil {
 			return &abcitypes.ExecTxResult{
 				Code: 11,
-				Log:  "memory submit rejected: " + err.Error(),
+				Log:  "memory submit rejected: " + provenanceErr.Error(),
 			}
 		}
 	}
