@@ -166,6 +166,7 @@ jobs:
           test "$(go env GOARCH)" = "${{ matrix.arch }}"
           go test ./internal/poe -run '^TestDeterministic' -v -count=1
           go test ./internal/store -run '^TestUpdateVerdictStatsDeterministic_GoldenBits$' -v -count=1
+          go test ./internal/abci -run '^TestAppV30CanonicalStateAppHashGolden$' -v -count=1
 
   test:
     name: Test
