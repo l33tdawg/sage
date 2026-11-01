@@ -385,7 +385,7 @@ A `POST /v1/memory/query` request passes through these gates in order (`memory_h
 
 ### Gate 1: checkDomainAccess (DomainAccess policy)
 
-`checkDomainAccess` (`memory_handler.go:369-372`) reads the agent's `DomainAccess` JSON field (on-chain BadgerDB first, SQLite fallback):
+`checkDomainAccess` (`memory_handler.go:407-410`) reads the agent's `DomainAccess` JSON field (on-chain BadgerDB first, SQLite fallback):
 
 - `role == "admin"` → bypass all checks, full access
 - `role == "observer"` → write operations blocked
@@ -407,7 +407,7 @@ Applied when `domainAccessApproved == false` and the domain has a registered own
 - `agentID == nodeOperatorID` → `seeAll = true` (node operator bypass)
 - `role == "admin"` → `seeAll = true`
 - `visible_agents == "*"` → `seeAll = true`
-- **Any org member with clearance=4 (TOP SECRET)** → `seeAll = true` (`agentHasTopSecretClearance` check, `memory_handler.go:1180`)
+- **Any org member with clearance=4 (TOP SECRET)** → `seeAll = true` (`agentHasTopSecretClearance` check, `memory_handler.go:1218`)
 - Otherwise: agent sees memories from `[agentID] + parsed(visible_agents)` list
 
 If `seeAll == false`, `opts.SubmittingAgents` is set to the allowed list, which `QuerySimilar` uses to filter at the PostgreSQL level.
@@ -504,7 +504,7 @@ The `FederationID` is deterministic: computed from the two org IDs + height to a
 
 ### MaxClearance Cap
 
-`checkFederationAccess` (`badger.go:6444-6524`) enforces: `if memoryClassification > maxClearance → deny`. This means a federation with `max_clearance=1` (INTERNAL) cannot expose CONFIDENTIAL (2) or higher memories to the federated org, regardless of the individual agent's clearance within their own org.
+`checkFederationAccess` (`badger.go:6464-6544`) enforces: `if memoryClassification > maxClearance → deny`. This means a federation with `max_clearance=1` (INTERNAL) cannot expose CONFIDENTIAL (2) or higher memories to the federated org, regardless of the individual agent's clearance within their own org.
 
 Every proposal remains `"proposed"` until an explicit target-organization
 approval changes it to `"active"`, regardless of the stored

@@ -22,6 +22,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`python-sdk.md`](python-sdk.md) | Every `SageClient` / `AsyncSageClient` method, signatures, and the REST endpoint each maps to. Package: `sage-agent-sdk`. |
 | [`mcp-tools.md`](mcp-tools.md) | Every `sage_*` MCP tool, parameters, and *when* to call it. Start here if you are an LLM agent with SAGE wired in. |
 | [`environment-variables.md`](environment-variables.md) | Every env var SAGE reads (`SAGE_HOME`, embeddings, hybrid recall, TLS, snapshots, …), with defaults and the `file:line` that consumes each. |
+| [`fresh-genesis.md`](fresh-genesis.md) | New chains start at the supported app version without replaying the upgrade ladder: signed public validator roster, Root-only or optional Companion bootstrap, immutable genesis distribution, and existing-chain compatibility. |
 | [`recall-backed-compaction.md`](recall-backed-compaction.md) | Capturing harness-evicted conversation turns as governed memories so a later session restores them verbatim: the `nevercompact` consent/enable/purge CLI, what is captured, the safety and idempotency guarantees, thread-scoped recall, retention/deletion, and the env knobs. |
 | [`cpu-only-embeddings.md`](cpu-only-embeddings.md) | Model/dimension pairing, CPU timeout sizing, Ollama and TEI/OpenAI-compatible deployment, plus the reproducible real-endpoint latency/request-count benchmark. |
 | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) | submit → proposed → committed/deprecated; node-local vs on-chain data; confidence decay; corroboration. |
@@ -56,6 +57,7 @@ stable REST or MCP route and grants no memory or governance authority.
 | You want to… | Go to |
 |--------------|-------|
 | Upgrade an existing node to a newer release (incl. v10.x → v11) | [`../UPGRADING.md`](../UPGRADING.md) — v11.18.0 minimum, full backup/restore, preflight, the app-version ladder, governed legacy-lineage recovery, and app-v23 admin migration |
+| Start a new personal or consumer chain at the latest supported app version | [`fresh-genesis.md`](fresh-genesis.md) — the app-v30 stack's signed fresh-genesis contract; `latest` selects app-v29 while explicit app-v30 remains compiled and dormant for automatic upgrades |
 | Upgrade without handling governance state manually | Use the desktop updater; it validates canonical `/upgrade/governance-status`, snapshots compatible in-flight state, and restarts automatically. `sage-gui upgrade status` is a technical diagnostic; see [`../UPGRADING.md`](../UPGRADING.md) |
 | Boot your memory at conversation start | **Boot sequence** below, then [`mcp-tools.md`](mcp-tools.md) |
 | Submit a memory with a clearance level | [`python-sdk.md`](python-sdk.md) `propose()` / [`rest-api.md`](rest-api.md) `POST /v1/memory/submit` |
@@ -118,13 +120,15 @@ through terminal lifecycle transitions. A governed re-anchor can repair
 eligible historical terminal rows without changing content, authorship,
 domains, or prior blocks.
 
-A fresh direct-v23 Mynah node remains `waiting_for_app_v24` until its next
+A historical direct-v23 Mynah origin remains `waiting_for_app_v24` until its next
 admitted transaction will execute under app-v24. Consensus independently blocks
 that exact Companion enrollment's pre-v24 memory/co-commit writes. The barrier
 does not apply to ordinary upgraded agents, which retain app-v23 write behavior
 while activation completes. See
 [`app-v23-access-control-design.md`](app-v23-access-control-design.md) — “App-v24
-readiness and memory-write barrier.”
+readiness and memory-write barrier.” New installations using the app-v30
+stack's [fresh-genesis contract](fresh-genesis.md) start with the supported app
+rules directly; they do not need this historical app-v23-to-app-v24 climb.
 
 ### App-v25 historical recovery and domain continuity
 
