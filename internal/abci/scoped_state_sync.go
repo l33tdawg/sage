@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/rs/zerolog"
 
 	"github.com/l33tdawg/sage/internal/poe"
 	"github.com/l33tdawg/sage/internal/statesync"
@@ -315,7 +316,7 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 		return 0, nil, fmt.Errorf("read %s fresh genesis: %w", label, freshErr)
 	}
 	if fresh != nil {
-		probe := &SageApp{badgerStore: badgerStore, state: state}
+		probe := &SageApp{badgerStore: badgerStore, state: state, logger: zerolog.Nop()}
 		if err := probe.validateFreshGenesisStateSync(); err != nil {
 			return 0, nil, fmt.Errorf("verify %s fresh genesis: %w", label, err)
 		}
@@ -361,7 +362,7 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 	if len(state.AppHash) != sha256.Size || !bytes.Equal(state.AppHash, computed) {
 		return 0, nil, fmt.Errorf("%s persisted AppHash does not match Badger state", label)
 	}
-	probe := &SageApp{badgerStore: badgerStore, state: state}
+	probe := &SageApp{badgerStore: badgerStore, state: state, logger: zerolog.Nop()}
 	if _, governanceErr := probe.governanceDelegationDomain(); governanceErr != nil {
 		return 0, nil, fmt.Errorf("verify %s governance delegation domain: %w", label, governanceErr)
 	}
