@@ -34,6 +34,14 @@ NODE_IMAGE=${V119_STATE_SYNC_NODE_IMAGE:-${DEFAULT_NODE_IMAGE}}
 REBUILD=${V119_STATE_SYNC_REBUILD:-${V119_CHAOS_REBUILD:-1}}
 KEEP=${V119_STATE_SYNC_KEEP:-0}
 TIMEOUT=${V119_STATE_SYNC_TIMEOUT:-240}
+# Docker Desktop bind mounts can expose fixture files as root-owned despite
+# chown. An explicit numeric override supports that local rehearsal; Linux CI
+# retains the image's unprivileged user and the same strict ownership checks.
+RUNTIME_USER=${V119_STATE_SYNC_RUNTIME_USER:-}
+if [ -n "${RUNTIME_USER}" ] && ! [[ "${RUNTIME_USER}" =~ ^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$ ]]; then
+  echo "ERROR: V119_STATE_SYNC_RUNTIME_USER must be a canonical numeric UID:GID" >&2
+  exit 1
+fi
 PERSISTENT_PEER_MAX_DIAL_SECONDS=5
 PERSISTENT_PEER_MAX_DIAL_PERIOD="${PERSISTENT_PEER_MAX_DIAL_SECONDS}s"
 AUTHORIZED_PEER_ASSERT_TIMEOUT=30
@@ -110,7 +118,7 @@ cleanup() {
     READINESS_PROBE_PID=
   fi
   dump_diagnostics
-  printf 'mode=%s\nsource=%s\nstatus=%s\n' "${MODE}" "${SOURCE_ID:-unbuilt}" "${status}" >"${EVIDENCE_DIR}/result.txt"
+  printf 'mode=%s\nsource=%s\nruntime_user=%s\nstatus=%s\n' "${MODE}" "${SOURCE_ID:-unbuilt}" "${ABCI_RUNTIME_IDENTITY:-unstarted}" "${status}" >"${EVIDENCE_DIR}/result.txt"
   if [ "${KEEP}" = 1 ]; then
     echo "v11.9 state-sync fixture retained at ${WORKDIR}" >&2
     echo "containers: ${CONTAINERS[*]}" >&2
@@ -193,7 +201,11 @@ if ! docker run --rm --pull never --network none --entrypoint sh "${ABCI_IMAGE}"
   echo "ERROR: ${ABCI_IMAGE} is not the v119-state-sync-fixture target; rebuild with V119_STATE_SYNC_REBUILD=1" >&2
   exit 1
 fi
-ABCI_RUNTIME_IDENTITY=$(docker run --rm --pull never --network none \
+if [ -z "${RUNTIME_USER}" ]; then
+  RUNTIME_USER=$(docker image inspect --format '{{.Config.User}}' "${ABCI_IMAGE}")
+  RUNTIME_USER=${RUNTIME_USER:-0:0}
+fi
+ABCI_RUNTIME_IDENTITY=$(docker run --rm --pull never --network none --user "${RUNTIME_USER}" \
   --entrypoint sh "${ABCI_IMAGE}" -ec 'printf "%s:%s\n" "$(id -u)" "$(id -g)"')
 ABCI_RUNTIME_UID=${ABCI_RUNTIME_IDENTITY%%:*}
 ABCI_RUNTIME_GID=${ABCI_RUNTIME_IDENTITY#*:}
@@ -443,6 +455,7 @@ create_sage() {
   mkdir -p "${home}/tmp"
   chmod 0777 "${home}/tmp"
   docker create --name "${name}" \
+    --user "${ABCI_RUNTIME_UID}:${ABCI_RUNTIME_GID}" \
     --label "dev.sage.state-sync.owner=${TOKEN}" --label "dev.sage.state-sync.project=${PROJECT}" \
     --network "${RPC_NETWORK}" --network-alias "${rpc_alias}" \
     -e SAGE_HOME=/sage \
@@ -1092,7 +1105,7 @@ verify_v30_receiver() {
   docker exec "${container}" ./sage-gui-v119-fixture v119-state-sync-fixture verify-v30-serving
   expected_hash=$(rpc_app_hash "${container}")
   stop_sage "${container}"
-  docker run --rm --pull never --network none -e SAGE_HOME=/sage \
+  docker run --rm --pull never --network none --user "${ABCI_RUNTIME_UID}:${ABCI_RUNTIME_GID}" -e SAGE_HOME=/sage \
     -v "${home}:/sage" "${ABCI_IMAGE}" ./sage-gui-v119-fixture \
     v119-state-sync-fixture verify-v30-canonical "${expected_hash}" | tee -a "${EVIDENCE_DIR}/canonical-proof.log"
   docker start "${container}" >/dev/null
@@ -1152,13 +1165,14 @@ PY
 
 echo "=== v11.9 integrated authorized state-sync wire gate ==="
 echo "source: ${SOURCE_ID} (both image labels verified before topology start)"
+echo "fixture runtime uid:gid: ${ABCI_RUNTIME_IDENTITY} (image default unless V119_STATE_SYNC_RUNTIME_USER was explicit)"
 echo "fixture: one validator provider; observer/receiver/unauthorized peers are distinct non-validator full nodes"
 
 # 1. Start a fresh chain at the selected origin. The scoped projection installed
 # below proves app-v20's governance-domain semantics under that rule set.
 write_provider_personal_config
 if [ "${MODE}" = fresh-v30 ]; then
-  docker run --rm --pull never --network none -e SAGE_HOME=/sage \
+  docker run --rm --pull never --network none --user "${ABCI_RUNTIME_UID}:${ABCI_RUNTIME_GID}" -e SAGE_HOME=/sage \
     -v "${PROVIDER_HOME}:/sage" "${ABCI_IMAGE}" \
     ./sage-gui-v119-fixture v119-state-sync-fixture init-fresh-v30
 fi
