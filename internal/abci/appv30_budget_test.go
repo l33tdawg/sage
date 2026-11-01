@@ -226,3 +226,35 @@ func TestAppV30WorstSubmitActualGeneratedWritesStayWithinEstimate(t *testing.T) 
 func testTaintDecisionIDForBudget(i int) string {
 	return fmt.Sprintf("%064x", i+1)
 }
+
+func TestAppV30RejectedSubmitRollsBackPendingMirrors(t *testing.T) {
+	app, root, target, _ := setupAppV30TaintGovernance(t)
+	const domain = "stage.rollback"
+	parsed := makeMemorySubmitTx(t, root, domain, "conflicting canonical envelope")
+	parsed.MemorySubmit.MemoryID = target.MemoryID
+	parsed.Nonce = 1
+	require.NoError(t, tx.SignTx(parsed, root.priv))
+
+	scoped := app.badgerStore.BeginConsensusTransaction(nil)
+	t.Cleanup(scoped.DiscardConsensusTransaction)
+	working := app.cloneForAppV20Finalize(scoped)
+	working.pendingWrites = []pendingWrite{{writeType: "earlier-transaction"}}
+	result, err := working.processAppV30MeteredTx(parsed, 20, appV23BlockTime())
+	require.NoError(t, err)
+	require.Equal(t, uint32(11), result.Code, result.Log)
+	require.Contains(t, result.Log, "different canonical envelope")
+	_, ownerErr := scoped.GetDomainOwner(domain)
+	require.Error(t, ownerErr, "the rejected transaction's domain claim must roll back")
+	require.Len(t, working.pendingWrites, 1, "rolled-back domain and grant mirrors must not publish")
+	require.Equal(t, "earlier-transaction", working.pendingWrites[0].writeType)
+
+	accepted := makeMemorySubmitTx(t, root, domain, "accepted after rollback")
+	accepted.Nonce = 2
+	require.NoError(t, tx.SignTx(accepted, root.priv))
+	result, err = working.processAppV30MeteredTx(accepted, 20, appV23BlockTime())
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), result.Code, result.Log)
+	require.Len(t, working.pendingWrites, 5, "the later accepted transaction must retain its mirrors")
+	require.Equal(t, "earlier-transaction", working.pendingWrites[0].writeType)
+	require.NoError(t, scoped.CommitConsensusTransaction())
+}
