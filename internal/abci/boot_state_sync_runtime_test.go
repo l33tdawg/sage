@@ -255,11 +255,10 @@ func TestBootStateSyncRuntimeHoldsPendingBlockExecutionUntilSeal(t *testing.T) {
 	require.Zero(t, checkTx.Code)
 }
 
-func TestBootStateSyncRuntimeSupportsV20ThroughV29WithExactSessionVersion(t *testing.T) {
-	// The allowlist follows the highest COMPILED fork gate. App-v29 currently
-	// converges the compiled and auto-vote ceilings, so a node carrying the
-	// gate can both restore and advance the exact v29 session version.
-	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29} {
+func TestBootStateSyncRuntimeSupportsV20ThroughV30WithExactSessionVersion(t *testing.T) {
+	// Explicit recovery sessions follow the compiled gate even when the
+	// unattended-upgrade readiness ceiling remains at an earlier version.
+	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30} {
 		t.Run(fmt.Sprintf("app-v%d", version), func(t *testing.T) {
 			oldHash := sha256.Sum256([]byte("old-versioned-state"))
 			newHash := sha256.Sum256([]byte(fmt.Sprintf("new-versioned-state-%d", version)))
@@ -279,26 +278,28 @@ func TestBootStateSyncRuntimeSupportsV20ThroughV29WithExactSessionVersion(t *tes
 		})
 	}
 
-	t.Run("replacement must match v21 session exactly", func(t *testing.T) {
-		oldHash := sha256.Sum256([]byte("old-exact-version-state"))
-		newHash := sha256.Sum256([]byte("new-exact-version-state"))
-		runtime := newBootRuntimeTestRuntime(t, &bootRuntimeTestApp{
-			height: 40, appHash: oldHash[:], appVersion: 19,
-		})
-		require.NoError(t, runtime.transitionBootStateSync(BootStateSyncDiscovering))
-		require.NoError(t, runtime.transitionBootStateSync(BootStateSyncAssembling))
-		require.NoError(t, runtime.transitionBootStateSync(BootStateSyncPrepared))
+	for _, version := range []uint64{21, 30} {
+		t.Run(fmt.Sprintf("replacement must match v%d session exactly", version), func(t *testing.T) {
+			oldHash := sha256.Sum256([]byte("old-exact-version-state"))
+			newHash := sha256.Sum256([]byte("new-exact-version-state"))
+			runtime := newBootRuntimeTestRuntime(t, &bootRuntimeTestApp{
+				height: 40, appHash: oldHash[:], appVersion: 19,
+			})
+			require.NoError(t, runtime.transitionBootStateSync(BootStateSyncDiscovering))
+			require.NoError(t, runtime.transitionBootStateSync(BootStateSyncAssembling))
+			require.NoError(t, runtime.transitionBootStateSync(BootStateSyncPrepared))
 
-		wrongVersionApp := &bootRuntimeTestApp{height: 42, appHash: newHash[:], appVersion: 20}
-		err := runtime.activatePreparedBundle(42, newHash[:], 21, func(*ConsensusBundle) (*ConsensusBundle, error) {
-			return NewConsensusBundleWithCleanup(context.Background(), wrongVersionApp, wrongVersionApp.Close)
+			wrongVersionApp := &bootRuntimeTestApp{height: 42, appHash: newHash[:], appVersion: version - 1}
+			err := runtime.activatePreparedBundle(42, newHash[:], version, func(*ConsensusBundle) (*ConsensusBundle, error) {
+				return NewConsensusBundleWithCleanup(context.Background(), wrongVersionApp, wrongVersionApp.Close)
+			})
+			assert.ErrorContains(t, err, "does not match trusted snapshot state and app version")
+			assert.Equal(t, int32(1), wrongVersionApp.closeCalls.Load())
+			assert.Equal(t, BootStateSyncFailed, runtime.Phase())
 		})
-		assert.ErrorContains(t, err, "does not match trusted snapshot state and app version")
-		assert.Equal(t, int32(1), wrongVersionApp.closeCalls.Load())
-		assert.Equal(t, BootStateSyncFailed, runtime.Phase())
-	})
+	}
 
-	for _, version := range []uint64{19, 30} {
+	for _, version := range []uint64{19, 31} {
 		t.Run(fmt.Sprintf("unsupported-app-v%d", version), func(t *testing.T) {
 			oldHash := sha256.Sum256([]byte("old-unsupported-version-state"))
 			newHash := sha256.Sum256([]byte("new-unsupported-version-state"))
@@ -313,7 +314,7 @@ func TestBootStateSyncRuntimeSupportsV20ThroughV29WithExactSessionVersion(t *tes
 				called = true
 				return nil, nil
 			})
-			assert.ErrorContains(t, err, "supported app version 20, 21, 22, 23, 24, 25, 26, 27, 28, or 29")
+			assert.ErrorContains(t, err, "supported app version 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, or 30")
 			assert.False(t, called)
 			assert.Equal(t, BootStateSyncFailed, runtime.Phase())
 		})

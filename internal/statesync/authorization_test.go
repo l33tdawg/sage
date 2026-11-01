@@ -75,8 +75,8 @@ func TestStateSyncAuthorizationRejectsIncompleteJoinBindings(t *testing.T) {
 		{name: "chain", mutate: func(c *JoinAuthorizationConfig) { c.ChainID = "../escape" }, want: "chain ID"},
 		{name: "joiner", mutate: func(c *JoinAuthorizationConfig) { c.JoiningNodeID = "short" }, want: "joining node ID"},
 		{name: "validator key", mutate: func(c *JoinAuthorizationConfig) { c.ValidatorPublicKey = []byte("short") }, want: "Ed25519"},
-		{name: "version below supported set", mutate: func(c *JoinAuthorizationConfig) { c.AppVersion = 19 }, want: "version (20, 21, 22, 23, 24, 25, 26, 27, 28, or 29)"},
-		{name: "version above supported set", mutate: func(c *JoinAuthorizationConfig) { c.AppVersion = 30 }, want: "version (20, 21, 22, 23, 24, 25, 26, 27, 28, or 29)"},
+		{name: "version below supported set", mutate: func(c *JoinAuthorizationConfig) { c.AppVersion = 19 }, want: "version (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, or 30)"},
+		{name: "version above supported set", mutate: func(c *JoinAuthorizationConfig) { c.AppVersion = 31 }, want: "version (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, or 30)"},
 		{name: "expiry", mutate: func(c *JoinAuthorizationConfig) { c.ExpiresAt = now }, want: "expired"},
 		{name: "floor", mutate: func(c *JoinAuthorizationConfig) { c.SnapshotHeightFloor = 0 }, want: "height floor"},
 		{name: "provider not validator", mutate: func(c *JoinAuthorizationConfig) {
@@ -105,9 +105,9 @@ func TestStateSyncAuthorizationRejectsIncompleteJoinBindings(t *testing.T) {
 	}
 }
 
-func TestStateSyncAuthorizationSupportsV20ThroughV29Exactly(t *testing.T) {
+func TestStateSyncAuthorizationSupportsV20ThroughV30Exactly(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
-	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29} {
+	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30} {
 		t.Run(fmt.Sprintf("app-v%d", version), func(t *testing.T) {
 			join, servingProfile, receivingProfile := authorizationTestConfig(now)
 			join.AppVersion = version
@@ -131,7 +131,44 @@ func TestStateSyncAuthorizationSupportsV20ThroughV29Exactly(t *testing.T) {
 	assert.True(t, SupportsAppVersion(27))
 	assert.True(t, SupportsAppVersion(28))
 	assert.True(t, SupportsAppVersion(29))
-	assert.False(t, SupportsAppVersion(30))
+	assert.True(t, SupportsAppVersion(30))
+	assert.False(t, SupportsAppVersion(31))
+	assert.Equal(t, "20, 21, 22, 23, 24, 25, 26, 27, 28, 29, or 30", SupportedAppVersionList())
+}
+
+func TestAppV30AuthorizationRetainsExactVersionAndJoinBindings(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	join, servingProfile, receivingProfile := authorizationTestConfig(now)
+	join.AppVersion = 30
+
+	encoded, err := json.Marshal(join)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "app-v30-join.json")
+	require.NoError(t, os.WriteFile(path, encoded, 0o600))
+	loaded, err := LoadJoinAuthorization(path)
+	require.NoError(t, err)
+	serving, err := NewServingAuthorization(loaded, servingProfile, now)
+	require.NoError(t, err)
+	receiving, err := NewReceivingAuthorization(loaded, receivingProfile, now)
+	require.NoError(t, err)
+
+	loaded.AppVersion = 29
+	loaded.ChainID = "another-chain"
+	loaded.ValidatorPublicKey[0] ^= 0xff
+	loaded.ProviderNodeIDs[0] = join.JoiningNodeID
+	assert.Equal(t, uint64(30), serving.AppVersion())
+	assert.Equal(t, uint64(30), receiving.AppVersion())
+	assert.Equal(t, join.ChainID, receiving.ChainID())
+	assert.Equal(t, join.ValidatorPublicKey, receiving.ValidatorPublicKey())
+	assert.Equal(t, join.SnapshotHeightFloor, receiving.SnapshotHeightFloor())
+	assert.True(t, receiving.AllowsProvider(join.ProviderNodeIDs[0]))
+	assert.False(t, receiving.AllowsProvider(join.JoiningNodeID))
+	assert.ErrorContains(t, serving.ValidateAt(join.ExpiresAt), "expired")
+	assert.ErrorContains(t, receiving.ValidateAt(join.ExpiresAt), "expired")
+
+	receivingProfile.ChainID = "another-chain"
+	_, err = NewReceivingAuthorization(join, receivingProfile, now)
+	assert.ErrorContains(t, err, "chain ID")
 }
 
 func TestStateSyncAuthorizationRejectsUnsafeP2PProfiles(t *testing.T) {

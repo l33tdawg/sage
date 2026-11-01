@@ -97,23 +97,23 @@ func (s *BadgerStore) ApplyTaintDecisionWithScope(
 
 	created := false
 	err = s.update(func(txn *badger.Txn) error {
-		existing, found, err := readTaintHeaderTxn(txn, decisionID)
-		if err != nil {
-			return err
+		existing, found, applyErr := readTaintHeaderTxn(txn, decisionID)
+		if applyErr != nil {
+			return applyErr
 		}
 		if found {
 			if existing.Action != taint.ActionApply ||
 				existing.PayloadHash != payloadHash {
 				return ErrTaintConflict
 			}
-			storedScope, found, err := readTaintDecisionScopeTxn(
+			storedScope, found, scopeErr := readTaintDecisionScopeTxn(
 				txn,
 				decisionID,
 				payloadHash,
 				nil,
 			)
-			if err != nil {
-				return err
+			if scopeErr != nil {
+				return scopeErr
 			}
 			if !found {
 				return fmt.Errorf(
@@ -121,18 +121,18 @@ func (s *BadgerStore) ApplyTaintDecisionWithScope(
 					ErrTaintStateMalformed,
 				)
 			}
-			encodedScope, err := encodeTaintDecisionScope(payloadHash, storedScope)
-			if err != nil {
-				return err
+			encodedScope, scopeErr := encodeTaintDecisionScope(payloadHash, storedScope)
+			if scopeErr != nil {
+				return scopeErr
 			}
 			if !bytes.Equal(encodedScope, scopeBytes) {
 				return ErrTaintConflict
 			}
 			return nil
 		}
-		active, err := readTaintUint64Txn(txn, taint.ActiveCountKey())
-		if err != nil {
-			return err
+		active, applyErr := readTaintUint64Txn(txn, taint.ActiveCountKey())
+		if applyErr != nil {
+			return applyErr
 		}
 		if active >= taint.MaxActiveDecisions {
 			return ErrTaintCapacity
@@ -149,15 +149,15 @@ func (s *BadgerStore) ApplyTaintDecisionWithScope(
 			{taint.FrontierKey(decisionID, 1, 0), queueEntry},
 		}
 		for _, write := range writes {
-			if err := s.txnSet(txn, write.key, write.value); err != nil {
-				return err
+			if writeErr := s.txnSet(txn, write.key, write.value); writeErr != nil {
+				return writeErr
 			}
 		}
-		if err := writeTaintUint64Txn(s, txn, taint.ActiveCountKey(), active+1); err != nil {
-			return err
+		if countErr := writeTaintUint64Txn(s, txn, taint.ActiveCountKey(), active+1); countErr != nil {
+			return countErr
 		}
-		if err := bumpTaintRevisionTxn(s, txn); err != nil {
-			return err
+		if revisionErr := bumpTaintRevisionTxn(s, txn); revisionErr != nil {
+			return revisionErr
 		}
 		created = true
 		return nil
@@ -267,8 +267,8 @@ func getEffectiveTaintDecisionsTxn(
 		header, cached := headers[decisionID]
 		if !cached {
 			if meter != nil {
-				if err := meter.charge(1); err != nil {
-					return nil, nil, err
+				if chargeErr := meter.charge(1); chargeErr != nil {
+					return nil, nil, chargeErr
 				}
 			}
 			var found bool
@@ -585,9 +585,9 @@ func planTaintInheritanceTxn(
 			}
 			header, cached := headers[decisionID]
 			if !cached {
-				if err := charge(1); err != nil {
+				if chargeErr := charge(1); chargeErr != nil {
 					it.Close()
-					return plan, err
+					return plan, chargeErr
 				}
 				var found bool
 				header, found, err = readTaintHeaderTxn(txn, decisionID)

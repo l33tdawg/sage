@@ -59,6 +59,8 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "init-genesis":
+		err = runInitGenesis(os.Args[2:])
 	case "init-fresh-personal-sage":
 		err = runFreshPersonalInit(os.Args[2:])
 	case "check-private-config":
@@ -286,6 +288,8 @@ Commands:
   serve     Start the SAGE personal node (CometBFT + REST + Dashboard)
   mcp       Run as MCP server (stdio, for Claude Desktop / ChatGPT)
   setup     Run first-time setup wizard
+  init-genesis --chain-id <id> --root-key <path> --validators <roster.json> --output <genesis.json>
+            Create a signed fresh-at-latest genesis for a complete validator roster
   init-fresh-personal-sage --profile <path> --unit <id> --owner-approved-companion-bootstrap
             Native fresh-only companion identity from a root-owned provisioning
             profile; no services or public enrollment
@@ -304,8 +308,8 @@ Commands:
   upgrade   Activate app-version consensus forks (status | preflight | propose --target N)
   recover   Reset vault passphrase using your recovery key
   repair-chain  Disabled: SQLite cannot reconstruct canonical chain history; restore a complete stopped-node backup
-  quorum-init   Initialize a quorum network (generates shared genesis)
-  quorum-join   Join a quorum network (imports genesis from another node)
+  quorum-init   Retired mutable-genesis ceremony; use init-genesis
+  quorum-join   Retired mutable-genesis ceremony; use init-genesis
   pair          Join a SAGE network on your LAN as a non-validator peer (sage-gui pair <token>)
   cert-status   Show TLS certificate status and expiry
   mcp-token     Manage HTTP MCP bearer tokens (create | list | revoke)

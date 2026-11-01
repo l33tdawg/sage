@@ -1208,7 +1208,7 @@ func TestVendoredAgentReadinessNeverRepairsLegacyLookalike(t *testing.T) {
 		HomeDomain:   "voice-interface",
 		Clearance:    1,
 	}, exactVendoredKeyResolver(rootPath), badgerStore)
-	require.ErrorContains(t, err, "fresh dual-signed app-v23 genesis")
+	require.ErrorContains(t, err, "authenticated fresh genesis")
 	after, err := badgerStore.ComputeAppHashExcludingBookkeeping()
 	require.NoError(t, err)
 	require.Equal(t, before, after, "readiness verification must never mutate legacy state")

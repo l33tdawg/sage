@@ -6,7 +6,14 @@ This document fixes the security and product invariants for app-v23. It is not
 permission to weaken an invariant to preserve app-v22 runtime behavior.
 Historical blocks must still replay byte-identically.
 
-## Product acceptance gate
+The direct-v23 genesis behavior below is a historical compatibility contract.
+New installations using the app-v30 stack follow the
+[fresh-genesis contract](fresh-genesis.md): start at the supported app version
+with a signed complete validator roster, without an app-v23-to-current upgrade
+climb. Existing direct-v23 artifacts retain their original serving and upgrade
+boundaries.
+
+## Historical direct-v23 product acceptance gate
 
 Mynah / SAGE Voice Bridge is a first-party vendored application that creates a
 fresh SAGE node and its genesis-operator key. A clean installation must be able

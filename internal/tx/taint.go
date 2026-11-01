@@ -41,6 +41,10 @@ var errTaintPayload = errors.New("invalid taint payload")
 // TaintApplyPayload is the canonical app-v30 apply body. Exactly one scope is
 // represented, selected by ScopeKind. Fields for the other scope kinds must be
 // empty.
+//
+// ReasonCategory is an opaque byte chosen by the proposal author. All values
+// 0..255 are valid; app-v30 assigns no enum meanings to them. The byte is part
+// of the canonical payload and therefore the decision identity.
 type TaintApplyPayload struct {
 	Version           uint8
 	Action            uint8
@@ -58,6 +62,8 @@ type TaintApplyPayload struct {
 
 // TaintClearPayload is the canonical app-v30 clear body. DecisionID is the
 // SHA-256 identity derived from the exact apply payload.
+// ReasonCategory has the same opaque-byte semantics as in TaintApplyPayload
+// and contributes to the clear target identity.
 type TaintClearPayload struct {
 	Version        uint8
 	Action         uint8

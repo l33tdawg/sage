@@ -6,11 +6,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/l33tdawg/sage/internal/taint"
 )
 
 func openTest(t *testing.T) *badger.DB {
@@ -30,6 +33,17 @@ func seed(t *testing.T, db *badger.DB, build func(seeder)) {
 }
 
 var testProfile = idProfile{Name: "uuid", Len: uuidIDLen}
+
+func TestStandInIdentityAndQueueSizesMatchProduction(t *testing.T) {
+	memoryID := strings.Repeat("m", memoryIDCap)
+	decisionID := strings.Repeat("a", decisionIDLen)
+	require.Equal(t, taint.MembershipKey(memoryID, decisionID), memberKey(memoryID, decisionID))
+	production, err := taint.EncodeQueueEntry(taint.QueueEntry{ParentRefID: decisionID, MemoryID: memoryID})
+	require.NoError(t, err)
+	standIn := encodeQueueEntry(memoryID, 0)
+	require.Len(t, standIn, len(production))
+	require.EqualValues(t, 1852, maximumSizes().triple)
+}
 
 func blockOpts(active int64) blockOptions {
 	return blockOptions{ceiling: defaultBlockCeiling, tombstone: 20, activeAtHeight: active, contentBytes: 64}

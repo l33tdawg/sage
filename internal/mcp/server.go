@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -1433,9 +1434,10 @@ func (e *apiProblemError) Error() string {
 }
 
 func appV30TaintStateFromProblem(problemType string, status *int, contentType string, httpStatus int) string {
+	mediaType, _, mediaErr := mime.ParseMediaType(contentType)
 	if httpStatus != http.StatusUnavailableForLegalReasons ||
 		status == nil || *status != http.StatusUnavailableForLegalReasons ||
-		!strings.HasPrefix(contentType, "application/problem+json") {
+		mediaErr != nil || mediaType != "application/problem+json" {
 		return ""
 	}
 	switch problemType {

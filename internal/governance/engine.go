@@ -35,6 +35,7 @@ type Engine struct {
 	store                       GovStore
 	validators                  ValidatorProvider
 	memoryTaintActivationHeight int64
+	memoryTaintGenesisActive    bool
 }
 
 // NewEngine creates a new governance engine.
@@ -46,6 +47,12 @@ func NewEngine(store GovStore, validators ValidatorProvider) *Engine {
 // height used only to choose a proposal's immutable quorum threshold.
 func (e *Engine) SetMemoryTaintActivationHeight(height int64) {
 	e.memoryTaintActivationHeight = height
+}
+
+// SetMemoryTaintGenesisActive selects the v30 threshold for proposals born on
+// an authenticated v30 origin. It never changes governed-upgrade replay rules.
+func (e *Engine) SetMemoryTaintGenesisActive(active bool) {
+	e.memoryTaintGenesisActive = active
 }
 
 func isAppV25MaintenanceOperation(op ProposalOp) bool {
@@ -682,6 +689,9 @@ func (e *Engine) processBlock(
 		proposal.CreatedHeight,
 		e.memoryTaintActivationHeight,
 	)
+	if e.memoryTaintGenesisActive && proposal.Operation == OpMemoryTaint && proposal.CreatedHeight > 0 {
+		passed, rejected, _, _, _ = checkGovQuorumThreshold(votes, powers, 3, 4)
+	}
 
 	if passed {
 		if preExecute != nil {

@@ -4,7 +4,7 @@ import "fmt"
 
 // postAppV26Fork is the strict H+1 boundary for persisted group authority.
 func (app *SageApp) postAppV26Fork(height int64) bool {
-	return app.appV26AppliedHeight > 0 && height > app.appV26AppliedHeight
+	return app.postFreshGenesisRules(26, height) || app.appV26AppliedHeight > 0 && height > app.appV26AppliedHeight
 }
 
 func (app *SageApp) postAppV26Rules(height int64) bool {
@@ -43,6 +43,9 @@ func (app *SageApp) refreshAppV26Fork() error {
 }
 
 func (app *SageApp) validateAppV26Predecessor() (int64, error) {
+	if app.freshGenesisAppVersion == 25 {
+		return 0, nil
+	}
 	if app.appV25AppliedHeight <= 0 {
 		return 0, fmt.Errorf("missing active %s predecessor", appV25UpgradeName)
 	}
@@ -65,7 +68,7 @@ func (app *SageApp) validateAppV26Prerequisite() error {
 	if err != nil {
 		return fmt.Errorf("applied %s has invalid predecessor: %w", appV26UpgradeName, err)
 	}
-	if app.appV26AppliedHeight <= predecessorHeight {
+	if predecessorHeight > 0 && app.appV26AppliedHeight <= predecessorHeight {
 		return fmt.Errorf(
 			"applied %s height %d must be after applied %s predecessor height %d",
 			appV26UpgradeName, app.appV26AppliedHeight,

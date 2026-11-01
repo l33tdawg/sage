@@ -52,6 +52,7 @@ EVIDENCE_CONTROL_FILES = (
     "deploy/init.sql",
     "Makefile",
     ".github/workflows/v11.9-fault-gates.yml",
+    ".github/workflows/fresh-genesis-v30.yml",
     ".github/workflows/ci.yml",
     ".github/workflows/release.yml",
 )

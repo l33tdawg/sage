@@ -12,8 +12,11 @@ import (
 )
 
 const (
-	appV30BlockWriteBudgetBytes  int64 = 4 << 20
-	appV30MembershipTripleBytes  int64 = 1_784
+	appV30BlockWriteBudgetBytes int64 = 4 << 20
+	// Production queue entries include the fixed parent-ref ID as well as the
+	// memory ID. The old synthetic 1,784-byte triple omitted that field; its
+	// 204-child reserve was still conservative against the six-unit child cost.
+	appV30MembershipTripleBytes  int64 = 1_852
 	appV30HeaderMaxBytes         int64 = 1_172
 	appV30ScopeStateMaxBytes     int64 = 2_206
 	appV30ActiveIndexBytes       int64 = 80
@@ -48,7 +51,7 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 			for _, ref := range parsed.MemorySubmit.DerivedFrom {
 				chainBytes := int64(len(ref.SourceChainID))
 				memoryBytes := int64(len(ref.MemoryID))
-				forwardKey := int64(len("lineage:")) + childBytes + 1 + 64
+				forwardKey := int64(len("lineage:")) + 2 + childBytes + 1 + 64
 				forwardValue := 2 + chainBytes + 2 + memoryBytes + 32
 				reverseKey := int64(len("lineage-ref:")) + 64 + 1 + childBytes
 				estimate += forwardKey + forwardValue + reverseKey
@@ -98,7 +101,7 @@ const appV30ProvenanceSignerBytes int64 = 64 + 64 + 8 + 1
 func appV30AdmissionMembershipEstimate(childBytes int64) int64 {
 	var estimate int64
 	for i := 0; i < taint.MaxActiveDecisions; i++ {
-		membershipKey := int64(len("taintm:")) + childBytes + 1 + 64
+		membershipKey := int64(len("taintm:")) + 2 + childBytes + 1 + 64
 		indexKey := int64(len("taintd:")) + 64 + 1 + childBytes
 		estimate += membershipKey + 11 + indexKey
 	}
@@ -201,6 +204,13 @@ func (app *SageApp) processAppV30MeteredTx(
 	if err := app.badgerStore.BeginAppV30WriteStage(estimate); err != nil {
 		return nil, fmt.Errorf("begin app-v30 write reservation: %w", err)
 	}
+	pendingWriteCount := len(app.pendingWrites)
+	stageCommitted := false
+	defer func() {
+		if !stageCommitted {
+			app.pendingWrites = app.pendingWrites[:pendingWriteCount]
+		}
+	}()
 
 	result := app.processTx(parsedTx, height, blockTime)
 	overflowed := app.badgerStore.AppV30WriteStageOverflowed()
@@ -231,6 +241,7 @@ func (app *SageApp) processAppV30MeteredTx(
 		}
 		return nil, fmt.Errorf("finish app-v30 write reservation: %w", err)
 	}
+	stageCommitted = true
 	return result, nil
 }
 

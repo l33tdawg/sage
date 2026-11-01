@@ -12,9 +12,9 @@
 # governed upgrade-delay floor is three blocks instead of 200, and the proposer
 # cooldown is one block instead of 50. It also recognizes a test-only dormant
 # pre-publication pause hook used to place the exact crash below. A fresh
-# provider still performs the real signed auto-advance ceremony through app-v29,
-# including app-v20's chain-derived governance domain at a positive activation
-# height.
+# default provider uses supported app-v29 rules. V119_STATE_SYNC_MODE=fresh-v30
+# explicitly signs an app30 origin and admits parent/child lineage, provenance,
+# and active/cleared taint through production transaction paths before transfer.
 # Authorization, quorum, identity, state-sync, P2P, receiver-session,
 # activation, Comet handoff, seal, REST admission, and restart paths are
 # production code.
@@ -22,12 +22,27 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-ABCI_IMAGE=${V119_STATE_SYNC_ABCI_IMAGE:-sage-v119-chaos-abci:local}
-NODE_IMAGE=${V119_STATE_SYNC_NODE_IMAGE:-sage-v119-chaos-node:local}
+MODE=${V119_STATE_SYNC_MODE:-app-v29}
+TARGET_APP_VERSION=29
+EXPECTED_SCOPED_RECORDS=1
+case "${MODE}" in
+  app-v29) PROJECT=sage-v119-ss; AUTO_UPGRADE_DISABLED=false; DEFAULT_ABCI_IMAGE=sage-v119-chaos-abci:local; DEFAULT_NODE_IMAGE=sage-v119-chaos-node:local ;;
+  fresh-v30) TARGET_APP_VERSION=30; EXPECTED_SCOPED_RECORDS=5; PROJECT=sage-fresh-v30-sync; AUTO_UPGRADE_DISABLED=true; DEFAULT_ABCI_IMAGE=sage-fresh-v30-sync-abci:local; DEFAULT_NODE_IMAGE=sage-fresh-v30-sync-node:local ;;
+  *) echo "ERROR: V119_STATE_SYNC_MODE must be app-v29 or fresh-v30" >&2; exit 1 ;;
+esac
+ABCI_IMAGE=${V119_STATE_SYNC_ABCI_IMAGE:-${DEFAULT_ABCI_IMAGE}}
+NODE_IMAGE=${V119_STATE_SYNC_NODE_IMAGE:-${DEFAULT_NODE_IMAGE}}
 REBUILD=${V119_STATE_SYNC_REBUILD:-${V119_CHAOS_REBUILD:-1}}
 KEEP=${V119_STATE_SYNC_KEEP:-0}
 TIMEOUT=${V119_STATE_SYNC_TIMEOUT:-240}
-TARGET_APP_VERSION=29
+# Docker Desktop bind mounts can expose fixture files as root-owned despite
+# chown. An explicit numeric override supports that local rehearsal; Linux CI
+# retains the image's unprivileged user and the same strict ownership checks.
+RUNTIME_USER=${V119_STATE_SYNC_RUNTIME_USER:-}
+if [ -n "${RUNTIME_USER}" ] && ! [[ "${RUNTIME_USER}" =~ ^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$ ]]; then
+  echo "ERROR: V119_STATE_SYNC_RUNTIME_USER must be a canonical numeric UID:GID" >&2
+  exit 1
+fi
 PERSISTENT_PEER_MAX_DIAL_SECONDS=5
 PERSISTENT_PEER_MAX_DIAL_PERIOD="${PERSISTENT_PEER_MAX_DIAL_SECONDS}s"
 AUTHORIZED_PEER_ASSERT_TIMEOUT=30
@@ -48,21 +63,23 @@ for setting in "REBUILD=${REBUILD}" "KEEP=${KEEP}"; do
 done
 
 TMP_ROOT=$(cd "${TMPDIR:-/tmp}" && pwd -P)
-WORKDIR=$(mktemp -d "${TMP_ROOT}/sage-v119-state-sync.XXXXXX")
+WORKDIR=$(mktemp -d "${TMP_ROOT}/${PROJECT}.XXXXXX")
 WORKDIR=$(cd "${WORKDIR}" && pwd -P)
 MARKER=${WORKDIR}/.sage-v119-state-sync-owner
 printf '%s\n' "${WORKDIR}" >"${MARKER}"
 
 TOKEN=$(basename "${WORKDIR}" | tr -cd '[:alnum:]')
-RPC_NETWORK="sage-v119-ss-rpc-${TOKEN}"
-P2P_NETWORK="sage-v119-ss-p2p-${TOKEN}"
-PROVIDER="sage-v119-ss-provider-${TOKEN}"
-OBSERVER="sage-v119-ss-observer-${TOKEN}"
-RECEIVER="sage-v119-ss-receiver-${TOKEN}"
-SUCCESS_RECEIVER="sage-v119-ss-success-receiver-${TOKEN}"
-ATTACKER="sage-v119-ss-unauthorized-${TOKEN}"
-P2P_PLACEHOLDER="sage-v119-ss-p2p-placeholder-${TOKEN}"
+RPC_NETWORK="${PROJECT}-rpc-${TOKEN}"
+P2P_NETWORK="${PROJECT}-p2p-${TOKEN}"
+PROVIDER="${PROJECT}-provider-${TOKEN}"
+OBSERVER="${PROJECT}-observer-${TOKEN}"
+RECEIVER="${PROJECT}-receiver-${TOKEN}"
+SUCCESS_RECEIVER="${PROJECT}-success-receiver-${TOKEN}"
+ATTACKER="${PROJECT}-unauthorized-${TOKEN}"
+P2P_PLACEHOLDER="${PROJECT}-p2p-placeholder-${TOKEN}"
 CONTAINERS=("${PROVIDER}" "${OBSERVER}" "${RECEIVER}" "${SUCCESS_RECEIVER}" "${ATTACKER}" "${P2P_PLACEHOLDER}")
+EVIDENCE_DIR=${V119_STATE_SYNC_EVIDENCE_DIR:-output/${PROJECT}/${TOKEN}}
+mkdir -p "${EVIDENCE_DIR}"
 
 PROVIDER_HOME=${WORKDIR}/provider
 OBSERVER_HOME=${WORKDIR}/observer
@@ -84,8 +101,11 @@ dump_diagnostics() {
   local container
   for container in "${CONTAINERS[@]}"; do
     if docker inspect "${container}" >/dev/null 2>&1; then
-      echo "--- ${container} ---" >&2
-      docker logs --tail=160 "${container}" >&2 || true
+      docker logs "${container}" >"${EVIDENCE_DIR}/${container}.log" 2>&1 || true
+      if [ "${status:-1}" -ne 0 ]; then
+        echo "--- ${container} ---" >&2
+        docker logs --tail=160 "${container}" >&2 || true
+      fi
     fi
   done
 }
@@ -98,17 +118,23 @@ cleanup() {
     wait "${READINESS_PROBE_PID}" >/dev/null 2>&1 || true
     READINESS_PROBE_PID=
   fi
-  if [ "${status}" -ne 0 ]; then
-    dump_diagnostics
-  fi
+  dump_diagnostics
+  printf 'mode=%s\nsource=%s\nruntime_user=%s\nstatus=%s\n' "${MODE}" "${SOURCE_ID:-unbuilt}" "${ABCI_RUNTIME_IDENTITY:-unstarted}" "${status}" >"${EVIDENCE_DIR}/result.txt"
   if [ "${KEEP}" = 1 ]; then
     echo "v11.9 state-sync fixture retained at ${WORKDIR}" >&2
     echo "containers: ${CONTAINERS[*]}" >&2
     exit "${status}"
   fi
-  docker rm -f "${CONTAINERS[@]}" >/dev/null 2>&1 || true
-  docker network rm "${P2P_NETWORK}" >/dev/null 2>&1 || true
-  docker network rm "${RPC_NETWORK}" >/dev/null 2>&1 || true
+  for container in "${CONTAINERS[@]}"; do
+    if [ "$(docker inspect --format '{{index .Config.Labels "dev.sage.state-sync.owner"}}' "${container}" 2>/dev/null || true)" = "${TOKEN}" ]; then
+      docker rm -f "${container}" >/dev/null 2>&1 || true
+    fi
+  done
+  for network in "${P2P_NETWORK}" "${RPC_NETWORK}"; do
+    if [ "$(docker network inspect --format '{{index .Labels "dev.sage.state-sync.owner"}}' "${network}" 2>/dev/null || true)" = "${TOKEN}" ]; then
+      docker network rm "${network}" >/dev/null 2>&1 || true
+    fi
+  done
   if validate_workdir; then
     # Container-owned Badger/Comet files may be mode 0700 on Linux. Remove only
     # this marker-validated run directory through the already-pinned local image.
@@ -137,6 +163,10 @@ require_command() {
 require_command docker
 require_command git
 require_command python3
+if [ -n "$(docker ps -aq --filter "label=dev.sage.state-sync.project=${PROJECT}")" ]; then
+  echo "ERROR: an existing ${PROJECT} fixture owns Docker resources; preserve it and use a separate run" >&2
+  exit 1
+fi
 
 SOURCE_ID=$(python3 deploy/scripts/v11.9-source-id.py)
 if [ "${#SOURCE_ID}" -ne 64 ]; then
@@ -172,7 +202,11 @@ if ! docker run --rm --pull never --network none --entrypoint sh "${ABCI_IMAGE}"
   echo "ERROR: ${ABCI_IMAGE} is not the v119-state-sync-fixture target; rebuild with V119_STATE_SYNC_REBUILD=1" >&2
   exit 1
 fi
-ABCI_RUNTIME_IDENTITY=$(docker run --rm --pull never --network none \
+if [ -z "${RUNTIME_USER}" ]; then
+  RUNTIME_USER=$(docker image inspect --format '{{.Config.User}}' "${ABCI_IMAGE}")
+  RUNTIME_USER=${RUNTIME_USER:-0:0}
+fi
+ABCI_RUNTIME_IDENTITY=$(docker run --rm --pull never --network none --user "${RUNTIME_USER}" \
   --entrypoint sh "${ABCI_IMAGE}" -ec 'printf "%s:%s\n" "$(id -u)" "$(id -g)"')
 ABCI_RUNTIME_UID=${ABCI_RUNTIME_IDENTITY%%:*}
 ABCI_RUNTIME_GID=${ABCI_RUNTIME_IDENTITY#*:}
@@ -189,8 +223,8 @@ case "${ABCI_RUNTIME_GID}" in
     ;;
 esac
 
-docker network create --internal "${RPC_NETWORK}" >/dev/null
-docker network create --internal "${P2P_NETWORK}" >/dev/null
+docker network create --internal --label "dev.sage.state-sync.owner=${TOKEN}" --label "dev.sage.state-sync.project=${PROJECT}" "${RPC_NETWORK}" >/dev/null
+docker network create --internal --label "dev.sage.state-sync.owner=${TOKEN}" --label "dev.sage.state-sync.project=${PROJECT}" "${P2P_NETWORK}" >/dev/null
 mkdir -p "${PROVIDER_HOME}" "${OBSERVER_HOME}" "${RECEIVER_HOME}" "${SUCCESS_RECEIVER_HOME}" "${ATTACKER_HOME}"
 chmod 0777 "${PROVIDER_HOME}" "${OBSERVER_HOME}" "${RECEIVER_HOME}" "${SUCCESS_RECEIVER_HOME}" "${ATTACKER_HOME}"
 
@@ -257,7 +291,7 @@ install_config_file() {
 write_provider_personal_config() {
   local staged
   staged=$(new_config_file "${PROVIDER_HOME}")
-  cat >"${staged}" <<'YAML'
+  cat >"${staged}" <<YAML
 embedding:
   provider: hash
   dimension: 768
@@ -276,7 +310,7 @@ data_dir: /sage/data
 rest_addr: 0.0.0.0:8080
 agent_key_file: /sage/agent.key
 retain_blocks: -1
-disable_auto_upgrade: false
+disable_auto_upgrade: ${AUTO_UPGRADE_DISABLED}
 YAML
   install_config_file "${PROVIDER_HOME}" "${staged}"
 }
@@ -422,6 +456,8 @@ create_sage() {
   mkdir -p "${home}/tmp"
   chmod 0777 "${home}/tmp"
   docker create --name "${name}" \
+    --user "${ABCI_RUNTIME_UID}:${ABCI_RUNTIME_GID}" \
+    --label "dev.sage.state-sync.owner=${TOKEN}" --label "dev.sage.state-sync.project=${PROJECT}" \
     --network "${RPC_NETWORK}" --network-alias "${rpc_alias}" \
     -e SAGE_HOME=/sage \
     -e TMPDIR=/sage/tmp \
@@ -619,11 +655,12 @@ scoped = body.get("scoped_projection") or {}
 status = body.get("status")
 if status != "ready":
     raise SystemExit(f"node readiness is {status!r}")
-want = {"checked": True, "required": True, "ok": True, "records": 1, "rebuilt": 1}
+records = int(sys.argv[1])
+want = {"checked": True, "required": True, "ok": True, "records": records, "rebuilt": records}
 for key, value in want.items():
     if scoped.get(key) != value:
         raise SystemExit(f"scoped_projection.{key}={scoped.get(key)!r}, want {value!r}")
-'
+' "${EXPECTED_SCOPED_RECORDS}"
 }
 
 # App-v25 becomes mandatory at its strict H+1 boundary.  A state-sync receiver
@@ -641,11 +678,12 @@ body = json.load(sys.stdin)
 scoped = body.get("scoped_projection") or {}
 if body.get("status") != "ready":
     raise SystemExit(1)
-want = {"checked": True, "required": True, "ok": True, "records": 1, "rebuilt": 1}
+records = int(sys.argv[1])
+want = {"checked": True, "required": True, "ok": True, "records": records, "rebuilt": records}
 for key, value in want.items():
     if scoped.get(key) != value:
         raise SystemExit(1)
-' >/dev/null 2>&1; do
+' "${EXPECTED_SCOPED_RECORDS}" >/dev/null 2>&1; do
     if [ "$(docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null || true)" != true ]; then
       echo "ERROR: ${container} exited before verified scoped projection readiness" >&2
       return 1
@@ -1064,6 +1102,21 @@ if len(matches) != 1 or matches[0] != summary or not lines or lines[-1] != summa
   fi
 }
 
+verify_v30_receiver() {
+  [ "${MODE}" = fresh-v30 ] || return 0
+  local container=$1 home=$2 expected_hash
+  docker exec "${container}" ./sage-gui-v119-fixture v119-state-sync-fixture verify-v30-serving restored
+  expected_hash=$(rpc_app_hash "${container}")
+  stop_sage "${container}"
+  docker run --rm --pull never --network none --user "${ABCI_RUNTIME_UID}:${ABCI_RUNTIME_GID}" -e SAGE_HOME=/sage \
+    -v "${home}:/sage" "${ABCI_IMAGE}" ./sage-gui-v119-fixture \
+    v119-state-sync-fixture verify-v30-canonical "${expected_hash}" | tee -a "${EVIDENCE_DIR}/canonical-proof.log"
+  docker start "${container}" >/dev/null
+  wait_rest "${container}"
+  wait_convergence "${PROVIDER}" "${container}"
+  docker exec "${container}" ./sage-gui-v119-fixture v119-state-sync-fixture verify-v30-serving restored
+}
+
 assert_root_semantics() {
   local provider=$1
   local receiver=$2
@@ -1115,13 +1168,19 @@ PY
 
 echo "=== v11.9 integrated authorized state-sync wire gate ==="
 echo "source: ${SOURCE_ID} (both image labels verified before topology start)"
+echo "fixture runtime uid:gid: ${ABCI_RUNTIME_IDENTITY} (image default unless V119_STATE_SYNC_RUNTIME_USER was explicit)"
 echo "fixture: one validator provider; observer/receiver/unauthorized peers are distinct non-validator full nodes"
 
-# 1. Drive a fresh real chain through the signed app-v29 ladder. The scoped
-# projection installed below still proves app-v20's governance-domain semantics.
+# 1. Start a fresh chain at the selected origin. The scoped projection installed
+# below proves app-v20's governance-domain semantics under that rule set.
 write_provider_personal_config
+if [ "${MODE}" = fresh-v30 ]; then
+  docker run --rm --pull never --network none --user "${ABCI_RUNTIME_UID}:${ABCI_RUNTIME_GID}" -e SAGE_HOME=/sage \
+    -v "${PROVIDER_HOME}:/sage" "${ABCI_IMAGE}" \
+    ./sage-gui-v119-fixture v119-state-sync-fixture init-fresh-v30
+fi
 cat >"${PROVIDER_HOME}/post-v29.txt" <<'EOF'
-This committed post-app-v29 fixture record proves the provider snapshot is beyond the positive activation height.
+This committed fixture record proves the provider snapshot contains admitted memory beyond genesis.
 EOF
 cat >"${PROVIDER_HOME}/advance.txt" <<'EOF'
 This first state-sync eligibility record advances the provider beyond the exported snapshot height.
@@ -1145,6 +1204,11 @@ if [ -z "${scoped_memory_id}" ]; then
   exit 1
 fi
 echo "governed app-v20 scoped projection fixture committed as ${scoped_memory_id}"
+if [ "${MODE}" = fresh-v30 ]; then
+  docker exec "${PROVIDER}" ./sage-gui-v119-fixture v119-state-sync-fixture install-v30-proof
+  docker exec "${PROVIDER}" ./sage-gui-v119-fixture v119-state-sync-fixture verify-v30-serving
+  echo "signed app30 parent/child provenance and active+cleared taint fixture admitted"
+fi
 stop_sage "${PROVIDER}"
 
 chain_id=$(read_private_comet_json "${PROVIDER_HOME}" config/genesis.json |
@@ -1159,6 +1223,17 @@ for home in "${OBSERVER_HOME}" "${RECEIVER_HOME}" "${SUCCESS_RECEIVER_HOME}" "${
   copy_provider_genesis "${home}"
   copy_provider_lineage_markers "${home}"
   secure_fixture_data_dir "${home}"
+  if [ "${MODE}" = fresh-v30 ]; then
+    # Only the fixture's Companion client credential and public proof metadata
+    # are distributed. Every node's Root/transport and Comet keys stay local.
+    docker run --rm --pull never --network none \
+      -v "${PROVIDER_HOME}:/provider:ro" -v "${home}:/target" "${NODE_IMAGE}" sh -ec '
+        test ! -e /target/data/badger && test ! -e /target/data/sage.db
+        cp /provider/v30-proof.json /provider/v30-proof-agent.key /target/
+        chown "$1:$2" /target/v30-proof.json /target/v30-proof-agent.key
+        chmod 0600 /target/v30-proof.json /target/v30-proof-agent.key
+      ' sh "${ABCI_RUNTIME_UID}" "${ABCI_RUNTIME_GID}"
+  fi
 done
 observer_id=$(node_id_from_home "${OBSERVER_HOME}")
 receiver_id=$(node_id_from_home "${RECEIVER_HOME}")
@@ -1191,7 +1266,7 @@ wait_convergence "${PROVIDER}" "${OBSERVER}"
 snapshot_height=$(rpc_height "${PROVIDER}")
 snapshot_app_hash=$(rpc_app_hash "${PROVIDER}")
 if [ "${snapshot_height}" -le 1 ]; then
-  echo "ERROR: provider did not reach a positive post-app-v29 snapshot height" >&2
+  echo "ERROR: provider did not reach a positive app-v${TARGET_APP_VERSION} snapshot height" >&2
   exit 1
 fi
 if ! is_canonical_hash "${snapshot_app_hash}"; then
@@ -1295,6 +1370,7 @@ write_receiving_config "${ATTACKER_HOME}" "${attacker_id}" "${provider_id}" \
   "${snapshot_height}" "${trust_hash}" 45s "${provider_rpc_url}" "${observer_rpc_url}"
 docker network disconnect "${P2P_NETWORK}" "${PROVIDER}" >/dev/null
 docker run -d --pull never --name "${P2P_PLACEHOLDER}" \
+  --label "dev.sage.state-sync.owner=${TOKEN}" --label "dev.sage.state-sync.project=${PROJECT}" \
   --network "${P2P_NETWORK}" --network-alias provider-p2p \
   "${NODE_IMAGE}" sh -ec 'exec tail -f /dev/null' >/dev/null
 placeholder_ip=$(docker inspect "${P2P_PLACEHOLDER}" | python3 -c '
@@ -1571,10 +1647,11 @@ if [ "${receiver_app_version}" != "${TARGET_APP_VERSION}" ] ||
    ! is_canonical_hash "${receiver_app_hash}" ||
    ! is_canonical_hash "${provider_app_hash}" ||
    [ "${receiver_app_hash}" != "${provider_app_hash}" ]; then
-  echo "ERROR: restarted receiver/provider did not remain on and converge at exact app-v29 state" >&2
+  echo "ERROR: restarted receiver/provider did not remain on and converge at exact app-v${TARGET_APP_VERSION} state" >&2
   exit 1
 fi
 assert_root_semantics "${PROVIDER}" "${RECEIVER}"
+verify_v30_receiver "${RECEIVER}" "${RECEIVER_HOME}"
 
 ready_line=$(docker logs "${RECEIVER}" 2>&1 | grep -n 'SAGE Personal ready' | tail -1 | cut -d: -f1)
 if [ -z "${ready_line}" ] || [ "${session_line}" -ge "${ready_line}" ]; then
@@ -1632,10 +1709,11 @@ if [ "${success_receiver_app_version}" != "${TARGET_APP_VERSION}" ] ||
    ! is_canonical_hash "${success_receiver_app_hash}" ||
    ! is_canonical_hash "${provider_app_hash}" ||
    [ "${success_receiver_app_hash}" != "${provider_app_hash}" ]; then
-  echo "ERROR: successful receiver/provider did not publish exact app-v29 state" >&2
+  echo "ERROR: successful receiver/provider did not publish exact app-v${TARGET_APP_VERSION} state" >&2
   exit 1
 fi
 assert_root_semantics "${PROVIDER}" "${SUCCESS_RECEIVER}"
+verify_v30_receiver "${SUCCESS_RECEIVER}" "${SUCCESS_RECEIVER_HOME}"
 
 success_session_line=$(docker logs "${SUCCESS_RECEIVER}" 2>&1 | grep -n 'authorized state-sync session assembled and exact-version candidate verified' | tail -1 | cut -d: -f1)
 success_seal_line=$(docker logs "${SUCCESS_RECEIVER}" 2>&1 | grep -n 'authorized validator state-sync activation sealed before service admission' | tail -1 | cut -d: -f1)
@@ -1674,7 +1752,7 @@ post_restart_provider_version=$(rpc_app_version "${PROVIDER}" 2>/dev/null || tru
 post_restart_receiver_version=$(rpc_app_version "${SUCCESS_RECEIVER}" 2>/dev/null || true)
 if [ "${post_restart_provider_version}" != "${TARGET_APP_VERSION}" ] ||
    [ "${post_restart_receiver_version}" != "${TARGET_APP_VERSION}" ]; then
-  echo "ERROR: provider SIGKILL recovery regressed exact app-v29 state (${post_restart_provider_version:-unknown}/${post_restart_receiver_version:-unknown})" >&2
+  echo "ERROR: provider SIGKILL recovery regressed exact app-v${TARGET_APP_VERSION} state (${post_restart_provider_version:-unknown}/${post_restart_receiver_version:-unknown})" >&2
   exit 1
 fi
 
@@ -1697,5 +1775,8 @@ for image in "${ABCI_IMAGE}" "${NODE_IMAGE}"; do
 done
 
 echo "=== v11.9 AUTHORIZED STATE-SYNC WIRE GATE PASSED ==="
-echo "PASS: frozen source ${SOURCE_ID}; governed app-v29 provider; real signed app-v20 scope+memory; exact app-v29 authorization/session/projection rebuild; independent provider+observer light origins; H+2 snapshot; exact P2P authorization; approved-sender sessions; concurrent seal-before-REST proof; unauthorized rejection; receiver pre-publication SIGKILL with automatic ordinary restart; separate session<seal<REST completion; provider SIGKILL; block/AppHash convergence"
+echo "PASS: frozen source ${SOURCE_ID}; ${MODE} app-v${TARGET_APP_VERSION} provider; real signed app-v20 scope+memory; exact app-v${TARGET_APP_VERSION} authorization/session/projection rebuild; independent provider+observer light origins; H+2 snapshot; exact P2P authorization; approved-sender sessions; concurrent seal-before-REST proof; unauthorized rejection; receiver pre-publication SIGKILL with automatic ordinary restart; separate session<seal<REST completion; provider SIGKILL; block/AppHash convergence"
+if [ "${MODE}" = fresh-v30 ]; then
+  echo "PASS: fresh app30 signed origin without upgrade replay; admitted ordinary+scoped parent/child memories with exact provenance; active and cleared taint restored over real authorized Comet snapshot transport; scoped SQL rebuilt without SQL input, ordinary plaintext stays node-local; canonical and catchup AppHash verified on both receivers"
+fi
 echo "ROLE: receiver is intentionally a synchronized NON-VALIDATOR full node; validator-set admission remains a separate signed governance action"

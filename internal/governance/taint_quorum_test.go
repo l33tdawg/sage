@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -130,4 +131,33 @@ func TestEngineKeepsActivationBlockMemoryTaintProposalAtTwoThirds(t *testing.T) 
 	require.NoError(t, err)
 	require.NotNil(t, executed)
 	assert.Equal(t, StatusExecuted, executed.Status)
+}
+
+func TestEngineFreshGenesisMemoryTaintRequiresThreeQuartersFromBlockOne(t *testing.T) {
+	for _, fresh30 := range []bool{false, true} {
+		for _, action := range []string{"apply", "clear"} {
+			t.Run(fmt.Sprintf("fresh30%t/%s", fresh30, action), func(t *testing.T) {
+				eng, _, _ := makeEngine(map[string]int64{"a": 10, "b": 10, "c": 10})
+				eng.SetMemoryTaintGenesisActive(fresh30)
+				proposalID, err := eng.ProposeWithoutAutoVote("a", OpMemoryTaint, "target", nil, 0, 0, action, 1, []byte(action))
+				require.NoError(t, err)
+				votes, err := eng.GetProposalVotes(proposalID)
+				require.NoError(t, err)
+				require.Empty(t, votes)
+				require.NoError(t, eng.Vote(proposalID, "a", "accept", 1))
+				require.NoError(t, eng.Vote(proposalID, "b", "accept", 1))
+				executed, err := eng.ProcessBlock(1 + MinVotingBlocks)
+				require.NoError(t, err)
+				if !fresh30 {
+					require.NotNil(t, executed)
+					return
+				}
+				require.Nil(t, executed, "two thirds cannot execute a fresh-v30 proposal born at block1")
+				require.NoError(t, eng.Vote(proposalID, "c", "accept", 1+MinVotingBlocks))
+				executed, err = eng.ProcessBlock(2 + MinVotingBlocks)
+				require.NoError(t, err)
+				require.NotNil(t, executed)
+			})
+		}
+	}
 }

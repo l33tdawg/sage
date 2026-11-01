@@ -8,6 +8,12 @@ lived-in node during an upgrade, and no supported procedure asks you to export
 SQLite and initialize a fresh chain. Memories, domains, grants, agent
 identities, governance records, and block history all survive.
 
+A brand-new empty chain is a different operation. The app-v30 stack's
+[fresh-genesis contract](reference/fresh-genesis.md) starts new installations at
+the supported app version directly, using one signed genesis artifact rather
+than replaying the historical upgrade ladder. It does not replace the governed
+upgrade path for any existing chain, including historical direct-v23 origins.
+
 **The recovery commands in this guide require SAGE v11.18.0 or later.** That is
 the first concrete release containing `backup --full`, `restore --from`,
 `upgrade preflight`, and `upgrade lineage status|doctor|verify`. Install the

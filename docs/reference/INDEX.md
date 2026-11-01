@@ -22,6 +22,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`python-sdk.md`](python-sdk.md) | Every `SageClient` / `AsyncSageClient` method, signatures, and the REST endpoint each maps to. Package: `sage-agent-sdk`. |
 | [`mcp-tools.md`](mcp-tools.md) | Every `sage_*` MCP tool, parameters, and *when* to call it. Start here if you are an LLM agent with SAGE wired in. |
 | [`environment-variables.md`](environment-variables.md) | Every env var SAGE reads (`SAGE_HOME`, embeddings, hybrid recall, TLS, snapshots, …), with defaults and the `file:line` that consumes each. |
+| [`fresh-genesis.md`](fresh-genesis.md) | New chains start at the supported app version without replaying the upgrade ladder: signed public validator roster, Root-only or optional Companion bootstrap, immutable genesis distribution, and existing-chain compatibility. |
 | [`recall-backed-compaction.md`](recall-backed-compaction.md) | Capturing harness-evicted conversation turns as governed memories so a later session restores them verbatim: the `nevercompact` consent/enable/purge CLI, what is captured, the safety and idempotency guarantees, thread-scoped recall, retention/deletion, and the env knobs. |
 | [`cpu-only-embeddings.md`](cpu-only-embeddings.md) | Model/dimension pairing, CPU timeout sizing, Ollama and TEI/OpenAI-compatible deployment, plus the reproducible real-endpoint latency/request-count benchmark. |
 | [`concepts/memory-lifecycle.md`](concepts/memory-lifecycle.md) | submit → proposed → committed/deprecated; node-local vs on-chain data; confidence decay; corroboration. |
@@ -33,6 +34,7 @@ or `api/openapi.yaml`, **trust this reference** — those two have known drift (
 | [`concepts/app-v27-lifecycle.md`](concepts/app-v27-lifecycle.md) | The current consensus boundary: static reserved shared-domain record-author challenge/reinstate authority with hard denials preserved, and omitted new-task `task_status` canonicalization to `planned`. |
 | [`concepts/app-v28-lifecycle.md`](concepts/app-v28-lifecycle.md) | The app-v28 design contract, **activated in v11.23.0**: the public-memory Merkle commitment and the consensus-side co-commit tombstone rule both land in one fork, the ceiling bump is what activates them, and the evidence that landed with it. |
 | [`concepts/app-v29-poe-determinism.md`](concepts/app-v29-poe-determinism.md) | The app-v29 contract for architecture-independent PoE arithmetic: deterministic EWMA updates, portable explicitly-rounded log/exp, native cross-architecture golden vectors, mixed-architecture activation evidence, and the strict H+1 replay boundary. |
+| [`concepts/app-v30-taint-payloads.md`](concepts/app-v30-taint-payloads.md) | Dormant app-v30 taint payload categories: opaque `reason_category` bytes, identity binding, and the defined version/action/scope discriminants. |
 | [`app-v23-access-control-design.md`](app-v23-access-control-design.md) | The v11.16.0 contract for Root, Member/Manager/Admin roles, named security profiles, Access Groups, atomic enrollment, linked federated readers, app-v24 readiness and memory integrity, migration, replay, and state sync. |
 | [`app-v25-upgrade-recovery.md`](app-v25-upgrade-recovery.md) | The v11.16.2 strict App-v25 upgrade: immutable new-memory envelopes, automatic historical repair, local writer continuity, record-local quarantine, Root retry/deprecation controls, and readiness semantics. |
 | [`concepts/consensus-confidence-decay.md`](concepts/consensus-confidence-decay.md) | CometBFT BFT path, "CometBFT-committed" vs "SAGE-committed", quorum, PoE weights, epochs. |
@@ -56,6 +58,7 @@ stable REST or MCP route and grants no memory or governance authority.
 | You want to… | Go to |
 |--------------|-------|
 | Upgrade an existing node to a newer release (incl. v10.x → v11) | [`../UPGRADING.md`](../UPGRADING.md) — v11.18.0 minimum, full backup/restore, preflight, the app-version ladder, governed legacy-lineage recovery, and app-v23 admin migration |
+| Start a new personal or consumer chain at the latest supported app version | [`fresh-genesis.md`](fresh-genesis.md) — the app-v30 stack's signed fresh-genesis contract; `latest` selects app-v29 while explicit app-v30 remains compiled and dormant for automatic upgrades |
 | Upgrade without handling governance state manually | Use the desktop updater; it validates canonical `/upgrade/governance-status`, snapshots compatible in-flight state, and restarts automatically. `sage-gui upgrade status` is a technical diagnostic; see [`../UPGRADING.md`](../UPGRADING.md) |
 | Boot your memory at conversation start | **Boot sequence** below, then [`mcp-tools.md`](mcp-tools.md) |
 | Submit a memory with a clearance level | [`python-sdk.md`](python-sdk.md) `propose()` / [`rest-api.md`](rest-api.md) `POST /v1/memory/submit` |
@@ -118,13 +121,15 @@ through terminal lifecycle transitions. A governed re-anchor can repair
 eligible historical terminal rows without changing content, authorship,
 domains, or prior blocks.
 
-A fresh direct-v23 Mynah node remains `waiting_for_app_v24` until its next
+A historical direct-v23 Mynah origin remains `waiting_for_app_v24` until its next
 admitted transaction will execute under app-v24. Consensus independently blocks
 that exact Companion enrollment's pre-v24 memory/co-commit writes. The barrier
 does not apply to ordinary upgraded agents, which retain app-v23 write behavior
 while activation completes. See
 [`app-v23-access-control-design.md`](app-v23-access-control-design.md) — “App-v24
-readiness and memory-write barrier.”
+readiness and memory-write barrier.” New installations using the app-v30
+stack's [fresh-genesis contract](fresh-genesis.md) start with the supported app
+rules directly; they do not need this historical app-v23-to-app-v24 climb.
 
 ### App-v25 historical recovery and domain continuity
 

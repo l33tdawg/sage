@@ -34,19 +34,36 @@ func handleCommandHelp(args []string) bool {
 		printNeverCompactUsage()
 	case "upgrade":
 		printUpgradeUsage()
+	case "quorum-init", "quorum-join":
+		fmt.Println(freshQuorumGenesisGuidance)
+	case "init-genesis":
+		fmt.Println(`Usage: sage-gui init-genesis --chain-id <id> --root-key <path> --validators <roster.json> --output <genesis.json>
+
+Create one signed genesis and distribute that exact artifact to every new
+validator. The public roster is a JSON array of {"validator_id":"<Ed25519 hex>","power":10}.
+Key files must already exist. This command does not start or alter a chain.
+
+Options:
+  --app-version latest|N  Default: latest release-supported app version
+  --agent-key <path>      Optional Companion key; requires --home-domain
+  --home-domain <domain>  Companion-owned non-shared domain
+  --clearance 0..4        Companion clearance (default: 1)
+  --genesis-time <UTC>    Optional RFC3339Nano genesis time
+
+Install the generated file as config/genesis.json alongside each node's own
+validator key and quorum configuration before starting SAGE. Existing genesis
+output is never overwritten. Existing chains use the normal upgrade route.`)
 	default:
 		usage := map[string]string{
 			"serve": "serve", "setup": "setup", "mcp": "mcp [install [--token <claim-token>]]",
 			"codex": "codex install", "seed": "seed <file> [--domain <domain>]",
-			"export":      "export [output.vault] [--encrypt]",
-			"import":      "import <file.vault> [--key <key-file>]",
-			"backup":      "backup [--full [--out <archive.tar.gz>]]",
-			"restore":     "restore --from <archive.tar.gz>",
-			"snapshot":    "snapshot list | prune [--keep N]",
-			"recover":     "recover --key <recovery-key> --passphrase <new-passphrase>",
-			"quorum-init": "quorum-init --address HOST:PORT [--name <name>]",
-			"quorum-join": "quorum-join --manifest <path> --address HOST:PORT [--name <name>]",
-			"pair":        "pair <token>",
+			"export":   "export [output.vault] [--encrypt]",
+			"import":   "import <file.vault> [--key <key-file>]",
+			"backup":   "backup [--full [--out <archive.tar.gz>]]",
+			"restore":  "restore --from <archive.tar.gz>",
+			"snapshot": "snapshot list | prune [--keep N]",
+			"recover":  "recover --key <recovery-key> --passphrase <new-passphrase>",
+			"pair":     "pair <token>",
 		}[args[0]]
 		if usage == "" {
 			usage = args[0]

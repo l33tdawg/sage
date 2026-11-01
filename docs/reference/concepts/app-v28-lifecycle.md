@@ -90,7 +90,7 @@ A co-commit does not consult the voter: block inclusion is decisive for it.
 Before app-v28, its tombstone check existed only at the local REST submission
 boundary, so a directly broadcast transaction bypassed that guard. From H+1,
 consensus checks the content hash against the promoted reverse index before
-applying a co-commit (`processCoCommitSubmit`, `internal/abci/app.go:6043`).
+applying a co-commit (`processCoCommitSubmit`, `internal/abci/app.go:6088`).
 
 Closing that gap required an index over consensus state. State
 carries `memory:<id>` as a content hash plus status, so the predicate "these

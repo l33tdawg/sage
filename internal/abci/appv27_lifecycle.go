@@ -13,7 +13,7 @@ import (
 // postAppV27Fork is the strict H+1 boundary for static shared-domain author
 // lifecycle authority and canonical omitted task-status normalization.
 func (app *SageApp) postAppV27Fork(height int64) bool {
-	return app.appV27AppliedHeight > 0 && height > app.appV27AppliedHeight
+	return app.postFreshGenesisRules(27, height) || app.appV27AppliedHeight > 0 && height > app.appV27AppliedHeight
 }
 
 func (app *SageApp) postAppV27Rules(height int64) bool {
@@ -56,6 +56,9 @@ func (app *SageApp) refreshAppV27Fork() error {
 }
 
 func (app *SageApp) validateAppV27Predecessor() (int64, error) {
+	if app.freshGenesisAppVersion == 26 {
+		return 0, nil
+	}
 	if app.appV26AppliedHeight <= 0 {
 		return 0, fmt.Errorf("missing active %s predecessor", appV26UpgradeName)
 	}
@@ -78,7 +81,7 @@ func (app *SageApp) validateAppV27Prerequisite() error {
 	if err != nil {
 		return fmt.Errorf("applied %s has invalid predecessor: %w", appV27UpgradeName, err)
 	}
-	if app.appV27AppliedHeight <= predecessorHeight {
+	if predecessorHeight > 0 && app.appV27AppliedHeight <= predecessorHeight {
 		return fmt.Errorf(
 			"applied %s height %d must be after applied %s predecessor height %d",
 			appV27UpgradeName, app.appV27AppliedHeight,

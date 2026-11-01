@@ -312,12 +312,13 @@ func TestConfigureCometStateSyncReceiver(t *testing.T) {
 }
 
 func TestStateSyncServingRequiresExactSupportedSessionVersion(t *testing.T) {
-	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29} {
+	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30} {
 		require.NoError(t, requireExactStateSyncAppVersion(version, version))
 	}
 	require.ErrorContains(t, requireExactStateSyncAppVersion(20, 21), "does not match")
 	require.ErrorContains(t, requireExactStateSyncAppVersion(21, 20), "does not match")
-	require.ErrorContains(t, requireExactStateSyncAppVersion(30, 30), "unsupported")
+	require.ErrorContains(t, requireExactStateSyncAppVersion(30, 29), "does not match")
+	require.ErrorContains(t, requireExactStateSyncAppVersion(31, 31), "unsupported")
 }
 
 func TestEnsureStateSyncServingSnapshotReusesExactHeightAndRejectsConflict(t *testing.T) {
