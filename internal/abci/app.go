@@ -2523,6 +2523,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshPoEWeights()
 
 	app.armContentValidatorsFromProvider()
+	app.refreshMemoryTaintMirror(context.Background())
 
 	return app, nil
 }
@@ -2654,6 +2655,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshPoEWeights()
 
 	app.armContentValidatorsFromProvider()
+	app.refreshMemoryTaintMirror(context.Background())
 
 	return app, nil
 }
@@ -10579,6 +10581,7 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 			panic(fmt.Sprintf("sage: legacy Commit projection failed: %v", err))
 		}
 	}
+	app.refreshMemoryTaintMirror(ctx)
 
 	// v7.5 snapshot scheduler: post-SaveState is the only point where
 	// BadgerDB + SQLite + CometBFT-state-as-of-this-height are mutually
