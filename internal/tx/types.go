@@ -142,6 +142,10 @@ const (
 	// GovOpDomainContinuityAdopt (app-v25) restores exact pre-upgrade local
 	// writer authority for one domain from a canonical attested payload.
 	GovOpDomainContinuityAdopt GovProposalOp = 11
+	// GovOpMemoryTaint (app-v30) carries one canonical TaintApplyV1 or
+	// TaintClearV1 payload. The numeric value remains inert before app-v30 so a
+	// historical unknown-op-12 proposal retains its replay behavior.
+	GovOpMemoryTaint GovProposalOp = 12
 )
 
 // VoteDecision represents a validator's vote on a proposed memory.

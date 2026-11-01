@@ -72,6 +72,10 @@ const (
 	// memories. One writer becomes owner; multiple writers become a local
 	// shared group. It never admits federated or post-upgrade identities.
 	OpDomainContinuityAdopt ProposalOp = 11
+	// OpMemoryTaint (app-v30) applies or clears one governance taint decision.
+	// The number is deliberately unhandled by fork-unaware ThresholdFor so
+	// historical op-12 proposals keep their original 2/3 quorum.
+	OpMemoryTaint ProposalOp = 12
 )
 
 // ProposalStatus represents the current state of a governance proposal.
