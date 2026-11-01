@@ -48,7 +48,13 @@ func initV30StateSyncFixture() error {
 		return err
 	}
 	bootstrap := &VendoredAgentBootstrapConfig{AgentKeyFile: filepath.Join(SageHome(), "v30-proof-agent.key"), HomeDomain: v30SyncDomain, Clearance: 1}
-	return initCometBFTConfigWithGenesisVersion(filepath.Join(cfg.DataDir, "cometbft"), cfg.AgentKey, bootstrap, 30)
+	if err = initCometBFTConfigWithGenesisVersion(filepath.Join(cfg.DataDir, "cometbft"), cfg.AgentKey, bootstrap, 30); err != nil {
+		return err
+	}
+	// An offline-created genesis is persisted origin evidence on first serve.
+	// Use the ordinary exclusive/synced initializer stamps so the production
+	// markerless-origin guard can remain fail-closed (diagnostic fork stays 1).
+	return writeFreshPersonalMarkers(SageHome())
 }
 
 func loadV30SyncProof() (*v30SyncProof, error) {
