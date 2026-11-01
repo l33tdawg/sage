@@ -116,10 +116,7 @@ func (s *BadgerStore) maintainCoCommitTombstoneTxn(txn *badger.Txn, memoryKey, v
 	}
 	entryKey := coCommitTombstoneEntryKey(contentHash, memoryID)
 	if status == "proposed" {
-		if err := txn.Delete(entryKey); err != nil && !errors.Is(err, badger.ErrKeyNotFound) {
-			return err
-		}
-		return nil
+		return s.txnDelete(txn, entryKey)
 	}
 	return s.txnSetPrimitive(txn, entryKey, []byte(status))
 }
@@ -152,11 +149,7 @@ func (s *BadgerStore) retractCoCommitTombstoneTxn(txn *badger.Txn, memoryKey []b
 	if decodeErr != nil || len(contentHash) != sha256.Size || memoryID == "" {
 		return nil
 	}
-	if err := txn.Delete(coCommitTombstoneEntryKey(contentHash, memoryID)); err != nil &&
-		!errors.Is(err, badger.ErrKeyNotFound) {
-		return err
-	}
-	return nil
+	return s.txnDelete(txn, coCommitTombstoneEntryKey(contentHash, memoryID))
 }
 
 // SyncCoCommitTombstoneChanges folds the identifiers this transaction already

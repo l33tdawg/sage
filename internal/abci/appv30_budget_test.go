@@ -2,13 +2,16 @@ package abci
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -113,4 +116,145 @@ func TestAppV30WorstSubmitEstimateMatchesBenchmarkBound(t *testing.T) {
 	require.EqualValues(t, 80_157, estimate)
 	require.LessOrEqual(t, estimate*52, appV30BlockWriteBudgetBytes)
 	require.Greater(t, estimate*53, appV30BlockWriteBudgetBytes)
+}
+
+func TestAppV30ActiveGovernanceReserveCountsBeforeExecutionVote(t *testing.T) {
+	app, root, target, _ := setupAppV30TaintGovernance(t)
+	payload, err := tx.EncodeTaintApplyPayload(appV30ApplyPayload(target))
+	require.NoError(t, err)
+	decisionID, err := tx.TaintApplyDecisionID(payload)
+	require.NoError(t, err)
+
+	pubKey, sig, bodyHash, timestamp := signAgentProof(t, root, []byte("reserved taint proposal"))
+	parsed := &tx.ParsedTx{
+		Type:  tx.TxTypeGovPropose,
+		Nonce: 1,
+		GovPropose: &tx.GovPropose{
+			Operation: tx.GovOpMemoryTaint,
+			TargetID:  decisionID,
+			Payload:   payload,
+			Reason:    "reserved taint proposal",
+		},
+		AgentPubKey:    pubKey,
+		AgentSig:       sig,
+		AgentBodyHash:  bodyHash,
+		AgentTimestamp: timestamp,
+	}
+	require.NoError(t, tx.SignTx(parsed, root.priv))
+	result := app.processGovPropose(parsed, 20, appV23BlockTime())
+	require.Equal(t, uint32(0), result.Code, result.Log)
+
+	want := appV30TaintExecutionEstimate(payload)
+	reserve, err := app.appV30ActiveGovernanceReserve(20)
+	require.NoError(t, err)
+	require.Equal(t, want, reserve)
+	total, err := app.appV30BlockGeneratedWriteEstimate(nil, 20)
+	require.NoError(t, err)
+	require.Equal(t, want, total)
+
+	txs := make([][]byte, 11)
+	for i := range txs {
+		txs[i] = makeAppV30WorkRawTx(t, uint64(i+1))
+	}
+	selected, err := app.selectAppV30Proposal(txs, 20)
+	require.NoError(t, err)
+	require.Len(t, selected, 10, "the active execution reserve must remain outside proposal selection")
+	_, err = app.appV30BlockGeneratedWriteEstimate(txs, 20)
+	require.ErrorContains(t, err, "exceed")
+}
+
+func TestAppV30WorstSubmitActualGeneratedWritesStayWithinEstimate(t *testing.T) {
+	app := setupTestApp(t)
+	parents := make([]tx.ParentRef, taint.MaxParents)
+	for i := range parents {
+		parents[i] = tx.ParentRef{
+			SourceChainID: "sage",
+			MemoryID:      "submit-parent-" + strings.Repeat(string(rune('a'+i)), 8),
+			ContentHash:   [32]byte{byte(i + 1)},
+		}
+	}
+
+	decisions := make([]string, taint.MaxActiveDecisions)
+	for i := range decisions {
+		decisions[i] = testTaintDecisionIDForBudget(i)
+		created, err := app.badgerStore.ApplyTaintDecision(
+			"sage",
+			decisions[i],
+			parents[0],
+			[32]byte{byte(i + 1)},
+		)
+		require.NoError(t, err)
+		require.True(t, created)
+	}
+	require.NoError(t, app.badgerStore.DB().Update(func(txn *badger.Txn) error {
+		for _, decisionID := range decisions {
+			item, err := txn.Get(taint.MembershipKey(parents[0].MemoryID, decisionID))
+			require.NoError(t, err)
+			value, err := item.ValueCopy(nil)
+			require.NoError(t, err)
+			for _, parent := range parents[1:] {
+				require.NoError(t, txn.Set(taint.MembershipKey(parent.MemoryID, decisionID), value))
+				require.NoError(t, txn.Set(taint.DecisionIndexKey(decisionID, parent.MemoryID), []byte{}))
+			}
+		}
+		return nil
+	}))
+
+	childID := "submit-child-" + strings.Repeat("m", taint.MaxMemoryIDBytes-20)
+	signerID := strings.Repeat("a", 64)
+	scoped := app.badgerStore.BeginConsensusTransaction(nil)
+	t.Cleanup(scoped.DiscardConsensusTransaction)
+	require.NoError(t, scoped.BeginAppV30WriteStage(1<<20))
+	require.NoError(t, scoped.SetMemoryLineage(childID, parents))
+	inherited, err := scoped.InheritTaintMemberships("sage", childID, parents)
+	require.NoError(t, err)
+	require.Equal(t, taint.MaxActiveDecisions, inherited.Decisions)
+	require.NoError(t, scoped.SetAppV30Provenance(
+		childID,
+		[]store.AppV30ProvenanceSigner{{
+			CredentialID: signerID,
+			PrincipalID:  signerID,
+			Exact:        true,
+		}},
+	))
+	stats, err := scoped.CommitAppV30WriteStage()
+	require.NoError(t, err)
+	require.Positive(t, stats.Generated)
+	require.LessOrEqual(t, stats.Generated, int64(80_157))
+}
+
+func testTaintDecisionIDForBudget(i int) string {
+	return fmt.Sprintf("%064x", i+1)
+}
+
+func TestAppV30RejectedSubmitRollsBackPendingMirrors(t *testing.T) {
+	app, root, target, _ := setupAppV30TaintGovernance(t)
+	const domain = "stage.rollback"
+	parsed := makeMemorySubmitTx(t, root, domain, "conflicting canonical envelope")
+	parsed.MemorySubmit.MemoryID = target.MemoryID
+	parsed.Nonce = 1
+	require.NoError(t, tx.SignTx(parsed, root.priv))
+
+	scoped := app.badgerStore.BeginConsensusTransaction(nil)
+	t.Cleanup(scoped.DiscardConsensusTransaction)
+	working := app.cloneForAppV20Finalize(scoped)
+	working.pendingWrites = []pendingWrite{{writeType: "earlier-transaction"}}
+	result, err := working.processAppV30MeteredTx(parsed, 20, appV23BlockTime())
+	require.NoError(t, err)
+	require.Equal(t, uint32(11), result.Code, result.Log)
+	require.Contains(t, result.Log, "different canonical envelope")
+	_, ownerErr := scoped.GetDomainOwner(domain)
+	require.Error(t, ownerErr, "the rejected transaction's domain claim must roll back")
+	require.Len(t, working.pendingWrites, 1, "rolled-back domain and grant mirrors must not publish")
+	require.Equal(t, "earlier-transaction", working.pendingWrites[0].writeType)
+
+	accepted := makeMemorySubmitTx(t, root, domain, "accepted after rollback")
+	accepted.Nonce = 2
+	require.NoError(t, tx.SignTx(accepted, root.priv))
+	result, err = working.processAppV30MeteredTx(accepted, 20, appV23BlockTime())
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), result.Code, result.Log)
+	require.Len(t, working.pendingWrites, 5, "the later accepted transaction must retain its mirrors")
+	require.Equal(t, "earlier-transaction", working.pendingWrites[0].writeType)
+	require.NoError(t, scoped.CommitConsensusTransaction())
 }

@@ -4225,7 +4225,10 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 		// Use req.Time for deterministic timestamps (NOT time.Now())
 		blockTime := req.Time
 
-		result := app.processTx(parsedTx, req.Height, blockTime)
+		result, processErr := app.processAppV30MeteredTx(parsedTx, req.Height, blockTime)
+		if processErr != nil {
+			return nil, processErr
+		}
 		txResults[i] = result
 
 		if result.Code == 0 {
@@ -4282,6 +4285,18 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 		// Governance evaluation begins in the following block, disabling the old
 		// single-block auto-approve edge for target-20.
 	} else if postAppV20Governance || freezeValidatorReconfiguration {
+		appV30GovernanceStaged := false
+		if activeProposalBefore != nil &&
+			activeProposalBefore.Operation == governance.OpMemoryTaint &&
+			activeProposalBefore.CreatedHeight > app.appV30AppliedHeight {
+			reservation := appV30TaintExecutionEstimate(activeProposalBefore.Payload)
+			if reservation > 0 {
+				if err := app.badgerStore.BeginAppV30WriteStage(reservation); err != nil {
+					return nil, fmt.Errorf("begin app-v30 governance write reservation: %w", err)
+				}
+				appV30GovernanceStaged = true
+			}
+		}
 		processGovernance := app.govEngine.ProcessBlockValidatedWithInvalidation
 		if app.postAppV25Rules(req.Height) {
 			processGovernance = app.govEngine.ProcessBlockValidatedWithMemoryLegacyAdoption
@@ -4343,6 +4358,30 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 						errors.Is(validationErr, errAppV30TaintStateDrift)
 			},
 		)
+		if appV30GovernanceStaged {
+			if app.badgerStore.AppV30WriteStageOverflowed() {
+				if err := app.badgerStore.AbortAppV30WriteStage(); err != nil {
+					return nil, fmt.Errorf("rollback over-budget app-v30 governance writes: %w", err)
+				}
+				return nil, fmt.Errorf(
+					"app-v30 governance execution exceeded its %d-byte generated-write reservation",
+					appV30TaintExecutionEstimate(activeProposalBefore.Payload),
+				)
+			}
+			if govErr != nil {
+				if err := app.badgerStore.AbortAppV30WriteStage(); err != nil {
+					return nil, fmt.Errorf("rollback failed app-v30 governance writes: %w", err)
+				}
+			} else if _, err := app.badgerStore.CommitAppV30WriteStage(); err != nil {
+				if abortErr := app.badgerStore.AbortAppV30WriteStage(); abortErr != nil {
+					return nil, fmt.Errorf(
+						"abort failed app-v30 governance write reservation: %w",
+						abortErr,
+					)
+				}
+				return nil, fmt.Errorf("finish app-v30 governance write reservation: %w", err)
+			}
+		}
 	} else {
 		executedProposal, govErr = app.govEngine.ProcessBlock(req.Height)
 	}
@@ -11190,7 +11229,10 @@ func (app *SageApp) PrepareProposal(_ context.Context, req *abcitypes.RequestPre
 		// entry admitted before the ceremony in the mempool forever when an
 		// external Comet operator disabled recheck.
 		selected := prepareAppV20Proposal(req.Txs, req.MaxTxBytes)
-		selected = app.selectAppV30Proposal(selected, req.Height)
+		selected, err := app.selectAppV30Proposal(selected, req.Height)
+		if err != nil {
+			return nil, err
+		}
 		return &abcitypes.ResponsePrepareProposal{Txs: selected}, nil
 	}
 	recognizedButUnfit := make(map[int]struct{})
