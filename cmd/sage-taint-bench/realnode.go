@@ -10,7 +10,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 )
 
-const migratedUnmeasurable = "no marker distinguishes a migrated record until app-v30 adds one, so this count cannot be taken from today's state"
+const migratedCountReason = "no node copy supplied; migrated markers are counted when -node-copy is provided"
 
 type realNodeCounts struct {
 	Measured       bool   `json:"measured"`
@@ -25,20 +25,20 @@ type realNodeCounts struct {
 func notMeasured() realNodeCounts {
 	return realNodeCounts{
 		Reason:         "no node copy supplied; pass -node-copy with a copy of a stopped node's Badger directory",
-		MigratedReason: migratedUnmeasurable,
+		MigratedReason: migratedCountReason,
 	}
 }
 
 // countRealNode opens a supplied Badger copy read-only and counts keys. It must
 // be given a copy, never the directory of a running node.
 func countRealNode(path string) (realNodeCounts, error) {
-	counts := realNodeCounts{Measured: true, MigratedReason: migratedUnmeasurable}
+	counts := realNodeCounts{Measured: true}
 	db, err := badger.Open(badger.DefaultOptions(path).WithReadOnly(true).WithLogger(nil))
 	if err != nil {
 		return counts, err
 	}
 	defer func() { _ = db.Close() }()
-	var records, overCap, adopted int64
+	var records, overCap, adopted, migrated int64
 	err = db.View(func(txn *badger.Txn) error {
 		if scanErr := eachKey(txn, []byte("memory:"), func(key []byte) {
 			records++
@@ -48,12 +48,16 @@ func countRealNode(path string) (realNodeCounts, error) {
 		}); scanErr != nil {
 			return scanErr
 		}
-		return eachKey(txn, []byte(adoptionReceiptPrefix), func([]byte) { adopted++ })
+		if scanErr := eachKey(txn, []byte(adoptionReceiptPrefix), func([]byte) { adopted++ }); scanErr != nil {
+			return scanErr
+		}
+		return eachKey(txn, []byte("memprov:migrated:"), func([]byte) { migrated++ })
 	})
 	if err != nil {
 		return counts, err
 	}
-	counts.Records, counts.OverCapIDs, counts.AdoptedRecords = &records, &overCap, &adopted
+	counts.Records, counts.OverCapIDs, counts.AdoptedRecords, counts.Migrated =
+		&records, &overCap, &adopted, &migrated
 	return counts, nil
 }
 

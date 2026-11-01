@@ -402,14 +402,16 @@ func TestAssertArch(t *testing.T) {
 	assert.ErrorContains(t, assertArch(amd, "riscv64"), "unsupported")
 }
 
-func TestRealNodeCountsReadACopyAndNeverGuessMigrated(t *testing.T) {
+func TestRealNodeCountsReadACopyAndCountMigratedMarkers(t *testing.T) {
 	path := t.TempDir()
 	db, err := openBadger(path)
 	require.NoError(t, err)
 	require.NoError(t, db.Update(func(txn *badger.Txn) error {
 		require.NoError(t, txn.Set(memoryKey("short"), []byte("x")))
 		require.NoError(t, txn.Set(memoryKey(makeID(memoryIDCap+1, "long", 0)), []byte("x")))
-		return txn.Set(adoptionKey("short"), []byte("r"))
+		require.NoError(t, txn.Set(adoptionKey("short"), []byte("r")))
+		require.NoError(t, txn.Set(migratedKey("short"), []byte{1}))
+		return txn.Set(migratedKey("long"), []byte{1})
 	}))
 	require.NoError(t, db.Close())
 
@@ -419,12 +421,14 @@ func TestRealNodeCountsReadACopyAndNeverGuessMigrated(t *testing.T) {
 	assert.Equal(t, int64(2), *counts.Records)
 	assert.Equal(t, int64(1), *counts.OverCapIDs)
 	assert.Equal(t, int64(1), *counts.AdoptedRecords)
-	assert.Nil(t, counts.Migrated)
-	assert.NotEmpty(t, counts.MigratedReason)
+	assert.Equal(t, int64(2), *counts.Migrated)
+	assert.Empty(t, counts.MigratedReason)
 
 	missing := notMeasured()
 	assert.False(t, missing.Measured)
 	assert.Nil(t, missing.Records)
+	assert.Nil(t, missing.Migrated)
+	assert.NotEmpty(t, missing.MigratedReason)
 }
 
 func TestReceiptRecordsLabelAndNeverThePath(t *testing.T) {
