@@ -70,11 +70,11 @@ func preflightExistingFreshVendoredGenesis(cometHome string, cfg *Config, genesi
 	if localPublic == nil {
 		return fail(errors.New("local validator is absent from signed fresh genesis"))
 	}
-	if err := validateVendoredValidatorState(filepath.Join(cometHome, "data", "priv_validator_state.json"), localPublic, genesis.ChainID); err != nil {
-		return fail(fmt.Errorf("verify fresh genesis validator state: %w", err))
+	if stateErr := validateVendoredValidatorState(filepath.Join(cometHome, "data", "priv_validator_state.json"), localPublic, genesis.ChainID); stateErr != nil {
+		return fail(fmt.Errorf("verify fresh genesis validator state: %w", stateErr))
 	}
-	if err := validateVendoredNodeKey(filepath.Join(cometHome, "config", "node_key.json")); err != nil {
-		return fail(err)
+	if nodeKeyErr := validateVendoredNodeKey(filepath.Join(cometHome, "config", "node_key.json")); nodeKeyErr != nil {
+		return fail(nodeKeyErr)
 	}
 	rootKey, err := readFederationTransportKey(cfg.AgentKey)
 	if err != nil || appV23AgentIDForKey(rootKey) != manifest.RootID {

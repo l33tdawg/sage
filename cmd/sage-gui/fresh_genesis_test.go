@@ -131,7 +131,7 @@ func TestFreshGenesisVersionAndInputsFailClosed(t *testing.T) {
 	missingRoot := filepath.Join(dir, "root.key")
 	err := runInitGenesis([]string{"--chain-id", "fresh-no-key", "--root-key", missingRoot,
 		"--validators", filepath.Join(dir, "validators.json"), "--output", filepath.Join(dir, "genesis.json")})
-	require.ErrorContains(t, err, "Root key")
+	require.ErrorContains(t, err, "root key")
 	require.NoFileExists(t, missingRoot, "artifact generation must not mint an unrequested Root")
 	require.NoFileExists(t, filepath.Join(dir, "genesis.json"))
 }

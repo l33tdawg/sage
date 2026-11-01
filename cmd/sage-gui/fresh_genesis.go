@@ -105,8 +105,8 @@ func genesisAppStateForFreshChain(
 	var agentKey ed25519.PrivateKey
 	if bootstrap != nil {
 		agentPath := filepath.Clean(expandTilde(bootstrap.AgentKeyFile))
-		if err := os.MkdirAll(filepath.Dir(agentPath), 0700); err != nil {
-			return nil, err
+		if mkdirErr := os.MkdirAll(filepath.Dir(agentPath), 0700); mkdirErr != nil {
+			return nil, mkdirErr
 		}
 		agentKey, err = loadOrGenerateKey(agentPath)
 		if err != nil {
@@ -142,7 +142,7 @@ func runInitGenesis(args []string) error {
 		return err
 	}
 	if (*agentPath == "") != (*homeDomain == "") || *clearance > 4 {
-		return errors.New("Companion bootstrap requires both --agent-key and --home-domain, with --clearance from 0 through 4")
+		return errors.New("companion bootstrap requires both --agent-key and --home-domain, with --clearance from 0 through 4")
 	}
 	when := time.Now().UTC()
 	if *genesisTime != "" {
@@ -151,19 +151,19 @@ func runInitGenesis(args []string) error {
 			return fmt.Errorf("parse genesis time: %w", err)
 		}
 	}
-	if _, err := os.Lstat(*outputPath); !errors.Is(err, os.ErrNotExist) {
+	if _, statErr := os.Lstat(*outputPath); !errors.Is(statErr, os.ErrNotExist) {
 		return errors.New("genesis output already exists or is inaccessible; refusing to replace it")
 	}
 	rootKey, ok := parseKeyFile(expandTilde(*rootPath))
 	if !ok {
-		return errors.New("Root key is unavailable or invalid")
+		return errors.New("root key is unavailable or invalid")
 	}
 	var agentKey ed25519.PrivateKey
 	var bootstrap *VendoredAgentBootstrapConfig
 	if *agentPath != "" {
 		agentKey, ok = parseKeyFile(expandTilde(*agentPath))
 		if !ok {
-			return errors.New("Companion key is unavailable or invalid")
+			return errors.New("companion key is unavailable or invalid")
 		}
 		bootstrap = &VendoredAgentBootstrapConfig{AgentKeyFile: *agentPath, HomeDomain: *homeDomain, Clearance: uint8(*clearance)} // #nosec G115 -- bounded to 0..4 above
 	}
@@ -182,11 +182,11 @@ func runInitGenesis(args []string) error {
 	decoder := json.NewDecoder(bytes.NewReader(rosterBytes))
 	decoder.DisallowUnknownFields()
 	var validators []sageabci.FreshGenesisValidator
-	if err := decoder.Decode(&validators); err != nil {
-		return fmt.Errorf("decode public validator roster: %w", err)
+	if decodeErr := decoder.Decode(&validators); decodeErr != nil {
+		return fmt.Errorf("decode public validator roster: %w", decodeErr)
 	}
 	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if decodeErr := decoder.Decode(&trailing); decodeErr != io.EOF {
 		return errors.New("public validator roster has trailing data")
 	}
 	appState, err := freshGenesisAppStateWithKeys(*chainID, target, rootKey, agentKey, bootstrap, validators)
@@ -204,8 +204,8 @@ func runInitGenesis(args []string) error {
 		key := cmtcryptoed.PubKey(public)
 		doc.Validators = append(doc.Validators, cmttypes.GenesisValidator{Address: key.Address(), PubKey: key, Power: validator.Power})
 	}
-	if err := doc.ValidateAndComplete(); err != nil {
-		return fmt.Errorf("validate fresh genesis: %w", err)
+	if validationErr := doc.ValidateAndComplete(); validationErr != nil {
+		return fmt.Errorf("validate fresh genesis: %w", validationErr)
 	}
 	encoded, err := cmtjson.MarshalIndent(doc, "", "  ")
 	if err != nil {

@@ -1,13 +1,6 @@
 package main
 
-import (
-	"encoding/base64"
-	"fmt"
-	"os"
-
-	"github.com/cometbft/cometbft/crypto/ed25519"
-	cmttypes "github.com/cometbft/cometbft/types"
-)
+import "os"
 
 // QuorumManifest describes historical mutable-roster ceremony artifacts.
 // New chains use a finalized signed genesis from init-genesis.
@@ -36,20 +29,6 @@ type ManifestValidator struct {
 	PubKey  string `json:"pub_key"` // base64-encoded Ed25519 public key
 	Power   int64  `json:"power"`
 	Name    string `json:"name"`
-}
-
-func (v ManifestValidator) toGenesis() (cmttypes.GenesisValidator, error) {
-	pubBytes, err := base64.StdEncoding.DecodeString(v.PubKey)
-	if err != nil {
-		return cmttypes.GenesisValidator{}, fmt.Errorf("decode pub_key: %w", err)
-	}
-	pubKey := ed25519.PubKey(pubBytes)
-	return cmttypes.GenesisValidator{
-		Address: pubKey.Address(),
-		PubKey:  pubKey,
-		Power:   v.Power,
-		Name:    v.Name,
-	}, nil
 }
 
 // QuorumPeer identifies a node in the quorum.

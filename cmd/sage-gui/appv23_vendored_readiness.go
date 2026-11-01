@@ -114,8 +114,8 @@ func vendoredGenesisProvenance(bs *store.BadgerStore) (*store.AppV23GenesisActiv
 		return nil, err
 	}
 	if fresh != nil {
-		if err := bs.ValidateFreshGenesisLineage(); err != nil {
-			return nil, fmt.Errorf("invalid fresh genesis lineage: %w", err)
+		if lineageErr := bs.ValidateFreshGenesisLineage(); lineageErr != nil {
+			return nil, fmt.Errorf("invalid fresh genesis lineage: %w", lineageErr)
 		}
 		if fresh.Agent == nil {
 			return nil, errors.New("fresh genesis does not enroll a Companion")
