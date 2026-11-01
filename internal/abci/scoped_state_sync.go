@@ -158,13 +158,20 @@ func InspectStateSyncRecoveryDirectory(ctx context.Context, path string) (uint64
 		_ = readOnly.CloseBadger()
 		return 0, nil, freshErr
 	}
+	root, rootErr := readOnly.GetAppV23Root()
+	if rootErr != nil {
+		_ = readOnly.CloseBadger()
+		return 0, nil, rootErr
+	}
 	// A quarantine may legitimately be from any older supported app version.
 	// Pre-app-v12 AppHashes include bookkeeping that SaveState changes after
 	// FinalizeBlock, so they cannot be recomputed from the closed post-Commit DB.
 	// The persisted height/AppHash are still compared exactly with Comet by the
 	// recovery executor. Once app-v20 is active, apply its stronger narrow-hash
 	// and scoped-state checks as well.
-	if genesisV23 == nil && fresh == nil &&
+	// Root state cannot belong to a pre-v20 image. If its origin marker is
+	// missing, force strong verification instead of downgrading to legacy.
+	if genesisV23 == nil && fresh == nil && root == nil &&
 		(appV20 == nil || appV20.TargetAppVersion != 20 ||
 			appV20.AppliedHeight <= 0 || state.Height <= appV20.AppliedHeight) {
 		closeErr := readOnly.CloseBadger()
