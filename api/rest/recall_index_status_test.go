@@ -123,6 +123,35 @@ func TestRecallIndexStatusEnumForFullVisibilityCaller(t *testing.T) {
 	}
 }
 
+func TestRecallIndexStatusRejectsFirstTaintDuringProbe(t *testing.T) {
+	srv, badger, _, _, _ := setupAppV23RESTAccess(t)
+	srv.embedder = authoritativeTestEmbedder{vector: []float32{0.1, 0.2, 0.3}, name: "ollama"}
+	caller := fullVisibilityCaller(t, srv, badger, "fv.home")
+	mock := mockStoreOf(srv)
+	mock.outside = outsideSpaceProbe{hasOutside: false, established: true}
+	revision, err := badger.TaintRevision()
+	require.NoError(t, err)
+	require.Zero(t, revision)
+	_, before := queryEmptyRecall(t, srv, caller, "fv.home", "committed")
+	require.Equal(t, "complete", before.IndexStatus)
+	probeRan := false
+	mock.outside.after = func() {
+		probeRan = true
+		created, applyErr := badger.ApplyTaintDecision(
+			"sage",
+			"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			tx.ParentRef{SourceChainID: "sage", MemoryID: "first-taint-during-probe"},
+			[32]byte{1},
+		)
+		require.NoError(t, applyErr)
+		require.True(t, created)
+	}
+	_, resp := queryEmptyRecall(t, srv, caller, "fv.home", "committed")
+	require.True(t, probeRan)
+	assert.Equal(t, "unavailable", resp.IndexStatus,
+		"the first taint invalidates a probe that began without a taint filter")
+}
+
 func TestRecallIndexStatusRequiresFreshTaintMirrorAndCompletedCoverage(t *testing.T) {
 	srv, badger, _, _, _ := setupAppV23RESTAccess(t)
 	srv.embedder = authoritativeTestEmbedder{vector: []float32{0.1, 0.2, 0.3}, name: "ollama"}
