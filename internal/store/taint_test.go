@@ -314,6 +314,16 @@ func TestInheritTaintMembershipsUsesEffectiveParentDecisions(t *testing.T) {
 
 	parents := []tx.ParentRef{parentA, parentB}
 	tx.SortParentRefs(parents)
+	preflight, err := s.ValidateTaintInheritance("sage", "child", parents)
+	require.NoError(t, err)
+	assert.Equal(t, InheritedTaintResult{Decisions: 2, Units: 14}, preflight)
+	invisible, err := s.GetEffectiveTaintDecisions("child")
+	require.NoError(t, err)
+	assert.Empty(t, invisible)
+	revisionAfterPreflight, err := s.TaintRevision()
+	require.NoError(t, err)
+	assert.Equal(t, revisionBefore, revisionAfterPreflight)
+
 	result, err := s.InheritTaintMemberships("sage", "child", parents)
 	require.NoError(t, err)
 	assert.Equal(t, InheritedTaintResult{Decisions: 2, Units: 14}, result)

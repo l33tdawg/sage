@@ -1,11 +1,15 @@
 package abci
 
 import (
+	"crypto/sha256"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/taint"
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 func activateAppV30ForMemorySubmitTest(t *testing.T, app *SageApp, height int64) {
@@ -99,4 +103,131 @@ func TestAppV30ProvenanceConflictRejectsBeforeMemoryWrites(t *testing.T) {
 	require.Equal(t, uint32(11), result.Code)
 	require.Contains(t, result.Log, store.ErrAppV30ProvenanceConflict.Error())
 	require.Len(t, app.pendingWrites, pendingBefore)
+}
+
+func TestAppV30LineageAdmissionWritesBothIndexesAndInheritsTaint(t *testing.T) {
+	app := setupTestApp(t)
+	root := newAgentKey(t)
+	registerAppV23Agent(t, app, root, store.AppV23RoleAdmin, 2, store.AgentCapabilityReadAllDomains)
+	require.NoError(t, app.badgerStore.EnsureAppV23Root("app-v30-lineage", 2))
+	rootState, err := app.badgerStore.GetAppV23Root()
+	require.NoError(t, err)
+	require.NotNil(t, rootState)
+	const chainID = "app-v30-lineage-chain"
+	require.NoError(t, app.SetExpectedGovernanceDelegationDomain(chainID))
+	activateAppV30ForMemorySubmitTest(t, app, 20)
+
+	parentContentHash := sha256.Sum256([]byte("committed parent"))
+	parent := tx.ParentRef{
+		SourceChainID: chainID,
+		MemoryID:      "lineage-parent",
+		ContentHash:   parentContentHash,
+	}
+	require.NoError(t, app.badgerStore.SetMemoryHash(
+		parent.MemoryID,
+		parent.ContentHash[:],
+		"committed",
+	))
+	require.NoError(t, app.badgerStore.SetMemoryDomain(parent.MemoryID, "general"))
+	require.NoError(t, app.badgerStore.SetMemoryAuthor(parent.MemoryID, root.id))
+	require.NoError(t, app.badgerStore.SetMemoryAuthorPrincipal(
+		parent.MemoryID,
+		rootState.PrincipalID,
+	))
+	require.NoError(t, app.badgerStore.SetMemoryClassification(
+		parent.MemoryID,
+		uint8(store.ClearanceInternal),
+	))
+	decisionID := strings.Repeat("d", taint.DecisionIDBytes)
+	created, err := app.badgerStore.ApplyTaintDecision(
+		chainID,
+		decisionID,
+		parent,
+		sha256.Sum256([]byte("taint payload")),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	submit := makeMemorySubmitTx(t, root, "general", "derived child")
+	submit.MemorySubmit.DerivedFrom = []tx.ParentRef{parent}
+	scoped := app.badgerStore.BeginConsensusTransaction(nil)
+	defer scoped.DiscardConsensusTransaction()
+	working := app.cloneForAppV20Finalize(scoped)
+	result := working.processMemorySubmit(submit, 20, appV23BlockTime())
+	require.Equal(t, uint32(0), result.Code, result.Log)
+	childID := string(result.Data)
+
+	invisibleLineage, err := app.badgerStore.GetMemoryLineage(childID)
+	require.NoError(t, err)
+	require.Empty(t, invisibleLineage)
+	invisibleDecisions, err := app.badgerStore.GetEffectiveTaintDecisions(childID)
+	require.NoError(t, err)
+	require.Empty(t, invisibleDecisions)
+	require.NoError(t, scoped.CommitConsensusTransaction())
+
+	lineage, err := app.badgerStore.GetMemoryLineage(childID)
+	require.NoError(t, err)
+	require.Equal(t, []tx.ParentRef{parent}, lineage)
+	decisions, err := app.badgerStore.GetEffectiveTaintDecisions(childID)
+	require.NoError(t, err)
+	require.Equal(t, []string{decisionID}, decisions)
+	revision, err := app.badgerStore.TaintRevision()
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), revision, "apply and admission inheritance each advance taintrev")
+
+	parentID, err := tx.ParentRefIDHex(parent)
+	require.NoError(t, err)
+	require.Len(t, parentID, 64)
+	children, err := app.badgerStore.ListLineageChildren(parentID, "", 10)
+	require.NoError(t, err)
+	require.Equal(t, []string{childID}, children)
+}
+
+func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
+	app := setupTestApp(t)
+	root := newAgentKey(t)
+	member := newAgentKey(t)
+	registerAppV23Agent(t, app, root, store.AppV23RoleAdmin, 2, store.AgentCapabilityReadAllDomains)
+	registerAppV23Agent(t, app, member, store.AppV23RoleMember, 3, 0)
+	require.NoError(t, app.badgerStore.EnsureAppV23Root("app-v30-clearance", 2))
+	rootState, err := app.badgerStore.GetAppV23Root()
+	require.NoError(t, err)
+	require.NotNil(t, rootState)
+	const chainID = "app-v30-clearance-chain"
+	require.NoError(t, app.SetExpectedGovernanceDelegationDomain(chainID))
+	activateAppV30ForMemorySubmitTest(t, app, 20)
+
+	parentContentHash := sha256.Sum256([]byte("top secret parent"))
+	parent := tx.ParentRef{
+		SourceChainID: chainID,
+		MemoryID:      "classified-parent",
+		ContentHash:   parentContentHash,
+	}
+	require.NoError(t, app.badgerStore.SetMemoryHash(
+		parent.MemoryID,
+		parent.ContentHash[:],
+		"committed",
+	))
+	require.NoError(t, app.badgerStore.SetMemoryDomain(parent.MemoryID, "general"))
+	require.NoError(t, app.badgerStore.SetMemoryAuthor(parent.MemoryID, root.id))
+	require.NoError(t, app.badgerStore.SetMemoryAuthorPrincipal(
+		parent.MemoryID,
+		rootState.PrincipalID,
+	))
+	require.NoError(t, app.badgerStore.SetMemoryClassification(
+		parent.MemoryID,
+		uint8(store.ClearanceTopSecret),
+	))
+
+	submit := makeMemorySubmitTx(t, member, "general", "unauthorized child")
+	submit.MemorySubmit.DerivedFrom = []tx.ParentRef{parent}
+	_, err = app.preflightAppV30Lineage(
+		submit,
+		member.id,
+		memoryIDForSubmit(submit.MemorySubmit, 20, member.id),
+		submit.MemorySubmit.DerivedFrom,
+		20,
+		appV23BlockTime(),
+	)
+	require.ErrorContains(t, err, "outside caller clearance")
 }
