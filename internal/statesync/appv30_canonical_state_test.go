@@ -73,6 +73,14 @@ func TestCanonicalStateRoundTripPreservesAppV30TaintLineageAndProvenance(t *test
 	require.NoError(t, WriteCanonicalState(ctx, sourceDB, &stream))
 	require.NoError(t, sourceDB.Close())
 
+	reopened, err := store.NewBadgerStore(sourceDir)
+	require.NoError(t, err)
+	reopenedHash, err := reopened.ComputeAppHashExcludingBookkeeping()
+	require.NoError(t, err)
+	require.Equal(t, sourceHash, reopenedHash, "restart must preserve the exact AppHash")
+	verifyAppV30StateSyncState(t, reopened, parent, child, grandchild, decisionID, signerID)
+	require.NoError(t, reopened.CloseBadger())
+
 	restoredDir := t.TempDir()
 	restoredDB, err := badger.Open(badger.DefaultOptions(restoredDir).WithLogger(nil))
 	require.NoError(t, err)
@@ -85,16 +93,25 @@ func TestCanonicalStateRoundTripPreservesAppV30TaintLineageAndProvenance(t *test
 	restoredHash, err := restored.ComputeAppHashExcludingBookkeeping()
 	require.NoError(t, err)
 	require.Equal(t, sourceHash, restoredHash)
+	verifyAppV30StateSyncState(t, restored, parent, child, grandchild, decisionID, signerID)
+}
 
+func verifyAppV30StateSyncState(
+	t *testing.T,
+	reader *store.BadgerStore,
+	parent, child, grandchild tx.ParentRef,
+	decisionID, signerID string,
+) {
+	t.Helper()
 	for _, memoryID := range []string{parent.MemoryID, child.MemoryID, grandchild.MemoryID} {
-		decisions, err := restored.GetEffectiveTaintDecisions(memoryID)
+		decisions, err := reader.GetEffectiveTaintDecisions(memoryID)
 		require.NoError(t, err)
 		require.Equal(t, []string{decisionID}, decisions, memoryID)
 	}
-	lineage, err := restored.GetMemoryLineage(grandchild.MemoryID)
+	lineage, err := reader.GetMemoryLineage(grandchild.MemoryID)
 	require.NoError(t, err)
 	require.Equal(t, []tx.ParentRef{child}, lineage)
-	signers, found, err := restored.GetAppV30Provenance(child.MemoryID)
+	signers, found, err := reader.GetAppV30Provenance(child.MemoryID)
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, signerID, signers[0].CredentialID)
