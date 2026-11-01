@@ -24,7 +24,7 @@ const (
 	DecisionIDBytes          = 64
 )
 
-const minimumHeaderBytes = 76
+const minimumHeaderBytes = 78
 
 type Status uint8
 
@@ -67,18 +67,19 @@ const (
 )
 
 type Header struct {
-	Action       Action
-	Status       Status
-	Generation   uint64
-	FrontierHead uint64
-	FrontierTail uint64
-	Scanned      uint32
-	Materialized uint32
-	MaxDepth     uint32
-	Parent       string
-	ParentDepth  uint16
-	LastEdge     string
-	PayloadHash  [sha256.Size]byte
+	Action         Action
+	Status         Status
+	Generation     uint64
+	FrontierHead   uint64
+	FrontierTail   uint64
+	Scanned        uint32
+	Materialized   uint32
+	MaxDepth       uint32
+	ParentRefID    string
+	ParentMemoryID string
+	ParentDepth    uint16
+	LastEdge       string
+	PayloadHash    [sha256.Size]byte
 }
 
 type Membership struct {
@@ -88,8 +89,9 @@ type Membership struct {
 }
 
 type QueueEntry struct {
-	MemoryID string
-	Depth    uint16
+	ParentRefID string
+	MemoryID    string
+	Depth       uint16
 }
 
 var errState = errors.New("invalid taint state")
@@ -146,7 +148,7 @@ func EncodeHeader(header Header) ([]byte, error) {
 	if err := validateHeader(header); err != nil {
 		return nil, err
 	}
-	encoded := make([]byte, 0, 48+len(header.Parent)+len(header.LastEdge))
+	encoded := make([]byte, 0, 48+len(header.ParentRefID)+len(header.ParentMemoryID)+len(header.LastEdge))
 	encoded = append(encoded, byte(header.Action), byte(header.Status))
 	encoded = binary.BigEndian.AppendUint64(encoded, header.Generation)
 	encoded = binary.BigEndian.AppendUint64(encoded, header.FrontierHead)
@@ -155,8 +157,10 @@ func EncodeHeader(header Header) ([]byte, error) {
 	encoded = binary.BigEndian.AppendUint32(encoded, header.Materialized)
 	encoded = binary.BigEndian.AppendUint32(encoded, header.MaxDepth)
 	encoded = binary.BigEndian.AppendUint16(encoded, header.ParentDepth)
-	encoded = binary.BigEndian.AppendUint16(encoded, uint16(len(header.Parent)))
-	encoded = append(encoded, header.Parent...)
+	encoded = binary.BigEndian.AppendUint16(encoded, uint16(len(header.ParentRefID)))
+	encoded = append(encoded, header.ParentRefID...)
+	encoded = binary.BigEndian.AppendUint16(encoded, uint16(len(header.ParentMemoryID)))
+	encoded = append(encoded, header.ParentMemoryID...)
 	encoded = binary.BigEndian.AppendUint16(encoded, uint16(len(header.LastEdge)))
 	encoded = append(encoded, header.LastEdge...)
 	return append(encoded, header.PayloadHash[:]...), nil
@@ -185,13 +189,20 @@ func DecodeHeader(encoded []byte) (Header, error) {
 	offset += 4
 	header.ParentDepth = binary.BigEndian.Uint16(encoded[offset:])
 	offset += 2
-	parentLen := int(binary.BigEndian.Uint16(encoded[offset:]))
+	parentRefLen := int(binary.BigEndian.Uint16(encoded[offset:]))
 	offset += 2
-	if parentLen > MaxMemoryIDBytes || len(encoded)-offset < parentLen+2+sha256.Size {
-		return Header{}, fmt.Errorf("%w: invalid parent length %d", errState, parentLen)
+	if parentRefLen > DecisionIDBytes || len(encoded)-offset < parentRefLen+2+2+sha256.Size {
+		return Header{}, fmt.Errorf("%w: invalid parent ref length %d", errState, parentRefLen)
 	}
-	header.Parent = string(encoded[offset : offset+parentLen])
-	offset += parentLen
+	header.ParentRefID = string(encoded[offset : offset+parentRefLen])
+	offset += parentRefLen
+	parentMemoryLen := int(binary.BigEndian.Uint16(encoded[offset:]))
+	offset += 2
+	if parentMemoryLen > MaxMemoryIDBytes || len(encoded)-offset < parentMemoryLen+2+sha256.Size {
+		return Header{}, fmt.Errorf("%w: invalid parent memory length %d", errState, parentMemoryLen)
+	}
+	header.ParentMemoryID = string(encoded[offset : offset+parentMemoryLen])
+	offset += parentMemoryLen
 	edgeLen := int(binary.BigEndian.Uint16(encoded[offset:]))
 	offset += 2
 	if edgeLen > MaxCursorBytes || len(encoded)-offset < edgeLen+sha256.Size {
@@ -245,28 +256,45 @@ func EncodeQueueEntry(entry QueueEntry) ([]byte, error) {
 	if err := validateMemoryID(entry.MemoryID); err != nil {
 		return nil, err
 	}
+	if err := validateParentRefID(entry.ParentRefID); err != nil {
+		return nil, err
+	}
 	if entry.Depth > MaxDepth {
 		return nil, fmt.Errorf("%w: queue depth %d exceeds %d", errState, entry.Depth, MaxDepth)
 	}
-	encoded := make([]byte, 0, 4+len(entry.MemoryID))
+	encoded := make([]byte, 0, 6+len(entry.ParentRefID)+len(entry.MemoryID))
+	encoded = binary.BigEndian.AppendUint16(encoded, uint16(len(entry.ParentRefID))) // #nosec G115 -- bounded
+	encoded = append(encoded, entry.ParentRefID...)
 	encoded = binary.BigEndian.AppendUint16(encoded, uint16(len(entry.MemoryID))) // #nosec G115 -- bounded
 	encoded = append(encoded, entry.MemoryID...)
 	return binary.BigEndian.AppendUint16(encoded, entry.Depth), nil
 }
 
 func DecodeQueueEntry(encoded []byte) (QueueEntry, error) {
-	if len(encoded) < 4 {
+	if len(encoded) < 6 {
 		return QueueEntry{}, fmt.Errorf("%w: short queue entry", errState)
 	}
-	length := int(binary.BigEndian.Uint16(encoded))
-	if length > MaxMemoryIDBytes || len(encoded) != length+4 {
+	parentRefLen := int(binary.BigEndian.Uint16(encoded))
+	offset := 2
+	if parentRefLen != DecisionIDBytes || len(encoded)-offset < parentRefLen+4 {
+		return QueueEntry{}, fmt.Errorf("%w: invalid queue parent ref length %d", errState, parentRefLen)
+	}
+	parentRefID := string(encoded[offset : offset+parentRefLen])
+	offset += parentRefLen
+	memoryLen := int(binary.BigEndian.Uint16(encoded[offset:]))
+	offset += 2
+	if memoryLen > MaxMemoryIDBytes || len(encoded) != offset+memoryLen+2 {
 		return QueueEntry{}, fmt.Errorf("%w: invalid queue entry length %d", errState, len(encoded))
 	}
 	entry := QueueEntry{
-		MemoryID: string(encoded[2 : 2+length]),
-		Depth:    binary.BigEndian.Uint16(encoded[2+length:]),
+		ParentRefID: parentRefID,
+		MemoryID:    string(encoded[offset : offset+memoryLen]),
+		Depth:       binary.BigEndian.Uint16(encoded[offset+memoryLen:]),
 	}
 	if err := validateMemoryID(entry.MemoryID); err != nil {
+		return QueueEntry{}, err
+	}
+	if err := validateParentRefID(entry.ParentRefID); err != nil {
 		return QueueEntry{}, err
 	}
 	if entry.Depth > MaxDepth {
@@ -300,8 +328,14 @@ func validateHeader(header Header) error {
 	if header.ParentDepth > MaxDepth || header.MaxDepth > MaxDepth {
 		return fmt.Errorf("%w: depth exceeds %d", errState, MaxDepth)
 	}
-	if len(header.Parent) != 0 {
-		if err := validateMemoryID(header.Parent); err != nil {
+	if (header.ParentRefID == "") != (header.ParentMemoryID == "") {
+		return fmt.Errorf("%w: parent ref ID and parent memory ID must be set together", errState)
+	}
+	if header.ParentRefID != "" {
+		if err := validateParentRefID(header.ParentRefID); err != nil {
+			return err
+		}
+		if err := validateMemoryID(header.ParentMemoryID); err != nil {
 			return err
 		}
 	}
@@ -316,6 +350,14 @@ func validateMemoryID(memoryID string) error {
 	if len(memoryID) == 0 || len(memoryID) > MaxMemoryIDBytes {
 		return fmt.Errorf("%w: memory ID length %d is outside 1..%d",
 			errState, len(memoryID), MaxMemoryIDBytes)
+	}
+	return nil
+}
+
+func validateParentRefID(parentRefID string) error {
+	decoded, err := hex.DecodeString(parentRefID)
+	if err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != parentRefID {
+		return fmt.Errorf("%w: parent ref ID must be lowercase %d-byte hex", errState, sha256.Size)
 	}
 	return nil
 }
