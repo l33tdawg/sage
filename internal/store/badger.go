@@ -403,6 +403,7 @@ func isCanonicalMemoryProjectionKey(key []byte) bool {
 		[]byte("taintq:"),
 		[]byte("taintrev"),
 		[]byte("taintactive"),
+		[]byte("memprov:v30:"),
 	} {
 		if bytes.HasPrefix(key, prefix) {
 			return true
