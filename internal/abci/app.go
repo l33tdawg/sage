@@ -6157,6 +6157,23 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		return &abcitypes.ExecTxResult{Code: 96, Log: "co-commit: SharedID does not match signed core"}
 	}
 	sharedID := env.SharedID
+	var appV30Signers []store.AppV30ProvenanceSigner
+	if app.postAppV30Fork(height) {
+		var provenanceErr error
+		appV30Signers, provenanceErr = appV30CoCommitProvenanceSigners(
+			appV23Root,
+			env,
+		)
+		if provenanceErr != nil {
+			return &abcitypes.ExecTxResult{Code: 99, Log: "co-commit: " + provenanceErr.Error()}
+		}
+		if provenanceErr = app.badgerStore.ValidateAppV30Provenance(
+			sharedID,
+			appV30Signers,
+		); provenanceErr != nil {
+			return &abcitypes.ExecTxResult{Code: 98, Log: "co-commit: provenance conflict: " + provenanceErr.Error()}
+		}
+	}
 
 	// Footgun E — freshness + federation-status bind (both determinism-safe: only
 	// the block's own deterministic blockTime and on-chain cross_fed state, never
@@ -6431,6 +6448,17 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 		sort.Strings(principals)
 		if wErr := app.badgerStore.SetCoCommitPrincipals(sharedID, principals); wErr != nil {
 			return &abcitypes.ExecTxResult{Code: 99, Log: fmt.Sprintf("co-commit: badger write error: %v", wErr)}
+		}
+	}
+	if len(appV30Signers) > 0 {
+		if err := app.badgerStore.SetAppV30Provenance(
+			sharedID,
+			appV30Signers,
+		); err != nil {
+			return &abcitypes.ExecTxResult{
+				Code: 99,
+				Log:  "co-commit: persist app-v30 provenance: " + err.Error(),
+			}
 		}
 	}
 

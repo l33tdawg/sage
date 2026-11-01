@@ -2,6 +2,7 @@ package abci
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -38,6 +39,32 @@ func (app *SageApp) appV30ProvenanceSigners(
 		RootGeneration: rootGeneration,
 		Exact:          true,
 	}}, nil
+}
+
+func appV30CoCommitProvenanceSigners(
+	root *store.AppV23RootState,
+	env *tx.CoCommitSubmit,
+) ([]store.AppV30ProvenanceSigner, error) {
+	if root == nil || env == nil {
+		return nil, fmt.Errorf("co-commit provenance requires Root state and an envelope")
+	}
+	signers := make([]store.AppV30ProvenanceSigner, 0, len(env.Coauthors))
+	for _, coauthor := range env.Coauthors {
+		credentialID := hex.EncodeToString(coauthor.PubKey)
+		principalID := credentialID
+		rootGeneration := uint64(0)
+		if credentialID == root.CredentialID {
+			principalID = root.PrincipalID
+			rootGeneration = root.Generation
+		}
+		signers = append(signers, store.AppV30ProvenanceSigner{
+			CredentialID:   credentialID,
+			PrincipalID:    principalID,
+			RootGeneration: rootGeneration,
+			Exact:          true,
+		})
+	}
+	return signers, nil
 }
 
 func (app *SageApp) preflightAppV30Lineage(

@@ -2,6 +2,7 @@ package abci
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 
@@ -230,4 +231,47 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 		appV23BlockTime(),
 	)
 	require.ErrorContains(t, err, "outside caller clearance")
+}
+
+func TestAppV30CoCommitWritesEverySignerProvenance(t *testing.T) {
+	app, root, _, _ := setupAppV30TaintGovernance(t)
+	app.appV15AppliedHeight = 5
+	rootState, err := app.badgerStore.GetAppV23Root()
+	require.NoError(t, err)
+	require.NotNil(t, rootState)
+
+	envelope, foreign := buildCoCommitEnvelope(
+		t,
+		root,
+		"general",
+		[]byte("app-v30-coauthor-provenance"),
+		"sage-v30-foreign",
+	)
+	result := app.processCoCommitSubmit(
+		coCommitSubmitTx(t, root, envelope),
+		20,
+		appV23BlockTime(),
+	)
+	require.Equal(t, uint32(0), result.Code, result.Log)
+
+	signers, found, err := app.badgerStore.GetAppV30Provenance(envelope.SharedID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Len(t, signers, 2)
+	byCredential := make(map[string]store.AppV30ProvenanceSigner, len(signers))
+	for _, signer := range signers {
+		byCredential[signer.CredentialID] = signer
+	}
+	require.Equal(t, store.AppV30ProvenanceSigner{
+		CredentialID:   root.id,
+		PrincipalID:    rootState.PrincipalID,
+		RootGeneration: rootState.Generation,
+		Exact:          true,
+	}, byCredential[root.id])
+	foreignID := hex.EncodeToString(foreign.pub)
+	require.Equal(t, store.AppV30ProvenanceSigner{
+		CredentialID: foreignID,
+		PrincipalID:  foreignID,
+		Exact:        true,
+	}, byCredential[foreignID])
 }
