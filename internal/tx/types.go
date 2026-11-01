@@ -142,6 +142,10 @@ const (
 	// GovOpDomainContinuityAdopt (app-v25) restores exact pre-upgrade local
 	// writer authority for one domain from a canonical attested payload.
 	GovOpDomainContinuityAdopt GovProposalOp = 11
+	// GovOpMemoryTaint (app-v30) carries one canonical TaintApplyV1 or
+	// TaintClearV1 payload. The numeric value remains inert before app-v30 so a
+	// historical unknown-op-12 proposal retains its replay behavior.
+	GovOpMemoryTaint GovProposalOp = 12
 )
 
 // VoteDecision represents a validator's vote on a proposed memory.
@@ -189,8 +193,11 @@ type MemorySubmit struct {
 	// Tags is a canonical (sorted, unique, bounded) app-v20 extension. It is
 	// encoded only when non-empty, so every historical MemorySubmit retains its
 	// exact bytes. DecodeTx keeps the extension dormant until the caller knows
-	// the deterministic fork height and calls ActivateMemorySubmitTags.
+	// the deterministic fork heights and calls ActivateMemorySubmitExtensions.
 	Tags []string
+	// DerivedFrom is the app-v30 authenticated lineage extension. It stays
+	// dormant until the caller activates the app-v30 H+1 rules.
+	DerivedFrom []ParentRef
 
 	tagExtension []byte
 }

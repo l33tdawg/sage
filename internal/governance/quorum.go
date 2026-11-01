@@ -30,6 +30,17 @@ func ThresholdFor(op ProposalOp) (num, den int64) {
 	}
 }
 
+// ThresholdForAt selects the threshold from the proposal's immutable creation
+// height. OpMemoryTaint needs 3/4 only for proposals created after a real
+// app-v30 activation. The activation block itself and every older proposal keep
+// ThresholdFor's historical result, including the 2/3 unknown-op-12 behavior.
+func ThresholdForAt(op ProposalOp, createdHeight, activationHeight int64) (num, den int64) {
+	if op == OpMemoryTaint && activationHeight > 0 && createdHeight > activationHeight {
+		return 3, 4
+	}
+	return ThresholdFor(op)
+}
+
 // CheckGovQuorum checks if a governance proposal has reached quorum.
 // Uses pure integer arithmetic for cross-platform determinism.
 //
@@ -56,7 +67,26 @@ func CheckGovQuorum(votes map[string]string, powers map[string]int64) (passed bo
 // engine. The op selects the threshold via ThresholdFor.
 func CheckGovQuorumOp(votes map[string]string, powers map[string]int64, op ProposalOp) (passed bool, rejected bool, acceptPower, rejectPower, totalPower int64) {
 	num, den := ThresholdFor(op)
+	return checkGovQuorumThreshold(votes, powers, num, den)
+}
 
+// CheckGovQuorumAt uses the proposal creation height to select a fork-aware
+// threshold without changing historical ThresholdFor behavior.
+func CheckGovQuorumAt(
+	votes map[string]string,
+	powers map[string]int64,
+	op ProposalOp,
+	createdHeight, activationHeight int64,
+) (passed bool, rejected bool, acceptPower, rejectPower, totalPower int64) {
+	num, den := ThresholdForAt(op, createdHeight, activationHeight)
+	return checkGovQuorumThreshold(votes, powers, num, den)
+}
+
+func checkGovQuorumThreshold(
+	votes map[string]string,
+	powers map[string]int64,
+	num, den int64,
+) (passed bool, rejected bool, acceptPower, rejectPower, totalPower int64) {
 	// Sort validator IDs for deterministic iteration.
 	ids := make([]string, 0, len(powers))
 	for id := range powers {

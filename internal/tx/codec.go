@@ -283,7 +283,7 @@ func encodePayload(tx *ParsedTx) ([]byte, error) {
 		if tx.MemorySubmit == nil {
 			return nil, fmt.Errorf("MemorySubmit is nil for submit tx")
 		}
-		return encodeMemorySubmit(tx.MemorySubmit), nil
+		return encodeMemorySubmit(tx.MemorySubmit)
 	case TxTypeMemoryVote:
 		if tx.MemoryVote == nil {
 			return nil, fmt.Errorf("MemoryVote is nil for vote tx")
@@ -761,7 +761,7 @@ func decodePayload(tx *ParsedTx, data []byte) error {
 
 // --- MemorySubmit ---
 
-func encodeMemorySubmit(s *MemorySubmit) []byte {
+func encodeMemorySubmit(s *MemorySubmit) ([]byte, error) {
 	var buf []byte
 	buf = appendBytes(buf, []byte(s.MemoryID))
 	buf = appendBytes(buf, s.ContentHash)
@@ -777,7 +777,14 @@ func encodeMemorySubmit(s *MemorySubmit) []byte {
 		buf = append(buf, memorySubmitTagsMarker...)
 		buf = appendStringSlice(buf, s.Tags)
 	}
-	return buf
+	if len(s.DerivedFrom) > 0 {
+		derivedFrom, err := EncodeDerivedFromExtension(s.DerivedFrom)
+		if err != nil {
+			return nil, err
+		}
+		buf = append(buf, derivedFrom...)
+	}
+	return buf, nil
 }
 
 var memorySubmitTagsMarker = []byte("SAGE-MEM-TAGS-V1\x00")
@@ -857,37 +864,71 @@ func decodeMemorySubmit(data []byte) (*MemorySubmit, error) {
 	return s, nil
 }
 
-// ActivateMemorySubmitTags interprets the app-v20 tag extension after the
-// caller has established that the deterministic fork is active. Keeping this
-// out of DecodeTx preserves pre-v20 replay: legacy decoders ignored every byte
-// after TaskStatus, including arbitrary historical trailing data.
+// ActivateMemorySubmitTags interprets the app-v20 tag extension while rejecting
+// any later extension. Pre-app-v30 callers must use this wrapper so the
+// derived_from marker cannot be consumed silently before its fork.
 func ActivateMemorySubmitTags(parsed *ParsedTx) error {
+	return ActivateMemorySubmitExtensions(parsed, true, false)
+}
+
+// ActivateMemorySubmitExtensions interprets the ordered optional MemorySubmit
+// extensions after the caller has established the deterministic fork height.
+// The v20 tags marker may be absent when there are no tags. The app-v30
+// derived_from marker, when present, must follow the tag extension.
+func ActivateMemorySubmitExtensions(parsed *ParsedTx, tagsActive, derivedFromActive bool) error {
 	if parsed == nil || parsed.Type != TxTypeMemorySubmit || parsed.MemorySubmit == nil {
 		return nil
 	}
 	submit := parsed.MemorySubmit
-	if len(submit.tagExtension) == 0 {
+	remaining := submit.tagExtension
+	if len(remaining) == 0 {
+		if len(submit.DerivedFrom) != 0 {
+			return fmt.Errorf("%w: in-memory derived_from has no wire extension", ErrInvalidTxData)
+		}
+		if !tagsActive && len(submit.Tags) != 0 {
+			return fmt.Errorf("%w: memory extensions are not active", ErrInvalidTxData)
+		}
 		return memorytags.ValidateCanonical(submit.Tags)
 	}
-	if !bytes.HasPrefix(submit.tagExtension, memorySubmitTagsMarker) {
-		return fmt.Errorf("%w: invalid memory tag extension", ErrInvalidTxData)
+	submit.Tags = nil
+	submit.DerivedFrom = nil
+
+	if !tagsActive {
+		return fmt.Errorf("%w: memory extensions are not active", ErrInvalidTxData)
 	}
-	countOffset := len(memorySubmitTagsMarker)
-	if len(submit.tagExtension)-countOffset < 4 {
-		return fmt.Errorf("%w: malformed memory tag extension", ErrInvalidTxData)
+	if bytes.HasPrefix(remaining, memorySubmitTagsMarker) {
+		countOffset := len(memorySubmitTagsMarker)
+		if len(remaining)-countOffset < 4 {
+			return fmt.Errorf("%w: malformed memory tag extension", ErrInvalidTxData)
+		}
+		count := binary.BigEndian.Uint32(remaining[countOffset : countOffset+4])
+		if count == 0 || count > memorytags.MaxCount {
+			return fmt.Errorf("%w: invalid memory tag count", ErrInvalidTxData)
+		}
+		values, off, err := readStringSlice(remaining, len(memorySubmitTagsMarker))
+		if err != nil {
+			return fmt.Errorf("%w: malformed memory tag extension", ErrInvalidTxData)
+		}
+		if err := memorytags.ValidateCanonical(values); err != nil {
+			return fmt.Errorf("%w: non-canonical memory tags: %v", ErrInvalidTxData, err)
+		}
+		submit.Tags = values
+		remaining = remaining[off:]
 	}
-	count := binary.BigEndian.Uint32(submit.tagExtension[countOffset : countOffset+4])
-	if count == 0 || count > memorytags.MaxCount {
-		return fmt.Errorf("%w: invalid memory tag count", ErrInvalidTxData)
+	if len(remaining) == 0 {
+		return memorytags.ValidateCanonical(submit.Tags)
 	}
-	values, off, err := readStringSlice(submit.tagExtension, len(memorySubmitTagsMarker))
-	if err != nil || off != len(submit.tagExtension) {
-		return fmt.Errorf("%w: malformed memory tag extension", ErrInvalidTxData)
+	if !bytes.HasPrefix(remaining, memorySubmitDerivedFromMarker) {
+		return fmt.Errorf("%w: invalid memory extension marker", ErrInvalidTxData)
 	}
-	if err := memorytags.ValidateCanonical(values); err != nil {
-		return fmt.Errorf("%w: non-canonical memory tags: %v", ErrInvalidTxData, err)
+	if !derivedFromActive {
+		return fmt.Errorf("%w: derived_from extension is not active", ErrInvalidTxData)
 	}
-	submit.Tags = values
+	refs, err := DecodeDerivedFromExtension(remaining)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidTxData, err)
+	}
+	submit.DerivedFrom = refs
 	return nil
 }
 
