@@ -156,7 +156,8 @@ func (s *BadgerStore) ValidateMemoryProjectionWithoutTaint(
 			ErrMemoryProjectionUnpublished, err,
 		)
 	}
-	state, _, err := s.classifyCanonicalMemoryProjection(record, requireCompleteEnvelope)
+	state, disposition, err := s.classifyCanonicalMemoryProjection(record, requireCompleteEnvelope)
+	s.observeMemoryProjectionDisposition(disposition)
 	return state, err
 }
 
