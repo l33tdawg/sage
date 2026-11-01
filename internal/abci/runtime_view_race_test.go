@@ -74,6 +74,7 @@ func TestRuntimeViewPublicationSerializesOffConsensusReaders(t *testing.T) {
 				_ = app.IsAppV20ActiveForNextTx()
 				_ = app.IsAppV22ActiveForNextTx()
 				_ = app.IsAppV23ActiveForNextTx()
+				_ = app.IsAppV30ActiveForNextTx()
 				_, _ = app.Info(context.Background(), &abcitypes.RequestInfo{})
 				_, _ = app.Query(context.Background(), &abcitypes.RequestQuery{Path: "/status"})
 				_, _ = app.CheckTx(context.Background(), &abcitypes.RequestCheckTx{Tx: checkRaw})

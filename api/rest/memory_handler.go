@@ -21,6 +21,7 @@ import (
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/authzdenial"
 	"github.com/l33tdawg/sage/internal/federation"
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/idfmt"
 	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/metrics"
@@ -60,6 +61,15 @@ type SubmitMemoryRequest struct {
 	// part of the signed body; the evidence itself never enters a transaction.
 	// Not accepted for tasks.
 	EvidenceID string `json:"evidence_id,omitempty"`
+	// DerivedFrom is the authenticated app-v30 lineage extension. Content hashes
+	// are lowercase 32-byte hex and refs are canonicalized before signing.
+	DerivedFrom []SubmitMemoryParent `json:"derived_from,omitempty"`
+}
+
+type SubmitMemoryParent struct {
+	SourceChainID string `json:"source_chain_id"`
+	MemoryID      string `json:"memory_id"`
+	ContentHash   string `json:"content_hash"`
 }
 
 // SubmitMemoryResponse is the JSON body for a successful submission.
@@ -77,6 +87,35 @@ type SubmitMemoryResponse struct {
 	IdempotentReplay    bool   `json:"idempotent_replay,omitempty"`
 	EmbeddingProvider   string `json:"embedding_provider,omitempty"`
 	EmbeddingQueued     bool   `json:"embedding_queued,omitempty"`
+}
+
+func parseSubmitDerivedFrom(input []SubmitMemoryParent) ([]tx.ParentRef, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	refs := make([]tx.ParentRef, 0, len(input))
+	for i, parent := range input {
+		decoded, err := hex.DecodeString(parent.ContentHash)
+		if err != nil || len(decoded) != sha256.Size ||
+			hex.EncodeToString(decoded) != parent.ContentHash {
+			return nil, fmt.Errorf(
+				"parent %d content_hash must be lowercase %d-byte hex",
+				i,
+				sha256.Size,
+			)
+		}
+		ref := tx.ParentRef{
+			SourceChainID: parent.SourceChainID,
+			MemoryID:      parent.MemoryID,
+		}
+		copy(ref.ContentHash[:], decoded)
+		refs = append(refs, ref)
+	}
+	tx.SortParentRefs(refs)
+	if _, err := tx.EncodeDerivedFromExtension(refs); err != nil {
+		return nil, err
+	}
+	return refs, nil
 }
 
 // QueryMemoryRequest is the JSON body for POST /v1/memory/query.
@@ -1225,6 +1264,16 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
+	derivedFromPresent, err := jsonFieldPresent(r, "derived_from")
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if derivedFromPresent && len(req.DerivedFrom) == 0 {
+		writeProblem(w, http.StatusBadRequest, "Invalid derived_from lineage",
+			"derived_from must contain between 1 and 16 parent refs when present.")
+		return
+	}
 
 	// Validate required fields.
 	if req.Content == "" {
@@ -1249,6 +1298,42 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 	if req.IdempotencyKey != "" && req.MemoryType != string(memory.TypeTask) {
 		writeProblem(w, http.StatusBadRequest, "Invalid idempotency key", "idempotency_key is supported only for task memories.")
 		return
+	}
+	if len(req.DerivedFrom) > 0 && !s.isPostV30ForNextTx() {
+		writeProblemTyped(
+			w,
+			http.StatusConflict,
+			"https://sage.dev/errors/app-v30-required",
+			"App-v30 required",
+			"Authenticated derived_from lineage requires app-v30. Upgrade the node and retry after activation.",
+		)
+		return
+	}
+	derivedFrom, err := parseSubmitDerivedFrom(req.DerivedFrom)
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid derived_from lineage", err.Error())
+		return
+	}
+	if len(derivedFrom) > 0 {
+		var localDomain string
+		if s.governanceDomainFn != nil {
+			localDomain = s.governanceDomainFn()
+		}
+		if localDomain == "" {
+			writeProblem(w, http.StatusServiceUnavailable, "Consensus chain unavailable",
+				"The local consensus chain binding is unavailable. Retry after the node is ready.")
+			return
+		}
+		for _, parent := range derivedFrom {
+			// The committed governance domain is a hash of the raw CometBFT
+			// chain ID. Bind the supplied ID through that same derivation.
+			parentDomain, domainErr := governance.DelegationDomainForChainID(parent.SourceChainID)
+			if domainErr != nil || parentDomain != localDomain {
+				writeProblem(w, http.StatusBadRequest, "Invalid derived_from lineage",
+					"source_chain_id must equal the local consensus chain ID; cross-chain refs are not active in app-v30.")
+				return
+			}
+		}
 	}
 	explicitTaskIdempotency := req.IdempotencyKey != ""
 	if explicitTaskIdempotency {
@@ -1434,6 +1519,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 			Classification:  tx.ClearanceLevel(classification), // #nosec G115 -- validated small int
 			TaskStatus:      req.TaskStatus,
 			Tags:            consensusTags,
+			DerivedFrom:     derivedFrom,
 		},
 	}
 	taskPayloadDigest := ""

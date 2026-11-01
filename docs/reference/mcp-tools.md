@@ -323,6 +323,7 @@ replacement first, old-memory challenge second.
 | `evidence` | string | no | Optional source text, up to 32 KiB, for non-task memories. Uploaded separately and kept on this node; an enabled memory gate checks whether it supports the claim. |
 | `replaces_memory_id` | string | no | Live committed/challenged memory this content corrects. The replacement is pre-validated like any other write, so a body byte-identical to its source is refused as a duplicate — the voter would have deprecated it — and the correction must actually change the content. |
 | `replacement_reason` | string | no | Audit reason used when challenging the old memory after the replacement commits. |
+| `derived_from` | object[] | no | App-v30 authenticated parent refs (1–16), each `{source_chain_id, memory_id, content_hash}`. Parents must be local, committed/challenged, readable by the caller, and carry the exact lowercase SHA-256 hash. |
 
 **Returns:**
 - `memory_id`, `status`, `tx_hash`, `domain`, `type`, `provider`, `tags`.
@@ -355,6 +356,10 @@ replacement first, old-memory challenge second.
   - `replacement_committed_old_retained` when replacement succeeded but the
     challenge failed. This ordering is intentionally fail-safe: interruption
   can leave both memories live, but cannot leave neither.
+- `derived_from` creates the authenticated app-v30 lineage graph; it is
+  distinct from legacy `parent_hash` and from mutable typed links. Missing,
+  unauthorized, deprecated, self-referential, wrong-hash, and non-local parents
+  receive the same fail-closed lineage-unavailable refusal.
 
 Before this default alignment, `sage_remember(type="task")` with omitted
 confidence submitted 0.80. Existing records retain that value. When deliberately
