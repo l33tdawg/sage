@@ -426,6 +426,16 @@ func validateAppV20TxResources(parsed *tx.ParsedTx) error { //nolint:gocyclo // 
 			}
 			return appV20Metadata("cross-federation revoke reason", p.Reason)
 		}
+	case tx.TxTypeMemoryTaintWork:
+		if p := parsed.MemoryTaintWork; p != nil {
+			if err := appV20Identifiers(
+				id("taint decision id", p.DecisionID),
+				id("taint parent ref id", p.ParentRefID),
+				id("taint cursor", p.Cursor),
+			); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

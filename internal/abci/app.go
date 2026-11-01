@@ -684,6 +684,9 @@ type SageApp struct {
 	// appV30AppliedHeight gates authenticated lineage and taint consensus state.
 	// The activation block remains under app-v29 rules; v30 semantics begin H+1.
 	appV30AppliedHeight int64 // 0 => fork dormant
+	// appV30WorkTxCount is process-local for one FinalizeBlock execution. It
+	// enforces the four-expand-or-cleanup transaction policy limit.
+	appV30WorkTxCount uint8
 	// appV23GenesisActive is loaded only from the dedicated, AppHash-covered
 	// dual-signed genesis activation marker. It is separate from applied-height
 	// upgrades because a v23-born chain has no historical activation block.
@@ -3758,6 +3761,10 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 		!app.isAppV23ActiveForNextTx() {
 		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
 	}
+	if parsedTx.Type == tx.TxTypeMemoryTaintWork &&
+		!app.postAppV30Fork(app.state.Height+1) {
+		return &abcitypes.ResponseCheckTx{Code: 10, Log: "unknown tx type"}, nil
+	}
 	// app-v26 extends the existing AccessGroupMutate wire payload rather than
 	// allocating a new tx type. Before activation, a v26 binary can decode the
 	// appended member_authority bytes but a still-rolling v25 binary rejects
@@ -4124,6 +4131,7 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 
 	// Clear pending writes from previous block
 	app.pendingWrites = nil
+	app.appV30WorkTxCount = 0
 	postAppV20 := app.postAppV20Fork(req.Height)
 	strictV20Rules := app.requiresAppV20StrictRulesAt(req.Height)
 	atomicBudgetOK := !strictV20Rules || appV20AtomicFinalizeBudget(req.Txs)
@@ -5165,6 +5173,8 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 		return app.processAccessGroupMutateV23(parsedTx, height, blockTime)
 	case tx.TxTypeRootCredentialRotate:
 		return app.processRootCredentialRotateV23(parsedTx, height, blockTime)
+	case tx.TxTypeMemoryTaintWork:
+		return app.processMemoryTaintWork(parsedTx, height)
 	default:
 		return &abcitypes.ExecTxResult{Code: 10, Log: "unknown tx type"}
 	}
