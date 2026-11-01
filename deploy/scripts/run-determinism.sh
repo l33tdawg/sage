@@ -44,6 +44,7 @@ case "${PROJECT}" in
   *) echo "ERROR: unsupported isolated determinism project '${PROJECT}'" >&2; exit 1 ;;
 esac
 FRESH_PROJECT=
+FRESH_VALIDATOR_KEY_DIR=
 if [ "${DET_FRESH_V30:-0}" = "1" ]; then
   if [ "${PROJECT}" != "sage-fresh-v30" ]; then
     echo "ERROR: fresh-v30 proof requires its own sage-fresh-v30 project" >&2
@@ -70,6 +71,9 @@ cleanup() {
   # the teardown aborts and every container and volume of the run is left
   # behind. It is the same throwaway value `up` used, never a real secret.
   POSTGRES_PASSWORD=ci_test_password "${COMPOSE[@]}" down -v --remove-orphans || true
+  if [ -n "${FRESH_VALIDATOR_KEY_DIR}" ]; then
+    rm -rf -- "${FRESH_VALIDATOR_KEY_DIR}"
+  fi
 }
 trap cleanup EXIT
 
@@ -116,6 +120,27 @@ if [ "${DET_MIXED_ARCH:-0}" = "1" ]; then
 else
   build_det_image "sage-det-abci:local" deploy/Dockerfile.abci
   build_det_image "sage-det-node:local" deploy/Dockerfile.node
+fi
+
+if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+  # init-testnet deliberately gives the original signing keys to the ABCI uid.
+  # A Linux host runner cannot read them. Export only this throwaway fixture's
+  # vote keys through a read-only mount; host redirection keeps the copies owned
+  # by the runner, with no secret bytes in logs or evidence artifacts.
+  FRESH_VALIDATOR_KEY_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/sage-fresh-v30-vote-keys.XXXXXX")"
+  (
+    umask 077
+    key_image=sage-det-node:local
+    if [ "${DET_MIXED_ARCH:-0}" = "1" ]; then
+      key_image=sage-det-node:local-arm64
+    fi
+    for node in 0 1 2 3; do
+      docker run --rm --pull=never --network none --read-only --entrypoint cat \
+        -v "${PWD}/deploy/genesis:/genesis:ro" "${key_image}" \
+        "/genesis/node${node}/config/priv_validator_key.json" \
+        > "${FRESH_VALIDATOR_KEY_DIR}/node${node}.json"
+    done
+  )
 fi
 
 echo "--- starting the isolated cluster ---"
@@ -181,6 +206,7 @@ SAGE_TEST_API2=http://localhost:18092 SAGE_TEST_API3=http://localhost:18093 \
 SAGE_TEST_RPC0=http://localhost:36657 SAGE_TEST_RPC1=http://localhost:36757 \
 SAGE_TEST_RPC2=http://localhost:36857 SAGE_TEST_RPC3=http://localhost:36957 \
 SAGE_TEST_FRESH_V30_PROJECT="${FRESH_PROJECT}" \
+SAGE_TEST_FRESH_V30_VALIDATOR_KEY_DIR="${FRESH_VALIDATOR_KEY_DIR}" \
 go test ./test/integration/ -run "${DET_TEST}" \
   -tags=integration -count=1 -v -timeout "${DET_TIMEOUT:-1800s}" $SHORT_FLAG
 

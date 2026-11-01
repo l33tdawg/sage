@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -91,6 +92,10 @@ func TestAppV30FreshGenesisFourValidators(t *testing.T) {
 	if os.Getenv("SAGE_TEST_FRESH_V30_PROJECT") != "sage-fresh-v30" {
 		t.Skip("requires the owned fresh-v30 four-validator harness")
 	}
+	genesis, err := cmttypes.GenesisDocFromFile(filepath.Join(devnetGenesisDir(), "node0/config/genesis.json"))
+	require.NoError(t, err)
+	validatorKeys, err := readFreshV30ValidatorKeys(genesis, os.Getenv("SAGE_TEST_FRESH_V30_VALIDATOR_KEY_DIR"))
+	require.NoError(t, err)
 	requireNetwork(t)
 	rpcs, apis := allCometRPCs(), allAPIURLs()
 	rootBytes, err := os.ReadFile(filepath.Join(devnetGenesisDir(), "fresh-v30-root.key"))
@@ -129,7 +134,7 @@ func TestAppV30FreshGenesisFourValidators(t *testing.T) {
 	require.NoError(t, err)
 	decision, err := tx.TaintApplyDecisionID(apply)
 	require.NoError(t, err)
-	applyHeight := freshV30Govern(t, root, rpcs, decision, apply)
+	applyHeight := freshV30Govern(t, root, rpcs, validatorKeys, decision, apply)
 	freshV30WaitReadable(t, agent, apis, parent, false)
 	freshV30WaitReadable(t, agent, apis, child, false)
 	applyObserved := readLatestHeight(t, rpcs[0])
@@ -169,7 +174,7 @@ func TestAppV30FreshGenesisFourValidators(t *testing.T) {
 	require.NoError(t, err)
 	clearTarget, err := tx.TaintClearTargetID(clear)
 	require.NoError(t, err)
-	freshV30Govern(t, root, rpcs, clearTarget, clear)
+	freshV30Govern(t, root, rpcs, validatorKeys, clearTarget, clear)
 	freshV30WaitReadable(t, agent, apis, parent, true)
 	freshV30WaitReadable(t, agent, apis, child, true)
 	clearObserved := readLatestHeight(t, rpcs[0])
@@ -250,7 +255,72 @@ func freshV30WaitReadable(t *testing.T, root ed25519.PrivateKey, apis []string, 
 	}, 2*time.Minute, time.Second, "memory%s readable=%t on every validator", id, readable)
 }
 
-func freshV30Govern(t *testing.T, root ed25519.PrivateKey, rpcs []string, target string, payload []byte) int64 {
+// readFreshV30ValidatorKeys validates the host-owned vote-key export against
+// the original public genesis. The export must cover its distinct full roster;
+// it does not replace the canonical genesis or alter the container-owned keys.
+func readFreshV30ValidatorKeys(genesis *cmttypes.GenesisDoc, directory string) ([]ed25519.PrivateKey, error) {
+	if directory == "" || genesis == nil || len(genesis.Validators) != cometRPCCount {
+		return nil, fmt.Errorf("fresh-v30 vote keys require an explicit export directory and four-validator genesis")
+	}
+	roster := make(map[string]struct{}, cometRPCCount)
+	for _, validator := range genesis.Validators {
+		if validator.PubKey == nil || validator.PubKey.Type() != "ed25519" ||
+			len(validator.PubKey.Bytes()) != ed25519.PublicKeySize || validator.Power <= 0 {
+			return nil, fmt.Errorf("fresh-v30 genesis has an invalid validator")
+		}
+		identity := string(validator.PubKey.Bytes())
+		if _, duplicate := roster[identity]; duplicate {
+			return nil, fmt.Errorf("fresh-v30 genesis has duplicate validators")
+		}
+		roster[identity] = struct{}{}
+	}
+	keys := make([]ed25519.PrivateKey, 0, cometRPCCount)
+	seen := make(map[string]struct{}, cometRPCCount)
+	for node := 0; node < cometRPCCount; node++ {
+		raw, err := os.ReadFile(filepath.Join(directory, fmt.Sprintf("node%d.json", node)))
+		if err != nil {
+			return nil, fmt.Errorf("read fresh validator%d exported vote key: %w", node, err)
+		}
+		var document struct {
+			Public struct {
+				Type  string `json:"type"`
+				Value string `json:"value"`
+			} `json:"pub_key"`
+			Private struct {
+				Type  string `json:"type"`
+				Value string `json:"value"`
+			} `json:"priv_key"`
+		}
+		if err := json.Unmarshal(raw, &document); err != nil {
+			return nil, fmt.Errorf("parse fresh validator%d exported vote key: %w", node, err)
+		}
+		public, publicErr := base64.StdEncoding.DecodeString(document.Public.Value)
+		private, privateErr := base64.StdEncoding.DecodeString(document.Private.Value)
+		if document.Public.Type != "tendermint/PubKeyEd25519" ||
+			document.Private.Type != "tendermint/PrivKeyEd25519" ||
+			publicErr != nil || privateErr != nil ||
+			len(public) != ed25519.PublicKeySize || len(private) != ed25519.PrivateKeySize {
+			return nil, fmt.Errorf("fresh validator%d exported vote key has invalid Ed25519 encoding", node)
+		}
+		key := ed25519.PrivateKey(private)
+		if !bytes.Equal(ed25519.NewKeyFromSeed(key.Seed()), private) ||
+			!bytes.Equal(public, private[ed25519.SeedSize:]) {
+			return nil, fmt.Errorf("fresh validator%d exported private/public key pair does not match", node)
+		}
+		identity := string(public)
+		if _, member := roster[identity]; !member {
+			return nil, fmt.Errorf("fresh validator%d exported vote key is outside the genesis roster", node)
+		}
+		if _, duplicate := seen[identity]; duplicate {
+			return nil, fmt.Errorf("fresh validator%d exported vote key duplicates another validator", node)
+		}
+		seen[identity] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+func freshV30Govern(t *testing.T, root ed25519.PrivateKey, rpcs []string, validatorKeys []ed25519.PrivateKey, target string, payload []byte) int64 {
 	t.Helper()
 	proposal := &tx.ParsedTx{Type: tx.TxTypeGovPropose, Nonce: uint64(time.Now().UnixNano()), Timestamp: time.Now(), //nolint:gosec // positive test nonce
 		GovPropose: &tx.GovPropose{Operation: tx.GovOpMemoryTaint, TargetID: target, Payload: payload, Reason: "fresh app30 process evidence"}}
@@ -260,7 +330,7 @@ func freshV30Govern(t *testing.T, root ed25519.PrivateKey, rpcs []string, target
 	require.Zero(t, result.TxCode, result.TxLog)
 	id := governance.ComputeProposalID(agentIDFor(root), result.Height, governance.OpMemoryTaint, target)
 	for node := 0; node < 3; node++ {
-		vote := castValidatorUpgradeVote(t, rpcs[node], loadDevnetValidatorKey(t, node), id)
+		vote := castValidatorUpgradeVote(t, rpcs[node], validatorKeys[node], id)
 		require.Zero(t, vote.CheckCode, vote.CheckLog)
 		require.Zero(t, vote.TxCode, vote.TxLog)
 		if node == 2 {
