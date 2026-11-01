@@ -533,14 +533,18 @@ fn sage_home<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
 }
 
 fn navigation_allowed(url: &Url, session: &SharedSession) -> bool {
+    let mut state = session.lock().expect("shell session lock");
     if bundled_asset_url(url) {
         return true;
     }
-    let state = session.lock().expect("shell session lock");
-    state
+    let allowed = state
         .pin
         .as_ref()
-        .is_some_and(|pin| url_matches_pin(url, pin))
+        .is_some_and(|pin| url_matches_pin(url, pin));
+    if allowed {
+        remember_current_route(&mut state, Some(url));
+    }
+    allowed
 }
 
 fn bundled_asset_url(url: &Url) -> bool {
@@ -721,6 +725,10 @@ mod tests {
             &Url::parse("http://127.0.0.1:8080/ui/#/brain").unwrap(),
             &session
         ));
+        {
+            let state = session.lock().unwrap();
+            assert_eq!(state.last_route.as_deref(), Some("/brain"));
+        }
         assert!(navigation_allowed(
             &Url::parse("https://tauri.localhost/index.html#starting").unwrap(),
             &session
@@ -730,7 +738,7 @@ mod tests {
             &session
         ));
         assert!(!navigation_allowed(
-            &Url::parse("http://127.0.0.1:8081/ui/").unwrap(),
+            &Url::parse("http://127.0.0.1:8081/ui/#/tasks").unwrap(),
             &session
         ));
         assert!(!navigation_allowed(
@@ -741,6 +749,10 @@ mod tests {
             &Url::parse("data:text/html,nope").unwrap(),
             &session
         ));
+        assert_eq!(
+            session.lock().unwrap().last_route.as_deref(),
+            Some("/brain")
+        );
     }
 
     #[test]
