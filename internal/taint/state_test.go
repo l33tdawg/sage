@@ -82,6 +82,7 @@ func TestHeaderRoundTrip(t *testing.T) {
 		},
 		{
 			Action: ActionClear, Status: StatusCleaning, Generation: 3,
+			CleanupPhase: CleanupMembers,
 			FrontierHead: 4, FrontierTail: 4, Scanned: 20, Materialized: 20,
 			MaxDepth: 7, PayloadHash: testPayloadHash(),
 		},
@@ -110,6 +111,8 @@ func TestHeaderValidation(t *testing.T) {
 	}{
 		{"action", func(h *Header) { h.Action = 9 }, "header action"},
 		{"status", func(h *Header) { h.Status = 9 }, "header status"},
+		{"cleanup phase", func(h *Header) { h.CleanupPhase = 9 }, "cleanup phase"},
+		{"cleanup phase without cleaning", func(h *Header) { h.CleanupPhase = CleanupMembers }, "requires cleaning status"},
 		{"generation", func(h *Header) { h.Generation = 0 }, "generation must be positive"},
 		{"frontier", func(h *Header) { h.FrontierHead = 2; h.FrontierTail = 1 }, "frontier head"},
 		{"parent depth", func(h *Header) { h.ParentDepth = MaxDepth + 1 }, "depth exceeds"},
@@ -154,9 +157,22 @@ func TestDecodeHeaderRejectsMalformedLengthsAndTrailingBytes(t *testing.T) {
 	require.ErrorContains(t, err, "trailing bytes")
 
 	badParent := append([]byte(nil), encoded...)
-	binary.BigEndian.PutUint16(badParent[40:42], uint16(DecisionIDBytes+1))
+	binary.BigEndian.PutUint16(badParent[41:43], uint16(DecisionIDBytes+1))
 	_, err = DecodeHeader(badParent)
 	require.ErrorContains(t, err, "parent ref length")
+}
+
+func TestCleaningHeaderRequiresPhase(t *testing.T) {
+	header := Header{
+		Action: ActionApply, Status: StatusCleaning, Generation: 2,
+		PayloadHash: testPayloadHash(),
+	}
+	_, err := EncodeHeader(header)
+	require.ErrorContains(t, err, "requires a cleanup phase")
+
+	header.CleanupPhase = CleanupQueue
+	_, err = EncodeHeader(header)
+	require.NoError(t, err)
 }
 
 func TestMembershipRoundTripAndEffectiveness(t *testing.T) {

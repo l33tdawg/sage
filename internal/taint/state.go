@@ -25,7 +25,7 @@ const (
 	DecisionIDBytes          = 64
 )
 
-const minimumHeaderBytes = 78
+const minimumHeaderBytes = 79
 
 type Status uint8
 
@@ -59,6 +59,14 @@ const (
 	ActionClear Action = 2
 )
 
+type CleanupPhase uint8
+
+const (
+	CleanupNone CleanupPhase = iota
+	CleanupMembers
+	CleanupQueue
+)
+
 type Origin uint8
 
 const (
@@ -70,6 +78,7 @@ const (
 type Header struct {
 	Action         Action
 	Status         Status
+	CleanupPhase   CleanupPhase
 	Generation     uint64
 	FrontierHead   uint64
 	FrontierTail   uint64
@@ -160,8 +169,8 @@ func EncodeHeader(header Header) ([]byte, error) {
 	if err := validateHeader(header); err != nil {
 		return nil, err
 	}
-	encoded := make([]byte, 0, 48+len(header.ParentRefID)+len(header.ParentMemoryID)+len(header.LastEdge))
-	encoded = append(encoded, byte(header.Action), byte(header.Status))
+	encoded := make([]byte, 0, 49+len(header.ParentRefID)+len(header.ParentMemoryID)+len(header.LastEdge))
+	encoded = append(encoded, byte(header.Action), byte(header.Status), byte(header.CleanupPhase))
 	encoded = binary.BigEndian.AppendUint64(encoded, header.Generation)
 	encoded = binary.BigEndian.AppendUint64(encoded, header.FrontierHead)
 	encoded = binary.BigEndian.AppendUint64(encoded, header.FrontierTail)
@@ -186,7 +195,8 @@ func DecodeHeader(encoded []byte) (Header, error) {
 	offset := 0
 	header.Action = Action(encoded[offset])
 	header.Status = Status(encoded[offset+1])
-	offset += 2
+	header.CleanupPhase = CleanupPhase(encoded[offset+2])
+	offset += 3
 	header.Generation = binary.BigEndian.Uint64(encoded[offset:])
 	offset += 8
 	header.FrontierHead = binary.BigEndian.Uint64(encoded[offset:])
@@ -325,6 +335,10 @@ func (h Header) MembershipEffective(membership Membership) bool {
 	return h.Status.Active() && membership.Generation == h.Generation
 }
 
+func (p CleanupPhase) Valid() bool {
+	return p == CleanupNone || p == CleanupMembers || p == CleanupQueue
+}
+
 func (o Origin) Valid() bool {
 	return o == OriginTarget || o == OriginExpand || o == OriginAdmit
 }
@@ -335,6 +349,19 @@ func validateHeader(header Header) error {
 	}
 	if !header.Status.Valid() {
 		return fmt.Errorf("%w: invalid header status %d", errState, header.Status)
+	}
+	if !header.CleanupPhase.Valid() {
+		return fmt.Errorf("%w: invalid cleanup phase %d", errState, header.CleanupPhase)
+	}
+	switch header.Status {
+	case StatusCleaning:
+		if header.CleanupPhase != CleanupMembers && header.CleanupPhase != CleanupQueue {
+			return fmt.Errorf("%w: cleaning header requires a cleanup phase", errState)
+		}
+	default:
+		if header.CleanupPhase != CleanupNone {
+			return fmt.Errorf("%w: cleanup phase requires cleaning status", errState)
+		}
 	}
 	if header.Generation == 0 {
 		return fmt.Errorf("%w: generation must be positive", errState)

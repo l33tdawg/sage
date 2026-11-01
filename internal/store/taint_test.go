@@ -179,6 +179,32 @@ func TestTaintDecisionCapacityIsNotReleasedBeforeCleanup(t *testing.T) {
 	count, err := s.ActiveTaintDecisionCount()
 	require.NoError(t, err)
 	assert.Equal(t, uint64(taint.MaxActiveDecisions), count)
+
+	for attempts := 0; attempts < 3; attempts++ {
+		header, found, err := s.GetTaintDecision(decisionIDs[0])
+		require.NoError(t, err)
+		require.True(t, found)
+		if header.Status == taint.StatusClean {
+			break
+		}
+		_, err = s.CleanupTaintDecision(
+			decisionIDs[0],
+			taint.PerExecutionUnitBudget,
+		)
+		require.NoError(t, err)
+	}
+	count, err = s.ActiveTaintDecisionCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(taint.MaxActiveDecisions-1), count)
+
+	created, err := s.ApplyTaintDecision(
+		"sage",
+		testTaintDecisionID("capacity-released"),
+		testTaintParent("target-released"),
+		testTaintPayloadHash("capacity-released"),
+	)
+	require.NoError(t, err)
+	assert.True(t, created)
 }
 
 func TestClearTaintDecisionInvalidatesGenerationAndReplays(t *testing.T) {
@@ -205,6 +231,7 @@ func TestClearTaintDecisionInvalidatesGenerationAndReplays(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, taint.StatusCleaning, header.Status)
 	assert.Equal(t, uint64(2), header.Generation)
+	assert.Equal(t, taint.CleanupMembers, header.CleanupPhase)
 	assert.Empty(t, header.ParentRefID)
 	assert.Empty(t, header.ParentMemoryID)
 	assert.Zero(t, header.ParentDepth)
