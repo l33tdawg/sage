@@ -209,6 +209,11 @@ func TestFreshV30RecoveryInspectorRejectsCorruptQuarantine(t *testing.T) {
 		recompute bool
 		mutate    func(*testing.T, *store.BadgerStore)
 	}{
+		{name: "missing origin", want: "app-v20", mutate: func(t *testing.T, s *store.BadgerStore) {
+			require.NoError(t, s.DB().Update(func(txn *badger.Txn) error {
+				return txn.Delete([]byte(consensuskeys.FreshGenesisActivation))
+			}))
+		}},
 		{name: "malformed origin", want: "fresh genesis", mutate: func(t *testing.T, s *store.BadgerStore) {
 			require.NoError(t, s.DB().Update(func(txn *badger.Txn) error {
 				return txn.Set([]byte(consensuskeys.FreshGenesisActivation), []byte(`{}`))
