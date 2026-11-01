@@ -50,6 +50,18 @@ class SageAPIError(SageError):
             remedy = None
             retryable = None
 
+        if error_type in {
+            "https://sage.dev/errors/memory-tainted",
+            "https://sage.dev/errors/memory-taint-pending",
+        }:
+            return SageTaintError(
+                status_code=status_code,
+                detail=detail,
+                error_type=error_type,
+                reason_code=reason_code,
+                remedy=remedy,
+                retryable=retryable,
+            )
         if status_code == 401 or status_code == 403:
             return SageAuthError(
                 status_code=status_code,
@@ -117,6 +129,16 @@ class SageNotFoundError(SageAPIError):
 
 class SageValidationError(SageAPIError):
     """Validation error (422)."""
+
+
+class SageTaintError(SageAPIError):
+    """Memory withheld by app-v30 governance taint coverage."""
+
+    @property
+    def taint_state(self) -> str:
+        if self.error_type == "https://sage.dev/errors/memory-taint-pending":
+            return "taint_pending"
+        return "tainted"
 
 
 # --- ABCI error code surface notes ---
