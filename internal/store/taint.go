@@ -214,6 +214,7 @@ func (s *BadgerStore) ClearTaintDecision(decisionID string) (bool, error) {
 		}
 		header.Status = taint.StatusCleaning
 		header.Generation++
+		header.CleanupPhase = taint.CleanupMembers
 		header.ParentRefID = ""
 		header.ParentMemoryID = ""
 		header.ParentDepth = 0
