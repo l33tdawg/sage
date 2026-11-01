@@ -2,8 +2,12 @@ package abci
 
 import (
 	"crypto/sha256"
+	"strings"
 	"testing"
 
+	badger "github.com/dgraph-io/badger/v4"
+	"github.com/l33tdawg/sage/internal/lineage"
+	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
 	"github.com/stretchr/testify/require"
 )
@@ -73,4 +77,38 @@ func TestAppV30DerivedFromExtensionUsesStrictForkBoundary(t *testing.T) {
 		app.postAppV30Fork(101),
 	))
 	require.Len(t, firstV30Block.MemorySubmit.DerivedFrom, 1)
+}
+
+func TestAppV30RecoveryAuditRebuildsLineageAndRejectsTaintDamage(t *testing.T) {
+	app := setupTestApp(t)
+	app.appV30AppliedHeight = 100
+	parent := tx.ParentRef{
+		SourceChainID: "sage",
+		MemoryID:      "recovery-parent",
+		ContentHash:   sha256.Sum256([]byte("recovery parent")),
+	}
+	require.NoError(t, app.badgerStore.SetMemoryLineage(
+		"recovery-child",
+		[]tx.ParentRef{parent},
+	))
+	parentID, err := tx.ParentRefIDHex(parent)
+	require.NoError(t, err)
+	require.NoError(t, app.badgerStore.DB().Update(func(txn *badger.Txn) error {
+		return txn.Delete(lineage.ReverseKey(parentID, "recovery-child"))
+	}))
+	require.NoError(t, app.validateAppV30RecoveryState())
+
+	decisionID := strings.Repeat("a", taint.DecisionIDBytes)
+	created, err := app.badgerStore.ApplyTaintDecision(
+		"sage",
+		decisionID,
+		parent,
+		sha256.Sum256([]byte("recovery taint")),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	require.NoError(t, app.badgerStore.DB().Update(func(txn *badger.Txn) error {
+		return txn.Delete(taint.DecisionIndexKey(decisionID, parent.MemoryID))
+	}))
+	require.Error(t, app.validateAppV30RecoveryState())
 }
