@@ -150,6 +150,38 @@ func ParentRefIDHex(ref ParentRef) (string, error) {
 	return hex.EncodeToString(id[:]), nil
 }
 
+// EncodeParentRefValue returns the canonical value stored on a forward lineage
+// edge. It is the same length-prefixed tuple used by ParentRefID.
+func EncodeParentRefValue(ref ParentRef) ([]byte, error) {
+	if err := validateParentRef(ref); err != nil {
+		return nil, err
+	}
+	return canonicalParentRef(ref), nil
+}
+
+// DecodeParentRefValue accepts only the canonical forward-edge value.
+func DecodeParentRefValue(encoded []byte) (ParentRef, error) {
+	sourceChainID, offset, err := readDerivedFromBytes(
+		encoded, 0, MaxDerivedFromChainIDBytes, "parent source chain ID",
+	)
+	if err != nil {
+		return ParentRef{}, err
+	}
+	memoryID, offset, err := readDerivedFromBytes(
+		encoded, offset, MaxDerivedFromMemoryIDBytes, "parent memory ID",
+	)
+	if err != nil {
+		return ParentRef{}, err
+	}
+	if len(encoded)-offset != sha256.Size {
+		return ParentRef{}, fmt.Errorf("%w: parent value has %d trailing bytes",
+			errDerivedFromExtension, len(encoded)-offset)
+	}
+	ref := ParentRef{SourceChainID: string(sourceChainID), MemoryID: string(memoryID)}
+	copy(ref.ContentHash[:], encoded[offset:])
+	return ref, nil
+}
+
 func validateParentRefs(refs []ParentRef) error {
 	if len(refs) == 0 || len(refs) > MaxDerivedFromParents {
 		return fmt.Errorf("%w: parent count %d is outside 1..%d",

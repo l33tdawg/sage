@@ -64,6 +64,18 @@ func TestDerivedFromParentIdentityBindsEveryField(t *testing.T) {
 	assert.Equal(t, baseID, repeatedID)
 }
 
+func TestParentRefValueRoundTrip(t *testing.T) {
+	ref := testParentRef("sage", "memory", "content")
+	encoded, err := EncodeParentRefValue(ref)
+	require.NoError(t, err)
+	decoded, err := DecodeParentRefValue(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, ref, decoded)
+
+	_, err = DecodeParentRefValue(append(encoded, 0))
+	require.ErrorContains(t, err, "trailing bytes")
+}
+
 func TestDerivedFromExtensionValidation(t *testing.T) {
 	valid := []ParentRef{
 		testParentRef("sage-a", "memory-a", "content-a"),
