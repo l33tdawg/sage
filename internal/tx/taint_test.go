@@ -87,6 +87,41 @@ func TestTaintPayloadIdentitiesAreDomainSeparated(t *testing.T) {
 	assert.Equal(t, clearPayload, *decodedClear)
 }
 
+func TestTaintReasonCategoryIsOpaqueIdentityBoundByte(t *testing.T) {
+	applyIDs := make(map[string]struct{})
+	clearIDs := make(map[string]struct{})
+	for category := 0; category <= 255; category++ {
+		apply := testTaintApplyPayload(TaintScopeDirect)
+		apply.ReasonCategory = uint8(category)
+		encoded, err := EncodeTaintApplyPayload(apply)
+		require.NoError(t, err)
+		decoded, err := DecodeTaintApplyPayload(encoded)
+		require.NoError(t, err)
+		require.Equal(t, apply.ReasonCategory, decoded.ReasonCategory)
+		id, err := TaintApplyDecisionID(encoded)
+		require.NoError(t, err)
+		_, duplicate := applyIDs[id]
+		require.False(t, duplicate, "apply identity omitted reason category %d", category)
+		applyIDs[id] = struct{}{}
+
+		clear := TaintClearPayload{
+			Version: TaintClearPayloadVersion, Action: TaintActionClear,
+			DecisionID: testDigest("decision"), ReasonCategory: uint8(category),
+			EvidenceDigest: testDigest("clear-evidence"),
+		}
+		encoded, err = EncodeTaintClearPayload(clear)
+		require.NoError(t, err)
+		decodedClear, err := DecodeTaintClearPayload(encoded)
+		require.NoError(t, err)
+		require.Equal(t, clear.ReasonCategory, decodedClear.ReasonCategory)
+		id, err = TaintClearTargetID(encoded)
+		require.NoError(t, err)
+		_, duplicate = clearIDs[id]
+		require.False(t, duplicate, "clear identity omitted reason category %d", category)
+		clearIDs[id] = struct{}{}
+	}
+}
+
 func TestTaintApplyPayloadValidation(t *testing.T) {
 	valid := testTaintApplyPayload(TaintScopeDirect)
 	tests := []struct {
