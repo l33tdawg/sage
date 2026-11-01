@@ -55,7 +55,10 @@ func runV119StateSyncFixtureCommand(args []string) (bool, error) {
 	case "install-v30-proof":
 		return true, installV30StateSyncProof(context.Background())
 	case "verify-v30-serving":
-		return true, verifyV30StateSyncServing(context.Background())
+		if len(args) != 2 && (len(args) != 3 || args[2] != "restored") {
+			return true, errors.New("verify-v30-serving accepts only optional restored mode")
+		}
+		return true, verifyV30StateSyncServing(context.Background(), len(args) == 3)
 	case "verify-v30-canonical":
 		if len(args) != 3 {
 			return true, errors.New("verify-v30-canonical requires the expected AppHash")

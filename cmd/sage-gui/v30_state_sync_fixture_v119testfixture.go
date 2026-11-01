@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -26,7 +27,12 @@ import (
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
-const v30SyncDomain = "fresh-v30-sync"
+const (
+	// The real governed scope created by install-scoped-proof retains these
+	// payloads canonically. Ordinary memory plaintext remains node-local.
+	v30SyncDomain         = v119StateSyncFixtureDomain
+	v30SyncOrdinaryDomain = "ordinary-v30-sync"
+)
 
 type v30SyncBranch struct {
 	Parent   tx.ParentRef `json:"parent"`
@@ -35,9 +41,11 @@ type v30SyncBranch struct {
 }
 
 type v30SyncProof struct {
-	AgentID string        `json:"agent_id"`
-	Active  v30SyncBranch `json:"active"`
-	Cleared v30SyncBranch `json:"cleared"`
+	AgentID  string        `json:"agent_id"`
+	RootID   string        `json:"root_id"`
+	Active   v30SyncBranch `json:"active"`
+	Cleared  v30SyncBranch `json:"cleared"`
+	Ordinary v30SyncBranch `json:"ordinary"`
 }
 
 // This command only prepares the owned fixture home. The ordinary production
@@ -66,7 +74,7 @@ func loadV30SyncProof() (*v30SyncProof, error) {
 	if err = json.Unmarshal(raw, &proof); err != nil {
 		return nil, err
 	}
-	if !v119CanonicalHash(proof.AgentID) || !v119CanonicalHash(proof.Active.Decision) || !v119CanonicalHash(proof.Cleared.Decision) {
+	if !v119CanonicalHash(proof.AgentID) || !v119CanonicalHash(proof.RootID) || !v119CanonicalHash(proof.Active.Decision) || !v119CanonicalHash(proof.Cleared.Decision) || !v119CanonicalHash(proof.Ordinary.Decision) {
 		return nil, errors.New("noncanonical app30 proof identities")
 	}
 	return &proof, nil
@@ -103,18 +111,20 @@ func installV30StateSyncProof(parent context.Context) error {
 	if err != nil {
 		return err
 	}
-	proof := v30SyncProof{AgentID: auth.PublicKeyToAgentID(agent.Public().(ed25519.PublicKey))}
+	proof := v30SyncProof{AgentID: auth.PublicKeyToAgentID(agent.Public().(ed25519.PublicKey)), RootID: auth.PublicKeyToAgentID(root.Public().(ed25519.PublicKey))}
 	for _, entry := range []struct {
 		name   string
 		branch *v30SyncBranch
-	}{{"cleared", &proof.Cleared}, {"active", &proof.Active}} {
+		key    ed25519.PrivateKey
+		domain string
+	}{{"cleared", &proof.Cleared, agent, v30SyncDomain}, {"active", &proof.Active, agent, v30SyncDomain}, {"ordinary", &proof.Ordinary, root, v30SyncOrdinaryDomain}} {
 		content := "fresh app30 wire " + entry.name + " parent"
-		parentID, submitErr := submitV30SyncMemory(ctx, api, agent, content, nil)
+		parentID, submitErr := submitV30SyncMemory(ctx, api, entry.key, entry.domain, content, nil)
 		if submitErr != nil {
 			return submitErr
 		}
 		entry.branch.Parent = tx.ParentRef{SourceChainID: genesis, MemoryID: parentID, ContentHash: sha256.Sum256([]byte(content))}
-		entry.branch.ChildID, err = submitV30SyncMemory(ctx, api, agent, "fresh app30 wire "+entry.name+" child", &entry.branch.Parent)
+		entry.branch.ChildID, err = submitV30SyncMemory(ctx, api, entry.key, entry.domain, "fresh app30 wire "+entry.name+" child", &entry.branch.Parent)
 		if err != nil {
 			return err
 		}
@@ -168,8 +178,8 @@ func installV30StateSyncProof(parent context.Context) error {
 	return os.WriteFile(filepath.Join(SageHome(), "v30-proof.json"), raw, 0600)
 }
 
-func submitV30SyncMemory(ctx context.Context, api string, key ed25519.PrivateKey, content string, parent *tx.ParentRef) (string, error) {
-	body := map[string]any{"content": content, "memory_type": "fact", "domain_tag": v30SyncDomain, "confidence_score": 0.93}
+func submitV30SyncMemory(ctx context.Context, api string, key ed25519.PrivateKey, domain, content string, parent *tx.ParentRef) (string, error) {
+	body := map[string]any{"content": content, "memory_type": "fact", "domain_tag": domain, "confidence_score": 0.93}
 	if parent != nil {
 		body["derived_from"] = []map[string]string{{"source_chain_id": parent.SourceChainID, "memory_id": parent.MemoryID, "content_hash": hex.EncodeToString(parent.ContentHash[:])}}
 	}
@@ -249,7 +259,7 @@ func waitV30SyncDisclosure(ctx context.Context, api string, key ed25519.PrivateK
 	}
 }
 
-func verifyV30StateSyncServing(parent context.Context) error {
+func verifyV30StateSyncServing(parent context.Context, restored bool) error {
 	ctx, cancel := context.WithTimeout(parent, 45*time.Second)
 	defer cancel()
 	proof, err := loadV30SyncProof()
@@ -265,6 +275,16 @@ func verifyV30StateSyncServing(parent context.Context) error {
 			if err = waitV30SyncDisclosure(ctx, api, agent, id, branch.Decision == proof.Cleared.Decision); err != nil {
 				return err
 			}
+		}
+	}
+	for _, id := range []string{proof.Ordinary.Parent.MemoryID, proof.Ordinary.ChildID} {
+		if restored {
+			_, requestErr := v119FixtureSignedRequest(ctx, api, agent, http.MethodGet, "/v1/memory/"+id, nil)
+			if requestErr == nil || !bytes.Contains([]byte(requestErr.Error()), []byte("HTTP 404:")) || !bytes.Contains([]byte(requestErr.Error()), []byte("https://sage.dev/errors/404")) {
+				return fmt.Errorf("ordinary node-local payload unexpectedly disclosed after state sync: %s: %v", id, requestErr)
+			}
+		} else if err = waitV30SyncDisclosure(ctx, api, agent, id, false); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -287,7 +307,7 @@ func verifyV30StateSyncCanonical(ctx context.Context, expectedHash string) error
 	}
 	defer func() { _ = canonical.CloseBadger() }()
 	origin, err := canonical.GetFreshGenesisActivation()
-	if err != nil || origin == nil || origin.AppVersion != 30 || origin.Agent == nil || origin.Agent.AgentID != proof.AgentID || len(origin.Validators) != 1 {
+	if err != nil || origin == nil || origin.AppVersion != 30 || origin.RootID != proof.RootID || origin.Agent == nil || origin.Agent.AgentID != proof.AgentID || len(origin.Validators) != 1 {
 		return fmt.Errorf("restored fresh app30 origin mismatch: %v", err)
 	}
 	for version := 2; version <= 30; version++ {
@@ -318,12 +338,15 @@ func verifyV30StateSyncCanonical(ctx context.Context, expectedHash string) error
 	if err != nil || mirrorRevision != canonicalRevision {
 		return fmt.Errorf("rebuilt SQL taint revision %d, want %d: %v", mirrorRevision, canonicalRevision, err)
 	}
-	wantEffective := []string{proof.Active.Parent.MemoryID, proof.Active.ChildID}
+	wantEffective := []string{proof.Active.Parent.MemoryID, proof.Active.ChildID, proof.Ordinary.Parent.MemoryID, proof.Ordinary.ChildID}
 	slices.Sort(wantEffective)
 	if !slices.Equal(effective, wantEffective) {
 		return fmt.Errorf("restored effective taint set %v, want %v", effective, wantEffective)
 	}
-	visible, total, err := projection.ListMemories(ctx, store.ListOptions{DomainTag: v30SyncDomain, Limit: 10, ExcludeTainted: true})
+	if err = verifyV30SQLTaintIDs(ctx, filepath.Join(cfg.DataDir, "sage.db"), wantEffective); err != nil {
+		return err
+	}
+	visible, total, err := projection.ListMemories(ctx, store.ListOptions{DomainTag: v30SyncDomain, SubmittingAgent: proof.AgentID, Limit: 10, ExcludeTainted: true})
 	if err != nil || total != 2 || len(visible) != 2 {
 		return fmt.Errorf("rebuilt SQL taint filter total=%d, want two cleared rows: %v", total, err)
 	}
@@ -334,7 +357,8 @@ func verifyV30StateSyncCanonical(ctx context.Context, expectedHash string) error
 	if !slices.Equal(visibleIDs, wantVisible) {
 		return fmt.Errorf("rebuilt SQL taint filter IDs=%v, want %v", visibleIDs, wantVisible)
 	}
-	for _, branch := range []v30SyncBranch{proof.Active, proof.Cleared} {
+	for _, branch := range []v30SyncBranch{proof.Active, proof.Cleared, proof.Ordinary} {
+		ordinary := branch.Decision == proof.Ordinary.Decision
 		parents, lineageErr := canonical.GetMemoryLineage(branch.ChildID)
 		if lineageErr != nil || len(parents) != 1 || parents[0] != branch.Parent {
 			return fmt.Errorf("restored forward lineage mismatch: %v", lineageErr)
@@ -349,22 +373,41 @@ func verifyV30StateSyncCanonical(ctx context.Context, expectedHash string) error
 		}
 		header, found, headerErr := canonical.GetTaintDecision(branch.Decision)
 		if headerErr != nil || !found || (branch.Decision == proof.Cleared.Decision && header.Status != taint.StatusClean) ||
-			(branch.Decision == proof.Active.Decision && header.Status != taint.StatusComplete) {
+			(branch.Decision != proof.Cleared.Decision && header.Status != taint.StatusComplete) {
 			return fmt.Errorf("restored taint decision state mismatch: %v (status %d)", headerErr, header.Status)
 		}
 		for _, id := range []string{branch.Parent.MemoryID, branch.ChildID} {
 			signers, present, signerErr := canonical.GetAppV30Provenance(id)
 			want := []store.AppV30ProvenanceSigner{{CredentialID: proof.AgentID, PrincipalID: proof.AgentID, Exact: true}}
+			if ordinary {
+				want = []store.AppV30ProvenanceSigner{{CredentialID: proof.RootID, PrincipalID: proof.RootID, RootGeneration: 1, Exact: true}}
+			}
 			if signerErr != nil || !present || !slices.Equal(signers, want) {
 				return fmt.Errorf("restored signed provenance mismatch for %s: %v", id, signerErr)
 			}
 			verdict, verdictErr := canonical.ClassifyMemoryTaint(id)
 			if verdictErr != nil || !verdict.CoverageComplete || verdict.LineageMissing ||
-				(branch.Decision == proof.Active.Decision && (verdict.Outcome != store.TaintServingTainted || !slices.Equal(verdict.DecisionIDs, []string{branch.Decision}))) ||
+				(branch.Decision != proof.Cleared.Decision && (verdict.Outcome != store.TaintServingTainted || !slices.Equal(verdict.DecisionIDs, []string{branch.Decision}))) ||
 				(branch.Decision == proof.Cleared.Decision && verdict.Outcome != store.TaintServingClear) {
 				return fmt.Errorf("restored canonical taint classification mismatch for %s: %+v %v", id, verdict, verdictErr)
 			}
 			record, recordErr := projection.GetMemory(ctx, id)
+			if ordinary {
+				if !errors.Is(recordErr, store.ErrMemoryNotFound) {
+					return fmt.Errorf("ordinary plaintext was incorrectly fabricated during SQL rebuild: %s: %v", id, recordErr)
+				}
+				content := "fresh app30 wire ordinary parent"
+				if id == branch.ChildID {
+					content = "fresh app30 wire ordinary child"
+				}
+				wantHash := sha256.Sum256([]byte(content))
+				contentHash, status, hashErr := canonical.GetMemoryHash(id)
+				author, authorErr := canonical.GetMemoryAuthor(id)
+				if hashErr != nil || authorErr != nil || status != string(memory.StatusCommitted) || !bytes.Equal(contentHash, wantHash[:]) || author != proof.RootID {
+					return fmt.Errorf("ordinary canonical envelope was not preserved: %s: %v %v", id, hashErr, authorErr)
+				}
+				continue
+			}
 			if recordErr != nil || record.Status != memory.StatusCommitted || record.DomainTag != v30SyncDomain || record.SubmittingAgent != proof.AgentID {
 				return fmt.Errorf("rebuilt SQL envelope mismatch for %s: %v", id, recordErr)
 			}
@@ -382,6 +425,34 @@ func verifyV30StateSyncCanonical(ctx context.Context, expectedHash string) error
 			}
 		}
 	}
-	fmt.Printf("fresh app30 canonical origin, forward/reverse lineage, exact provenance, active+cleared taint, rebuilt SQL and AppHash=%s verified\n", expectedHash)
+	fmt.Printf("fresh app30 canonical origin, ordinary+scoped forward/reverse lineage and exact provenance, active+cleared taint, scoped SQL rebuild, ordinary payload404 and AppHash=%s verified\n", expectedHash)
+	return nil
+}
+
+func verifyV30SQLTaintIDs(ctx context.Context, path string, expected []string) error {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = db.Close() }()
+	rows, err := db.QueryContext(ctx, "SELECT memory_id FROM memory_taint_mirror ORDER BY memory_id")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	var actual []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			return err
+		}
+		actual = append(actual, id)
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if !slices.Equal(actual, expected) {
+		return fmt.Errorf("rebuilt ordinary+scoped SQL taint mirror IDs=%v, want %v", actual, expected)
+	}
 	return nil
 }

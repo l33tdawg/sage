@@ -1102,7 +1102,7 @@ if len(matches) != 1 or matches[0] != summary or not lines or lines[-1] != summa
 verify_v30_receiver() {
   [ "${MODE}" = fresh-v30 ] || return 0
   local container=$1 home=$2 expected_hash
-  docker exec "${container}" ./sage-gui-v119-fixture v119-state-sync-fixture verify-v30-serving
+  docker exec "${container}" ./sage-gui-v119-fixture v119-state-sync-fixture verify-v30-serving restored
   expected_hash=$(rpc_app_hash "${container}")
   stop_sage "${container}"
   docker run --rm --pull never --network none --user "${ABCI_RUNTIME_UID}:${ABCI_RUNTIME_GID}" -e SAGE_HOME=/sage \
@@ -1111,7 +1111,7 @@ verify_v30_receiver() {
   docker start "${container}" >/dev/null
   wait_rest "${container}"
   wait_convergence "${PROVIDER}" "${container}"
-  docker exec "${container}" ./sage-gui-v119-fixture v119-state-sync-fixture verify-v30-serving
+  docker exec "${container}" ./sage-gui-v119-fixture v119-state-sync-fixture verify-v30-serving restored
 }
 
 assert_root_semantics() {
@@ -1774,6 +1774,6 @@ done
 echo "=== v11.9 AUTHORIZED STATE-SYNC WIRE GATE PASSED ==="
 echo "PASS: frozen source ${SOURCE_ID}; ${MODE} app-v${TARGET_APP_VERSION} provider; real signed app-v20 scope+memory; exact app-v${TARGET_APP_VERSION} authorization/session/projection rebuild; independent provider+observer light origins; H+2 snapshot; exact P2P authorization; approved-sender sessions; concurrent seal-before-REST proof; unauthorized rejection; receiver pre-publication SIGKILL with automatic ordinary restart; separate session<seal<REST completion; provider SIGKILL; block/AppHash convergence"
 if [ "${MODE}" = fresh-v30 ]; then
-  echo "PASS: fresh app30 signed origin without upgrade replay; admitted ordinary and derived memories with exact provenance; active and cleared taint restored over real authorized Comet snapshot transport; SQL rebuilt without SQL input; canonical and catchup AppHash verified on both receivers"
+  echo "PASS: fresh app30 signed origin without upgrade replay; admitted ordinary+scoped parent/child memories with exact provenance; active and cleared taint restored over real authorized Comet snapshot transport; scoped SQL rebuilt without SQL input, ordinary plaintext stays node-local; canonical and catchup AppHash verified on both receivers"
 fi
 echo "ROLE: receiver is intentionally a synchronized NON-VALIDATOR full node; validator-set admission remains a separate signed governance action"
