@@ -106,14 +106,14 @@ func (s *BadgerStore) ApplyTaintDecisionWithScope(
 				existing.PayloadHash != payloadHash {
 				return ErrTaintConflict
 			}
-			storedScope, found, err := readTaintDecisionScopeTxn(
+			storedScope, found, scopeErr := readTaintDecisionScopeTxn(
 				txn,
 				decisionID,
 				payloadHash,
 				nil,
 			)
-			if err != nil {
-				return err
+			if scopeErr != nil {
+				return scopeErr
 			}
 			if !found {
 				return fmt.Errorf(
@@ -121,9 +121,9 @@ func (s *BadgerStore) ApplyTaintDecisionWithScope(
 					ErrTaintStateMalformed,
 				)
 			}
-			encodedScope, err := encodeTaintDecisionScope(payloadHash, storedScope)
-			if err != nil {
-				return err
+			encodedScope, scopeErr := encodeTaintDecisionScope(payloadHash, storedScope)
+			if scopeErr != nil {
+				return scopeErr
 			}
 			if !bytes.Equal(encodedScope, scopeBytes) {
 				return ErrTaintConflict
@@ -267,8 +267,8 @@ func getEffectiveTaintDecisionsTxn(
 		header, cached := headers[decisionID]
 		if !cached {
 			if meter != nil {
-				if err := meter.charge(1); err != nil {
-					return nil, nil, err
+				if chargeErr := meter.charge(1); chargeErr != nil {
+					return nil, nil, chargeErr
 				}
 			}
 			var found bool
