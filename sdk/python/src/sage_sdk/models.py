@@ -132,7 +132,11 @@ class MemorySubmitRequest(BaseModel):
     classification: int | None = None
     # App-v30 authenticated lineage refs. The node verifies each local parent's
     # lifecycle, content hash, clearance and exact content-addressed identity.
-    derived_from: list[DerivedFromParent] | None = Field(default=None, max_length=16)
+    derived_from: list[DerivedFromParent] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=16,
+    )
 
     @field_validator("idempotency_key")
     @classmethod

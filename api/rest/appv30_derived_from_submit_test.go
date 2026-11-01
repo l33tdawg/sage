@@ -40,6 +40,22 @@ func TestSubmitDerivedFromCanonicalizesAndValidates(t *testing.T) {
 	require.ErrorContains(t, err, "lowercase")
 }
 
+func TestSubmitMemoryRejectsExplicitEmptyDerivedFromBeforeAppV30Gate(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	body := []byte(`{
+		"content":"lineage child",
+		"memory_type":"fact",
+		"domain_tag":"general",
+		"confidence_score":0.9,
+		"derived_from":[]
+	}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+	recorder := httptest.NewRecorder()
+	srv.Router().ServeHTTP(recorder, req)
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "between 1 and 16")
+}
+
 func TestSubmitMemoryCarriesDerivedFromOnlyAfterAppV30(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	var captured *tx.MemorySubmit

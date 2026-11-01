@@ -633,6 +633,15 @@ def test_memory_submit_serializes_app_v30_derived_from():
             derived_from=[parent] * 17,
         )
 
+    with pytest.raises(ValueError):
+        MemorySubmitRequest(
+            content="empty parent list",
+            memory_type="fact",
+            domain_tag="general",
+            confidence_score=0.9,
+            derived_from=[],
+        )
+
 
 def test_message_models_retain_additive_agent_presentation_without_making_it_authority():
     from sage_sdk.models import MessageItem, PipeMessage

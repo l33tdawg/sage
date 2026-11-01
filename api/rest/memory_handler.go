@@ -1263,6 +1263,16 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
+	derivedFromPresent, err := jsonFieldPresent(r, "derived_from")
+	if err != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	if derivedFromPresent && len(req.DerivedFrom) == 0 {
+		writeProblem(w, http.StatusBadRequest, "Invalid derived_from lineage",
+			"derived_from must contain between 1 and 16 parent refs when present.")
+		return
+	}
 
 	// Validate required fields.
 	if req.Content == "" {
