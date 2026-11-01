@@ -5,13 +5,23 @@ on:
   pull_request:
     paths:
       - ".github/workflows/fresh-genesis-v30.yml"
-      - "internal/abci/fresh_genesis*"
-      - "internal/store/fresh_genesis*"
+      - "internal/abci/**"
+      - "internal/store/**"
+      - "internal/consensuskeys/**"
       - "internal/governance/**"
       - "internal/statesync/**"
-      - "cmd/sage-gui/fresh_genesis*"
-      - "test/integration/appv30_fresh_genesis_test.go"
+      - "internal/taint/**"
+      - "api/rest/**"
+      - "cmd/sage-gui/**"
+      - "cmd/amid/**"
+      - "test/integration/**"
+      - "deploy/Dockerfile*"
+      - "deploy/docker-compose.determinism*.yml"
       - "deploy/scripts/run-determinism.sh"
+      - "deploy/scripts/init-testnet.sh"
+      - "go.mod"
+      - "go.sum"
+      - "third_party/cometbft/**"
 
 permissions:
   contents: read
