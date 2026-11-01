@@ -3074,7 +3074,13 @@ func ensureGenesisSeedWithConfig(cometHome string, cfg *Config, logger zerolog.L
 	if cfg == nil {
 		return errors.New("initialize genesis: config is required")
 	}
-	return ensureGenesisSeedWithBootstrap(cometHome, cfg.AgentKey, cfg.VendoredAgentBootstrap, logger)
+	if cfg.Quorum.Enabled {
+		if _, err := os.Stat(filepath.Join(cometHome, "config", "genesis.json")); err != nil {
+			return fmt.Errorf("fresh quorum requires a finalized signed genesis: use sage-gui init-genesis with the complete validator roster, install the same artifact on every validator, then start serve: %w", err)
+		}
+	}
+	_ = logger
+	return initCometBFTConfigForFreshChain(cometHome, cfg.AgentKey, cfg.VendoredAgentBootstrap)
 }
 
 func ensureGenesisSeedWithBootstrap(
@@ -3258,6 +3264,9 @@ func preflightExistingVendoredGenesis(cometHome string, cfg *Config) error {
 	genesis, genesisErr := cmttypes.GenesisDocFromFile(genesisPath)
 	if genesisErr != nil {
 		return fmt.Errorf("read existing genesis: %w", genesisErr)
+	}
+	if handled, freshErr := preflightExistingFreshVendoredGenesis(cometHome, cfg, genesis); handled {
+		return freshErr
 	}
 	if genesis.ConsensusParams == nil ||
 		genesis.ConsensusParams.Version.App != sageabci.AppV23GenesisAppVersion {
@@ -3634,6 +3643,21 @@ func initCometBFTConfigWithBootstrap(
 	home, keyPath string,
 	bootstrap *VendoredAgentBootstrapConfig,
 ) error {
+	return initCometBFTConfigWithGenesisVersion(home, keyPath, bootstrap, 0)
+}
+
+// Production fresh installs start with the current release's complete rule set.
+// Existing genesis is never replaced; the legacy helper above remains available
+// to read and test historical app-v23 origins byte-for-byte.
+func initCometBFTConfigForFreshChain(home, keyPath string, bootstrap *VendoredAgentBootstrapConfig) error {
+	return initCometBFTConfigWithGenesisVersion(home, keyPath, bootstrap, sageabci.MaxSupportedAppVersion())
+}
+
+func initCometBFTConfigWithGenesisVersion(
+	home, keyPath string,
+	bootstrap *VendoredAgentBootstrapConfig,
+	appVersion uint64,
+) error {
 	configDir := filepath.Join(home, "config")
 	dataDir := filepath.Join(home, "data")
 
@@ -3684,20 +3708,25 @@ func initCometBFTConfigWithBootstrap(
 			},
 		},
 	}
-	// issue #52: seed the operator's agent key as the genesis chain-admin so the
-	// personal fork-ladder climb to app-v13 never strands at the propose admin-gate.
-	// This is a single-validator genesis (quorum join overwrites it with a shared
-	// genesis that carries no app_state, so quorum is unaffected). InitChain only
-	// honours the seed for single-validator chains.
+	// A new origin signs its complete rule set and validator roster. The
+	// historical helper retains the old single-validator chain-admin seed and
+	// direct-v23 Companion origin for compatibility with existing artifacts.
 	validatorID := hex.EncodeToString(pv.Key.PubKey.Bytes())
-	appState, appStateErr := genesisAppStateForVendoredAgent(
-		chainID, keyPath, bootstrap, validatorID, 10,
-	)
+	var appState json.RawMessage
+	var appStateErr error
+	if appVersion == 0 {
+		appState, appStateErr = genesisAppStateForVendoredAgent(chainID, keyPath, bootstrap, validatorID, 10)
+	} else {
+		appState, appStateErr = genesisAppStateForFreshChain(chainID, keyPath, bootstrap, appVersion,
+			[]sageabci.FreshGenesisValidator{{ValidatorID: validatorID, Power: 10}})
+	}
 	if appStateErr != nil {
 		return fmt.Errorf("build genesis app_state: %w", appStateErr)
 	}
 	genDoc.AppState = appState
-	if bootstrap != nil {
+	if appVersion != 0 {
+		genDoc.ConsensusParams.Version.App = appVersion
+	} else if bootstrap != nil {
 		// Declare the same protocol origin that the dual-signed InitChain
 		// manifest activates. InitChain returns this value again so CometBFT's
 		// pre-InitChain Info handshake and persisted consensus state converge

@@ -166,6 +166,10 @@ func (c *SageNodeController) RegenerateGenesis(validators []orchestrator.Validat
 		return fmt.Errorf("read genesis: %w", err)
 	}
 
+	if hasSignedFreshGenesis(existingGen.AppState) {
+		return fmt.Errorf("cannot regenerate a signed fresh genesis; use governed validator changes or create a separate chain with sage-gui init-genesis")
+	}
+
 	c.logger.Info().
 		Int("validator_count", len(validators)).
 		Str("chain_id", existingGen.ChainID).
