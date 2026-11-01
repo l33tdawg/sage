@@ -68,81 +68,82 @@ func appV30CoCommitProvenanceSigners(
 	return signers, nil
 }
 
-func (app *SageApp) preflightAppV30Lineage(
+func (app *SageApp) preflightAppV30Admission(
 	parsedTx *tx.ParsedTx,
 	credentialID, childID string,
 	parents []tx.ParentRef,
+	signers []store.AppV30ProvenanceSigner,
 	height int64,
 	blockTime time.Time,
 ) (string, error) {
-	if len(parents) == 0 {
-		return "", nil
-	}
 	if !app.postAppV30Fork(height) {
-		return "", fmt.Errorf("derived_from extension is not active")
+		return "", fmt.Errorf("app-v30 admission rules are not active")
 	}
 	localChainID := app.expectedConsensusChainIDValue()
-	if localChainID == "" {
+	if len(parents) > 0 && localChainID == "" {
 		return "", fmt.Errorf("local consensus chain ID is unavailable")
 	}
-	if err := app.badgerStore.ValidateMemoryLineageParents(
-		childID,
+	if len(parents) > 0 {
+		if err := app.badgerStore.ValidateMemoryLineageParents(
+			childID,
+			localChainID,
+			parents,
+		); err != nil {
+			if errors.Is(err, store.ErrMemoryLineageUnavailable) {
+				return "", appV30LineageParentUnavailable()
+			}
+			return "", err
+		}
+		existing, err := app.badgerStore.GetMemoryLineage(childID)
+		if err != nil {
+			return "", err
+		}
+		if len(existing) > 0 {
+			existingEncoded, existingErr := tx.EncodeDerivedFromExtension(existing)
+			if existingErr != nil {
+				return "", fmt.Errorf("existing lineage is malformed: %w", existingErr)
+			}
+			parentsEncoded, parentsErr := tx.EncodeDerivedFromExtension(parents)
+			if parentsErr != nil {
+				return "", parentsErr
+			}
+			if !bytes.Equal(existingEncoded, parentsEncoded) {
+				return "", fmt.Errorf("memory lineage conflicts with the submitted parent set")
+			}
+		}
+		for _, parent := range parents {
+			state, stateErr := app.badgerStore.GetMemoryDisclosureState(parent.MemoryID)
+			if stateErr != nil {
+				return "", appV30LineageParentUnavailable()
+			}
+			if !state.DomainRecorded || state.Domain == "" {
+				return "", appV30LineageParentUnavailable()
+			}
+			withinClearance, clearanceErr := app.appV23MemoryWithinClearance(
+				credentialID,
+				parent.MemoryID,
+			)
+			if clearanceErr != nil || !withinClearance {
+				return "", appV30LineageParentUnavailable()
+			}
+			allowed, _, decisionErr := app.appV23DomainDecision(
+				parsedTx,
+				credentialID,
+				state.Domain,
+				store.AppV23VerbRead,
+				height,
+				blockTime,
+			)
+			if decisionErr != nil || !allowed {
+				return "", appV30LineageParentUnavailable()
+			}
+		}
+	}
+	if _, err := app.badgerStore.ValidateTaintAdmission(
 		localChainID,
-		parents,
-	); err != nil {
-		if errors.Is(err, store.ErrMemoryLineageUnavailable) {
-			return "", appV30LineageParentUnavailable()
-		}
-		return "", err
-	}
-	existing, err := app.badgerStore.GetMemoryLineage(childID)
-	if err != nil {
-		return "", err
-	}
-	if len(existing) > 0 {
-		existingEncoded, existingErr := tx.EncodeDerivedFromExtension(existing)
-		if existingErr != nil {
-			return "", fmt.Errorf("existing lineage is malformed: %w", existingErr)
-		}
-		parentsEncoded, parentsErr := tx.EncodeDerivedFromExtension(parents)
-		if parentsErr != nil {
-			return "", parentsErr
-		}
-		if !bytes.Equal(existingEncoded, parentsEncoded) {
-			return "", fmt.Errorf("memory lineage conflicts with the submitted parent set")
-		}
-	}
-	for _, parent := range parents {
-		state, stateErr := app.badgerStore.GetMemoryDisclosureState(parent.MemoryID)
-		if stateErr != nil {
-			return "", appV30LineageParentUnavailable()
-		}
-		if !state.DomainRecorded || state.Domain == "" {
-			return "", appV30LineageParentUnavailable()
-		}
-		withinClearance, clearanceErr := app.appV23MemoryWithinClearance(
-			credentialID,
-			parent.MemoryID,
-		)
-		if clearanceErr != nil || !withinClearance {
-			return "", appV30LineageParentUnavailable()
-		}
-		allowed, _, decisionErr := app.appV23DomainDecision(
-			parsedTx,
-			credentialID,
-			state.Domain,
-			store.AppV23VerbRead,
-			height,
-			blockTime,
-		)
-		if decisionErr != nil || !allowed {
-			return "", appV30LineageParentUnavailable()
-		}
-	}
-	if _, err := app.badgerStore.ValidateTaintInheritance(
-		localChainID,
 		childID,
 		parents,
+		signers,
 	); err != nil {
 		return "", err
 	}
@@ -156,19 +157,20 @@ func appV30LineageParentUnavailable() error {
 	)
 }
 
-func (app *SageApp) applyAppV30Lineage(
+func (app *SageApp) applyAppV30Admission(
 	localChainID, childID string,
 	parents []tx.ParentRef,
+	signers []store.AppV30ProvenanceSigner,
 ) (store.InheritedTaintResult, error) {
-	if len(parents) == 0 {
-		return store.InheritedTaintResult{}, nil
+	if len(parents) > 0 {
+		if err := app.badgerStore.SetMemoryLineage(childID, parents); err != nil {
+			return store.InheritedTaintResult{}, err
+		}
 	}
-	if err := app.badgerStore.SetMemoryLineage(childID, parents); err != nil {
-		return store.InheritedTaintResult{}, err
-	}
-	return app.badgerStore.InheritTaintMemberships(
+	return app.badgerStore.ApplyTaintAdmission(
 		localChainID,
 		childID,
 		parents,
+		signers,
 	)
 }

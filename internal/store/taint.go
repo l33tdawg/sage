@@ -35,6 +35,23 @@ func (s *BadgerStore) ApplyTaintDecision(
 	target tx.ParentRef,
 	payloadHash [sha256.Size]byte,
 ) (bool, error) {
+	return s.ApplyTaintDecisionWithScope(
+		localChainID,
+		decisionID,
+		target,
+		payloadHash,
+		TaintDecisionScope{Kind: tx.TaintScopeDirect},
+	)
+}
+
+// ApplyTaintDecisionWithScope installs the target membership, immutable scope
+// state and first frontier entry for an accepted apply proposal.
+func (s *BadgerStore) ApplyTaintDecisionWithScope(
+	localChainID, decisionID string,
+	target tx.ParentRef,
+	payloadHash [sha256.Size]byte,
+	decisionScope TaintDecisionScope,
+) (bool, error) {
 	if err := taint.ValidateDecisionID(decisionID); err != nil {
 		return false, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 	}
@@ -73,6 +90,10 @@ func (s *BadgerStore) ApplyTaintDecision(
 	if err != nil {
 		return false, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 	}
+	scopeBytes, err := encodeTaintDecisionScope(payloadHash, decisionScope)
+	if err != nil {
+		return false, err
+	}
 
 	created := false
 	err = s.update(func(txn *badger.Txn) error {
@@ -83,6 +104,28 @@ func (s *BadgerStore) ApplyTaintDecision(
 		if found {
 			if existing.Action != taint.ActionApply ||
 				existing.PayloadHash != payloadHash {
+				return ErrTaintConflict
+			}
+			storedScope, found, err := readTaintDecisionScopeTxn(
+				txn,
+				decisionID,
+				payloadHash,
+				nil,
+			)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf(
+					"%w: existing taint decision has no scope",
+					ErrTaintStateMalformed,
+				)
+			}
+			encodedScope, err := encodeTaintDecisionScope(payloadHash, storedScope)
+			if err != nil {
+				return err
+			}
+			if !bytes.Equal(encodedScope, scopeBytes) {
 				return ErrTaintConflict
 			}
 			return nil
@@ -99,6 +142,8 @@ func (s *BadgerStore) ApplyTaintDecision(
 			value []byte
 		}{
 			{taint.DecisionKey(decisionID), headerBytes},
+			{TaintDecisionScopeKey(decisionID), scopeBytes},
+			{taint.ActiveDecisionKey(decisionID), []byte{}},
 			{taint.MembershipKey(target.MemoryID, decisionID), membership},
 			{taint.DecisionIndexKey(decisionID, target.MemoryID), []byte{}},
 			{taint.FrontierKey(decisionID, 1, 0), queueEntry},
@@ -118,6 +163,30 @@ func (s *BadgerStore) ApplyTaintDecision(
 		return nil
 	})
 	return created, err
+}
+
+func (s *BadgerStore) GetTaintDecisionScope(
+	decisionID string,
+) (TaintDecisionScope, bool, error) {
+	if err := taint.ValidateDecisionID(decisionID); err != nil {
+		return TaintDecisionScope{}, false, err
+	}
+	var decisionScope TaintDecisionScope
+	found := false
+	err := s.view(func(txn *badger.Txn) error {
+		header, headerFound, err := readTaintHeaderTxn(txn, decisionID)
+		if err != nil || !headerFound {
+			return err
+		}
+		decisionScope, found, err = readTaintDecisionScopeTxn(
+			txn,
+			decisionID,
+			header.PayloadHash,
+			nil,
+		)
+		return err
+	})
+	return decisionScope, found, err
 }
 
 func (s *BadgerStore) GetTaintDecision(decisionID string) (taint.Header, bool, error) {
@@ -140,49 +209,84 @@ func (s *BadgerStore) GetEffectiveTaintDecisions(memoryID string) ([]string, err
 	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
 		return nil, fmt.Errorf("%w: invalid memory ID", ErrTaintStateMalformed)
 	}
+	var decisions []string
+	err := s.view(func(txn *badger.Txn) error {
+		var err error
+		decisions, _, err = getEffectiveTaintDecisionsTxn(txn, memoryID, nil)
+		return err
+	})
+	return decisions, err
+}
+
+func getEffectiveTaintDecisionsTxn(
+	txn *badger.Txn,
+	memoryID string,
+	meter *taintUnitMeter,
+) ([]string, map[string]taint.Header, error) {
+	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
+		return nil, nil, fmt.Errorf("%w: invalid memory ID", ErrTaintStateMalformed)
+	}
 	prefix := taint.MembershipPrefix(memoryID)
 	decisions := make([]string, 0, taint.MaxActiveDecisions)
-	err := s.view(func(txn *badger.Txn) error {
-		options := badger.DefaultIteratorOptions
-		options.Prefix = prefix
-		it := txn.NewIterator(options)
-		defer it.Close()
-		seen := make(map[string]struct{})
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			if len(seen) >= taint.MaxActiveDecisions {
-				return fmt.Errorf("%w: too many memberships for %s", ErrTaintStateMalformed, memoryID)
-			}
-			decisionID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
-			if _, duplicate := seen[decisionID]; duplicate {
-				return fmt.Errorf("%w: duplicate decision membership", ErrTaintStateMalformed)
-			}
-			seen[decisionID] = struct{}{}
-			if err := taint.ValidateDecisionID(decisionID); err != nil {
-				return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
-			}
-			value, err := it.Item().ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			membership, err := taint.DecodeMembership(value)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
-			}
-			header, found, err := readTaintHeaderTxn(txn, decisionID)
-			if err != nil {
-				return err
-			}
-			if !found {
-				return fmt.Errorf("%w: missing decision header %s", ErrTaintStateMalformed, decisionID)
-			}
-			if header.MembershipEffective(membership) {
-				decisions = append(decisions, decisionID)
+	headers := make(map[string]taint.Header)
+	if meter != nil {
+		if err := meter.charge(1); err != nil {
+			return nil, nil, err
+		}
+	}
+	options := badger.DefaultIteratorOptions
+	options.Prefix = prefix
+	it := txn.NewIterator(options)
+	defer it.Close()
+	seen := make(map[string]struct{})
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		if meter != nil {
+			if err := meter.charge(1); err != nil {
+				return nil, nil, err
 			}
 		}
-		return nil
-	})
+		if len(seen) >= taint.MaxActiveDecisions {
+			return nil, nil, fmt.Errorf("%w: too many memberships for %s", ErrTaintStateMalformed, memoryID)
+		}
+		decisionID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
+		if _, duplicate := seen[decisionID]; duplicate {
+			return nil, nil, fmt.Errorf("%w: duplicate decision membership", ErrTaintStateMalformed)
+		}
+		seen[decisionID] = struct{}{}
+		if err := taint.ValidateDecisionID(decisionID); err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+		}
+		value, err := it.Item().ValueCopy(nil)
+		if err != nil {
+			return nil, nil, err
+		}
+		membership, err := taint.DecodeMembership(value)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+		}
+		header, cached := headers[decisionID]
+		if !cached {
+			if meter != nil {
+				if err := meter.charge(1); err != nil {
+					return nil, nil, err
+				}
+			}
+			var found bool
+			header, found, err = readTaintHeaderTxn(txn, decisionID)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !found {
+				return nil, nil, fmt.Errorf("%w: missing decision header %s", ErrTaintStateMalformed, decisionID)
+			}
+			headers[decisionID] = header
+		}
+		if header.MembershipEffective(membership) {
+			decisions = append(decisions, decisionID)
+		}
+	}
 	sort.Strings(decisions)
-	return decisions, err
+	return decisions, headers, nil
 }
 
 // ClearTaintDecision withdraws one apply decision before cleanup. Exact replay
@@ -224,6 +328,9 @@ func (s *BadgerStore) ClearTaintDecision(decisionID string) (bool, error) {
 			return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 		}
 		if err := s.txnSet(txn, taint.DecisionKey(decisionID), encoded); err != nil {
+			return err
+		}
+		if err := s.txnDelete(txn, taint.ActiveDecisionKey(decisionID)); err != nil {
 			return err
 		}
 		if err := bumpTaintRevisionTxn(s, txn); err != nil {
@@ -307,6 +414,100 @@ func (s *BadgerStore) ValidateTaintInheritance(
 	}
 	err := s.view(func(txn *badger.Txn) error {
 		plan, err := planTaintInheritanceTxn(txn, localChainID, childID, parents)
+		if err != nil {
+			return err
+		}
+		result.Decisions, result.Units = len(plan.decisions), plan.units
+		return nil
+	})
+	return result, err
+}
+
+// ApplyTaintAdmission copies effective parent memberships and adds every active
+// decision whose credential or Root-generation scope matches the child's exact
+// creation provenance.
+func (s *BadgerStore) ApplyTaintAdmission(
+	localChainID, childID string,
+	parents []tx.ParentRef,
+	signers []AppV30ProvenanceSigner,
+) (InheritedTaintResult, error) {
+	var result InheritedTaintResult
+	if len(childID) == 0 || len(childID) > taint.MaxMemoryIDBytes {
+		return result, fmt.Errorf("%w: invalid child memory ID", ErrTaintStateMalformed)
+	}
+	if len(parents) == 0 && len(signers) == 0 {
+		return result, nil
+	}
+	if len(parents) > 0 {
+		if _, err := tx.EncodeDerivedFromExtension(parents); err != nil {
+			return result, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+		}
+	}
+	err := s.update(func(txn *badger.Txn) error {
+		plan, err := planTaintAdmissionTxn(
+			txn,
+			localChainID,
+			childID,
+			parents,
+			signers,
+		)
+		if err != nil {
+			return err
+		}
+		for _, item := range plan.decisions {
+			value, err := taint.EncodeMembership(taint.Membership{
+				Generation: item.header.Generation,
+				Depth:      0,
+				Origin:     taint.OriginAdmit,
+			})
+			if err != nil {
+				return err
+			}
+			if err := s.txnSet(txn, taint.MembershipKey(childID, item.decisionID), value); err != nil {
+				return err
+			}
+			if err := s.txnSet(txn, taint.DecisionIndexKey(item.decisionID, childID), []byte{}); err != nil {
+				return err
+			}
+		}
+		if len(plan.decisions) > 0 {
+			if err := bumpTaintRevisionTxn(s, txn); err != nil {
+				return err
+			}
+		}
+		result.Decisions, result.Units = len(plan.decisions), plan.units
+		return nil
+	})
+	return result, err
+}
+
+// ValidateTaintAdmission performs the read-only scope and parent inheritance
+// preflight without writing memberships.
+func (s *BadgerStore) ValidateTaintAdmission(
+	localChainID, childID string,
+	parents []tx.ParentRef,
+	signers []AppV30ProvenanceSigner,
+) (InheritedTaintResult, error) {
+	var result InheritedTaintResult
+	if len(childID) == 0 || len(childID) > taint.MaxMemoryIDBytes {
+		return result, fmt.Errorf("%w: invalid child memory ID", ErrTaintStateMalformed)
+	}
+	if len(parents) == 0 && len(signers) == 0 {
+		return result, nil
+	}
+	if len(parents) > 0 {
+		if _, err := tx.EncodeDerivedFromExtension(parents); err != nil {
+			return result, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+		}
+	}
+	err := s.view(func(txn *badger.Txn) error {
+		plan, err := planTaintAdmissionTxn(
+			txn,
+			localChainID,
+			childID,
+			parents,
+			signers,
+		)
 		if err != nil {
 			return err
 		}
@@ -428,6 +629,67 @@ func planTaintInheritanceTxn(
 		}
 	}
 	plan.units = units
+	return plan, nil
+}
+
+func planTaintAdmissionTxn(
+	txn *badger.Txn,
+	localChainID, childID string,
+	parents []tx.ParentRef,
+	signers []AppV30ProvenanceSigner,
+) (taintInheritancePlan, error) {
+	plan, err := planTaintInheritanceTxn(txn, localChainID, childID, parents)
+	if err != nil || len(signers) == 0 {
+		return plan, err
+	}
+	meter := newTaintUnitMeter(
+		taint.MaxProvenanceAdmissionTaintUnits,
+		ErrTaintBudget,
+	)
+	meter.units = plan.units
+	activeScopes, err := readActiveTaintDecisionScopesTxn(txn, meter)
+	if err != nil {
+		return plan, err
+	}
+	provenance := AuthorProvenance{
+		Signers:       append([]AppV30ProvenanceSigner(nil), signers...),
+		Exact:         true,
+		CoverageKnown: true,
+	}
+	effective := make(map[string]taint.Header, len(plan.decisions)+len(activeScopes))
+	for _, item := range plan.decisions {
+		effective[item.decisionID] = item.header
+	}
+	for _, active := range activeScopes {
+		if !active.Scope.Matches(provenance) {
+			continue
+		}
+		if _, exists := effective[active.DecisionID]; exists {
+			continue
+		}
+		if err := meter.charge(2); err != nil {
+			return plan, err
+		}
+		effective[active.DecisionID] = active.Header
+	}
+	if len(plan.decisions) == 0 && len(effective) > 0 {
+		if err := meter.charge(1); err != nil {
+			return plan, err
+		}
+	}
+	decisionIDs := make([]string, 0, len(effective))
+	for decisionID := range effective {
+		decisionIDs = append(decisionIDs, decisionID)
+	}
+	sort.Strings(decisionIDs)
+	plan.decisions = make([]plannedTaintMembership, 0, len(decisionIDs))
+	for _, decisionID := range decisionIDs {
+		plan.decisions = append(plan.decisions, plannedTaintMembership{
+			decisionID: decisionID,
+			header:     effective[decisionID],
+		})
+	}
+	plan.units = meter.units
 	return plan, nil
 }
 

@@ -38,6 +38,7 @@ func TestAcceptedLimits(t *testing.T) {
 
 func TestCanonicalKeys(t *testing.T) {
 	assert.Equal(t, "taintdec:decision", string(DecisionKey("decision")))
+	assert.Equal(t, "taintactivedec:decision", string(ActiveDecisionKey("decision")))
 	assert.Equal(t, "taintm:memory:decision", string(MembershipKey("memory", "decision")))
 	assert.Equal(t, "taintm:memory:", string(MembershipPrefix("memory")))
 	assert.Equal(t, "taintd:decision:memory", string(DecisionIndexKey("decision", "memory")))
