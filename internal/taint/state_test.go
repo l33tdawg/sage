@@ -18,6 +18,10 @@ func testPayloadHash() [sha256.Size]byte {
 	return sha256.Sum256([]byte("taint-payload"))
 }
 
+func testParentRefID() string {
+	return strings.Repeat("a", DecisionIDBytes)
+}
+
 func TestAcceptedLimits(t *testing.T) {
 	assert.Equal(t, 32, MaxActiveDecisions)
 	assert.Equal(t, 16, MaxParents)
@@ -56,7 +60,7 @@ func TestHeaderRoundTrip(t *testing.T) {
 		{
 			Action: ActionApply, Status: StatusExpanding, Generation: 2,
 			FrontierHead: 3, FrontierTail: 9, Scanned: 10, Materialized: 6,
-			MaxDepth: 4, Parent: "parent", ParentDepth: 3,
+			MaxDepth: 4, ParentRefID: testParentRefID(), ParentMemoryID: "parent", ParentDepth: 3,
 			LastEdge: "last-child", PayloadHash: testPayloadHash(),
 		},
 		{
@@ -93,8 +97,14 @@ func TestHeaderValidation(t *testing.T) {
 		{"frontier", func(h *Header) { h.FrontierHead = 2; h.FrontierTail = 1 }, "frontier head"},
 		{"parent depth", func(h *Header) { h.ParentDepth = MaxDepth + 1 }, "depth exceeds"},
 		{"max depth", func(h *Header) { h.MaxDepth = MaxDepth + 1 }, "depth exceeds"},
-		{"parent empty is allowed", func(h *Header) { h.Parent = "" }, ""},
-		{"parent too long", func(h *Header) { h.Parent = strings.Repeat("p", MaxMemoryIDBytes+1) }, "memory ID length"},
+		{"both parent fields empty", func(h *Header) { h.ParentRefID = ""; h.ParentMemoryID = "" }, ""},
+		{"parent ref without memory", func(h *Header) { h.ParentRefID = testParentRefID() }, "must be set together"},
+		{"parent memory without ref", func(h *Header) { h.ParentMemoryID = "parent" }, "must be set together"},
+		{"invalid parent ref", func(h *Header) { h.ParentRefID = strings.Repeat("z", DecisionIDBytes); h.ParentMemoryID = "parent" }, "parent ref ID"},
+		{"parent too long", func(h *Header) {
+			h.ParentRefID = testParentRefID()
+			h.ParentMemoryID = strings.Repeat("p", MaxMemoryIDBytes+1)
+		}, "memory ID length"},
 		{"cursor too long", func(h *Header) { h.LastEdge = strings.Repeat("c", MaxCursorBytes+1) }, "cursor length"},
 	}
 	for _, tc := range tests {
@@ -127,9 +137,9 @@ func TestDecodeHeaderRejectsMalformedLengthsAndTrailingBytes(t *testing.T) {
 	require.ErrorContains(t, err, "trailing bytes")
 
 	badParent := append([]byte(nil), encoded...)
-	binary.BigEndian.PutUint16(badParent[40:42], uint16(MaxMemoryIDBytes+1))
+	binary.BigEndian.PutUint16(badParent[40:42], uint16(DecisionIDBytes+1))
 	_, err = DecodeHeader(badParent)
-	require.ErrorContains(t, err, "parent length")
+	require.ErrorContains(t, err, "parent ref length")
 }
 
 func TestMembershipRoundTripAndEffectiveness(t *testing.T) {
@@ -172,22 +182,34 @@ func TestMembershipValidation(t *testing.T) {
 }
 
 func TestQueueEntryRoundTripAndValidation(t *testing.T) {
-	entry := QueueEntry{MemoryID: strings.Repeat("m", MaxMemoryIDBytes), Depth: MaxDepth}
+	entry := QueueEntry{
+		ParentRefID: testParentRefID(),
+		MemoryID:    strings.Repeat("m", MaxMemoryIDBytes),
+		Depth:       MaxDepth,
+	}
 	encoded, err := EncodeQueueEntry(entry)
 	require.NoError(t, err)
 	decoded, err := DecodeQueueEntry(encoded)
 	require.NoError(t, err)
 	assert.Equal(t, entry, decoded)
 
-	_, err = EncodeQueueEntry(QueueEntry{Depth: 1})
+	_, err = EncodeQueueEntry(QueueEntry{ParentRefID: testParentRefID(), Depth: 1})
 	require.ErrorContains(t, err, "memory ID length")
-	_, err = EncodeQueueEntry(QueueEntry{MemoryID: "memory", Depth: MaxDepth + 1})
+	_, err = EncodeQueueEntry(QueueEntry{ParentRefID: testParentRefID(), MemoryID: "memory", Depth: MaxDepth + 1})
 	require.ErrorContains(t, err, "queue depth")
+	_, err = EncodeQueueEntry(QueueEntry{MemoryID: "memory", Depth: 1})
+	require.ErrorContains(t, err, "parent ref ID")
 	_, err = DecodeQueueEntry([]byte{0, 1})
 	require.ErrorContains(t, err, "short queue entry")
 
 	bad := append([]byte(nil), encoded...)
 	binary.BigEndian.PutUint16(bad, uint16(MaxMemoryIDBytes+1))
+	_, err = DecodeQueueEntry(bad)
+	require.ErrorContains(t, err, "parent ref length")
+
+	bad = append([]byte(nil), encoded...)
+	memoryLengthOffset := 2 + DecisionIDBytes
+	binary.BigEndian.PutUint16(bad[memoryLengthOffset:], uint16(MaxMemoryIDBytes+1))
 	_, err = DecodeQueueEntry(bad)
 	require.ErrorContains(t, err, "invalid queue entry length")
 }
