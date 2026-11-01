@@ -117,3 +117,53 @@ func TestTaintServingCoverageCompleteRequiresFinishedExpansion(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, complete)
 }
+
+func TestTaintServingCoverageSkipsRetiredDecisionHistory(t *testing.T) {
+	s := openTaintStore(t)
+	for i := 0; i < 3; i++ {
+		target := testTaintParent("retired-target-" + string(rune('a'+i)))
+		decisionID := strings.Repeat(string(rune('1'+i)), taint.DecisionIDBytes)
+		created, err := s.ApplyTaintDecision(
+			"sage",
+			decisionID,
+			target,
+			sha256.Sum256([]byte("retired payload")),
+		)
+		require.NoError(t, err)
+		require.True(t, created)
+		changed, err := s.ClearTaintDecision(decisionID)
+		require.NoError(t, err)
+		require.True(t, changed)
+		for attempts := 0; attempts < 3; attempts++ {
+			cleaned, err := s.CleanupTaintDecision(decisionID, taint.PerExecutionUnitBudget)
+			require.NoError(t, err)
+			if cleaned.Status == taint.StatusClean {
+				break
+			}
+		}
+		header, found, err := s.GetTaintDecision(decisionID)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, taint.StatusClean, header.Status)
+	}
+
+	activeTarget := testTaintParent("active-target")
+	activeDecision := strings.Repeat("a", taint.DecisionIDBytes)
+	created, err := s.ApplyTaintDecision(
+		"sage",
+		activeDecision,
+		activeTarget,
+		sha256.Sum256([]byte("active payload")),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	_, err = s.ExpandTaintDecision("sage", activeDecision, taint.PerExecutionUnitBudget)
+	require.NoError(t, err)
+
+	complete, err := s.TaintServingCoverageComplete()
+	require.NoError(t, err)
+	require.True(t, complete)
+	_, memoryIDs, err := s.SnapshotEffectiveTaintMemberships()
+	require.NoError(t, err)
+	require.Equal(t, []string{activeTarget.MemoryID}, memoryIDs)
+}

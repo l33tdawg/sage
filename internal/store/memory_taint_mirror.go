@@ -168,12 +168,24 @@ func (s *BadgerStore) SnapshotEffectiveTaintMemberships() (
 		if readErr != nil {
 			return readErr
 		}
+		activeCount, readErr := readTaintUint64Txn(txn, taint.ActiveCountKey())
+		if readErr != nil {
+			return readErr
+		}
+		if activeCount > taint.MaxActiveDecisions {
+			return fmt.Errorf("%w: active decision count %d exceeds %d",
+				ErrTaintStateMalformed, activeCount, taint.MaxActiveDecisions)
+		}
+		if activeCount == 0 {
+			return nil
+		}
 		decisionPrefix := []byte("taintdec:")
 		options := badger.DefaultIteratorOptions
 		options.Prefix = decisionPrefix
 		options.PrefetchValues = false
 		it := txn.NewIterator(options)
 		defer it.Close()
+		var retained uint64
 		for it.Seek(decisionPrefix); it.ValidForPrefix(decisionPrefix); it.Next() {
 			decisionID := string(it.Item().Key()[len(decisionPrefix):])
 			if validateErr := taint.ValidateDecisionID(decisionID); validateErr != nil {
@@ -183,7 +195,19 @@ func (s *BadgerStore) SnapshotEffectiveTaintMemberships() (
 			if readErr != nil {
 				return readErr
 			}
-			if !found || !header.Status.Active() {
+			if !found {
+				continue
+			}
+			if header.Status.Active() || header.Status == taint.StatusCleaning {
+				retained++
+				if retained > activeCount {
+					return fmt.Errorf("%w: retained decision count exceeds active count", ErrTaintStateMalformed)
+				}
+			}
+			if !header.Status.Active() {
+				if retained == activeCount {
+					return nil
+				}
 				continue
 			}
 			indexPrefix := taint.DecisionIndexPrefix(decisionID)
@@ -218,6 +242,13 @@ func (s *BadgerStore) SnapshotEffectiveTaintMemberships() (
 				}
 			}
 			index.Close()
+			if retained == activeCount {
+				return nil
+			}
+		}
+		if retained != activeCount {
+			return fmt.Errorf("%w: active count %d does not match %d retained decisions",
+				ErrTaintStateMalformed, activeCount, retained)
 		}
 		return nil
 	})

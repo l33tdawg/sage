@@ -131,6 +131,7 @@ func (s *BadgerStore) TaintServingCoverageComplete() (bool, error) {
 		options.PrefetchValues = true
 		it := txn.NewIterator(options)
 		defer it.Close()
+		var retained uint64
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			decisionID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
 			if err := taint.ValidateDecisionID(decisionID); err != nil {
@@ -144,10 +145,24 @@ func (s *BadgerStore) TaintServingCoverageComplete() (bool, error) {
 			if err != nil {
 				return fmt.Errorf("%w: %v", ErrTaintServingState, err)
 			}
+			if header.Status.Active() || header.Status == taint.StatusCleaning {
+				retained++
+				if retained > active {
+					return fmt.Errorf("%w: retained decision count exceeds active count",
+						ErrTaintServingState)
+				}
+			}
 			if header.Status.Incomplete() {
 				complete = false
 				return nil
 			}
+			if retained == active {
+				return nil
+			}
+		}
+		if retained != active {
+			return fmt.Errorf("%w: active count %d does not match %d retained decisions",
+				ErrTaintServingState, active, retained)
 		}
 		return nil
 	})
