@@ -2,7 +2,11 @@ package abci
 
 import (
 	"fmt"
+	"time"
 
+	abcitypes "github.com/cometbft/cometbft/abci/types"
+
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -57,22 +61,7 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 			tx.GovProposalOp(parsed.GovPropose.Operation) != tx.GovOpMemoryTaint {
 			return 0
 		}
-		payload := parsed.GovPropose.Payload
-		if len(payload) < 2 {
-			return 0
-		}
-		switch payload[1] {
-		case tx.TaintActionApply:
-			return appV30GeneratedOverheadBytes +
-				int64(taint.MaxNewMembershipsPerExec)*appV30MembershipTripleBytes +
-				appV30HeaderMaxBytes
-		case tx.TaintActionClear:
-			return appV30GeneratedOverheadBytes +
-				int64(appV30MaxCleanupMemberPairs)*appV30MembershipTripleBytes +
-				appV30HeaderMaxBytes
-		default:
-			return 0
-		}
+		return appV30TaintExecutionEstimate(parsed.GovPropose.Payload)
 
 	case tx.TxTypeMemoryTaintWork:
 		if parsed.MemoryTaintWork == nil {
@@ -104,11 +93,60 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 
 const appV30ProvenanceSignerBytes int64 = 64 + 64 + 8 + 1
 
+func appV30TaintExecutionEstimate(payload []byte) int64 {
+	if len(payload) < 2 {
+		return 0
+	}
+	switch payload[1] {
+	case tx.TaintActionApply:
+		return appV30GeneratedOverheadBytes +
+			int64(taint.MaxNewMembershipsPerExec)*appV30MembershipTripleBytes +
+			appV30HeaderMaxBytes
+	case tx.TaintActionClear:
+		return appV30GeneratedOverheadBytes +
+			int64(appV30MaxCleanupMemberPairs)*appV30MembershipTripleBytes +
+			appV30HeaderMaxBytes
+	default:
+		return 0
+	}
+}
+
+// appV30ActiveGovernanceReserve bounds the one governance execution that can
+// occur after this block's transactions. An op-12 proposal created in this
+// block contributes the same reservation through its proposal tx; an existing
+// active proposal has no transaction in the block, so it must be added here.
+func (app *SageApp) appV30ActiveGovernanceReserve(height int64) (int64, error) {
+	if !app.postAppV30Fork(height) {
+		return 0, nil
+	}
+	active, err := app.govEngine.GetActiveProposal()
+	if err != nil {
+		return 0, fmt.Errorf("read active app-v30 governance proposal: %w", err)
+	}
+	if active == nil ||
+		active.Operation != governance.OpMemoryTaint ||
+		active.CreatedHeight <= app.appV30AppliedHeight ||
+		height > active.ExpiryHeight {
+		return 0, nil
+	}
+	if height < active.CreatedHeight+governance.MinVotingBlocks &&
+		app.validators.Size() > 1 {
+		return 0, nil
+	}
+	return appV30TaintExecutionEstimate(active.Payload), nil
+}
+
 func (app *SageApp) appV30BlockGeneratedWriteEstimate(txs [][]byte, height int64) (int64, error) {
 	if !app.postAppV30Fork(height) {
 		return 0, nil
 	}
-	var total int64
+	total, err := app.appV30ActiveGovernanceReserve(height)
+	if err != nil {
+		return 0, err
+	}
+	if total > appV30BlockWriteBudgetBytes {
+		return 0, fmt.Errorf("app-v30 generated writes exceed %d bytes", appV30BlockWriteBudgetBytes)
+	}
 	for _, rawTx := range txs {
 		estimate := app.appV30EstimatedTxBytes(rawTx, height)
 		if estimate > appV30BlockWriteBudgetBytes-total {
@@ -135,12 +173,67 @@ func (app *SageApp) appV30EstimatedTxBytes(rawTx []byte, height int64) int64 {
 	return appV30GeneratedWriteEstimate(parsed)
 }
 
-func (app *SageApp) selectAppV30Proposal(txs [][]byte, height int64) [][]byte {
+// processAppV30MeteredTx gives each app-v30 state-generating transaction its
+// own rollback-safe reservation inside the enclosing block transaction. The
+// deterministic estimate still decides proposal admission; this boundary
+// enforces the same limit against actual key/value and tombstone bytes.
+func (app *SageApp) processAppV30MeteredTx(
+	parsedTx *tx.ParsedTx,
+	height int64,
+	blockTime time.Time,
+) (*abcitypes.ExecTxResult, error) {
+	estimate := appV30GeneratedWriteEstimate(parsedTx)
+	if !app.postAppV30Fork(height) || estimate == 0 {
+		return app.processTx(parsedTx, height, blockTime), nil
+	}
+	if err := app.badgerStore.BeginAppV30WriteStage(estimate); err != nil {
+		return nil, fmt.Errorf("begin app-v30 write reservation: %w", err)
+	}
+
+	result := app.processTx(parsedTx, height, blockTime)
+	overflowed := app.badgerStore.AppV30WriteStageOverflowed()
+	if result.Code != 0 || overflowed {
+		if err := app.badgerStore.AbortAppV30WriteStage(); err != nil {
+			return nil, fmt.Errorf("rollback app-v30 transaction: %w", err)
+		}
+		if overflowed {
+			return &abcitypes.ExecTxResult{
+				Code: appV30GeneratedWriteBudgetCode,
+				Log:  appV30GeneratedWriteBudgetLog,
+			}, nil
+		}
+		return result, nil
+	}
+	if _, err := app.badgerStore.CommitAppV30WriteStage(); err != nil {
+		if abortErr := app.badgerStore.AbortAppV30WriteStage(); abortErr != nil {
+			return nil, fmt.Errorf(
+				"abort over-budget app-v30 transaction after reservation failure: %w",
+				abortErr,
+			)
+		}
+		if app.badgerStore.AppV30WriteStageOverflowed() {
+			return &abcitypes.ExecTxResult{
+				Code: appV30GeneratedWriteBudgetCode,
+				Log:  appV30GeneratedWriteBudgetLog,
+			}, nil
+		}
+		return nil, fmt.Errorf("finish app-v30 write reservation: %w", err)
+	}
+	return result, nil
+}
+
+func (app *SageApp) selectAppV30Proposal(txs [][]byte, height int64) ([][]byte, error) {
 	if !app.postAppV30Fork(height) {
-		return txs
+		return txs, nil
 	}
 	selected := make([][]byte, 0, len(txs))
-	var total int64
+	total, err := app.appV30ActiveGovernanceReserve(height)
+	if err != nil {
+		return nil, err
+	}
+	if total > appV30BlockWriteBudgetBytes {
+		return nil, fmt.Errorf("app-v30 generated writes exceed %d bytes", appV30BlockWriteBudgetBytes)
+	}
 	for _, rawTx := range txs {
 		estimate := app.appV30EstimatedTxBytes(rawTx, height)
 		if estimate > appV30BlockWriteBudgetBytes-total {
@@ -149,5 +242,5 @@ func (app *SageApp) selectAppV30Proposal(txs [][]byte, height int64) [][]byte {
 		selected = append(selected, rawTx)
 		total += estimate
 	}
-	return selected
+	return selected, nil
 }
