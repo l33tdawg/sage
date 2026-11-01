@@ -3,6 +3,7 @@ package abci
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -89,6 +90,9 @@ func (app *SageApp) preflightAppV30Lineage(
 		localChainID,
 		parents,
 	); err != nil {
+		if errors.Is(err, store.ErrMemoryLineageUnavailable) {
+			return "", appV30LineageParentUnavailable()
+		}
 		return "", err
 	}
 	existing, err := app.badgerStore.GetMemoryLineage(childID)
@@ -111,17 +115,17 @@ func (app *SageApp) preflightAppV30Lineage(
 	for _, parent := range parents {
 		state, stateErr := app.badgerStore.GetMemoryDisclosureState(parent.MemoryID)
 		if stateErr != nil {
-			return "", fmt.Errorf("read parent disclosure state: %w", stateErr)
+			return "", appV30LineageParentUnavailable()
 		}
 		if !state.DomainRecorded || state.Domain == "" {
-			return "", fmt.Errorf("parent %s has no authenticated domain", parent.MemoryID)
+			return "", appV30LineageParentUnavailable()
 		}
 		withinClearance, clearanceErr := app.appV23MemoryWithinClearance(
 			credentialID,
 			parent.MemoryID,
 		)
 		if clearanceErr != nil || !withinClearance {
-			return "", fmt.Errorf("parent %s is outside caller clearance", parent.MemoryID)
+			return "", appV30LineageParentUnavailable()
 		}
 		allowed, _, decisionErr := app.appV23DomainDecision(
 			parsedTx,
@@ -132,7 +136,7 @@ func (app *SageApp) preflightAppV30Lineage(
 			blockTime,
 		)
 		if decisionErr != nil || !allowed {
-			return "", fmt.Errorf("parent %s is not readable by the caller", parent.MemoryID)
+			return "", appV30LineageParentUnavailable()
 		}
 	}
 	if _, err := app.badgerStore.ValidateTaintInheritance(
@@ -143,6 +147,13 @@ func (app *SageApp) preflightAppV30Lineage(
 		return "", err
 	}
 	return localChainID, nil
+}
+
+func appV30LineageParentUnavailable() error {
+	return fmt.Errorf(
+		"%w: parent cannot be resolved for this caller",
+		store.ErrMemoryLineageUnavailable,
+	)
 }
 
 func (app *SageApp) applyAppV30Lineage(
