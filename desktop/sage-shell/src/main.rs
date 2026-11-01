@@ -64,7 +64,6 @@ struct ShellSession {
     pin: Option<OriginPin>,
     generation: Option<String>,
     attached: bool,
-    navigation_seen: bool,
     pending_routes: VecDeque<String>,
     last_route: Option<String>,
     recovery_view: Option<RecoveryView>,
@@ -424,7 +423,7 @@ fn attach_ready<R: tauri::Runtime>(
     };
     let pin = OriginPin::from_url(&origin);
 
-    let current_url = navigation_seen_url(&window, session);
+    let current_url = window.url().ok();
     let (should_navigate, route) = {
         let mut state = session.lock().expect("shell session lock");
         remember_current_route(&mut state, current_url.as_ref());
@@ -473,7 +472,7 @@ fn show_recovery_with_browser<R: tauri::Runtime>(
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    let current_url = navigation_seen_url(&window, session);
+    let current_url = window.url().ok();
     let should_navigate = {
         let mut state = session.lock().expect("shell session lock");
         remember_current_route(&mut state, current_url.as_ref());
@@ -506,16 +505,6 @@ fn remember_current_route(state: &mut ShellSession, current: Option<&Url>) {
     }
 }
 
-fn navigation_seen_url<R: tauri::Runtime>(
-    window: &tauri::WebviewWindow<R>,
-    session: &SharedSession,
-) -> Option<Url> {
-    let seen = session.lock().expect("shell session lock").navigation_seen;
-    // Wry's macOS url() unwraps WKWebView.URL. The recovery view can be requested
-    // before the first navigation, when that Objective-C property is still nil.
-    seen.then(|| window.url().ok()).flatten()
-}
-
 fn enqueue_route(session: &SharedSession, route: String) {
     let mut state = session.lock().expect("shell session lock");
     if state.pending_routes.len() == MAX_PENDING_ROUTES {
@@ -545,7 +534,6 @@ fn sage_home<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> PathBuf {
 
 fn navigation_allowed(url: &Url, session: &SharedSession) -> bool {
     let mut state = session.lock().expect("shell session lock");
-    state.navigation_seen = true;
     if bundled_asset_url(url) {
         return true;
     }
@@ -733,14 +721,12 @@ mod tests {
             }),
             ..ShellSession::default()
         }));
-        assert!(!session.lock().unwrap().navigation_seen);
         assert!(navigation_allowed(
             &Url::parse("http://127.0.0.1:8080/ui/#/brain").unwrap(),
             &session
         ));
         {
             let state = session.lock().unwrap();
-            assert!(state.navigation_seen);
             assert_eq!(state.last_route.as_deref(), Some("/brain"));
         }
         assert!(navigation_allowed(
@@ -752,7 +738,7 @@ mod tests {
             &session
         ));
         assert!(!navigation_allowed(
-            &Url::parse("http://127.0.0.1:8081/ui/").unwrap(),
+            &Url::parse("http://127.0.0.1:8081/ui/#/tasks").unwrap(),
             &session
         ));
         assert!(!navigation_allowed(
@@ -763,6 +749,10 @@ mod tests {
             &Url::parse("data:text/html,nope").unwrap(),
             &session
         ));
+        assert_eq!(
+            session.lock().unwrap().last_route.as_deref(),
+            Some("/brain")
+        );
     }
 
     #[test]
