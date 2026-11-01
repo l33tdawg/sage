@@ -46,6 +46,10 @@ func TestMemoryProjectionHidesEffectiveTaintAndRestoresOnClear(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 
+	state, err := badger.ValidateMemoryProjectionWithoutTaint(record)
+	require.NoError(t, err, "authorization must be able to validate the envelope without learning taint state")
+	require.Equal(t, uint8(1), state.Classification)
+
 	_, disposition, err := badger.ClassifyMemoryProjection(record)
 	require.ErrorIs(t, err, ErrMemoryProjectionUnpublished)
 	require.ErrorIs(t, err, ErrMemoryProjectionTainted)
@@ -200,6 +204,24 @@ func TestClassifyMemoryProjectionsPublishesUnsafeDispositionToSharedHealth(t *te
 	require.True(t, after.Quarantined,
 		"the transaction-scoped batch reader must share the process health tracker")
 	require.Equal(t, CanonicalMemoryProjectionQuarantined, after.State)
+}
+
+func TestMemoryProjectionWithoutTaintPublishesUnsafeDispositionToSharedHealth(t *testing.T) {
+	canonical := newTestBadger(t)
+	canonical.PublishCanonicalMemoryProjectionAudit(true, false, false)
+	require.False(t, canonical.CanonicalMemoryProjectionHealth().Quarantined)
+
+	_, err := canonical.ValidateMemoryProjectionWithoutTaint(&memory.MemoryRecord{
+		MemoryID: "authorization-unanchored",
+	})
+	require.ErrorIs(t, err, ErrMemoryProjectionUnpublished)
+	require.ErrorIs(t, err, ErrMemoryDisclosureNotFound)
+
+	health := canonical.CanonicalMemoryProjectionHealth()
+	require.True(t, health.Checked, "an individual observation must preserve the completed audit")
+	require.True(t, health.OK, "post-audit quarantine must remain degraded-ready")
+	require.True(t, health.Quarantined, "authorization must publish proven unsafe projection state")
+	require.Equal(t, CanonicalMemoryProjectionQuarantined, health.State)
 }
 
 func TestClassifyMemoryProjectionUsesAppV25SubmissionCutoffForCompleteEnvelope(t *testing.T) {

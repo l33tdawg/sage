@@ -68,7 +68,7 @@ func (s *Server) evaluateAppV23RecordDisclosure(
 		)
 	}
 
-	canonical, err := s.badgerStore.ValidateMemoryProjection(record)
+	canonical, err := s.badgerStore.ValidateMemoryProjectionWithoutTaint(record)
 	if err != nil {
 		return appV23RecordDisclosure{}, err
 	}
@@ -106,6 +106,11 @@ func (s *Server) evaluateAppV23RecordDisclosure(
 	)
 	if err != nil {
 		return appV23RecordDisclosure{}, err
+	}
+	if decision.Allowed {
+		if _, taintErr := s.badgerStore.ValidateMemoryProjection(record); taintErr != nil {
+			return appV23RecordDisclosure{}, taintErr
+		}
 	}
 	return appV23RecordDisclosure{
 		Allowed:        decision.Allowed,
