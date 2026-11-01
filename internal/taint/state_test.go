@@ -29,6 +29,7 @@ func TestAcceptedLimits(t *testing.T) {
 	assert.Equal(t, 256, MaxServingAncestorWalk)
 	assert.Equal(t, 64, MaxDepth)
 	assert.Equal(t, 1024, PerExecutionUnitBudget)
+	assert.Equal(t, 625, MaxAdmissionTaintUnits)
 	assert.Equal(t, 204, MaxNewMembershipsPerExec)
 	assert.Equal(t, 16384, MaxExpansionMemberships)
 	assert.Equal(t, 4<<20, MaxPerBlockBytes)
