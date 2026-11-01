@@ -65,3 +65,24 @@ func (app *SageApp) validateAppV30Prerequisite() error {
 	}
 	return nil
 }
+
+func (app *SageApp) validateAppV30RecoveryState() error {
+	if app.appV30AppliedHeight <= 0 {
+		return nil
+	}
+	inserted, err := app.badgerStore.RebuildLineageReverseIndex()
+	if err != nil {
+		return fmt.Errorf("rebuild app-v30 lineage reverse index: %w", err)
+	}
+	if err := app.badgerStore.ValidateLineageIndexes(); err != nil {
+		return fmt.Errorf("validate app-v30 lineage index: %w", err)
+	}
+	if err := app.badgerStore.ValidateTaintState(); err != nil {
+		return fmt.Errorf("validate app-v30 taint state: %w", err)
+	}
+	if inserted > 0 {
+		app.logger.Warn().Int("inserted", inserted).
+			Msg("reconstructed missing app-v30 lineage reverse edges")
+	}
+	return nil
+}
