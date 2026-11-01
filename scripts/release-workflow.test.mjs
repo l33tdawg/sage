@@ -562,7 +562,8 @@ test('the mandatory cold gate transfers one exact app-v29 session', () => {
 test('fresh app30 wire proof is explicit and retains exact-version sealing and owned cleanup', () => {
   const freshWorkflow = readFileSync(new URL('../.github/workflows/fresh-genesis-v30.yml', import.meta.url), 'utf8');
   assert.match(v119StateSync, /MODE=\$\{V119_STATE_SYNC_MODE:-app-v29\}/);
-  assert.match(v119StateSync, /fresh-v30\) TARGET_APP_VERSION=30; PROJECT=sage-fresh-v30-sync; AUTO_UPGRADE_DISABLED=true/);
+  assert.match(v119StateSync, /fresh-v30\) TARGET_APP_VERSION=30; EXPECTED_SCOPED_RECORDS=5; PROJECT=sage-fresh-v30-sync; AUTO_UPGRADE_DISABLED=true/);
+  assert.match(v119StateSync, /^EXPECTED_SCOPED_RECORDS=1$/m);
   assert.match(v119StateSync, /test "\$\(cat \/provider\/fork-version\.txt\)" = "1"/);
   assert.match(v119StateSync, /dev\.sage\.state-sync\.owner/);
   assert.match(v119StateSync, /V119_STATE_SYNC_RUNTIME_USER must be a canonical numeric UID:GID/);

@@ -372,9 +372,10 @@ func verifyV30StateSyncCanonical(ctx context.Context, expectedHash string) error
 			return fmt.Errorf("restored reverse lineage mismatch: %v", childErr)
 		}
 		header, found, headerErr := canonical.GetTaintDecision(branch.Decision)
-		if headerErr != nil || !found || (branch.Decision == proof.Cleared.Decision && header.Status != taint.StatusClean) ||
-			(branch.Decision != proof.Cleared.Decision && header.Status != taint.StatusComplete) {
-			return fmt.Errorf("restored taint decision state mismatch: %v (status %d)", headerErr, header.Status)
+		if headerErr != nil || !found || header.Action != taint.ActionApply ||
+			(branch.Decision == proof.Cleared.Decision && (header.Status != taint.StatusCleaning || header.Generation != 2 || header.CleanupPhase != taint.CleanupQueue)) ||
+			(branch.Decision != proof.Cleared.Decision && (header.Status != taint.StatusComplete || header.Generation != 1)) {
+			return fmt.Errorf("restored taint decision state mismatch: %v (header %+v)", headerErr, header)
 		}
 		for _, id := range []string{branch.Parent.MemoryID, branch.ChildID} {
 			signers, present, signerErr := canonical.GetAppV30Provenance(id)

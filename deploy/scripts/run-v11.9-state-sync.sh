@@ -24,9 +24,10 @@ cd "$(dirname "$0")/../.."
 
 MODE=${V119_STATE_SYNC_MODE:-app-v29}
 TARGET_APP_VERSION=29
+EXPECTED_SCOPED_RECORDS=1
 case "${MODE}" in
   app-v29) PROJECT=sage-v119-ss; AUTO_UPGRADE_DISABLED=false; DEFAULT_ABCI_IMAGE=sage-v119-chaos-abci:local; DEFAULT_NODE_IMAGE=sage-v119-chaos-node:local ;;
-  fresh-v30) TARGET_APP_VERSION=30; PROJECT=sage-fresh-v30-sync; AUTO_UPGRADE_DISABLED=true; DEFAULT_ABCI_IMAGE=sage-fresh-v30-sync-abci:local; DEFAULT_NODE_IMAGE=sage-fresh-v30-sync-node:local ;;
+  fresh-v30) TARGET_APP_VERSION=30; EXPECTED_SCOPED_RECORDS=5; PROJECT=sage-fresh-v30-sync; AUTO_UPGRADE_DISABLED=true; DEFAULT_ABCI_IMAGE=sage-fresh-v30-sync-abci:local; DEFAULT_NODE_IMAGE=sage-fresh-v30-sync-node:local ;;
   *) echo "ERROR: V119_STATE_SYNC_MODE must be app-v29 or fresh-v30" >&2; exit 1 ;;
 esac
 ABCI_IMAGE=${V119_STATE_SYNC_ABCI_IMAGE:-${DEFAULT_ABCI_IMAGE}}
@@ -654,11 +655,12 @@ scoped = body.get("scoped_projection") or {}
 status = body.get("status")
 if status != "ready":
     raise SystemExit(f"node readiness is {status!r}")
-want = {"checked": True, "required": True, "ok": True, "records": 1, "rebuilt": 1}
+records = int(sys.argv[1])
+want = {"checked": True, "required": True, "ok": True, "records": records, "rebuilt": records}
 for key, value in want.items():
     if scoped.get(key) != value:
         raise SystemExit(f"scoped_projection.{key}={scoped.get(key)!r}, want {value!r}")
-'
+' "${EXPECTED_SCOPED_RECORDS}"
 }
 
 # App-v25 becomes mandatory at its strict H+1 boundary.  A state-sync receiver
@@ -676,11 +678,12 @@ body = json.load(sys.stdin)
 scoped = body.get("scoped_projection") or {}
 if body.get("status") != "ready":
     raise SystemExit(1)
-want = {"checked": True, "required": True, "ok": True, "records": 1, "rebuilt": 1}
+records = int(sys.argv[1])
+want = {"checked": True, "required": True, "ok": True, "records": records, "rebuilt": records}
 for key, value in want.items():
     if scoped.get(key) != value:
         raise SystemExit(1)
-' >/dev/null 2>&1; do
+' "${EXPECTED_SCOPED_RECORDS}" >/dev/null 2>&1; do
     if [ "$(docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null || true)" != true ]; then
       echo "ERROR: ${container} exited before verified scoped projection readiness" >&2
       return 1
