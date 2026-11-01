@@ -46,6 +46,10 @@ func TestMemoryProjectionHidesEffectiveTaintAndRestoresOnClear(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 
+	state, err := badger.ValidateMemoryProjectionWithoutTaint(record)
+	require.NoError(t, err, "authorization must be able to validate the envelope without learning taint state")
+	require.Equal(t, uint8(1), state.Classification)
+
 	_, disposition, err := badger.ClassifyMemoryProjection(record)
 	require.ErrorIs(t, err, ErrMemoryProjectionUnpublished)
 	require.ErrorIs(t, err, ErrMemoryProjectionTainted)

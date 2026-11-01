@@ -107,7 +107,11 @@ func (s *BadgerStore) ClassifyMemoryProjections(
 				}
 			}
 			state, disposition, classifyErr :=
-				reader.classifyMemoryProjection(record, requireCompleteEnvelope)
+				reader.classifyCanonicalMemoryProjection(record, requireCompleteEnvelope)
+			if classifyErr == nil {
+				classifyErr = reader.applyMemoryTaintDisposition(record.MemoryID, &disposition)
+			}
+			reader.observeMemoryProjectionDisposition(disposition)
 			results[i] = MemoryProjectionClassification{
 				Disposition: disposition,
 				State:       state,
@@ -133,6 +137,29 @@ func (s *BadgerStore) ValidateMemoryProjection(
 	return state, err
 }
 
+// ValidateMemoryProjectionWithoutTaint validates the canonical SQL envelope
+// without disclosing taint state. Authorization layers use this first so a
+// caller who cannot read the record receives the ordinary denial rather than a
+// 451 that confirms the protected record exists.
+func (s *BadgerStore) ValidateMemoryProjectionWithoutTaint(
+	record *memory.MemoryRecord,
+) (*MemoryDisclosureState, error) {
+	requireCompleteEnvelope := false
+	var err error
+	if record != nil {
+		requireCompleteEnvelope, err =
+			s.appV25MemoryEnvelopeRequired(record.MemoryID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf(
+			"%w: read app-v25 disclosure gate: %w",
+			ErrMemoryProjectionUnpublished, err,
+		)
+	}
+	state, _, err := s.classifyCanonicalMemoryProjection(record, requireCompleteEnvelope)
+	return state, err
+}
+
 // ClassifyMemoryProjection performs the same fail-closed validation as
 // ValidateMemoryProjection and additionally reports the narrow compatibility
 // disposition used for pre-app-v23 terminal zero-hash records.
@@ -151,7 +178,18 @@ func (s *BadgerStore) ClassifyMemoryProjection(
 			ErrMemoryProjectionUnpublished, err,
 		)
 	}
-	return s.classifyMemoryProjection(record, requireCompleteEnvelope)
+	state, disposition, resultErr := s.classifyCanonicalMemoryProjection(
+		record,
+		requireCompleteEnvelope,
+	)
+	if resultErr == nil {
+		resultErr = s.applyMemoryTaintDisposition(record.MemoryID, &disposition)
+	}
+	s.observeMemoryProjectionDisposition(disposition)
+	if resultErr != nil {
+		return nil, disposition, resultErr
+	}
+	return state, disposition, nil
 }
 
 func (s *BadgerStore) appV25MemoryEnvelopeRequired(memoryID string) (bool, error) {
@@ -178,13 +216,10 @@ func (s *BadgerStore) appV25MemoryEnvelopeRequired(memoryID string) (bool, error
 	return found, nil
 }
 
-func (s *BadgerStore) classifyMemoryProjection(
+func (s *BadgerStore) classifyCanonicalMemoryProjection(
 	record *memory.MemoryRecord,
 	requireCompleteEnvelope bool,
 ) (projection *MemoryDisclosureState, disposition MemoryProjectionDisposition, resultErr error) {
-	defer func() {
-		s.observeMemoryProjectionDisposition(disposition)
-	}()
 	if s == nil || record == nil || record.MemoryID == "" {
 		return nil, MemoryProjectionUnpublished, fmt.Errorf(
 			"%w: missing store or record identity", ErrMemoryProjectionUnpublished,
@@ -204,25 +239,6 @@ func (s *BadgerStore) classifyMemoryProjection(
 		}
 		return nil, disposition, fmt.Errorf(
 			"%w: %w", ErrMemoryProjectionUnpublished, err,
-		)
-	}
-	verdict, err := s.ClassifyMemoryTaint(record.MemoryID)
-	if err != nil {
-		return nil, MemoryProjectionUnpublished, fmt.Errorf(
-			"%w: classify taint: %w",
-			ErrMemoryProjectionUnpublished, err,
-		)
-	}
-	switch verdict.Outcome {
-	case TaintServingTainted:
-		return nil, MemoryProjectionTainted, fmt.Errorf(
-			"%w: %w",
-			ErrMemoryProjectionUnpublished, ErrMemoryProjectionTainted,
-		)
-	case TaintServingPending:
-		return nil, MemoryProjectionTaintPending, fmt.Errorf(
-			"%w: %w",
-			ErrMemoryProjectionUnpublished, ErrMemoryProjectionTaintPending,
 		)
 	}
 	if requireCompleteEnvelope &&
@@ -282,6 +298,36 @@ func (s *BadgerStore) classifyMemoryProjection(
 		)
 	}
 	return state, MemoryProjectionExact, nil
+}
+
+func (s *BadgerStore) applyMemoryTaintDisposition(
+	memoryID string,
+	disposition *MemoryProjectionDisposition,
+) error {
+	verdict, err := s.ClassifyMemoryTaint(memoryID)
+	if err != nil {
+		*disposition = MemoryProjectionUnpublished
+		return fmt.Errorf(
+			"%w: classify taint: %w",
+			ErrMemoryProjectionUnpublished, err,
+		)
+	}
+	switch verdict.Outcome {
+	case TaintServingTainted:
+		*disposition = MemoryProjectionTainted
+		return fmt.Errorf(
+			"%w: %w",
+			ErrMemoryProjectionUnpublished, ErrMemoryProjectionTainted,
+		)
+	case TaintServingPending:
+		*disposition = MemoryProjectionTaintPending
+		return fmt.Errorf(
+			"%w: %w",
+			ErrMemoryProjectionUnpublished, ErrMemoryProjectionTaintPending,
+		)
+	default:
+		return nil
+	}
 }
 
 func legacyTerminalHashlessProjectionEligible(
