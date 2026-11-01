@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -1354,6 +1355,12 @@ func decodeSignedJSONResponse(resp *http.Response, respBody []byte, out any) err
 				ProblemStatus: problem.Status,
 				ContentType:   resp.Header.Get("Content-Type"),
 				StatusCode:    resp.StatusCode,
+				TaintState: appV30TaintStateFromProblem(
+					problem.Type,
+					problem.Status,
+					resp.Header.Get("Content-Type"),
+					resp.StatusCode,
+				),
 			}
 			definition, validWriteDenial := authzdenial.ValidateProblem(
 				problem.Type, authzdenial.Code(problem.ReasonCode), problem.Retryable,
@@ -1405,6 +1412,7 @@ type apiProblemError struct {
 	RetryableSet         bool
 	EffectiveWriteDenial bool
 	StatusCode           int
+	TaintState           string
 }
 
 func (e *apiProblemError) Error() string {
@@ -1419,7 +1427,27 @@ func (e *apiProblemError) Error() string {
 	if e.Remedy != "" {
 		message += " Remedy: " + e.Remedy
 	}
+	if e.TaintState != "" {
+		message += fmt.Sprintf(" [taint_state=%s]", e.TaintState)
+	}
 	return message
+}
+
+func appV30TaintStateFromProblem(problemType string, status *int, contentType string, httpStatus int) string {
+	mediaType, _, mediaErr := mime.ParseMediaType(contentType)
+	if httpStatus != http.StatusUnavailableForLegalReasons ||
+		status == nil || *status != http.StatusUnavailableForLegalReasons ||
+		mediaErr != nil || mediaType != "application/problem+json" {
+		return ""
+	}
+	switch problemType {
+	case "https://sage.dev/errors/memory-tainted":
+		return "tainted"
+	case "https://sage.dev/errors/memory-taint-pending":
+		return "taint_pending"
+	default:
+		return ""
+	}
 }
 
 func isAPIStatus(err error, statusCode int) bool {
