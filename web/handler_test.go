@@ -1295,6 +1295,7 @@ func TestTaskAssignmentDoesNotBypassAgentDomainAllowlist(t *testing.T) {
 
 func TestTaskNotificationRechecksRBACAfterAssignment(t *testing.T) {
 	h, s := newTestHandler(t)
+	h.BadgerStore = newGrantTestBadger(t)
 	r := testRouter(h)
 	insertTestTask(t, s, "reclassified-task", "work", "codex")
 	agentPub, agentPriv, err := ed25519pkg.GenerateKey(nil)
@@ -1303,6 +1304,10 @@ func TestTaskNotificationRechecksRBACAfterAssignment(t *testing.T) {
 	require.NoError(t, s.CreateAgent(context.Background(), &store.AgentEntry{
 		AgentID: agentID, Name: "agent-a", RegisteredName: "agent-a", Status: "active",
 	}))
+	// The legacy classification path still needs canonical authority to prove
+	// denial after reclassification. This member has no grant or org access.
+	require.NoError(t, h.BadgerStore.RegisterAgent(agentID, "agent-a", "member", "", "", "", 1))
+	require.NoError(t, h.BadgerStore.RegisterDomain("work", "author-agent", "", 1))
 
 	body := bytes.NewBufferString(fmt.Sprintf(`{"assignee":%q}`, agentID))
 	req := httptest.NewRequest(http.MethodPut, "/v1/dashboard/tasks/reclassified-task/assign", body)
@@ -1311,7 +1316,13 @@ func TestTaskNotificationRechecksRBACAfterAssignment(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	allowed, definitive := h.agentTaskReadDecision(context.Background(), agentID, "reclassified-task", "work")
+	require.True(t, allowed)
+	require.True(t, definitive)
 	require.NoError(t, s.UpdateMemoryClassification(context.Background(), "reclassified-task", store.ClearanceConfidential))
+	allowed, definitive = h.agentTaskReadDecision(context.Background(), agentID, "reclassified-task", "work")
+	require.False(t, allowed)
+	require.True(t, definitive, "the canonical authority proves denial rather than an unavailable lookup")
 
 	req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
 	require.Equal(t, agentID, signAgentGET(t, req, agentPriv))
@@ -1373,19 +1384,37 @@ func TestTaskNotificationTransientAuthorizationFailureDoesNotConsumeNotice(t *te
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
+	before, _, err := sqliteStore.PeekAgentNotificationPage(context.Background(), agentID, 5, "")
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+	require.Equal(t, "unread", before[0].State)
 	wrapped.failNext.Store(true)
-	for _, wantCount := range []int{0, 1} {
-		req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
-		signAgentGET(t, req, agentPriv)
-		w = httptest.NewRecorder()
-		r.ServeHTTP(w, req)
-		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-		var inbox struct {
-			Count int `json:"count"`
-		}
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &inbox))
-		require.Equal(t, wantCount, inbox.Count)
+	req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
+	signAgentGET(t, req, agentPriv)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	require.Contains(t, w.Body.String(), "task authorization state is unavailable")
+	require.False(t, wrapped.failNext.Load(), "the one-shot lookup failure has cleared")
+	notice, err := sqliteStore.GetAgentNotification(context.Background(), agentID, before[0].NotificationID)
+	require.NoError(t, err)
+	require.Equal(t, "unread", notice.State, "an unavailable authorization lookup must not consume the notice")
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/dashboard/task-notifications", nil)
+	signAgentGET(t, req, agentPriv)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var inbox struct {
+		Count int                        `json:"count"`
+		Items []*store.AgentNotification `json:"items"`
 	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &inbox))
+	require.Equal(t, 1, inbox.Count)
+	require.Len(t, inbox.Items, 1)
+	require.Equal(t, before[0].NotificationID, inbox.Items[0].NotificationID)
+	require.Equal(t, "retry-auth-task", inbox.Items[0].TaskID)
+	require.Equal(t, "unread", inbox.Items[0].State, "delivery remains passive until explicit acknowledgement")
 }
 
 func TestAgentTaskStatusRequiresActiveCurrentOwnerAndCannotReopen(t *testing.T) {

@@ -4461,6 +4461,10 @@ func (h *DashboardHandler) agentTaskRecordReadDecision(
 	}
 	canonical, err := h.BadgerStore.ValidateMemoryProjection(task)
 	if err != nil {
+		if errors.Is(err, store.ErrMemoryProjectionTainted) ||
+			errors.Is(err, store.ErrMemoryProjectionTaintPending) {
+			return false, true
+		}
 		return false, false
 	}
 	domain := task.DomainTag
@@ -4616,14 +4620,33 @@ func (h *DashboardHandler) handleTaskNotifications(w http.ResponseWriter, r *htt
 		writeError(w, 501, "passive task notices unavailable")
 		return
 	}
-	items, next, err := notices.PeekAgentNotificationPage(r.Context(), agentID, limit, cursor)
+	excludeTainted := h.appV30TaskTaintFilterEnabled(r.Context())
+	var items []*store.AgentNotification
+	var next string
+	var err error
+	if filtered, ok := h.store.(store.TaintAwareTaskNoticeInboxStore); ok && excludeTainted {
+		items, next, err = filtered.PeekAgentNotificationPageFiltered(
+			r.Context(), agentID, limit, cursor, true,
+		)
+	} else {
+		items, next, err = notices.PeekAgentNotificationPage(
+			r.Context(), agentID, limit, cursor,
+		)
+	}
 	if err != nil {
 		writeError(w, 503, "task notice inspection unavailable")
 		return
 	}
 	filtered := make([]*store.AgentNotification, 0, len(items))
 	for _, item := range items {
-		if allowed, _ := h.agentTaskReadDecision(r.Context(), agentID, item.TaskID, item.Domain); allowed {
+		allowed, definitive := h.agentTaskReadDecision(
+			r.Context(), agentID, item.TaskID, item.Domain,
+		)
+		if !allowed && !definitive {
+			writeError(w, 503, "task authorization state is unavailable; retry later")
+			return
+		}
+		if allowed {
 			filtered = append(filtered, item)
 		}
 	}
