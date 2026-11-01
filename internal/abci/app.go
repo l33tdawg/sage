@@ -4344,6 +4344,7 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 					return err
 				}
 				if proposal.Operation == governance.OpMemoryTaint &&
+					app.postAppV30Fork(req.Height) &&
 					proposal.CreatedHeight > app.appV30AppliedHeight {
 					_, err := app.validateAppV30TaintProposal(
 						proposal.TargetID,
