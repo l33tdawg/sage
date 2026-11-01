@@ -1,12 +1,63 @@
 package store
 
 import (
+	"crypto/sha256"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/memory"
+	"github.com/l33tdawg/sage/internal/tx"
 )
+
+func TestMemoryProjectionHidesEffectiveTaintAndRestoresOnClear(t *testing.T) {
+	badger, err := NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, badger.CloseBadger()) })
+
+	record := &memory.MemoryRecord{
+		MemoryID:        "tainted-memory",
+		SubmittingAgent: "agent-a",
+		Content:         "tainted canonical content",
+		ContentHash:     memory.ComputeContentHash("tainted canonical content"),
+		MemoryType:      memory.TypeFact,
+		DomainTag:       "research",
+		Status:          memory.StatusCommitted,
+	}
+	require.NoError(t, badger.SetMemoryHash(
+		record.MemoryID, record.ContentHash, string(record.Status),
+	))
+	require.NoError(t, badger.SetMemoryDomain(record.MemoryID, record.DomainTag))
+	require.NoError(t, badger.SetMemoryAuthor(record.MemoryID, record.SubmittingAgent))
+	require.NoError(t, badger.SetMemoryClassification(record.MemoryID, 1))
+	_, err = badger.ValidateMemoryProjection(record)
+	require.NoError(t, err)
+
+	target := tx.ParentRef{SourceChainID: "sage", MemoryID: record.MemoryID}
+	copy(target.ContentHash[:], record.ContentHash)
+	decisionID := strings.Repeat("d", 64)
+	created, err := badger.ApplyTaintDecision(
+		"sage",
+		decisionID,
+		target,
+		sha256.Sum256([]byte("taint payload")),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	_, disposition, err := badger.ClassifyMemoryProjection(record)
+	require.ErrorIs(t, err, ErrMemoryProjectionUnpublished)
+	require.ErrorIs(t, err, ErrMemoryProjectionTainted)
+	require.Equal(t, MemoryProjectionTainted, disposition)
+
+	cleared, err := badger.ClearTaintDecision(decisionID)
+	require.NoError(t, err)
+	require.True(t, cleared)
+	_, disposition, err = badger.ClassifyMemoryProjection(record)
+	require.NoError(t, err)
+	require.Equal(t, MemoryProjectionExact, disposition)
+}
 
 func TestValidateMemoryProjectionRequiresExactCanonicalEnvelope(t *testing.T) {
 	badger, err := NewBadgerStore(t.TempDir())

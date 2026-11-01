@@ -534,3 +534,25 @@ func TestTaintKeysParticipateInCanonicalProjectionHealth(t *testing.T) {
 	}
 	assert.False(t, isCanonicalMemoryProjectionKey([]byte("taintother")))
 }
+
+func TestTaintMutationsAdvanceCanonicalProjectionRevision(t *testing.T) {
+	s := openTaintStore(t)
+	decisionID := testTaintDecisionID("projection-revision")
+	target := testTaintParent("projection-target")
+	before := s.CanonicalMemoryProjectionRevision()
+	created, err := s.ApplyTaintDecision(
+		"sage",
+		decisionID,
+		target,
+		testTaintPayloadHash("projection-revision"),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	afterApply := s.CanonicalMemoryProjectionRevision()
+	assert.Greater(t, afterApply, before)
+
+	changed, err := s.ClearTaintDecision(decisionID)
+	require.NoError(t, err)
+	require.True(t, changed)
+	assert.Greater(t, s.CanonicalMemoryProjectionRevision(), afterApply)
+}

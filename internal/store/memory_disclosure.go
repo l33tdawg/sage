@@ -35,7 +35,15 @@ var ErrMemoryProjectionQuarantined = errors.New("memory projection is quarantine
 // exact reads still fail closed and infrastructure errors still fail globally.
 var ErrMemoryDisclosureCorrupt = errors.New("canonical memory disclosure is corrupt")
 
-// MemoryProjectionDisposition describes why a serving-layer row is publishable.
+// ErrMemoryProjectionTainted marks a canonical row withheld by an effective
+// app-v30 governance taint decision.
+var ErrMemoryProjectionTainted = errors.New("memory projection is tainted")
+
+// ErrMemoryProjectionTaintPending marks a row held because an incomplete taint
+// decision still covers an authenticated ancestor.
+var ErrMemoryProjectionTaintPending = errors.New("memory projection taint is pending")
+
+// MemoryProjectionDisposition describes a serving-layer row's publication state.
 // Only Exact and LegacyTerminalHashless are returned without an error.
 type MemoryProjectionDisposition string
 
@@ -53,6 +61,8 @@ const (
 	MemoryProjectionLegacyUnanchored MemoryProjectionDisposition = "legacy_unanchored"
 	MemoryProjectionQuarantined      MemoryProjectionDisposition = "quarantined"
 	MemoryProjectionUnpublished      MemoryProjectionDisposition = "unpublished"
+	MemoryProjectionTainted          MemoryProjectionDisposition = "tainted"
+	MemoryProjectionTaintPending     MemoryProjectionDisposition = "taint_pending"
 )
 
 // MemoryProjectionClassification is one row's exact result from a shared
@@ -194,6 +204,25 @@ func (s *BadgerStore) classifyMemoryProjection(
 		}
 		return nil, disposition, fmt.Errorf(
 			"%w: %w", ErrMemoryProjectionUnpublished, err,
+		)
+	}
+	verdict, err := s.ClassifyMemoryTaint(record.MemoryID)
+	if err != nil {
+		return nil, MemoryProjectionUnpublished, fmt.Errorf(
+			"%w: classify taint: %w",
+			ErrMemoryProjectionUnpublished, err,
+		)
+	}
+	switch verdict.Outcome {
+	case TaintServingTainted:
+		return nil, MemoryProjectionTainted, fmt.Errorf(
+			"%w: %w",
+			ErrMemoryProjectionUnpublished, ErrMemoryProjectionTainted,
+		)
+	case TaintServingPending:
+		return nil, MemoryProjectionTaintPending, fmt.Errorf(
+			"%w: %w",
+			ErrMemoryProjectionUnpublished, ErrMemoryProjectionTaintPending,
 		)
 	}
 	if requireCompleteEnvelope &&
