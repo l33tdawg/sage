@@ -29,6 +29,43 @@ permissions:
   contents: read
 
 jobs:
+  canonical-proofs:
+    name: App30 canonical replay and crash proofs (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Prove canonical bytes, committed activation replay and process-crash recovery
+        run: |
+          set -o pipefail
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+          mkdir -p output/fresh-v30-core-proof
+          git rev-parse HEAD | tee output/fresh-v30-core-proof/checkout.txt
+          python3 deploy/scripts/v11.9-source-id.py | tee output/fresh-v30-core-proof/source-id.txt
+          proof_tests='^(TestAppV30CanonicalStateAppHashGolden|TestAppV30CommittedReplayBoundary|TestAppV30SIGKILLProjectionAndTaintRecovery)$'
+          go test -race -tags=v119testfixture ./internal/abci -list "$proof_tests" | tee output/fresh-v30-core-proof/test-inventory.txt
+          for proof_test in TestAppV30CanonicalStateAppHashGolden TestAppV30CommittedReplayBoundary TestAppV30SIGKILLProjectionAndTaintRecovery; do
+            rg --fixed-strings --line-regexp --quiet "$proof_test" output/fresh-v30-core-proof/test-inventory.txt
+          done
+          go test -race -tags=v119testfixture ./internal/abci -run "$proof_tests" -count=1 -timeout=8m -v 2>&1 | tee output/fresh-v30-core-proof/run.log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: fresh-app-v30-core-proof-${{ matrix.arch }}
+          path: output/fresh-v30-core-proof
+          if-no-files-found: error
   network-state-sync:
     name: Fresh app30 authorized network state sync
     runs-on: ubuntu-24.04
