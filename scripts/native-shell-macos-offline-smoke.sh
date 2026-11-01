@@ -98,6 +98,40 @@ stop_exact_pid() {
   fi
 }
 
+require_shell_running() {
+  local pid=$1 expected=$2 phase=$3 actual status=0
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    wait "${pid}" 2>/dev/null || status=$?
+    echo "native shell exited unexpectedly ${phase} (pid ${pid}, status ${status})" >&2
+    return 1
+  fi
+  if ! jobs -pr | grep -qx "${pid}"; then
+    echo "native shell is not a running child ${phase} (pid ${pid})" >&2
+    return 1
+  fi
+  actual=$(process_path "${pid}")
+  if [ "${actual}" != "${expected}" ]; then
+    echo "native shell identity changed ${phase}: expected ${expected}, found ${actual:-<missing>}" >&2
+    return 1
+  fi
+}
+
+stop_shell() {
+  local pid=$1 expected=$2 status=0
+  require_shell_running "${pid}" "${expected}" 'before intentional shutdown'
+  stop_exact_pid "${pid}" "${expected}"
+  wait "${pid}" 2>/dev/null || status=$?
+  # Clean exit, TERM, and the bounded cleanup's KILL are intentional outcomes.
+  # A panic racing the final liveness check must still fail the smoke.
+  case "${status}" in
+    0|137|143) ;;
+    *)
+      echo "native shell exited unexpectedly during shutdown (pid ${pid}, status ${status})" >&2
+      return 1
+      ;;
+  esac
+}
+
 discover_daemon_pid() {
   python3 - "${SAGE_SMOKE_HOME}/run/shell-control.sock" 2>/dev/null <<'PY' || true
 import socket
@@ -301,10 +335,11 @@ STATUS=$(query_status)
 printf '%s\n' "${STATUS}" > "${DIAGNOSTICS}/offline-status.json"
 DAEMON_PID=$(printf '%s\n' "${STATUS}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["daemon_pid"])')
 track_pid "${DAEMON_PID}"
-kill -0 "${SHELL_PID}"
+require_shell_running "${SHELL_PID}" "${SHELL_EXECUTABLE}" 'after daemon readiness'
 
 # Settle: keep sampling after ready so a delayed phone-home is still caught.
 sleep 5
+require_shell_running "${SHELL_PID}" "${SHELL_EXECUTABLE}" 'after offline settle'
 
 kill -TERM "${SAMPLER_PID}" 2>/dev/null || true
 wait "${SAMPLER_PID}" 2>/dev/null || true
@@ -353,8 +388,7 @@ if offenders:
 print(f"offline socket sampling clean: {seen} socket observations, all loopback")
 PY
 
-stop_exact_pid "${SHELL_PID}" "${SHELL_EXECUTABLE}"
-wait "${SHELL_PID}" 2>/dev/null || true
+stop_shell "${SHELL_PID}" "${SHELL_EXECUTABLE}"
 stop_exact_pid "${DAEMON_PID}" ""
 
 echo "native-shell macOS offline smoke passed (no external sockets, daemon reached a renderable state)"

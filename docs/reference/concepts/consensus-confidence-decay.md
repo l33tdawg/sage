@@ -145,7 +145,7 @@ In single-node personal mode (`sage-gui serve`), the node's own auto-voter (`int
 
 ## AppHash and State Root
 
-`ComputeAppHash` (`internal/store/badger.go:1388+`) SHA-256 hashes all BadgerDB state in deterministic sorted-key order. This is the `AppHash` returned in `ResponseFinalizeBlock` and stored in every CometBFT block header. It provides tamper-evidence: any state modification outside the tx path would produce a mismatched AppHash and halt consensus.
+`ComputeAppHash` (`internal/store/badger.go:1394+`) SHA-256 hashes all BadgerDB state in deterministic sorted-key order. This is the `AppHash` returned in `ResponseFinalizeBlock` and stored in every CometBFT block header. It provides tamper-evidence: any state modification outside the tx path would produce a mismatched AppHash and halt consensus.
 
 ---
 
