@@ -352,6 +352,57 @@ func TestInheritTaintMembershipsUsesEffectiveParentDecisions(t *testing.T) {
 	assert.Equal(t, revisionBefore+1, revisionAfter)
 }
 
+func TestSameConsensusTransactionAdmitsNewTaintedParentAndChild(t *testing.T) {
+	base := openTaintStore(t)
+	parent := testTaintParent("same-block-parent")
+	child := testTaintParent("same-block-child")
+	decisionID := testTaintDecisionID("same-block")
+	scoped := base.BeginConsensusTransaction(nil)
+
+	require.NoError(t, scoped.SetMemoryHash(
+		parent.MemoryID,
+		parent.ContentHash[:],
+		"committed",
+	))
+	created, err := scoped.ApplyTaintDecision(
+		"sage",
+		decisionID,
+		parent,
+		testTaintPayloadHash("same-block"),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	require.NoError(t, scoped.SetMemoryHash(
+		child.MemoryID,
+		child.ContentHash[:],
+		"committed",
+	))
+	require.NoError(t, scoped.SetMemoryLineage(
+		child.MemoryID,
+		[]tx.ParentRef{parent},
+	))
+	inherited, err := scoped.InheritTaintMemberships(
+		"sage",
+		child.MemoryID,
+		[]tx.ParentRef{parent},
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, inherited.Decisions)
+
+	stagedDecisions, err := scoped.GetEffectiveTaintDecisions(child.MemoryID)
+	require.NoError(t, err)
+	require.Equal(t, []string{decisionID}, stagedDecisions)
+	require.NoError(t, scoped.CommitConsensusTransaction())
+
+	decisions, err := base.GetEffectiveTaintDecisions(child.MemoryID)
+	require.NoError(t, err)
+	require.Equal(t, []string{decisionID}, decisions)
+	lineage, err := base.GetMemoryLineage(child.MemoryID)
+	require.NoError(t, err)
+	require.Equal(t, []tx.ParentRef{parent}, lineage)
+}
+
 func TestInheritTaintMembershipsHonorsAdmissionBudgetBoundary(t *testing.T) {
 	s := openTaintStore(t)
 	parents := make([]tx.ParentRef, taint.MaxParents)
