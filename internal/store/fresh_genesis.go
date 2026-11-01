@@ -176,8 +176,9 @@ func (s *BadgerStore) BootstrapFreshGenesis(input FreshGenesisActivation) error 
 	})
 }
 
-// freshGenesisEntries defines the entire pristine keyspace. Replays compare
-// every key and value, so a partially initialized or contaminated image cannot
+// freshGenesisEntries defines the authenticated pristine keyspace. Replays
+// compare every key and value, apart from canonical empty bookkeeping, so a
+// partially initialized or contaminated image cannot
 // become a valid new chain merely by presenting the same manifest again.
 func freshGenesisEntries(input FreshGenesisActivation) (map[string][]byte, error) {
 	history, err := appV23NextRootHistoryDigest("", 1, input.RootID)
@@ -269,6 +270,19 @@ func (s *BadgerStore) validateFreshGenesisInitialTxn(txn *badger.Txn, input Fres
 		value, err := it.Item().ValueCopy(nil)
 		if err != nil {
 			return err
+		}
+		// Materializing the exact empty handshake tuple is equivalent to
+		// leaving it absent before block1. These three keys are excluded
+		// from AppHash; no other unbound state or tuple value is admissible.
+		switch key {
+		case "state:height", "state:epoch":
+			if len(value) == 8 && binary.BigEndian.Uint64(value) == 0 {
+				continue
+			}
+		case "state:app_hash":
+			if len(value) == 0 {
+				continue
+			}
 		}
 		want, ok := expected[key]
 		if !ok || !bytes.Equal(want, value) {
