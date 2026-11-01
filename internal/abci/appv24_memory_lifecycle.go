@@ -13,7 +13,7 @@ import (
 // activation block itself remains under app-v23 semantics so every historical
 // block and the activation block replay byte-identically.
 func (app *SageApp) postAppV24Fork(height int64) bool {
-	return app.appV24AppliedHeight > 0 && height > app.appV24AppliedHeight
+	return app.postFreshGenesisRules(24, height) || app.appV24AppliedHeight > 0 && height > app.appV24AppliedHeight
 }
 
 func (app *SageApp) postAppV24Rules(height int64) bool {

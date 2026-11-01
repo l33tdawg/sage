@@ -152,13 +152,18 @@ func InspectStateSyncRecoveryDirectory(ctx context.Context, path string) (uint64
 		_ = readOnly.CloseBadger()
 		return 0, nil, genesisErr
 	}
+	fresh, freshErr := readOnly.GetFreshGenesisActivation()
+	if freshErr != nil {
+		_ = readOnly.CloseBadger()
+		return 0, nil, freshErr
+	}
 	// A quarantine may legitimately be from any older supported app version.
 	// Pre-app-v12 AppHashes include bookkeeping that SaveState changes after
 	// FinalizeBlock, so they cannot be recomputed from the closed post-Commit DB.
 	// The persisted height/AppHash are still compared exactly with Comet by the
 	// recovery executor. Once app-v20 is active, apply its stronger narrow-hash
 	// and scoped-state checks as well.
-	if genesisV23 == nil &&
+	if genesisV23 == nil && fresh == nil &&
 		(appV20 == nil || appV20.TargetAppVersion != 20 ||
 			appV20.AppliedHeight <= 0 || state.Height <= appV20.AppliedHeight) {
 		closeErr := readOnly.CloseBadger()
@@ -305,7 +310,16 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 	if genesisErr != nil {
 		return 0, nil, fmt.Errorf("read %s app-v23 genesis activation: %w", label, genesisErr)
 	}
-	if genesisV23 != nil {
+	fresh, freshErr := badgerStore.GetFreshGenesisActivation()
+	if freshErr != nil {
+		return 0, nil, fmt.Errorf("read %s fresh genesis: %w", label, freshErr)
+	}
+	if fresh != nil {
+		probe := &SageApp{badgerStore: badgerStore, state: state}
+		if err := probe.validateFreshGenesisStateSync(); err != nil {
+			return 0, nil, fmt.Errorf("verify %s fresh genesis: %w", label, err)
+		}
+	} else if genesisV23 != nil {
 		if lineageErr := badgerStore.ValidateAppV23GenesisLineage(); lineageErr != nil {
 			return 0, nil, fmt.Errorf("verify %s app-v23 genesis lineage: %w", label, lineageErr)
 		}
@@ -347,12 +361,15 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 	if len(state.AppHash) != sha256.Size || !bytes.Equal(state.AppHash, computed) {
 		return 0, nil, fmt.Errorf("%s persisted AppHash does not match Badger state", label)
 	}
-	probe := &SageApp{badgerStore: badgerStore}
+	probe := &SageApp{badgerStore: badgerStore, state: state}
 	if _, governanceErr := probe.governanceDelegationDomain(); governanceErr != nil {
 		return 0, nil, fmt.Errorf("verify %s governance delegation domain: %w", label, governanceErr)
 	}
 	if _, scopedErr := probe.VerifyScopedCanonicalState(); scopedErr != nil {
 		return 0, nil, fmt.Errorf("verify %s scoped state: %w", label, scopedErr)
+	}
+	if fresh != nil {
+		return uint64(state.Height), computed, nil // #nosec G115 -- positive height checked above
 	}
 	appV23, upgradeErr := badgerStore.GetAppliedUpgrade(appV23UpgradeName)
 	if upgradeErr != nil {
@@ -492,6 +509,83 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 		if appV28.AppliedHeight <= appV27.AppliedHeight {
 			return 0, nil, fmt.Errorf("%s app-v28 activation does not follow app-v27", label)
 		}
+		if err := badgerStore.ValidatePublicMemoryStage(); err != nil {
+			return 0, nil, err
+		}
+		if err := badgerStore.ValidateCoCommitTombstoneStage(); err != nil {
+			return 0, nil, err
+		}
+	}
+	previous := appV28
+	for _, next := range []struct {
+		name    string
+		version uint64
+	}{{appV29UpgradeName, 29}, {appV30UpgradeName, 30}} {
+		record, err := badgerStore.GetAppliedUpgrade(next.name)
+		if err != nil {
+			return 0, nil, err
+		}
+		if record == nil {
+			previous = nil
+			continue
+		}
+		if record.Name != next.name || record.TargetAppVersion != next.version || record.AppliedHeight <= 0 || state.Height < record.AppliedHeight || previous == nil || record.AppliedHeight <= previous.AppliedHeight {
+			return 0, nil, fmt.Errorf("%s has invalid active %s record or predecessor", label, next.name)
+		}
+		if next.version == 30 {
+			if err := badgerStore.ValidateLineageIndexes(); err != nil {
+				return 0, nil, err
+			}
+			if err := badgerStore.ValidateTaintState(); err != nil {
+				return 0, nil, err
+			}
+		}
+		previous = record
 	}
 	return uint64(state.Height), computed, nil // #nosec G115 -- positive int64 checked above
+}
+
+// validateFreshGenesisStateSync verifies the actual origin and every later
+// governed edge. An origin substitutes only for its immediate successor's
+// predecessor; missing later upgrade records are never invented.
+func (app *SageApp) validateFreshGenesisStateSync() error {
+	if err := app.refreshAppV23Fork(); err != nil {
+		return err
+	}
+	for _, fork := range []struct {
+		refresh  func() error
+		validate func() error
+	}{
+		{app.refreshAppV24Fork, app.validateAppV24Prerequisite},
+		{app.refreshAppV25Fork, app.validateAppV25Prerequisite},
+		{app.refreshAppV26Fork, app.validateAppV26Prerequisite},
+		{app.refreshAppV27Fork, app.validateAppV27Prerequisite},
+		{app.refreshAppV28Fork, app.validateAppV28Prerequisite},
+		{app.refreshAppV29Fork, app.validateAppV29Prerequisite},
+		{app.refreshAppV30Fork, app.validateAppV30Prerequisite},
+	} {
+		if err := fork.refresh(); err != nil {
+			return err
+		}
+		if err := fork.validate(); err != nil {
+			return err
+		}
+	}
+	if app.freshGenesisAppVersion >= 28 || app.appV28AppliedHeight > 0 {
+		if err := app.badgerStore.ValidatePublicMemoryStage(); err != nil {
+			return err
+		}
+		if err := app.badgerStore.ValidateCoCommitTombstoneStage(); err != nil {
+			return err
+		}
+	}
+	if app.freshGenesisAppVersion >= 30 || app.appV30AppliedHeight > 0 {
+		if err := app.badgerStore.ValidateLineageIndexes(); err != nil {
+			return err
+		}
+		if err := app.badgerStore.ValidateTaintState(); err != nil {
+			return err
+		}
+	}
+	return nil
 }

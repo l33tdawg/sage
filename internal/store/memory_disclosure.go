@@ -201,7 +201,13 @@ func (s *BadgerStore) appV25MemoryEnvelopeRequired(memoryID string) (bool, error
 		return false, err
 	}
 	if applied == nil {
-		return false, nil
+		fresh, err := s.GetFreshGenesisActivation()
+		if err != nil {
+			return false, err
+		}
+		// A fresh-v25+ origin has no historical corpus eligible for the
+		// compatibility projection, and carries no synthetic applied record.
+		return fresh != nil && fresh.AppVersion >= 25, nil
 	}
 	// app-v25 records the first consensus submission height for every memory
 	// born under its rules. That AppHash-covered marker is the safe disclosure

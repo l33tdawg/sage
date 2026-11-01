@@ -691,6 +691,8 @@ type SageApp struct {
 	// dual-signed genesis activation marker. It is separate from applied-height
 	// upgrades because a v23-born chain has no historical activation block.
 	appV23GenesisActive bool
+	// freshGenesisAppVersion is the authenticated origin version, never an applied upgrade.
+	freshGenesisAppVersion uint64
 
 	// retainBlocks, when > 0, is the number of most-recent blocks Commit asks
 	// CometBFT to keep: ResponseCommit.RetainHeight = height - retainBlocks
@@ -2717,19 +2719,19 @@ func restoredValidatorInfo(id string, power int64) *validator.ValidatorInfo {
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
-	case app.appV30AppliedHeight > 0:
+	case app.appV30AppliedHeight > 0 || app.freshGenesisAppVersion >= 30:
 		return 30 // app-v30 (authenticated lineage and taint) — highest gate
-	case app.appV29AppliedHeight > 0:
+	case app.appV29AppliedHeight > 0 || app.freshGenesisAppVersion >= 29:
 		return 29 // app-v29 (architecture-independent PoE math) — highest gate
-	case app.appV28AppliedHeight > 0:
+	case app.appV28AppliedHeight > 0 || app.freshGenesisAppVersion >= 28:
 		return 28 // app-v28 (public-memory commitment + consensus co-commit rule) — highest gate
-	case app.appV27AppliedHeight > 0:
+	case app.appV27AppliedHeight > 0 || app.freshGenesisAppVersion >= 27:
 		return 27 // app-v27 (shared-author lifecycle + task proof normalization) — highest gate
-	case app.appV26AppliedHeight > 0:
+	case app.appV26AppliedHeight > 0 || app.freshGenesisAppVersion >= 26:
 		return 26 // app-v26 (consensus-backed Access Group authority) — highest gate
-	case app.appV25AppliedHeight > 0:
+	case app.appV25AppliedHeight > 0 || app.freshGenesisAppVersion >= 25:
 		return 25 // app-v25 (governed legacy-memory adoption) — highest gate
-	case app.appV24AppliedHeight > 0:
+	case app.appV24AppliedHeight > 0 || app.freshGenesisAppVersion >= 24:
 		return 24 // app-v24 (hash-preserving terminal memory lifecycle) — highest gate
 	case app.appV23GenesisActive:
 		return 23 // dual-signed first-party chains are born at app-v23
@@ -2828,6 +2830,11 @@ func (app *SageApp) SetExpectedGovernanceDelegationDomain(chainID string) error 
 		return err
 	}
 	if app.badgerStore != nil {
+		if fresh, freshErr := app.badgerStore.GetFreshGenesisActivation(); freshErr != nil {
+			return freshErr
+		} else if fresh != nil && fresh.Scope != domain {
+			return fmt.Errorf("fresh genesis scope does not match runtime chain %q", chainID)
+		}
 		if genesis, genesisErr := app.badgerStore.GetAppV23GenesisActivation(); genesisErr != nil {
 			return fmt.Errorf("read app-v23 genesis lineage: %w", genesisErr)
 		} else if genesis != nil && genesis.Scope != domain {
@@ -3259,15 +3266,23 @@ func (app *SageApp) InitChain(_ context.Context, req *abcitypes.RequestInitChain
 	app.runtimeViewMu.Lock()
 	defer app.runtimeViewMu.Unlock()
 
-	// A direct-v23 manifest is a fail-closed genesis contract, unlike the
+	// Signed direct-genesis manifests are fail-closed contracts, unlike the
 	// best-effort legacy initial_admin seed. Validate it before touching either
 	// the in-memory validator set or Badger so a rejected InitChain cannot leave
 	// stale validators behind for a corrected retry.
+	fresh, freshErr := prevalidateFreshGenesisRequest(req)
+	if freshErr != nil {
+		return nil, freshErr
+	}
 	if err := prevalidateAppV23GenesisRequest(req); err != nil {
 		return nil, err
 	}
 
-	if appV23GenesisManifestFromRequest(req) != nil {
+	if fresh != nil {
+		if err := app.bootstrapFreshGenesis(req, *fresh); err != nil {
+			return nil, err
+		}
+	} else if appV23GenesisManifestFromRequest(req) != nil {
 		// Direct-v23 persists the exact singleton validator atomically with its
 		// marker and policy state. Mirror it in memory only after that durable
 		// transaction succeeds, so a rejected dirty-store Init leaves no retry
@@ -3306,26 +3321,26 @@ func (app *SageApp) InitChain(_ context.Context, req *abcitypes.RequestInitChain
 	app.logger.Info().Int("validators", app.validators.Size()).Msg("chain initialized")
 
 	response := &abcitypes.ResponseInitChain{}
-	if app.appV23GenesisActive {
+	if app.appV23GenesisActive || app.freshGenesisAppVersion > 0 {
 		// CometBFT calls Info before InitChain on a fresh database. InitChain's
 		// consensus-parameter response is the protocol-defined point that
 		// changes that initial state from the constructor's version to the
-		// dual-signed genesis version before block 1 can be proposed.
+		// signed genesis version before block 1 can be proposed.
 		response.ConsensusParams = &cmtproto.ConsensusParams{
-			Version: &cmtproto.VersionParams{App: AppV23GenesisAppVersion},
+			Version: &cmtproto.VersionParams{App: app.currentAppVersion()},
 		}
-		appHash, hashErr := app.badgerStore.ComputeAppHashExcludingBookkeeping()
+		appHash, hashErr := computeAppHashForRule(app.badgerStore, selectAppHashRule(1, app.appHashRuleInputsFromApp()))
 		if hashErr != nil {
-			return nil, fmt.Errorf("compute app-v23 genesis AppHash: %w", hashErr)
+			return nil, fmt.Errorf("compute signed genesis AppHash: %w", hashErr)
 		}
 		// ResponseInitChain.AppHash is CometBFT's height-0 consensus state.
 		// Do not mirror it into the application's state:app_hash bookkeeping
 		// tuple. Existing recovery and state-sync invariants require the
 		// application tuple to remain height=0/hash=empty until block 1 commits.
 		// A crash before that commit safely re-runs InitChain and deterministically
-		// recomputes this exact narrow hash from the atomic genesis marker/state.
+		// recomputes the selected AppHash from the atomic genesis marker/state.
 		if syncErr := app.badgerStore.DB().Sync(); syncErr != nil {
-			return nil, fmt.Errorf("sync app-v23 genesis state: %w", syncErr)
+			return nil, fmt.Errorf("sync signed genesis state: %w", syncErr)
 		}
 		response.AppHash = appHash
 	}
@@ -3904,6 +3919,7 @@ func (app *SageApp) cloneForAppV20Finalize(scopedStore *store.BadgerStore) *Sage
 		appV29AppliedHeight:      app.appV29AppliedHeight,
 		appV30AppliedHeight:      app.appV30AppliedHeight,
 		appV23GenesisActive:      app.appV23GenesisActive,
+		freshGenesisAppVersion:   app.freshGenesisAppVersion,
 		retainBlocks:             app.retainBlocks,
 		expectedGovernanceDomain: app.expectedGovernanceDelegationDomain(),
 		expectedConsensusChainID: app.expectedConsensusChainIDValue(),
@@ -3911,6 +3927,7 @@ func (app *SageApp) cloneForAppV20Finalize(scopedStore *store.BadgerStore) *Sage
 	if notifier := app.syncNotifier.Load(); notifier != nil {
 		clone.syncNotifier.Store(notifier)
 	}
+	clone.govEngine.SetMemoryTaintGenesisActive(clone.freshGenesisAppVersion >= 30)
 	return clone
 }
 
@@ -3955,6 +3972,8 @@ func (app *SageApp) publishAppV20FinalizeLocked(clone *SageApp) {
 	app.appV29AppliedHeight = clone.appV29AppliedHeight
 	app.appV30AppliedHeight = clone.appV30AppliedHeight
 	app.appV23GenesisActive = clone.appV23GenesisActive
+	app.freshGenesisAppVersion = clone.freshGenesisAppVersion
+	app.govEngine.SetMemoryTaintGenesisActive(app.freshGenesisAppVersion >= 30)
 }
 
 // publishAppV20Finalize is retained for tests and other already-committed
@@ -4248,6 +4267,7 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 	var govErr error
 	postAppV20Governance := app.postAppV20Fork(req.Height)
 	app.govEngine.SetMemoryTaintActivationHeight(app.appV30AppliedHeight)
+	app.govEngine.SetMemoryTaintGenesisActive(app.freshGenesisAppVersion >= 30)
 	freezeValidatorReconfiguration := app.appV20PendingPlanFreezesValidatorReconfiguration()
 	var target20ProposalBefore *governance.ProposalState
 	if strictV20Rules {
@@ -10557,7 +10577,7 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 	pendingAtomic := app.pendingAppV20Finalize
 	if pendingAtomic != nil {
 		working = pendingAtomic.app
-	} else if app.appV20AppliedHeight > 0 && app.state != nil && app.state.Height >= app.appV20AppliedHeight {
+	} else if app.state != nil && (app.freshGenesisAppVersion >= 20 || app.appV20AppliedHeight > 0 && app.state.Height >= app.appV20AppliedHeight) {
 		panic("sage: Commit called without a matching post-app-v20 FinalizeBlock")
 	}
 	atomicPublished := pendingAtomic == nil

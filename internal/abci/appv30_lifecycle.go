@@ -5,7 +5,7 @@ import "fmt"
 // postAppV30Fork is the strict H+1 boundary for authenticated lineage,
 // provenance, taint admission, and taint consensus state.
 func (app *SageApp) postAppV30Fork(height int64) bool {
-	return app.appV30AppliedHeight > 0 && height > app.appV30AppliedHeight
+	return app.postFreshGenesisRules(30, height) || app.appV30AppliedHeight > 0 && height > app.appV30AppliedHeight
 }
 
 // IsAppV30ActiveForNextTx reports whether a transaction admitted now will
@@ -43,6 +43,9 @@ func (app *SageApp) refreshAppV30Fork() error {
 }
 
 func (app *SageApp) validateAppV30Predecessor() (int64, error) {
+	if app.freshGenesisAppVersion == 29 {
+		return 0, nil
+	}
 	if app.appV29AppliedHeight <= 0 {
 		return 0, fmt.Errorf("missing active %s predecessor", appV29UpgradeName)
 	}
@@ -65,7 +68,7 @@ func (app *SageApp) validateAppV30Prerequisite() error {
 	if err != nil {
 		return fmt.Errorf("applied %s has invalid predecessor: %w", appV30UpgradeName, err)
 	}
-	if app.appV30AppliedHeight <= predecessorHeight {
+	if predecessorHeight > 0 && app.appV30AppliedHeight <= predecessorHeight {
 		return fmt.Errorf(
 			"applied %s height %d must be after applied %s predecessor height %d",
 			appV30UpgradeName, app.appV30AppliedHeight,
@@ -76,7 +79,7 @@ func (app *SageApp) validateAppV30Prerequisite() error {
 }
 
 func (app *SageApp) validateAppV30RecoveryState() error {
-	if app.appV30AppliedHeight <= 0 {
+	if app.appV30AppliedHeight <= 0 && app.freshGenesisAppVersion < 30 {
 		return nil
 	}
 	inserted, err := app.badgerStore.RebuildLineageReverseIndex()

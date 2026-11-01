@@ -11,6 +11,7 @@ const (
 	OrgNameIndexBackfillProgress          = "migration:index:v1:org_name"
 	AppV23MigrationState                  = "appv23:migration_state"
 	AppV23GenesisActivation               = "appv23:genesis_activation"
+	FreshGenesisActivation                = "genesis:activation:v1"
 	GovernanceDelegationDomainV20         = "governance_delegation_domain_v20"
 )
 

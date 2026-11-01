@@ -12,7 +12,7 @@ import (
 // and the consensus-side co-commit tombstone rule. The activation block at H
 // still runs under app-v27 rules; both v28 rules apply only from H+1.
 func (app *SageApp) postAppV28Fork(height int64) bool {
-	return app.appV28AppliedHeight > 0 && height > app.appV28AppliedHeight
+	return app.postFreshGenesisRules(28, height) || app.appV28AppliedHeight > 0 && height > app.appV28AppliedHeight
 }
 
 func (app *SageApp) postAppV28Rules(height int64) bool {
@@ -50,6 +50,9 @@ func (app *SageApp) refreshAppV28Fork() error {
 }
 
 func (app *SageApp) validateAppV28Predecessor() (int64, error) {
+	if app.freshGenesisAppVersion == 27 {
+		return 0, nil
+	}
 	if app.appV27AppliedHeight <= 0 {
 		return 0, fmt.Errorf("missing active %s predecessor", appV27UpgradeName)
 	}
@@ -72,7 +75,7 @@ func (app *SageApp) validateAppV28Prerequisite() error {
 	if err != nil {
 		return fmt.Errorf("applied %s has invalid predecessor: %w", appV28UpgradeName, err)
 	}
-	if app.appV28AppliedHeight <= predecessorHeight {
+	if predecessorHeight > 0 && app.appV28AppliedHeight <= predecessorHeight {
 		return fmt.Errorf(
 			"applied %s height %d must be after applied %s predecessor height %d",
 			appV28UpgradeName, app.appV28AppliedHeight,
@@ -171,7 +174,7 @@ func (app *SageApp) promoteAppV28Indexes(height int64) error {
 // BEFORE that marker was written, later in the same block — needs the explicit
 // fold.
 func (app *SageApp) syncAppV28IndexesForBlock(height int64) error {
-	if app.appV28AppliedHeight <= 0 || height < app.appV28AppliedHeight {
+	if !app.postFreshGenesisRules(28, height) && (app.appV28AppliedHeight <= 0 || height < app.appV28AppliedHeight) {
 		return nil
 	}
 	if err := app.badgerStore.SyncPublicMemoryChanges(); err != nil {

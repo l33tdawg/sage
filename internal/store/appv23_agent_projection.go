@@ -45,10 +45,12 @@ func ReconcileAppV23AgentProjectionsForPreV26Recovery(
 func (s *BadgerStore) ValidateAppV23StateForPreV26ProjectionRecovery() error {
 	return s.view(func(txn *badger.Txn) error {
 		var v25 AppliedUpgradeRecord
-		if err := appV23ReadJSON(txn, upgradeAppliedKey("app-v25"), &v25); err != nil {
-			return errors.New("pre-app-v26 agent projection requires valid applied app-v25")
-		}
-		if v25.Name != "app-v25" || v25.TargetAppVersion != 25 || v25.AppliedHeight <= 0 {
+		if err := appV23ReadJSON(txn, upgradeAppliedKey("app-v25"), &v25); errors.Is(err, badger.ErrKeyNotFound) {
+			var fresh FreshGenesisActivation
+			if err := appV23ReadJSON(txn, freshGenesisActivationKey(), &fresh); err != nil || ValidateFreshGenesisActivation(fresh) != nil || fresh.AppVersion != 25 {
+				return errors.New("pre-app-v26 agent projection requires valid app-v25 origin")
+			}
+		} else if err != nil || v25.Name != "app-v25" || v25.TargetAppVersion != 25 || v25.AppliedHeight <= 0 {
 			return errors.New("pre-app-v26 agent projection requires valid applied app-v25")
 		}
 		if _, err := txn.Get(upgradeAppliedKey("app-v26")); err == nil {
