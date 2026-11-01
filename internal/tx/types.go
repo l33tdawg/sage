@@ -86,6 +86,10 @@ const (
 	TxTypeAgentRoleChange      TxType = 37
 	TxTypeAccessGroupMutate    TxType = 38
 	TxTypeRootCredentialRotate TxType = 39
+	// TxTypeMemoryTaintWork advances one already-accepted app-v30 taint
+	// decision. It adds no authority and is bounded by the same per-execution
+	// unit budget as the governance kickoff.
+	TxTypeMemoryTaintWork TxType = 40
 )
 
 // LocalElevationProof is the node-local CEREBRUM countersignature required
@@ -717,6 +721,26 @@ type RootCredentialRotate struct {
 	NewCredentialSignature []byte
 }
 
+type MemoryTaintWorkKind uint8
+
+const (
+	MemoryTaintWorkExpand  MemoryTaintWorkKind = 1
+	MemoryTaintWorkCleanup MemoryTaintWorkKind = 2
+)
+
+// MemoryTaintWork binds a permissionless continuation request to the exact
+// persisted cursor observed by the caller.
+type MemoryTaintWork struct {
+	Version      uint8
+	Kind         MemoryTaintWorkKind
+	DecisionID   string
+	Generation   uint64
+	FrontierHead uint64
+	CleanupPhase uint8
+	ParentRefID  string
+	Cursor       string
+}
+
 // ParsedTx is the top-level transaction envelope.
 type ParsedTx struct {
 	Type                 TxType
@@ -759,6 +783,7 @@ type ParsedTx struct {
 	AgentRoleChange      *AgentRoleChange
 	AccessGroupMutate    *AccessGroupMutate
 	RootCredentialRotate *RootCredentialRotate
+	MemoryTaintWork      *MemoryTaintWork
 	Signature            []byte // Node validator Ed25519 signature (64 bytes)
 	PublicKey            []byte // Node validator Ed25519 public key (32 bytes)
 	Nonce                uint64

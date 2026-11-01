@@ -474,6 +474,11 @@ func encodePayload(tx *ParsedTx) ([]byte, error) {
 			return nil, fmt.Errorf("RootCredentialRotate is nil for root credential rotate tx")
 		}
 		return encodeRootCredentialRotate(tx.RootCredentialRotate), nil
+	case TxTypeMemoryTaintWork:
+		if tx.MemoryTaintWork == nil {
+			return nil, fmt.Errorf("MemoryTaintWork is nil for taint work tx")
+		}
+		return encodeMemoryTaintWork(tx.MemoryTaintWork)
 	default:
 		return nil, ErrUnknownTxType
 	}
@@ -753,6 +758,13 @@ func decodePayload(tx *ParsedTx, data []byte) error {
 			return err
 		}
 		tx.RootCredentialRotate = r
+		return nil
+	case TxTypeMemoryTaintWork:
+		w, err := decodeMemoryTaintWork(data)
+		if err != nil {
+			return err
+		}
+		tx.MemoryTaintWork = w
 		return nil
 	default:
 		return ErrUnknownTxType

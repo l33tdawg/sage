@@ -116,5 +116,12 @@
   "docs/reference/rest-api.md|handlePipeSend|api/rest/pipe_handler.go#0": "decl",
   "docs/reference/rest-api.md|InsertPipeline|internal/store/sqlite.go#0": "decl",
   "docs/reference/rest-api.md|handlePipeResult|api/rest/pipe_handler.go#0": "decl",
-  "docs/reference/rest-api.md|CompletePipeline|sqlite.go#0": "decl"
+  "docs/reference/rest-api.md|CompletePipeline|sqlite.go#0": "decl",
+  "docs/reference/concepts/app-v30-taint-payloads.md|EncodeTaintApplyPayload|internal/tx/taint.go#0": "decl",
+  "docs/reference/concepts/app-v30-taint-payloads.md|EncodeTaintClearPayload|internal/tx/taint.go#0": "decl",
+  "docs/reference/concepts/app-v30-taint-payloads.md|TaintApplyDecisionID|internal/tx/taint.go#0": "decl",
+  "docs/reference/concepts/app-v30-taint-payloads.md|TaintClearTargetID|internal/tx/taint.go#0": "decl",
+  "docs/reference/concepts/app-v30-taint-payloads.md|validateTaintApplyPayload|internal/tx/taint.go#0": "decl",
+  "docs/reference/concepts/app-v30-taint-payloads.md|validateTaintClearPayload|internal/tx/taint.go#0": "decl",
+  "docs/reference/concepts/app-v30-taint-payloads.md|DecodeTaintApplyPayload|internal/tx/taint.go#0": "decl"
 }
