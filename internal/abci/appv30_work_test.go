@@ -10,6 +10,7 @@ import (
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -130,6 +131,70 @@ func TestMemoryTaintWorkRunsInsideMeteredAppV30Stage(t *testing.T) {
 	require.Equal(t, uint64(1), header.FrontierHead)
 	require.EqualValues(t, 1, working.appV30WorkTxCount)
 	require.Zero(t, working.badgerStore.AppV30WriteStageStats())
+}
+
+func TestMemoryTaintCursorStaysSpeculativeUntilCommit(t *testing.T) {
+	app, root, target, chainID := setupAppV30TaintGovernance(t)
+	decisionID := strings.Repeat("8", taint.DecisionIDBytes)
+	created, err := app.badgerStore.ApplyTaintDecision(
+		chainID,
+		decisionID,
+		target,
+		sha256.Sum256([]byte("crash-before-commit taint work payload")),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	before, err := app.badgerStore.TaintRevision()
+	require.NoError(t, err)
+
+	work := &tx.MemoryTaintWork{
+		Version:      tx.MemoryTaintWorkVersion,
+		Kind:         tx.MemoryTaintWorkExpand,
+		DecisionID:   decisionID,
+		Generation:   1,
+		FrontierHead: 0,
+	}
+	parsed := makeMemoryTaintWorkTx(t, root, work, 1)
+
+	// FinalizeBlock stages the cursor advance, but a crash before ABCI Commit
+	// discards the entire speculative transaction.
+	scoped := app.badgerStore.BeginConsensusTransaction(nil)
+	working := app.cloneForAppV20Finalize(scoped)
+	result := working.processMemoryTaintWork(parsed, 20)
+	require.Equal(t, uint32(0), result.Code, result.Log)
+	stagedHeader, found, err := working.badgerStore.GetTaintDecision(decisionID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, taint.StatusComplete, stagedHeader.Status)
+	scoped.DiscardConsensusTransaction()
+
+	durableHeader, found, err := app.badgerStore.GetTaintDecision(decisionID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, taint.StatusExpanding, durableHeader.Status)
+	require.Equal(t, uint64(0), durableHeader.FrontierHead)
+	after, err := app.badgerStore.TaintRevision()
+	require.NoError(t, err)
+	require.Equal(t, before, after, "an uncommitted cursor must not advance canonical taint revision")
+
+	// Deterministic replay from the same durable cursor commits exactly once.
+	replayStore := app.badgerStore.BeginConsensusTransaction(nil)
+	replay := app.cloneForAppV20Finalize(replayStore)
+	replayed := replay.processMemoryTaintWork(parsed, 20)
+	require.Equal(t, uint32(0), replayed.Code, replayed.Log)
+	require.NoError(t, replayStore.CommitConsensusTransaction())
+	replayedHeader, found, err := app.badgerStore.GetTaintDecision(decisionID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, taint.StatusComplete, replayedHeader.Status)
+	require.Equal(t, before+1, mustTaintRevision(t, app.badgerStore))
+}
+
+func mustTaintRevision(t *testing.T, s *store.BadgerStore) uint64 {
+	t.Helper()
+	revision, err := s.TaintRevision()
+	require.NoError(t, err)
+	return revision
 }
 
 func TestMemoryTaintWorkAdvancesCleanup(t *testing.T) {
