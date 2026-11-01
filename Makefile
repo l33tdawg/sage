@@ -124,6 +124,9 @@ bench-locomo: bench-locomo-fetch ## Run full LoCoMo benchmark; writes bench/resu
 bench-taint: ## Measure governance taint constants (stand-in over Badger); writes bench/results/taint-<sha>-<goarch>.json
 	go run ./cmd/sage-taint-bench -out bench/results/taint-$$(git rev-parse --short HEAD)-$$(go env GOARCH).json $(BENCH_ARGS)
 
+bench-taint-real: ## Exercise real app-v30 taint code; writes bench/results/taint-real-<sha>-<goarch>.json
+	go run ./cmd/sage-taint-realbench -out bench/results/taint-real-$$(git rev-parse --short HEAD)-$$(go env GOARCH).json $(BENCH_ARGS)
+
 sdk-test: ## Run Python SDK tests
 	cd sdk/python && pip install -e ".[dev]" && pytest -v
 
