@@ -56,6 +56,28 @@ func TestSubmitMemoryRejectsExplicitEmptyDerivedFromBeforeAppV30Gate(t *testing.
 	require.Contains(t, recorder.Body.String(), "between 1 and 16")
 }
 
+func TestSubmitMemoryRejectsCrossChainDerivedFromAtEdge(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	srv.SetPostV30ForNextTxAccessor(func() bool { return true })
+	srv.SetGovernanceDomainAccessor(func() string { return "local-chain" })
+	body := []byte(`{
+		"content":"lineage child",
+		"memory_type":"fact",
+		"domain_tag":"general",
+		"confidence_score":0.9,
+		"derived_from":[{
+			"source_chain_id":"remote-chain",
+			"memory_id":"parent-a",
+			"content_hash":"` + strings.Repeat("a", 64) + `"
+		}]
+	}`)
+	req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+	recorder := httptest.NewRecorder()
+	srv.Router().ServeHTTP(recorder, req)
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "local consensus chain ID")
+}
+
 func TestSubmitMemoryCarriesDerivedFromOnlyAfterAppV30(t *testing.T) {
 	hash := strings.Repeat("a", 64)
 	var captured *tx.MemorySubmit

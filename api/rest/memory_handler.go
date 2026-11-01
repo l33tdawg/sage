@@ -1313,6 +1313,16 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid derived_from lineage", err.Error())
 		return
 	}
+	if len(derivedFrom) > 0 && s.governanceDomainFn != nil {
+		localChainID := s.governanceDomainFn()
+		for _, parent := range derivedFrom {
+			if localChainID != "" && parent.SourceChainID != localChainID {
+				writeProblem(w, http.StatusBadRequest, "Invalid derived_from lineage",
+					"source_chain_id must equal the local consensus chain ID; cross-chain refs are not active in app-v30.")
+				return
+			}
+		}
+	}
 	explicitTaskIdempotency := req.IdempotencyKey != ""
 	if explicitTaskIdempotency {
 		if validationErr := taskidempotency.ValidateKey(req.IdempotencyKey); validationErr != nil {
