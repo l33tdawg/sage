@@ -4217,6 +4217,7 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 	var activeProposalBefore *governance.ProposalState
 	var govErr error
 	postAppV20Governance := app.postAppV20Fork(req.Height)
+	app.govEngine.SetMemoryTaintActivationHeight(app.appV30AppliedHeight)
 	freezeValidatorReconfiguration := app.appV20PendingPlanFreezesValidatorReconfiguration()
 	var target20ProposalBefore *governance.ProposalState
 	if strictV20Rules {
@@ -4276,6 +4277,17 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 					)
 					return err
 				}
+				if proposal.Operation == governance.OpMemoryTaint &&
+					proposal.CreatedHeight > app.appV30AppliedHeight {
+					_, err := app.validateAppV30TaintProposal(
+						proposal.TargetID,
+						proposal.TargetPubKey,
+						proposal.TargetPower,
+						proposal.Payload,
+						req.Height,
+					)
+					return err
+				}
 				if !isValidatorSetGovernanceOperation(proposal.Operation) {
 					return nil
 				}
@@ -4295,7 +4307,9 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 					proposal.Operation == governance.OpMemoryLegacyAdopt &&
 						appV25MemoryLegacyAdoptionBusinessStateDrift(validationErr) ||
 					proposal.Operation == governance.OpDomainContinuityAdopt &&
-						appV25DomainContinuityBusinessStateDrift(validationErr)
+						appV25DomainContinuityBusinessStateDrift(validationErr) ||
+					proposal.Operation == governance.OpMemoryTaint &&
+						errors.Is(validationErr, errAppV30TaintStateDrift)
 			},
 		)
 	} else {
@@ -11545,6 +11559,20 @@ func (app *SageApp) processGovPropose(parsedTx *tx.ParsedTx, height int64, _ tim
 			return &abcitypes.ExecTxResult{Code: 72, Log: "governance propose: invalid OpScopeAction: " + scopeErr.Error()}
 		}
 	}
+	if app.postAppV20Fork(height) && op == governance.OpMemoryTaint {
+		if !app.postAppV30Fork(height) {
+			return &abcitypes.ExecTxResult{Code: 72, Log: fmt.Sprintf("governance propose: unknown operation %d", op)}
+		}
+		if _, taintErr := app.validateAppV30TaintProposal(
+			gp.TargetID,
+			gp.TargetPubKey,
+			gp.TargetPower,
+			gp.Payload,
+			height,
+		); taintErr != nil {
+			return &abcitypes.ExecTxResult{Code: 72, Log: "governance propose: invalid OpMemoryTaint: " + taintErr.Error()}
+		}
+	}
 	if app.postAppV20Fork(height) {
 		if isValidatorSetGovernanceOperation(op) {
 			if validatorErr := app.validateAppV20ValidatorOperation(op, gp.TargetID, gp.TargetPubKey, gp.TargetPower); validatorErr != nil {
@@ -11558,7 +11586,8 @@ func (app *SageApp) processGovPropose(parsedTx *tx.ParsedTx, height int64, _ tim
 				governance.OpScopeAction,
 				governance.OpMemoryHashReanchor,
 				governance.OpMemoryLegacyAdopt,
-				governance.OpDomainContinuityAdopt:
+				governance.OpDomainContinuityAdopt,
+				governance.OpMemoryTaint:
 				// Each known non-validator operation has its own validation and/or
 				// intentionally inert attestation semantics.
 			case governance.OpUpgrade:
@@ -11571,7 +11600,8 @@ func (app *SageApp) processGovPropose(parsedTx *tx.ParsedTx, height int64, _ tim
 
 	autoVote := op != governance.OpMemoryHashReanchor &&
 		op != governance.OpMemoryLegacyAdopt &&
-		op != governance.OpDomainContinuityAdopt
+		op != governance.OpDomainContinuityAdopt &&
+		(op != governance.OpMemoryTaint || !app.postAppV30Fork(height))
 	var proposalID string
 	var propErr error
 	switch {
@@ -12927,6 +12957,11 @@ func (app *SageApp) applyGovernanceProposal(proposal *governance.ProposalState, 
 	if proposal.Operation == governance.OpDomainContinuityAdopt && app.postAppV25Rules(height) {
 		return nil, app.applyDomainContinuityAdoption(proposal, height)
 	}
+	if proposal.Operation == governance.OpMemoryTaint &&
+		app.postAppV30Fork(height) &&
+		proposal.CreatedHeight > app.appV30AppliedHeight {
+		return nil, app.applyAppV30TaintProposal(proposal, height)
+	}
 
 	// app-v20: quorum execution directly installs the exact scope record voted
 	// on by validators. Dispatch before validator pubkey derivation because the
@@ -13166,6 +13201,8 @@ func opToString(op governance.ProposalOp) string {
 		return appV25MemoryLegacyAdoptionOperationName
 	case governance.OpDomainContinuityAdopt:
 		return appV25DomainContinuityOperationName
+	case governance.OpMemoryTaint:
+		return "memory_taint"
 	default:
 		return fmt.Sprintf("unknown_%d", op)
 	}
@@ -13185,6 +13222,9 @@ func (app *SageApp) governanceOperationName(op governance.ProposalOp, height int
 		return fmt.Sprintf("unknown_%d", op)
 	}
 	if op == governance.OpDomainContinuityAdopt && !app.postAppV25Rules(height) {
+		return fmt.Sprintf("unknown_%d", op)
+	}
+	if op == governance.OpMemoryTaint && !app.postAppV30Fork(height) {
 		return fmt.Sprintf("unknown_%d", op)
 	}
 	return opToString(op)
