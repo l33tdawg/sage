@@ -231,6 +231,13 @@ func compareResults(paths []string) error {
 		if !result.Invariants.Passed {
 			return fmt.Errorf("%s has failed invariants", path)
 		}
+		computed, err := deterministicDigest(&result)
+		if err != nil {
+			return fmt.Errorf("recompute digest for %s: %w", path, err)
+		}
+		if result.DeterministicDigest != computed {
+			return fmt.Errorf("%s deterministic digest does not match its evidence", path)
+		}
 		results = append(results, result)
 	}
 	if results[0].Profile != results[1].Profile {

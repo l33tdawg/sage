@@ -64,11 +64,19 @@ func TestCompareRealBenchRequiresBothArchitecturesAndMatchingDigest(t *testing.T
 	arm.Machine.GOARCH = "arm64"
 	amd := base
 	amd.Machine.GOARCH = "amd64"
+	digest, err := deterministicDigest(&arm)
+	require.NoError(t, err)
+	arm.DeterministicDigest = digest
+	amd.DeterministicDigest = digest
 	armPath := writeTestResult(t, arm)
 	amdPath := writeTestResult(t, amd)
 	require.NoError(t, compareResults([]string{armPath, amdPath}))
 
-	amd.DeterministicDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	amd.Scenarios = []scenarioResult{{
+		Deterministic: deterministicScenario{Name: "scope", Units: 164},
+	}}
+	amd.DeterministicDigest, err = deterministicDigest(&amd)
+	require.NoError(t, err)
 	mismatchPath := writeTestResult(t, amd)
 	require.ErrorContains(t, compareResults([]string{armPath, mismatchPath}), "digest mismatch")
 }
