@@ -3414,6 +3414,9 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 			agentID, rec, time.Now(),
 		)
 		if disclosureErr != nil {
+			if writeAppV30TaintProjectionProblem(w, disclosureErr) {
+				return
+			}
 			writeProblem(w, http.StatusServiceUnavailable, "Authorization unavailable",
 				"Memory authorization state is unavailable; retry later.")
 			return
