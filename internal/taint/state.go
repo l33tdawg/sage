@@ -15,6 +15,7 @@ const (
 	MaxServingAncestorWalk   = 256
 	MaxDepth                 = 64
 	PerExecutionUnitBudget   = 1024
+	MaxAdmissionTaintUnits   = 625
 	MaxNewMembershipsPerExec = 204
 	MaxExpansionMemberships  = 16384
 	MaxPerBlockBytes         = 4 << 20
