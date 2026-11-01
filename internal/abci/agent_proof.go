@@ -380,6 +380,8 @@ func governanceProposalOpFromRequest(value string, dashboard bool) (tx.GovPropos
 		return tx.GovOpMemoryLegacyAdopt, nil
 	case appV25DomainContinuityOperationName:
 		return tx.GovOpDomainContinuityAdopt, nil
+	case "memory_taint":
+		return tx.GovOpMemoryTaint, nil
 	}
 	return 0, fmt.Errorf("operation %q is not supported by this governance route", value)
 }

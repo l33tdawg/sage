@@ -32,13 +32,20 @@ type ValidatorProvider interface {
 
 // Engine is the governance engine that manages validator proposals and voting.
 type Engine struct {
-	store      GovStore
-	validators ValidatorProvider
+	store                       GovStore
+	validators                  ValidatorProvider
+	memoryTaintActivationHeight int64
 }
 
 // NewEngine creates a new governance engine.
 func NewEngine(store GovStore, validators ValidatorProvider) *Engine {
 	return &Engine{store: store, validators: validators}
+}
+
+// SetMemoryTaintActivationHeight supplies the consensus app-v30 activation
+// height used only to choose a proposal's immutable quorum threshold.
+func (e *Engine) SetMemoryTaintActivationHeight(height int64) {
+	e.memoryTaintActivationHeight = height
 }
 
 func isAppV25MaintenanceOperation(op ProposalOp) bool {
@@ -668,7 +675,13 @@ func (e *Engine) processBlock(
 
 	// Check quorum. Op-aware so OpDomainReassign uses 3/4 supermajority
 	// while validator-set ops keep the historical 2/3.
-	passed, rejected, _, _, _ := CheckGovQuorumOp(votes, powers, proposal.Operation)
+	passed, rejected, _, _, _ := CheckGovQuorumAt(
+		votes,
+		powers,
+		proposal.Operation,
+		proposal.CreatedHeight,
+		e.memoryTaintActivationHeight,
+	)
 
 	if passed {
 		if preExecute != nil {
