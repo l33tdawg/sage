@@ -1,20 +1,30 @@
 package abci
 
 import (
+	"errors"
 	"fmt"
 
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
 const (
 	appV30BlockWriteBudgetBytes  int64 = 4 << 20
-	appV30MembershipTripleBytes  int64 = 1_784
+	appV30MembershipTripleBytes  int64 = 1_852
 	appV30HeaderMaxBytes         int64 = 1_172
+	appV30TargetAnchorBytes      int64 = 721
 	appV30GeneratedOverheadBytes int64 = 4 << 10
 	appV30SubmitOverheadBytes    int64 = 13_191
 	appV30MaxCleanupMemberPairs        = 340
+	// One carried taint proposal can execute after the current transactions.
+	// Clear is the larger of the corrected Apply/Clear allowances.
+	appV30PendingGovernanceBytes = appV30GeneratedOverheadBytes +
+		int64(appV30MaxCleanupMemberPairs)*appV30MembershipTripleBytes +
+		appV30HeaderMaxBytes
 )
+
+var errAppV30GeneratedWriteBudgetExceeded = errors.New("app-v30 generated-write budget exceeded")
 
 const (
 	appV30GeneratedWriteBudgetCode uint32 = 115
@@ -45,7 +55,7 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 			}
 			// Admission inheritance is bounded independently at 32 decisions.
 			for i := 0; i < taint.MaxActiveDecisions; i++ {
-				membershipKey := int64(len("taintm:")) + childBytes + 1 + 64
+				membershipKey := int64(len("taintm:")) + 2 + childBytes + 1 + 64
 				indexKey := int64(len("taintd:")) + 64 + 1 + childBytes
 				estimate += membershipKey + 11 + indexKey
 			}
@@ -65,7 +75,7 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 		case tx.TaintActionApply:
 			return appV30GeneratedOverheadBytes +
 				int64(taint.MaxNewMembershipsPerExec)*appV30MembershipTripleBytes +
-				appV30HeaderMaxBytes
+				appV30HeaderMaxBytes + appV30TargetAnchorBytes
 		case tx.TaintActionClear:
 			return appV30GeneratedOverheadBytes +
 				int64(appV30MaxCleanupMemberPairs)*appV30MembershipTripleBytes +
@@ -104,15 +114,38 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 
 const appV30ProvenanceSignerBytes int64 = 64 + 64 + 8 + 1
 
+// appV30PendingGovernanceReservation reads only the canonical pre-block view.
+// It does not forecast votes/status or execute governance while planning.
+func (app *SageApp) appV30PendingGovernanceReservation(height int64) (int64, error) {
+	if !app.postAppV30Fork(height) {
+		return 0, nil
+	}
+	if app.govEngine == nil {
+		return 0, fmt.Errorf("app-v30 pending governance: engine is unavailable")
+	}
+	proposal, err := app.govEngine.GetActiveProposal()
+	if err != nil {
+		return 0, fmt.Errorf("app-v30 pending governance: %w", err)
+	}
+	if proposal == nil || proposal.Operation != governance.OpMemoryTaint ||
+		proposal.CreatedHeight <= app.appV30AppliedHeight {
+		return 0, nil
+	}
+	return appV30PendingGovernanceBytes, nil
+}
+
 func (app *SageApp) appV30BlockGeneratedWriteEstimate(txs [][]byte, height int64) (int64, error) {
 	if !app.postAppV30Fork(height) {
 		return 0, nil
 	}
-	var total int64
+	total, err := app.appV30PendingGovernanceReservation(height)
+	if err != nil {
+		return 0, err
+	}
 	for _, rawTx := range txs {
 		estimate := app.appV30EstimatedTxBytes(rawTx, height)
 		if estimate > appV30BlockWriteBudgetBytes-total {
-			return 0, fmt.Errorf("app-v30 generated writes exceed %d bytes", appV30BlockWriteBudgetBytes)
+			return 0, fmt.Errorf("%w: limit %d bytes", errAppV30GeneratedWriteBudgetExceeded, appV30BlockWriteBudgetBytes)
 		}
 		total += estimate
 	}
@@ -135,12 +168,15 @@ func (app *SageApp) appV30EstimatedTxBytes(rawTx []byte, height int64) int64 {
 	return appV30GeneratedWriteEstimate(parsed)
 }
 
-func (app *SageApp) selectAppV30Proposal(txs [][]byte, height int64) [][]byte {
+func (app *SageApp) selectAppV30Proposal(txs [][]byte, height int64) ([][]byte, error) {
 	if !app.postAppV30Fork(height) {
-		return txs
+		return txs, nil
+	}
+	total, err := app.appV30PendingGovernanceReservation(height)
+	if err != nil {
+		return nil, err
 	}
 	selected := make([][]byte, 0, len(txs))
-	var total int64
 	for _, rawTx := range txs {
 		estimate := app.appV30EstimatedTxBytes(rawTx, height)
 		if estimate > appV30BlockWriteBudgetBytes-total {
@@ -149,5 +185,5 @@ func (app *SageApp) selectAppV30Proposal(txs [][]byte, height int64) [][]byte {
 		selected = append(selected, rawTx)
 		total += estimate
 	}
-	return selected
+	return selected, nil
 }

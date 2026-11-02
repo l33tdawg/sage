@@ -671,6 +671,7 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 
 // handleGetPending handles GET /v1/validator/pending.
 func (s *Server) handleGetPending(w http.ResponseWriter, r *http.Request) {
+	readScope := newAppV23StrictReadScope()
 	domainTag := r.URL.Query().Get("domain_tag")
 	limitStr := r.URL.Query().Get("limit")
 
@@ -719,13 +720,13 @@ func (s *Server) handleGetPending(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if s.isPostV23ForNextTx() {
 		if pager, ok := s.store.(store.PendingMemoryPageStore); ok {
-			records, err = s.collectAppV23VisibleRecords(
+			records, err = s.collectAppV23VisibleRecordsScoped(
 				r.Context(), agentID, limit,
 				func(ctx context.Context, pageLimit, offset int) ([]*memory.MemoryRecord, error) {
 					return pager.GetPendingByDomainPage(
 						ctx, domainTag, pageLimit, offset,
 					)
-				},
+				}, readScope,
 			)
 		} else {
 			// Compatibility fallback for external MemoryStore implementations.
@@ -759,8 +760,8 @@ func (s *Server) handleGetPending(w http.ResponseWriter, r *http.Request) {
 		kept := records[:0]
 		for _, rec := range records {
 			if s.isPostV23ForNextTx() {
-				disclosure, disclosureErr := s.evaluateAppV23RecordDisclosure(
-					agentID, rec, now,
+				disclosure, disclosureErr := s.evaluateAppV23RecordDisclosureScoped(
+					agentID, rec, now, readScope,
 				)
 				if disclosureErr != nil {
 					if isUnsafeAppV23Projection(disclosureErr) {
