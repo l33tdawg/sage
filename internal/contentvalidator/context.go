@@ -22,6 +22,9 @@ type FunctionAuthorityResult struct {
 	Allowed  bool
 }
 
+// FunctionAuthorizer returns the decision in Allowed. A nil error does not
+// authorize the request: callers must require Allowed and the exact echoed
+// function/domain/subject. An error means the decision could not be evaluated.
 type FunctionAuthorizer func(FunctionAuthorityRequest) (FunctionAuthorityResult, error)
 
 // ValidationContext is created for each executing submission. Its authorizer
@@ -35,9 +38,9 @@ type ValidationContext struct {
 
 type ContextContentValidator func(*memory.MemoryRecord, ValidationContext) error
 
-// RegisterContextContentValidator is boot-only, like RegisterContentValidator.
-// A legacy validator must also be registered for replay before adoption.
-func (r *ContentValidatorRegistry) RegisterContextContentValidator(domain, outcomeClass string, validator ContextContentValidator) {
+// registerContextContentValidator is used only by function registration, so no
+// exported contextual-only registration can silently omit its dispatch binding.
+func (r *ContentValidatorRegistry) registerContextContentValidator(domain, outcomeClass string, validator ContextContentValidator) {
 	if r.contextual == nil {
 		r.contextual = make(map[validatorKey]ContextContentValidator)
 	}
@@ -46,9 +49,16 @@ func (r *ContentValidatorRegistry) RegisterContextContentValidator(domain, outco
 
 // RegisterFunctionContentValidator binds a contextual schema to the canonical
 // function whose future policy selects it. Existing validators remain the
-// replay path before that policy's activation height.
+// replay path before that policy's activation height. A missing legacy replay
+// validator is a boot configuration error, not a closed-domain pass-through.
 func (r *ContentValidatorRegistry) RegisterFunctionContentValidator(domain, outcomeClass, function string, validator ContextContentValidator) {
-	r.RegisterContextContentValidator(domain, outcomeClass, validator)
+	if r == nil || r.m[validatorKey{domain: domain, outcomeClass: outcomeClass}] == nil {
+		panic("content validator: function registration requires a non-nil legacy replay validator")
+	}
+	if function == "" {
+		panic("content validator: function registration requires a function name")
+	}
+	r.registerContextContentValidator(domain, outcomeClass, validator)
 	if r.contextFunctions == nil {
 		r.contextFunctions = make(map[validatorKey]string)
 	}

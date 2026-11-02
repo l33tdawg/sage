@@ -6,6 +6,8 @@ import (
 	"math"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/l33tdawg/sage/internal/domainname"
 )
 
 // TxTypeFunctionAuthority is dormant until the app-v31 consensus boundary.
@@ -40,8 +42,8 @@ func ValidateFunctionAuthority(a *FunctionAuthority) error {
 			return errors.New("invalid function authority function")
 		}
 	}
-	if len(a.Domain) == 0 || len(a.Domain) > 512 || !utf8.ValidString(a.Domain) {
-		return errors.New("invalid function authority domain")
+	if err := domainname.Validate(a.Domain); err != nil {
+		return err
 	}
 	if len(a.Scope) == 0 || len(a.Scope) > 512 || !utf8.ValidString(a.Scope) {
 		return errors.New("invalid function authority scope")

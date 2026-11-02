@@ -228,6 +228,7 @@ func authorityRegistryWithoutFunction(mode string) *contentvalidator.ContentVali
 	case "wrong-function":
 		registry.RegisterFunctionContentValidator(authorityTestDomain, authorityTestOutcome, "other-function", func(*memory.MemoryRecord, contentvalidator.ValidationContext) error { return nil })
 	case "wrong-domain":
+		registry.RegisterContentValidator("other-domain", authorityTestOutcome, func(*memory.MemoryRecord) error { return nil })
 		registry.RegisterFunctionContentValidator("other-domain", authorityTestOutcome, authorityTestFunction, func(*memory.MemoryRecord, contentvalidator.ValidationContext) error { return nil })
 	case "nil-context":
 		registry.RegisterFunctionContentValidator(authorityTestDomain, authorityTestOutcome, authorityTestFunction, nil)
@@ -334,19 +335,24 @@ func TestFunctionAuthorityRootRotationRequiresFreshDesignation(t *testing.T) {
 	// Reassign under the real new current Root, then submit in the same scoped
 	// block. The new designation must be visible there and persist only at Commit.
 	f.root = replacement
+	assignRoot := f.control(t, f.root, authorityAssign(currentRoot.CredentialID, 0))
 	reassignment := f.control(t, f.root, authorityAssign(f.member.id, 1))
 	restoredSubmit, _ := f.submit(t, f.member)
 	response = finalizeAndCommit(t, f.app, &abcitypes.RequestFinalizeBlock{
-		Height: 71, Time: appV23BlockTime(), Txs: [][]byte{reassignment, restoredSubmit},
+		Height: 71, Time: appV23BlockTime(), Txs: [][]byte{assignRoot, reassignment, restoredSubmit},
 	})
-	for _, result := range response.TxResults {
+	require.NotZero(t, response.TxResults[0].Code, "even the current Root cannot designate its current credential as an ordinary function producer")
+	rootDesignation, err := f.app.badgerStore.GetFunctionDesignation(authorityTestFunction, authorityTestDomain, currentRoot.CredentialID)
+	require.NoError(t, err)
+	require.Nil(t, rootDesignation)
+	for _, result := range response.TxResults[1:] {
 		require.Zero(t, result.Code, result.Log)
 	}
 	designation, err = f.app.badgerStore.GetFunctionDesignation(authorityTestFunction, authorityTestDomain, f.member.id)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), designation.RootGeneration)
 	require.Equal(t, uint64(2), designation.Revision)
-	_, _, err = f.app.badgerStore.GetMemoryHash(string(response.TxResults[1].Data))
+	_, _, err = f.app.badgerStore.GetMemoryHash(string(response.TxResults[2].Data))
 	require.NoError(t, err)
 }
 

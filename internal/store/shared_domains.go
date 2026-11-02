@@ -1,14 +1,12 @@
 package store
 
 import (
-	"errors"
-	"fmt"
 	"strings"
-	"unicode"
-	"unicode/utf8"
+
+	"github.com/l33tdawg/sage/internal/domainname"
 )
 
-const appV23MaxDomainNameBytes = 512
+const appV23MaxDomainNameBytes = domainname.MaxBytes
 
 // ValidateAppV23DomainName validates a domain before it can participate in an
 // app-v23 consensus mutation. Domain and grant keys historically use ':' as a
@@ -20,30 +18,7 @@ const appV23MaxDomainNameBytes = 512
 // app-v23 tightens only ambiguous/control syntax rather than changing the
 // established domain vocabulary.
 func ValidateAppV23DomainName(name string) error {
-	if name == "" {
-		return errors.New("domain name is empty")
-	}
-	if len(name) > appV23MaxDomainNameBytes {
-		return fmt.Errorf("domain name exceeds %d bytes", appV23MaxDomainNameBytes)
-	}
-	if !utf8.ValidString(name) {
-		return errors.New("domain name is not valid UTF-8")
-	}
-	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") ||
-		strings.Contains(name, "..") {
-		return errors.New("domain name has an empty dotted segment")
-	}
-	for _, r := range name {
-		switch {
-		case r == ':':
-			return errors.New("domain name contains reserved delimiter ':'")
-		case unicode.IsSpace(r):
-			return errors.New("domain name contains whitespace")
-		case unicode.IsControl(r):
-			return errors.New("domain name contains a control character")
-		}
-	}
-	return nil
+	return domainname.Validate(name)
 }
 
 // sharedDomainsLocal mirrors the reserved catch-all domain names that the ABCI

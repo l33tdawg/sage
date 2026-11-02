@@ -58,7 +58,7 @@ func (app *SageApp) processFunctionAuthority(parsed *tx.ParsedTx, height int64, 
 		}
 		if a.Action == "assign" {
 			_, enrollment, role, targetErr := app.appV23Actor(a.Subject)
-			if targetErr != nil || enrollment == nil || role == nil || a.Subject == root.PrincipalID ||
+			if targetErr != nil || enrollment == nil || role == nil || a.Subject == root.PrincipalID || a.Subject == root.CredentialID ||
 				(role.Role != store.AppV23RoleMember && role.Role != store.AppV23RoleManager) {
 				return appV23ControlDenied()
 			}

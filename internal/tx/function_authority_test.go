@@ -3,6 +3,7 @@ package tx
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"math"
 	"strings"
 	"testing"
@@ -124,4 +125,47 @@ func TestFunctionAuthorityRefusesNoncanonicalFields(t *testing.T) {
 		})
 	}
 	require.Error(t, ValidateFunctionAuthority(nil))
+}
+
+// The signed wire and shared REST decoder must reject the same ambiguous
+// domains as canonical domain/grant storage, before any consensus broadcast.
+func TestFunctionAuthorityDomainLexicalContract(t *testing.T) {
+	for _, domain := range []string{
+		":", "parent:child", ".leading", "trailing.", "empty..segment",
+		"has space", "has\ttab", "has\nnewline", "has\u00a0space", "has\x00control",
+		string([]byte{0xff}), strings.Repeat("a", 513), strings.Repeat("é", 257),
+	} {
+		t.Run("invalid_"+domain, func(t *testing.T) {
+			a := functionAuthorityFixture()
+			a.Domain = domain
+			require.Error(t, ValidateFunctionAuthority(&a))
+			_, err := encodeFunctionAuthority(&a)
+			require.Error(t, err)
+			require.Nil(t, FunctionAuthorityActionBytes(&a))
+			// encoding/json replaces malformed UTF-8; test the actual binary
+			// string above rather than pretending that replacement preserves it.
+			if domain != string([]byte{0xff}) {
+				body, err := json.Marshal(a)
+				require.NoError(t, err)
+				_, err = DecodeFunctionAuthorityRequest(body)
+				require.Error(t, err)
+			}
+		})
+	}
+	for _, domain := range []string{"technical/hardware", "研发.笔记", strings.Repeat("a", 512), strings.Repeat("é", 256)} {
+		t.Run("valid_"+domain, func(t *testing.T) {
+			a := functionAuthorityFixture()
+			a.Domain = domain
+			wire, err := encodeFunctionAuthority(&a)
+			require.NoError(t, err)
+			decoded, err := decodeFunctionAuthority(wire)
+			require.NoError(t, err)
+			require.Equal(t, a, *decoded)
+			body, err := json.Marshal(a)
+			require.NoError(t, err)
+			fromRequest, err := DecodeFunctionAuthorityRequest(body)
+			require.NoError(t, err)
+			require.Equal(t, a, *fromRequest)
+		})
+	}
 }
