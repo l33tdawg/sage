@@ -208,10 +208,9 @@ func (s *BadgerStore) classifyMemoryProjection(
 	}
 	verdict, err := s.ClassifyMemoryTaint(record.MemoryID)
 	if err != nil {
-		return nil, MemoryProjectionUnpublished, fmt.Errorf(
-			"%w: classify taint: %w",
-			ErrMemoryProjectionUnpublished, err,
-		)
+		// A failed read or bounded ancestor walk has not established a
+		// record-local denial. Preserve the error so broad readers fail too.
+		return nil, MemoryProjectionUnpublished, fmt.Errorf("classify taint: %w", err)
 	}
 	switch verdict.Outcome {
 	case TaintServingTainted:
