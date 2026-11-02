@@ -106,8 +106,13 @@ type QueueEntry struct {
 
 var errState = errors.New("invalid taint state")
 
+// DecisionPrefix is the existing canonical decision-header namespace.
+func DecisionPrefix() []byte {
+	return []byte("taintdec:")
+}
+
 func DecisionKey(decisionID string) []byte {
-	return []byte("taintdec:" + decisionID)
+	return append(DecisionPrefix(), decisionID...)
 }
 
 // TargetKey retains immutable target history after expansion and cleanup.

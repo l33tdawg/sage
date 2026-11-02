@@ -131,6 +131,11 @@ func (s *authorizationMutationHookState) acquire() (
 
 // BadgerStore manages on-chain state in BadgerDB.
 type BadgerStore struct {
+	// Process-local serving cache and explicit read-scope trust; never consensus data.
+	taintServingCache         *taintServingStatusCache
+	taintServingCommittedRead bool
+	taintServingReadOnly      bool
+
 	db                  *badger.DB
 	publicMemoryChanged map[string]struct{}
 
@@ -220,6 +225,9 @@ func (s *BadgerStore) view(fn func(*badger.Txn) error) error {
 // typed store method remains its own deterministic mutation boundary, but none
 // of those boundaries becomes durable until CommitConsensusTransaction.
 func (s *BadgerStore) update(fn func(*badger.Txn) error) error {
+	if s.taintServingReadOnly {
+		return badger.ErrReadOnlyTxn
+	}
 	if s.txn == nil {
 		if s.projectionPublicationGate != nil {
 			s.projectionPublicationGate.Lock()
@@ -483,6 +491,7 @@ func (s *BadgerStore) BeginConsensusTransaction(mutationHook func(int)) *BadgerS
 		appV23StageFaultHook:              s.appV23StageFaultHook,
 		authorizationMutationHooks:        s.authorizationMutationHooks,
 		canonicalMemoryProjectionHealth:   s.canonicalMemoryProjectionHealth,
+		taintServingCache:                 s.taintServingCache,
 		canonicalMemoryProjectionRevision: s.canonicalMemoryProjectionRevision,
 		graphAuthorizationRevision:        s.graphAuthorizationRevision,
 		projectionPublicationGate:         s.projectionPublicationGate,
@@ -565,6 +574,7 @@ func (s *BadgerStore) WithOrderedPublicationBarrier(
 		appV23MigrationMu:                 s.appV23MigrationMu,
 		appV23StageFaultHook:              s.appV23StageFaultHook,
 		canonicalMemoryProjectionHealth:   s.canonicalMemoryProjectionHealth,
+		taintServingCache:                 s.taintServingCache,
 		canonicalMemoryProjectionRevision: s.canonicalMemoryProjectionRevision,
 		graphAuthorizationRevision:        s.graphAuthorizationRevision,
 		projectionPublicationGate:         s.projectionPublicationGate,
@@ -674,6 +684,9 @@ func (s *BadgerStore) CommitConsensusTransactionWithPublication(
 	beforeCommit func() error,
 	publish func(),
 ) error {
+	if s.taintServingReadOnly {
+		return badger.ErrReadOnlyTxn
+	}
 	if s.txn == nil {
 		return errors.New("store: no consensus transaction to commit")
 	}
@@ -770,7 +783,7 @@ func (s *BadgerStore) ConsensusTransactionError() error {
 // DiscardConsensusTransaction drops every staged mutation. It is idempotent so
 // panic/error cleanup may call it unconditionally.
 func (s *BadgerStore) DiscardConsensusTransaction() {
-	if s == nil || s.txn == nil {
+	if s == nil || s.taintServingReadOnly || s.txn == nil {
 		return
 	}
 	s.txn.Discard()
@@ -809,6 +822,7 @@ func NewBadgerStore(path string) (*BadgerStore, error) {
 		appV23MigrationMu:                 &sync.Mutex{},
 		authorizationMutationHooks:        &authorizationMutationHookState{},
 		canonicalMemoryProjectionHealth:   newCanonicalMemoryProjectionHealthTracker(),
+		taintServingCache:                 newTaintServingStatusCache(db),
 		canonicalMemoryProjectionRevision: &atomic.Uint64{},
 		graphAuthorizationRevision:        &atomic.Uint64{},
 		projectionPublicationGate:         &sync.RWMutex{},
@@ -851,6 +865,7 @@ func OpenBadgerStoreReadOnly(path string) (*BadgerStore, error) {
 		db: db, domainOwnershipGate: &sync.RWMutex{},
 		authorizationMutationHooks:        &authorizationMutationHookState{},
 		canonicalMemoryProjectionHealth:   newCanonicalMemoryProjectionHealthTracker(),
+		taintServingCache:                 newTaintServingStatusCache(db),
 		canonicalMemoryProjectionRevision: &atomic.Uint64{},
 		graphAuthorizationRevision:        &atomic.Uint64{},
 		projectionPublicationGate:         &sync.RWMutex{},
@@ -883,6 +898,7 @@ func OpenBadgerStoreWithoutMigrations(path string) (*BadgerStore, error) {
 		db: db, domainOwnershipGate: &sync.RWMutex{},
 		authorizationMutationHooks:        &authorizationMutationHookState{},
 		canonicalMemoryProjectionHealth:   newCanonicalMemoryProjectionHealthTracker(),
+		taintServingCache:                 newTaintServingStatusCache(db),
 		canonicalMemoryProjectionRevision: &atomic.Uint64{},
 		graphAuthorizationRevision:        &atomic.Uint64{},
 		projectionPublicationGate:         &sync.RWMutex{},
