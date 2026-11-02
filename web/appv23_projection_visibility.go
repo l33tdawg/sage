@@ -662,11 +662,11 @@ func (h *DashboardHandler) AuditAppV23CanonicalMemoryProjection(
 	return err
 }
 
-// walkAppV23CanonicalDashboardRecords pages deterministically through one SQL
-// result set and validates each row before passing it to visit. It deliberately
-// returns no raw count: even aggregate metadata must be derived only from
-// canonically published records.
-func (h *DashboardHandler) walkAppV23CanonicalDashboardRecords(
+// walkAppV23TaintFilteredDashboardRecords is the export-specific canonical walk.
+// Effective taint and pending taint holds are omitted as governed
+// non-disclosable rows; every other classification failure still aborts the
+// export so a corrupt backup cannot be presented as complete.
+func (h *DashboardHandler) walkAppV23TaintFilteredDashboardRecords(
 	ctx context.Context,
 	opts store.ListOptions,
 	visit func(*memory.MemoryRecord) error,
@@ -680,16 +680,17 @@ func (h *DashboardHandler) walkAppV23CanonicalDashboardRecords(
 	return h.walkAppV23DashboardProjectionPages(ctx, opts, func(
 		records []*memory.MemoryRecord,
 	) error {
-		classifications, classifyErr :=
-			h.BadgerStore.ClassifyMemoryProjections(records)
+		classifications, classifyErr := h.BadgerStore.ClassifyMemoryProjections(records)
 		if classifyErr != nil {
 			return appV23DashboardProjectionError(classifyErr)
 		}
 		for i, record := range records {
 			if classifications[i].Err != nil {
-				return appV23DashboardProjectionError(
-					classifications[i].Err,
-				)
+				if errors.Is(classifications[i].Err, store.ErrMemoryProjectionTainted) ||
+					errors.Is(classifications[i].Err, store.ErrMemoryProjectionTaintPending) {
+					continue
+				}
+				return appV23DashboardProjectionError(classifications[i].Err)
 			}
 			if visit != nil {
 				if err := visit(record); err != nil {
@@ -869,7 +870,7 @@ func (h *DashboardHandler) spoolAppV23CanonicalDashboardExport(
 	inventoryOpts := opts
 	inventoryOpts.Status = ""
 	inventoryOpts.ExcludeDomainPrefixes = nil
-	if walkErr := h.walkAppV23CanonicalDashboardRecords(
+	if walkErr := h.walkAppV23TaintFilteredDashboardRecords(
 		ctx,
 		inventoryOpts,
 		func(record *memory.MemoryRecord) error {
@@ -893,6 +894,13 @@ func (h *DashboardHandler) spoolAppV23CanonicalDashboardExport(
 	}
 	for _, memoryID := range canonicalMemoryIDs {
 		if _, ok := seenMemoryIDs[memoryID]; !ok {
+			verdict, taintErr := h.BadgerStore.ClassifyMemoryTaint(memoryID)
+			if taintErr != nil {
+				return nil, 0, appV23DashboardProjectionError(taintErr)
+			}
+			if verdict.Outcome != store.TaintServingClear {
+				continue
+			}
 			return nil, 0, appV23DashboardProjectionError(
 				errors.New("serving projection is missing canonical memory records"),
 			)
