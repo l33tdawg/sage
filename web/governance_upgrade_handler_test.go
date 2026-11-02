@@ -32,7 +32,7 @@ func upgradeStatusServer(t *testing.T, status sageabci.UpgradeGovernanceStatus) 
 }
 
 // The dashboard reads the same authoritative status the CLI does, and reports
-// the two ceilings. Compiled app-v30 remains above the app-v29 auto-vote
+// the two ceilings. Compiled app-v31 remains above the app-v29 auto-vote
 // ceiling, so a v29 ballot uses the auto-voter and v30 requires explicit votes.
 func TestDashboardUpgradeStatusReportsCeilingsAndExplicitVoteRequirement(t *testing.T) {
 	target := uint64(29)
@@ -54,11 +54,11 @@ func TestDashboardUpgradeStatusReportsCeilingsAndExplicitVoteRequirement(t *test
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 	require.Equal(t, float64(29), body["next_target_app_version"], "next rung is current+1")
 	require.Equal(t, float64(29), body["auto_vote_ceiling"])
-	require.Equal(t, float64(30), body["compiled_app_version"])
+	require.Equal(t, float64(31), body["compiled_app_version"])
 	require.Equal(t, false, body["explicit_vote_required_now"],
 		"app-v29 is within the auto-vote ceiling")
 	require.Equal(t, true, body["dormant_below_ceiling_gap"])
-	require.Contains(t, body["dormant_note"], "app-v30 is compiled but dormant")
+	require.Contains(t, body["dormant_note"], "app-v31 is compiled but dormant")
 	require.Contains(t, body["dormant_note"], "readiness ceiling (app-v29)")
 
 	aboveCeiling := uint64(30)
