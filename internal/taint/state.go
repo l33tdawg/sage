@@ -111,11 +111,22 @@ func DecisionKey(decisionID string) []byte {
 }
 
 func MembershipPrefix(memoryID string) []byte {
-	return []byte("taintm:" + memoryID + ":")
+	// Store entry points reject invalid IDs before calling this helper. Keep
+	// invalid direct calls disjoint from every valid prefix, without uint16 wrap.
+	if len(memoryID) > MaxMemoryIDBytes {
+		return []byte("taintm:\x00\x00:")
+	}
+	// Memory IDs may contain any bytes. The fixed-width length makes this an
+	// exact identity prefix, rather than also scanning IDs such as memoryID+":x".
+	prefix := make([]byte, 0, len("taintm:")+2+len(memoryID)+1)
+	prefix = append(prefix, "taintm:"...)
+	prefix = binary.BigEndian.AppendUint16(prefix, uint16(len(memoryID))) // #nosec G115 -- validated IDs are at most MaxMemoryIDBytes
+	prefix = append(prefix, memoryID...)
+	return append(prefix, ':')
 }
 
 func MembershipKey(memoryID, decisionID string) []byte {
-	return []byte("taintm:" + memoryID + ":" + decisionID)
+	return append(MembershipPrefix(memoryID), decisionID...)
 }
 
 func DecisionIndexPrefix(decisionID string) []byte {
