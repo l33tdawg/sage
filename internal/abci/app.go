@@ -2794,7 +2794,7 @@ func (app *SageApp) currentAppVersion() uint64 {
 const maxSupportedAppVersion uint64 = 29
 
 // maxCompiledAppVersion is the highest app version this binary has a compiled
-// fork gate for. app-v30 stays below the auto-vote ceiling until its real-code
+// fork gate for. app-v30 stays outside the auto-vote ceiling until its real-code
 // activation evidence is complete.
 const maxCompiledAppVersion uint64 = 30
 
@@ -4146,6 +4146,9 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 	appV30BudgetOK := true
 	if app.postAppV30Fork(req.Height) {
 		_, appV30BudgetErr := app.appV30BlockGeneratedWriteEstimate(req.Txs, req.Height)
+		if appV30BudgetErr != nil && !errors.Is(appV30BudgetErr, errAppV30GeneratedWriteBudgetExceeded) {
+			return nil, appV30BudgetErr
+		}
 		appV30BudgetOK = appV30BudgetErr == nil
 	}
 	app.appV20StrictFinalize = strictV20Rules
@@ -4307,6 +4310,7 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 					return err
 				}
 				if proposal.Operation == governance.OpMemoryTaint &&
+					app.postAppV30Fork(req.Height) &&
 					proposal.CreatedHeight > app.appV30AppliedHeight {
 					_, err := app.validateAppV30TaintProposal(
 						proposal.TargetID,
@@ -5433,13 +5437,13 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		if err != nil {
 			return appV23ControlDenied()
 		}
-		if err := app.badgerStore.ValidateAppV30Provenance(
+		if provenanceErr := app.badgerStore.ValidateAppV30Provenance(
 			appV30MemoryID,
 			appV30Signers,
-		); err != nil {
+		); provenanceErr != nil {
 			return &abcitypes.ExecTxResult{
 				Code: 11,
-				Log:  "memory submit rejected: " + err.Error(),
+				Log:  "memory submit rejected: " + provenanceErr.Error(),
 			}
 		}
 	}
@@ -11187,7 +11191,10 @@ func (app *SageApp) PrepareProposal(_ context.Context, req *abcitypes.RequestPre
 		// entry admitted before the ceremony in the mempool forever when an
 		// external Comet operator disabled recheck.
 		selected := prepareAppV20Proposal(req.Txs, req.MaxTxBytes)
-		selected = app.selectAppV30Proposal(selected, req.Height)
+		selected, err := app.selectAppV30Proposal(selected, req.Height)
+		if err != nil {
+			return nil, err
+		}
 		return &abcitypes.ResponsePrepareProposal{Txs: selected}, nil
 	}
 	recognizedButUnfit := make(map[int]struct{})
@@ -11259,6 +11266,9 @@ func (app *SageApp) ProcessProposal(_ context.Context, req *abcitypes.RequestPro
 	}
 	if app.postAppV30Fork(req.Height) {
 		if _, err := app.appV30BlockGeneratedWriteEstimate(req.Txs, req.Height); err != nil {
+			if !errors.Is(err, errAppV30GeneratedWriteBudgetExceeded) {
+				return nil, err
+			}
 			return &abcitypes.ResponseProcessProposal{Status: abcitypes.ResponseProcessProposal_REJECT}, nil
 		}
 	}
