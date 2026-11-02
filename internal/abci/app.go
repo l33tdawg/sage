@@ -4143,6 +4143,14 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 	postAppV20 := app.postAppV20Fork(req.Height)
 	strictV20Rules := app.requiresAppV20StrictRulesAt(req.Height)
 	atomicBudgetOK := !strictV20Rules || appV20AtomicFinalizeBudget(req.Txs)
+	appV30BudgetOK := true
+	if app.postAppV30Fork(req.Height) {
+		_, appV30BudgetErr := app.appV30BlockGeneratedWriteEstimate(req.Txs, req.Height)
+		if appV30BudgetErr != nil && !errors.Is(appV30BudgetErr, errAppV30GeneratedWriteBudgetExceeded) {
+			return nil, appV30BudgetErr
+		}
+		appV30BudgetOK = appV30BudgetErr == nil
+	}
 	app.appV20StrictFinalize = strictV20Rules
 	app.appV20FinalizeTxCount = len(req.Txs)
 	app.appV20FinalizeBudgetOK = appV20AtomicFinalizeBudget(req.Txs)
@@ -4210,6 +4218,10 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 			txResults[i] = &abcitypes.ExecTxResult{Code: appV20AtomicFinalizeBudgetCode, Log: appV20AtomicFinalizeBudgetLog}
 			continue
 		}
+		if !appV30BudgetOK {
+			txResults[i] = &abcitypes.ExecTxResult{Code: appV30GeneratedWriteBudgetCode, Log: appV30GeneratedWriteBudgetLog}
+			continue
+		}
 
 		// Use req.Time for deterministic timestamps (NOT time.Now())
 		blockTime := req.Time
@@ -4262,7 +4274,11 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 			activeProposalBefore = activeBefore
 		}
 	}
-	if app.appV20ProposalBootstrapped {
+	if !appV30BudgetOK {
+		// The generated-write estimator rejected this block before any
+		// transaction mutation. Do not let governance post-processing introduce
+		// taint state through the back door.
+	} else if app.appV20ProposalBootstrapped {
 		// The authenticated bootstrap proposal must first commit its audit marker.
 		// Governance evaluation begins in the following block, disabling the old
 		// single-block auto-approve edge for target-20.
@@ -11174,9 +11190,12 @@ func (app *SageApp) PrepareProposal(_ context.Context, req *abcitypes.RequestPre
 		// block regardless of its result code. Filtering here would leave an
 		// entry admitted before the ceremony in the mempool forever when an
 		// external Comet operator disabled recheck.
-		return &abcitypes.ResponsePrepareProposal{
-			Txs: prepareAppV20Proposal(req.Txs, req.MaxTxBytes),
-		}, nil
+		selected := prepareAppV20Proposal(req.Txs, req.MaxTxBytes)
+		selected, err := app.selectAppV30Proposal(selected, req.Height)
+		if err != nil {
+			return nil, err
+		}
+		return &abcitypes.ResponsePrepareProposal{Txs: selected}, nil
 	}
 	recognizedButUnfit := make(map[int]struct{})
 	for i, rawTx := range req.Txs {
@@ -11242,6 +11261,14 @@ func (app *SageApp) ProcessProposal(_ context.Context, req *abcitypes.RequestPro
 	}
 	if strictV20Rules {
 		if !validateAppV20Proposal(req.Txs) {
+			return &abcitypes.ResponseProcessProposal{Status: abcitypes.ResponseProcessProposal_REJECT}, nil
+		}
+	}
+	if app.postAppV30Fork(req.Height) {
+		if _, err := app.appV30BlockGeneratedWriteEstimate(req.Txs, req.Height); err != nil {
+			if !errors.Is(err, errAppV30GeneratedWriteBudgetExceeded) {
+				return nil, err
+			}
 			return &abcitypes.ResponseProcessProposal{Status: abcitypes.ResponseProcessProposal_REJECT}, nil
 		}
 	}
