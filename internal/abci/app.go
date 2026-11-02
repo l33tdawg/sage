@@ -2500,6 +2500,11 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 		_ = bs.CloseBadger()
 		return nil, invariantErr
 	}
+	if invariantErr := app.validateAppV30RecoveryState(); invariantErr != nil {
+		_ = ps.Close()
+		_ = bs.CloseBadger()
+		return nil, invariantErr
+	}
 	app.reconcilePoEForkMonotonicity()
 
 	// Reload persisted validators from BadgerDB (survives restart)
@@ -2627,6 +2632,9 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 		return nil, invariantErr
 	}
 	if invariantErr := app.validateAppV30Prerequisite(); invariantErr != nil {
+		return nil, invariantErr
+	}
+	if invariantErr := app.validateAppV30RecoveryState(); invariantErr != nil {
 		return nil, invariantErr
 	}
 	app.reconcilePoEForkMonotonicity()
