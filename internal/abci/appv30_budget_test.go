@@ -46,14 +46,14 @@ func TestAppV30GeneratedWriteBudgetPrepareProcessAndFinalize(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 
-	txs := make([][]byte, 12)
+	txs := make([][]byte, 11)
 	for i := range txs {
 		txs[i] = makeAppV30WorkRawTx(t, uint64(i+1))
 	}
 	perTx := app.appV30EstimatedTxBytes(txs[0], 20)
-	require.EqualValues(t, 369_204, perTx)
-	require.LessOrEqual(t, perTx*11, appV30BlockWriteBudgetBytes)
-	require.Greater(t, perTx*12, appV30BlockWriteBudgetBytes)
+	require.EqualValues(t, 383_076, perTx)
+	require.LessOrEqual(t, perTx*10, appV30BlockWriteBudgetBytes)
+	require.Greater(t, perTx*11, appV30BlockWriteBudgetBytes)
 
 	prepared, err := app.PrepareProposal(context.Background(), &abcitypes.RequestPrepareProposal{
 		Height:     20,
@@ -62,11 +62,11 @@ func TestAppV30GeneratedWriteBudgetPrepareProcessAndFinalize(t *testing.T) {
 		MaxTxBytes: 2_000_000,
 	})
 	require.NoError(t, err)
-	require.Len(t, prepared.Txs, 11)
+	require.Len(t, prepared.Txs, 10)
 
 	accepted, err := app.ProcessProposal(context.Background(), &abcitypes.RequestProcessProposal{
 		Height: 20,
-		Txs:    txs[:11],
+		Txs:    txs[:10],
 	})
 	require.NoError(t, err)
 	require.Equal(t, abcitypes.ResponseProcessProposal_ACCEPT, accepted.Status)
@@ -110,7 +110,7 @@ func TestAppV30WorstSubmitEstimateMatchesBenchmarkBound(t *testing.T) {
 		Type:         tx.TxTypeMemorySubmit,
 		MemorySubmit: submit,
 	})
-	require.EqualValues(t, 80_157, estimate)
+	require.EqualValues(t, 80_221, estimate)
 	require.LessOrEqual(t, estimate*52, appV30BlockWriteBudgetBytes)
 	require.Greater(t, estimate*53, appV30BlockWriteBudgetBytes)
 }

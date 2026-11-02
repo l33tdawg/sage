@@ -2747,7 +2747,7 @@ func TestCallerScopedMemoryStatsStopsOnInconsistentShortPageWithoutClaimingCompl
 	require.Equal(t, false, stats["breakdowns_complete"])
 }
 
-func TestCallerScopedMemoryStatsLaterExhaustionSupersedesInitialLowerBound(t *testing.T) {
+func TestCallerScopedMemoryStatsLaterExhaustionDoesNotEraseEarlierInexactness(t *testing.T) {
 	var requests int
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -2789,9 +2789,9 @@ func TestCallerScopedMemoryStatsLaterExhaustionSupersedesInitialLowerBound(t *te
 	require.NoError(t, err)
 	require.Equal(t, 2, requests)
 	require.Equal(t, 250, stats["total_memories"])
-	require.Equal(t, true, stats["total_exact"])
+	require.Equal(t, false, stats["total_exact"])
 	require.Equal(t, false, stats["has_more"])
-	require.Equal(t, true, stats["breakdowns_complete"])
+	require.Equal(t, false, stats["breakdowns_complete"])
 	require.Equal(t, 250, stats["by_status"].(map[string]int)["committed"])
 }
 
