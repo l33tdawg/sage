@@ -2,6 +2,7 @@ package abci
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -182,6 +183,173 @@ func TestFunctionAuthorityOnlyRootControlsAndSelfGrantDoesNotDesignate(t *testin
 	require.Equal(t, f.root.id, p.CreatedBy)
 }
 
+// A signed Root request cannot adopt a function whose implementation this
+// binary cannot execute. Merely naming it in metadata is not a callable schema.
+func TestFunctionAuthorityActivationRequiresCallableRegisteredFunction(t *testing.T) {
+	for _, mode := range []string{"nil-registry", "legacy-only", "wrong-function", "wrong-domain", "nil-context", "valid"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAuthorityTestFixture(t)
+			if mode != "valid" {
+				f.app.SetContentValidators(authorityRegistryWithoutFunction(mode))
+			}
+			raw := f.control(t, f.root, tx.FunctionAuthority{Action: "activate", Function: authorityTestFunction,
+				Domain: authorityTestDomain, ActivationHeight: 70})
+			parsed, err := tx.DecodeTxWithFunctionAuthority(raw, true)
+			require.NoError(t, err)
+			actor, err := f.app.verifyCurrentAgentIdentity(parsed, 68)
+			require.NoError(t, err, "the negative cases carry a real current Root signature")
+			require.Equal(t, f.root.id, actor)
+			response := finalizeAndCommit(t, f.app, &abcitypes.RequestFinalizeBlock{
+				Height: 68, Time: appV23BlockTime(), Txs: [][]byte{raw},
+			})
+			policy, err := f.app.badgerStore.GetFunctionAuthorityPolicy(authorityTestFunction, authorityTestDomain)
+			require.NoError(t, err)
+			if mode == "valid" {
+				require.Zero(t, response.TxResults[0].Code, response.TxResults[0].Log)
+				require.NotNil(t, policy)
+			} else {
+				require.NotZero(t, response.TxResults[0].Code, "unavailable implementation must not be adopted")
+				require.Nil(t, policy, "a rejected adoption must not persist canonical policy")
+			}
+		})
+	}
+}
+
+func authorityRegistryWithoutFunction(mode string) *contentvalidator.ContentValidatorRegistry {
+	if mode == "nil-registry" {
+		return nil
+	}
+	registry := contentvalidator.NewContentValidatorRegistry()
+	registry.RegisterClosedDomain(authorityTestDomain)
+	// A permissive legacy implementation is intentional: active canonical
+	// policy must refuse instead of silently falling back to this callback.
+	registry.RegisterContentValidator(authorityTestDomain, authorityTestOutcome, func(*memory.MemoryRecord) error { return nil })
+	switch mode {
+	case "wrong-function":
+		registry.RegisterFunctionContentValidator(authorityTestDomain, authorityTestOutcome, "other-function", func(*memory.MemoryRecord, contentvalidator.ValidationContext) error { return nil })
+	case "wrong-domain":
+		registry.RegisterFunctionContentValidator("other-domain", authorityTestOutcome, authorityTestFunction, func(*memory.MemoryRecord, contentvalidator.ValidationContext) error { return nil })
+	case "nil-context":
+		registry.RegisterFunctionContentValidator(authorityTestDomain, authorityTestOutcome, authorityTestFunction, nil)
+	}
+	return registry
+}
+
+func TestFunctionAuthorityCanonicalActivePolicyRefusesMissingBootImplementation(t *testing.T) {
+	for _, mode := range []string{"nil-registry", "legacy-only", "wrong-function", "wrong-domain", "nil-context", "valid"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAuthorityTestFixture(t)
+			f.activate(t, 68, 69)
+			assignment := f.control(t, f.root, authorityAssign(f.member.id, 0))
+			response := finalizeAndCommit(t, f.app, &abcitypes.RequestFinalizeBlock{
+				Height: 69, Time: appV23BlockTime(), Txs: [][]byte{assignment},
+			})
+			require.Zero(t, response.TxResults[0].Code, response.TxResults[0].Log)
+			policyBefore, err := f.app.badgerStore.GetFunctionAuthorityPolicy(authorityTestFunction, authorityTestDomain)
+			require.NoError(t, err)
+			// Model the boot-only registry configuration of a restarted binary;
+			// the already committed policy and designation remain in Badger.
+			if mode != "valid" {
+				f.app.SetContentValidators(authorityRegistryWithoutFunction(mode))
+			}
+			raw, parsed := f.submit(t, f.member)
+			response = finalizeAndCommit(t, f.app, &abcitypes.RequestFinalizeBlock{
+				Height: 70, Time: appV23BlockTime(), Txs: [][]byte{raw},
+			})
+			memoryID := memoryIDForSubmit(parsed.MemorySubmit, 70, f.member.id)
+			_, _, memoryErr := f.app.badgerStore.GetMemoryHash(memoryID)
+			if mode == "valid" {
+				require.Zero(t, response.TxResults[0].Code, response.TxResults[0].Log)
+				require.NoError(t, memoryErr)
+			} else {
+				require.Equal(t, uint32(18), response.TxResults[0].Code, response.TxResults[0].Log)
+				require.Error(t, memoryErr, "no implementation means no accepted canonical memory")
+			}
+			policyAfter, err := f.app.badgerStore.GetFunctionAuthorityPolicy(authorityTestFunction, authorityTestDomain)
+			require.NoError(t, err)
+			require.Equal(t, policyBefore, policyAfter, "local registry absence cannot delete adopted policy")
+		})
+	}
+}
+
+func TestFunctionAuthorityFuturePolicyKeepsHistoricalGateBeforeActivation(t *testing.T) {
+	for _, mode := range []string{"nil-registry", "legacy-only"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newAuthorityTestFixture(t)
+			f.activate(t, 68, 72)
+			f.app.SetContentValidators(authorityRegistryWithoutFunction(mode))
+			raw, parsed := f.submit(t, f.member)
+			response := finalizeAndCommit(t, f.app, &abcitypes.RequestFinalizeBlock{
+				Height: 69, Time: appV23BlockTime(), Txs: [][]byte{raw},
+			})
+			require.Zero(t, response.TxResults[0].Code, "a future policy must not rewrite the pre-adoption execution rule: %s", response.TxResults[0].Log)
+			_, _, err := f.app.badgerStore.GetMemoryHash(memoryIDForSubmit(parsed.MemorySubmit, 69, f.member.id))
+			require.NoError(t, err)
+			policy, err := f.app.badgerStore.GetFunctionAuthorityPolicy(authorityTestFunction, authorityTestDomain)
+			require.NoError(t, err)
+			require.Equal(t, int64(72), policy.ActivationHeight)
+		})
+	}
+}
+
+func TestFunctionAuthorityRootRotationRequiresFreshDesignation(t *testing.T) {
+	f := newAuthorityTestFixture(t)
+	f.activate(t, 68, 69)
+	assignment := f.control(t, f.root, authorityAssign(f.member.id, 0))
+	beforeRotation, _ := f.submit(t, f.member)
+	response := finalizeAndCommit(t, f.app, &abcitypes.RequestFinalizeBlock{
+		Height: 69, Time: appV23BlockTime(), Txs: [][]byte{assignment, beforeRotation},
+	})
+	for _, result := range response.TxResults {
+		require.Zero(t, result.Code, result.Log)
+	}
+	oldRoot, err := f.app.badgerStore.GetAppV23Root()
+	require.NoError(t, err)
+	replacement := newAgentKey(t)
+	rotation := &tx.RootCredentialRotate{ExpectedGeneration: oldRoot.Generation, NewCredentialID: replacement.id, Scope: oldRoot.Scope}
+	rotation.NewCredentialSignature = ed25519.Sign(replacement.priv, tx.RootCredentialRotationSignBytes(oldRoot.PrincipalID, rotation))
+	pub, signature, bodyHash, stamp := signAgentProof(t, f.root, []byte("rotate-functional-authority-root"))
+	parsedRotation := &tx.ParsedTx{Type: tx.TxTypeRootCredentialRotate, RootCredentialRotate: rotation,
+		AgentPubKey: pub, AgentSig: signature, AgentBodyHash: bodyHash, AgentTimestamp: stamp}
+	f.nonces[f.root.id]++
+	signAppV23Outer(t, parsedRotation, f.root, f.nonces[f.root.id])
+	rotationRaw, err := tx.EncodeTx(parsedRotation)
+	require.NoError(t, err)
+	staleSubmit, staleParsed := f.submit(t, f.member)
+	response = finalizeAndCommit(t, f.app, &abcitypes.RequestFinalizeBlock{
+		Height: 70, Time: appV23BlockTime(), Txs: [][]byte{rotationRaw, staleSubmit},
+	})
+	require.Zero(t, response.TxResults[0].Code, response.TxResults[0].Log)
+	require.Equal(t, uint32(18), response.TxResults[1].Code, response.TxResults[1].Log)
+	_, _, err = f.app.badgerStore.GetMemoryHash(memoryIDForSubmit(staleParsed.MemorySubmit, 70, f.member.id))
+	require.Error(t, err)
+	currentRoot, err := f.app.badgerStore.GetAppV23Root()
+	require.NoError(t, err)
+	require.Equal(t, oldRoot.PrincipalID, currentRoot.PrincipalID)
+	require.Equal(t, replacement.id, currentRoot.CredentialID)
+	require.Equal(t, uint64(2), currentRoot.Generation)
+	designation, err := f.app.badgerStore.GetFunctionDesignation(authorityTestFunction, authorityTestDomain, f.member.id)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), designation.RootGeneration, "rotation does not silently rewrite the old assignment")
+	// Reassign under the real new current Root, then submit in the same scoped
+	// block. The new designation must be visible there and persist only at Commit.
+	f.root = replacement
+	reassignment := f.control(t, f.root, authorityAssign(f.member.id, 1))
+	restoredSubmit, _ := f.submit(t, f.member)
+	response = finalizeAndCommit(t, f.app, &abcitypes.RequestFinalizeBlock{
+		Height: 71, Time: appV23BlockTime(), Txs: [][]byte{reassignment, restoredSubmit},
+	})
+	for _, result := range response.TxResults {
+		require.Zero(t, result.Code, result.Log)
+	}
+	designation, err = f.app.badgerStore.GetFunctionDesignation(authorityTestFunction, authorityTestDomain, f.member.id)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), designation.RootGeneration)
+	require.Equal(t, uint64(2), designation.Revision)
+	_, _, err = f.app.badgerStore.GetMemoryHash(string(response.TxResults[1].Data))
+	require.NoError(t, err)
+}
+
 func TestFunctionAuthorityAuthenticRootWrongScopeCannotActivate(t *testing.T) {
 	f := newAuthorityTestFixture(t)
 	root, err := f.app.badgerStore.GetAppV23Root()
@@ -317,6 +485,9 @@ func TestFunctionAuthorityExpiryAndExactScopeThroughRealSubmit(t *testing.T) {
 				// G is genuinely assigned and active, but this schema is bound to F.
 				// A trusted-looking callback cannot substitute G for selected F.
 				f.installValidator(func(r *contentvalidator.FunctionAuthorityRequest) { r.Function = "another-function" })
+				f.app.contentValidators.RegisterContentValidator(authorityTestDomain, "other_registered_outcome", func(*memory.MemoryRecord) error { return nil })
+				f.app.contentValidators.RegisterFunctionContentValidator(authorityTestDomain, "other_registered_outcome", "another-function",
+					func(*memory.MemoryRecord, contentvalidator.ValidationContext) error { return nil })
 			}
 			if mode == "cross-subject" {
 				f.installValidator(func(r *contentvalidator.FunctionAuthorityRequest) { r.Subject = f.other.id })
@@ -381,6 +552,9 @@ func TestFunctionAuthorityDesignationCannotBypassCurrentPrincipalPolicy(t *testi
 
 func (f *authorityTestFixture) policyFor(t *testing.T, function, domain string) {
 	t.Helper()
+	f.app.contentValidators.RegisterContentValidator(domain, "other_registered_outcome", func(*memory.MemoryRecord) error { return nil })
+	f.app.contentValidators.RegisterFunctionContentValidator(domain, "other_registered_outcome", function,
+		func(*memory.MemoryRecord, contentvalidator.ValidationContext) error { return nil })
 	raw := f.control(t, f.root, tx.FunctionAuthority{Action: "activate", Function: function, Domain: domain, ActivationHeight: 70})
 	parsed, err := tx.DecodeTxWithFunctionAuthority(raw, true)
 	require.NoError(t, err)

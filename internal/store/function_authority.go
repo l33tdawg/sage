@@ -62,23 +62,31 @@ func functionAuthorityPolicyKey(function, domain string) ([]byte, error) {
 	if err := validateFunctionAuthorityName(function); err != nil {
 		return nil, err
 	}
+	prefix, err := functionAuthorityPolicyDomainPrefix(domain)
+	if err != nil {
+		return nil, err
+	}
+	return append(prefix, []byte(hex.EncodeToString([]byte(function)))...), nil
+}
+
+func functionAuthorityPolicyDomainPrefix(domain string) ([]byte, error) {
 	if err := ValidateAppV23DomainName(domain); err != nil {
 		return nil, err
 	}
 	// Both variable components are encoded, so accepted slash/Unicode domains
-	// cannot introduce delimiters or alias another logical tuple.
-	return []byte("funcauth:policy:" + hex.EncodeToString([]byte(function)) + ":" + hex.EncodeToString([]byte(domain))), nil
+	// cannot introduce delimiters or alias another logical tuple. Domain-first
+	// ordering allows an exact domain scan without a duplicate consensus index.
+	return []byte("funcauth:policy:" + hex.EncodeToString([]byte(domain)) + ":"), nil
 }
 
 func functionDesignationKey(function, domain, subject string) ([]byte, error) {
-	policyKey, err := functionAuthorityPolicyKey(function, domain)
-	if err != nil {
+	if _, err := functionAuthorityPolicyKey(function, domain); err != nil {
 		return nil, err
 	}
 	if err := validateCanonicalAgentID("function subject", subject); err != nil {
 		return nil, err
 	}
-	return []byte("funcauth:designation:" + string(policyKey[len("funcauth:policy:"):]) + ":" + subject), nil
+	return []byte("funcauth:designation:" + hex.EncodeToString([]byte(function)) + ":" + hex.EncodeToString([]byte(domain)) + ":" + subject), nil
 }
 
 func validateFunctionAuthorityPolicy(policy *FunctionAuthorityPolicy) error {
@@ -180,6 +188,45 @@ func (s *BadgerStore) GetFunctionAuthorityPolicy(function, domain string) (*Func
 		return nil, nil
 	}
 	return policy, err
+}
+
+// ListFunctionAuthorityPoliciesForDomain returns every canonical policy for
+// exactly one domain in deterministic function-key order. It reads the same
+// scoped transaction as the current submission, including earlier writes in
+// that transaction, and refuses malformed state rather than returning a prefix.
+func (s *BadgerStore) ListFunctionAuthorityPoliciesForDomain(domain string) ([]*FunctionAuthorityPolicy, error) {
+	prefix, err := functionAuthorityPolicyDomainPrefix(domain)
+	if err != nil {
+		return nil, err
+	}
+	policies := make([]*FunctionAuthorityPolicy, 0)
+	err = s.view(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = prefix
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			key := it.Item().KeyCopy(nil)
+			var policy FunctionAuthorityPolicy
+			if err := readFunctionAuthorityJSON(txn, key, &policy); err != nil {
+				return fmt.Errorf("read domain function policy: %w", err)
+			}
+			if err := validateFunctionAuthorityPolicy(&policy); err != nil {
+				return err
+			}
+			expectedKey, _ := functionAuthorityPolicyKey(policy.Function, policy.Domain)
+			if policy.Domain != domain || !bytes.Equal(key, expectedKey) {
+				return errors.New("function policy key/value mismatch")
+			}
+			policies = append(policies, &policy)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return policies, nil
 }
 
 // SetFunctionAuthorityPolicy creates an immutable policy. An identical replay

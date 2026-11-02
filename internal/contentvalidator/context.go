@@ -1,7 +1,6 @@
 package contentvalidator
 
 import (
-	"sort"
 	"time"
 
 	"github.com/l33tdawg/sage/internal/memory"
@@ -63,31 +62,19 @@ func (r *ContentValidatorRegistry) FunctionFor(domain, outcomeClass string) stri
 	return r.contextFunctions[validatorKey{domain: domain, outcomeClass: outcomeClass}]
 }
 
-// ClosedDomainFunctions returns the frozen domain's distinct registered
-// functions in deterministic order. Once any policy is active, core must still
-// route unknown classes through the domain's closed-schema validation.
-func (r *ContentValidatorRegistry) ClosedDomainFunctions(domain string) []string {
-	if r == nil {
-		return nil
+// HasFunction reports whether this frozen binary can execute the named
+// function on the exact domain. Metadata without a callable contextual
+// validator and its legacy replay validator is not enforcement readiness.
+func (r *ContentValidatorRegistry) HasFunction(domain, function string) bool {
+	if r == nil || function == "" {
+		return false
 	}
-	if _, closed := r.closed[domain]; !closed {
-		return nil
-	}
-	if _, registered := r.domains[domain]; !registered {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	for key, function := range r.contextFunctions {
-		if key.domain == domain && function != "" {
-			seen[function] = struct{}{}
+	for key, registered := range r.contextFunctions {
+		if key.domain == domain && registered == function && r.contextual[key] != nil && r.m[key] != nil {
+			return true
 		}
 	}
-	functions := make([]string, 0, len(seen))
-	for function := range seen {
-		functions = append(functions, function)
-	}
-	sort.Strings(functions)
-	return functions
+	return false
 }
 
 // ValidateWithContext is called only at a governed execution boundary. Unknown

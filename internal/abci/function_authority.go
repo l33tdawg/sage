@@ -44,6 +44,9 @@ func (app *SageApp) processFunctionAuthority(parsed *tx.ParsedTx, height int64, 
 		if a.Subject != "" || a.ExpectedRevision != 0 || a.ExpiresAt != 0 || a.ActivationHeight <= height {
 			return appV23ControlDenied()
 		}
+		if !app.contentValidators.HasFunction(a.Domain, a.Function) {
+			return &abcitypes.ExecTxResult{Code: 18, Log: "function authority activation requires a callable registered function"}
+		}
 		err = app.badgerStore.SetFunctionAuthorityPolicy(&store.FunctionAuthorityPolicy{
 			Function: a.Function, Domain: a.Domain, ActivationHeight: a.ActivationHeight,
 			CreatedHeight: height, CreatedBy: root.PrincipalID, RuleVersion: 1,
@@ -105,11 +108,14 @@ func (app *SageApp) authorizeFunctionAt(parsed *tx.ParsedTx, rec *memory.MemoryR
 	}
 	designation, err := app.badgerStore.GetFunctionDesignation(request.Function, request.Domain, request.Subject)
 	if err != nil || designation == nil || designation.Revoked || designation.AssignedBy != root.PrincipalID ||
-		designation.RootGeneration > root.Generation || (designation.ExpiresAt > 0 && blockTime.Unix() >= designation.ExpiresAt) {
+		designation.RootGeneration != root.Generation || (designation.ExpiresAt > 0 && blockTime.Unix() >= designation.ExpiresAt) {
 		return result, err
 	}
 	level, expiry, _, err := app.badgerStore.GetAccessGrant(request.Domain, request.Subject)
-	if err != nil || level < 2 || level > 3 || expiry < 0 || (expiry > 0 && blockTime.Unix() >= expiry) {
+	if err != nil {
+		return result, err
+	}
+	if level < 2 || level > 3 || expiry < 0 || (expiry > 0 && blockTime.Unix() >= expiry) {
 		return result, nil // a missing, expired or invalid exact grant denies
 	}
 	result.Allowed = true
@@ -142,31 +148,32 @@ func (app *SageApp) validateMemoryContentAt(parsed *tx.ParsedTx, rec *memory.Mem
 	})
 }
 
-// functionContentValidationActive enables explicitly adopted contextual schemas.
-// An adopted closed domain also enforces its routing rules, so an unknown class
-// cannot bypass the gate. Stock builds have no provider/function registrations.
-func (app *SageApp) functionContentValidationActive(domain, outcomeClass string, height int64) (bool, error) {
-	if !app.postAppV31Fork(height) || app.contentValidators == nil {
+// functionContentValidationActive reads canonical adoption state before the
+// local registry. A binary missing an adopted implementation must fail closed,
+// including after a restart, rather than silently taking the legacy role path.
+func (app *SageApp) functionContentValidationActive(domain, _ string, height int64) (bool, error) {
+	if !app.postAppV31Fork(height) {
 		return false, nil
 	}
-	functions := app.contentValidators.ClosedDomainFunctions(domain)
-	if len(functions) == 0 {
-		if function := app.contentValidators.FunctionFor(domain, outcomeClass); function != "" {
-			functions = []string{function}
-		}
+	if app.badgerStore == nil {
+		return false, fmt.Errorf("functional policy store unavailable")
 	}
-	for _, function := range functions {
-		policy, err := app.badgerStore.GetFunctionAuthorityPolicy(function, domain)
-		if err != nil {
-			return false, err
-		}
-		if policy == nil || height < policy.ActivationHeight {
+	policies, err := app.badgerStore.ListFunctionAuthorityPoliciesForDomain(domain)
+	if err != nil {
+		return false, err
+	}
+	active := false
+	for _, policy := range policies {
+		if height < policy.ActivationHeight {
 			continue
 		}
 		if policy.RuleVersion != 1 {
 			return false, fmt.Errorf("unsupported functional rule version")
 		}
-		return true, nil
+		if !app.contentValidators.HasFunction(domain, policy.Function) {
+			return false, fmt.Errorf("adopted function implementation unavailable")
+		}
+		active = true
 	}
-	return false, nil
+	return active, nil
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math"
@@ -68,6 +69,81 @@ func TestFunctionAuthorityPolicyImmutableAndTupleIsolation(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, p, *value)
 	}
+}
+
+func TestFunctionAuthorityPolicyDomainListCanonicalOrderingAndIsolation(t *testing.T) {
+	s, policy, designation := functionAuthorityFixture(t)
+	empty, err := s.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+	require.NoError(t, err)
+	require.Empty(t, empty)
+	for _, function := range []string{"z-writer", policy.Function, "a-writer"} {
+		p := policy
+		p.Function = function
+		require.NoError(t, s.SetFunctionAuthorityPolicy(&p))
+		key, err := functionAuthorityPolicyKey(p.Function, p.Domain)
+		require.NoError(t, err)
+		require.Equal(t, "funcauth:policy:"+hex.EncodeToString([]byte(p.Domain))+":"+hex.EncodeToString([]byte(p.Function)), string(key))
+	}
+	for _, domain := range []string{policy.Domain + "/child", policy.Domain + "s", "lab.observations", "測試/observations"} {
+		other := policy
+		other.Domain = domain
+		require.NoError(t, s.SetFunctionAuthorityPolicy(&other))
+	}
+	// A corrupt policy outside the exact domain prefix must neither be read nor
+	// turn a domain-local check into a scan of every policy on the chain.
+	otherKey, err := functionAuthorityPolicyKey(policy.Function, policy.Domain+"s")
+	require.NoError(t, err)
+	require.NoError(t, s.SetRawForTest(otherKey, []byte("not JSON")))
+	listed, err := s.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+	require.NoError(t, err)
+	require.Len(t, listed, 3)
+	require.Equal(t, []string{"a-writer", policy.Function, "z-writer"}, []string{listed[0].Function, listed[1].Function, listed[2].Function})
+	for _, p := range listed {
+		require.Equal(t, policy.Domain, p.Domain)
+		got, err := s.GetFunctionAuthorityPolicy(p.Function, p.Domain)
+		require.NoError(t, err)
+		require.Equal(t, got, p, "point getter retains function/domain API")
+	}
+	listed[0].ActivationHeight++
+	again, err := s.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+	require.NoError(t, err)
+	require.Equal(t, policy.ActivationHeight, again[0].ActivationHeight, "listed values do not alias process state")
+	key, err := functionDesignationKey(designation.Function, designation.Domain, designation.Subject)
+	require.NoError(t, err)
+	require.Equal(t, "funcauth:designation:"+hex.EncodeToString([]byte(designation.Function))+":"+hex.EncodeToString([]byte(designation.Domain))+":"+designation.Subject, string(key),
+		"domain-first policy layout must not silently reorder designation keys")
+	for _, domain := range []string{"", "bad:domain", "bad domain"} {
+		listed, err := s.ListFunctionAuthorityPoliciesForDomain(domain)
+		require.Error(t, err)
+		require.Nil(t, listed)
+	}
+}
+
+func TestFunctionAuthorityPolicyDomainListRefusesCorruptRowsAndReadFailure(t *testing.T) {
+	s, policy, _ := functionAuthorityFixture(t)
+	good := policy
+	good.Function = "a-good"
+	require.NoError(t, s.SetFunctionAuthorityPolicy(&good))
+	badKey, err := functionAuthorityPolicyKey("z-row", policy.Domain)
+	require.NoError(t, err)
+	raw, err := json.Marshal(policy)
+	require.NoError(t, err)
+	invalid := policy
+	invalid.RuleVersion = 2
+	invalidJSON, err := json.Marshal(invalid)
+	require.NoError(t, err)
+	for _, wire := range [][]byte{[]byte("null"), []byte("{"), invalidJSON, raw} {
+		require.NoError(t, s.SetRawForTest(badKey, wire))
+		listed, err := s.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+		require.Error(t, err)
+		require.Nil(t, listed, "a validated earlier row must not escape as partial policy coverage")
+	}
+	closed, err := NewBadgerStore(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, closed.CloseBadger())
+	listed, err := closed.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+	require.Error(t, err, "underlying read failure must not look like absent policy")
+	require.Nil(t, listed)
 }
 
 func TestFunctionAuthorityPolicyRejectsInvalidWithoutMutation(t *testing.T) {
@@ -201,6 +277,12 @@ func TestFunctionAuthorityScopedCommitAndDiscard(t *testing.T) {
 	scoped := s.BeginConsensusTransaction(nil)
 	require.NoError(t, scoped.SetFunctionAuthorityPolicy(&policy))
 	require.NoError(t, scoped.SetFunctionDesignation(&designation, 0))
+	listed, err := scoped.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+	require.NoError(t, err)
+	require.Equal(t, []*FunctionAuthorityPolicy{&policy}, listed, "same block listing sees its earlier activation write")
+	baseListed, err := s.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+	require.NoError(t, err)
+	require.Empty(t, baseListed, "base listing cannot expose uncommitted policy")
 	missing, err := s.GetFunctionAuthorityPolicy(policy.Function, policy.Domain)
 	require.NoError(t, err)
 	require.Nil(t, missing, "base store must not expose speculative authority")
@@ -215,10 +297,16 @@ func TestFunctionAuthorityScopedCommitAndDiscard(t *testing.T) {
 	after, err := s.ComputeAppHash()
 	require.NoError(t, err)
 	require.Equal(t, before, after)
+	listed, err = s.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+	require.NoError(t, err)
+	require.Empty(t, listed, "discard removes speculative domain-list rows")
 	scoped = s.BeginConsensusTransaction(nil)
 	require.NoError(t, scoped.SetFunctionAuthorityPolicy(&policy))
 	require.NoError(t, scoped.SetFunctionDesignation(&designation, 0))
 	require.NoError(t, scoped.CommitConsensusTransaction())
+	listed, err = s.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+	require.NoError(t, err)
+	require.Equal(t, []*FunctionAuthorityPolicy{&policy}, listed)
 	got, err := s.GetFunctionDesignation(designation.Function, designation.Domain, designation.Subject)
 	require.NoError(t, err)
 	require.Equal(t, designation, *got)
@@ -269,6 +357,9 @@ func TestFunctionAuthorityBackupRestoreAndReopen(t *testing.T) {
 	s, policy, designation := functionAuthorityFixture(t)
 	require.NoError(t, s.SetFunctionAuthorityPolicy(&policy))
 	require.NoError(t, s.SetFunctionDesignation(&designation, 0))
+	second := policy
+	second.Function = "a-second-policy"
+	require.NoError(t, s.SetFunctionAuthorityPolicy(&second))
 	expectedHash, err := s.ComputeAppHash()
 	require.NoError(t, err)
 	var backup bytes.Buffer
@@ -285,6 +376,10 @@ func TestFunctionAuthorityBackupRestoreAndReopen(t *testing.T) {
 	p, err := restored.GetFunctionAuthorityPolicy(policy.Function, policy.Domain)
 	require.NoError(t, err)
 	require.Equal(t, policy, *p)
+	listed, err := restored.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+	require.NoError(t, err)
+	require.Equal(t, []*FunctionAuthorityPolicy{&second, &policy}, listed,
+		"backup/load/reopen preserves domain-first policy coverage and order")
 	d, err := restored.GetFunctionDesignation(designation.Function, designation.Domain, designation.Subject)
 	require.NoError(t, err)
 	require.Equal(t, designation, *d)
@@ -347,6 +442,9 @@ func TestFunctionAuthorityRefusesCorruptCanonicalState(t *testing.T) {
 			require.NoError(t, s.SetRawForTest(policyKey, corrupt))
 			_, err := s.GetFunctionAuthorityPolicy(policy.Function, policy.Domain)
 			require.Error(t, err)
+			listed, err := s.ListFunctionAuthorityPoliciesForDomain(policy.Domain)
+			require.Error(t, err)
+			require.Nil(t, listed)
 			require.Error(t, s.SetFunctionAuthorityPolicy(&policy), "must not overwrite malformed existing state")
 			require.Error(t, s.SetFunctionDesignation(&designation, 0))
 		})
