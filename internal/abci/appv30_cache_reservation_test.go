@@ -113,7 +113,7 @@ func TestAppV30SubmitCacheCheckpointIsCloneLocal(t *testing.T) {
 	require.Nil(t, absent.checkpointFinalizeItem("memory"))
 	live := NewSupplementaryCache()
 	require.Nil(t, live.checkpointFinalizeItem("memory"), "never restore into the live REST cache")
-	expired := &suppCacheEntry{storedAt: time.Now().Add(-2 * time.Hour), retainFor: time.Hour}
+	expired := &suppCacheEntry{data: &memory.SupplementaryData{Provider: "expired"}, storedAt: time.Now().Add(-2 * time.Hour), retainFor: time.Hour}
 	priorConsumed := &suppCacheEntry{}
 	untouched := &suppCacheEntry{}
 	live.items["memory"] = expired

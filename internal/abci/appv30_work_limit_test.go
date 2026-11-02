@@ -152,7 +152,7 @@ func TestAppV30TaintWorkLimitMalformedAndNonWork(t *testing.T) {
 	nonWork := makeAppV30BudgetSubmitRawTx(t, 2)
 	_, isWork := app.appV30EstimatedTxResources(nonWork, 20)
 	require.False(t, isWork)
-	txs := make([][]byte, 4)
+	txs := make([][]byte, 4, 4+len(malformed)+1)
 	for i := range txs {
 		txs[i] = makeAppV30WorkRawTx(t, uint64(i+1))
 	}
