@@ -451,6 +451,15 @@ func (s *SQLiteStore) RequirePristineStateSyncProjection(ctx context.Context) er
 			}
 			continue
 		}
+		if table == "memory_taint_mirror_revision" {
+			var count, id, revision int64
+			if err := s.conn.QueryRowContext(ctx,
+				`SELECT COUNT(*), COALESCE(MIN(singleton), 0), COALESCE(MIN(revision), 0) FROM memory_taint_mirror_revision`,
+			).Scan(&count, &id, &revision); err != nil || count != 1 || id != 1 || revision != 0 {
+				return errors.New("state sync receiving requires a pristine memory taint mirror revision")
+			}
+			continue
+		}
 		if table == "inbox_activity_meta" {
 			if _, err := s.GetInboxActivityEpoch(ctx); err != nil {
 				return errors.New("state sync receiving requires a pristine inbox activity database incarnation")
@@ -1096,6 +1105,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		return err
 	}
 	if err := s.ensureGraphProjectionRevision(ctx); err != nil {
+		return err
+	}
+	if err := ensureSQLiteMemoryTaintMirrorSchema(ctx, s); err != nil {
 		return err
 	}
 
@@ -2171,6 +2183,9 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		query += " AND memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
 			strings.Join(placeholders, ",") + "))"
 	}
+	if opts.ExcludeTainted {
+		query += " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = memories.memory_id)"
+	}
 	hasCandidateFilter := opts.CandidateFilter != nil ||
 		opts.CandidateBatchFilter != nil
 	if hasCandidateFilter {
@@ -2363,6 +2378,9 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 		}
 		sqlStr += " AND m.memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
 			strings.Join(placeholders, ",") + "))"
+	}
+	if opts.ExcludeTainted {
+		sqlStr += " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = m.memory_id)"
 	}
 
 	orderBy := " ORDER BY rank"
@@ -3301,6 +3319,11 @@ func (s *SQLiteStore) ListMemories(ctx context.Context, opts ListOptions) ([]*me
 			args = append(args, a)
 		}
 		filter := " AND submitting_agent IN (" + strings.Join(placeholders, ",") + ")"
+		query += filter
+		countQuery += filter
+	}
+	if opts.ExcludeTainted {
+		filter := " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = memories.memory_id)"
 		query += filter
 		countQuery += filter
 	}

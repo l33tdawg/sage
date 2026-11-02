@@ -95,6 +95,10 @@ func NewPostgresStore(ctx context.Context, connString string) (*PostgresStore, e
 		pool.Close()
 		return nil, fmt.Errorf("ensure projection schema: %w", err)
 	}
+	if err := ensurePostgresMemoryTaintMirrorSchema(ctx, s); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("ensure memory taint mirror schema: %w", err)
+	}
 
 	return s, nil
 }
@@ -986,6 +990,9 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 			argIdx++
 		}
 		query += " AND EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.memory_id AND mt.tag IN (" + strings.Join(placeholders, ",") + "))"
+	}
+	if opts.ExcludeTainted {
+		query += " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = memories.memory_id)"
 	}
 
 	scanRows := func(rows pgx.Rows, _ int) ([]*memory.MemoryRecord, error) {
@@ -2158,6 +2165,11 @@ func (s *PostgresStore) ListMemories(ctx context.Context, opts ListOptions) ([]*
 		countQuery += filter
 		args = append(args, opts.CreatedTo)
 		argIdx++
+	}
+	if opts.ExcludeTainted {
+		filter := " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = memories.memory_id)"
+		query += filter
+		countQuery += filter
 	}
 
 	switch opts.Sort {
