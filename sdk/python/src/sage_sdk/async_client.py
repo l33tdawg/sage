@@ -924,6 +924,32 @@ class AsyncSageClient:
         resp = await self._request("POST", "/v1/access/grant", json=body)
         return resp.json()
 
+    async def set_function_authority(
+        self,
+        action: str,
+        function: str,
+        domain: str,
+        *,
+        scope: str,
+        subject: str = "",
+        activation_height: int = 0,
+        expected_revision: int = 0,
+        expires_at: int = 0,
+    ) -> dict:
+        """Activate, assign or revoke a Root-governed functional entitlement.
+
+        Requires dormant app-v31 support and the current local Root. Assignment
+        is separate from an exact domain write grant; both are required at use.
+        The signed scope must equal the executing chain's immutable Root scope.
+        """
+        body = {
+            "action": action, "function": function, "domain": domain, "scope": scope,
+            "subject": subject, "activation_height": activation_height,
+            "expected_revision": expected_revision, "expires_at": expires_at,
+        }
+        resp = await self._request("POST", "/v1/access/function-authority", json=body)
+        return resp.json()
+
     async def revoke_access(self, grantee_id: str, domain: str, reason: str = "") -> dict:
         """Revoke access to a domain (domain owner only)."""
         body = {"grantee_id": grantee_id, "domain": domain, "reason": reason}

@@ -116,6 +116,17 @@ func EncodeTx(tx *ParsedTx) ([]byte, error) {
 
 // DecodeTx deserializes bytes into a ParsedTx.
 func DecodeTx(data []byte) (*ParsedTx, error) {
+	return decodeTxWithFunctionAuthority(data, true)
+}
+
+// DecodeTxWithFunctionAuthority preserves the historical unknown-type decoder
+// result for byte 41 before its governed app-v31 boundary, including malformed
+// envelope error precedence. Public/offline decoding remains additive.
+func DecodeTxWithFunctionAuthority(data []byte, enabled bool) (*ParsedTx, error) {
+	return decodeTxWithFunctionAuthority(data, enabled)
+}
+
+func decodeTxWithFunctionAuthority(data []byte, enabled bool) (*ParsedTx, error) {
 	if len(data) < 1+4 {
 		return nil, ErrInvalidTxData
 	}
@@ -213,6 +224,9 @@ func DecodeTx(data []byte) (*ParsedTx, error) {
 		}
 	}
 
+	if txType == TxTypeFunctionAuthority && !enabled {
+		return nil, ErrUnknownTxType
+	}
 	if err := decodePayload(tx, payload); err != nil {
 		return nil, err
 	}
@@ -474,6 +488,11 @@ func encodePayload(tx *ParsedTx) ([]byte, error) {
 			return nil, fmt.Errorf("RootCredentialRotate is nil for root credential rotate tx")
 		}
 		return encodeRootCredentialRotate(tx.RootCredentialRotate), nil
+	case TxTypeFunctionAuthority:
+		if tx.FunctionAuthority == nil {
+			return nil, fmt.Errorf("FunctionAuthority is nil for function authority tx")
+		}
+		return encodeFunctionAuthority(tx.FunctionAuthority)
 	case TxTypeMemoryTaintWork:
 		if tx.MemoryTaintWork == nil {
 			return nil, fmt.Errorf("MemoryTaintWork is nil for taint work tx")
@@ -765,6 +784,13 @@ func decodePayload(tx *ParsedTx, data []byte) error {
 			return err
 		}
 		tx.MemoryTaintWork = w
+		return nil
+	case TxTypeFunctionAuthority:
+		a, err := decodeFunctionAuthority(data)
+		if err != nil {
+			return err
+		}
+		tx.FunctionAuthority = a
 		return nil
 	default:
 		return ErrUnknownTxType

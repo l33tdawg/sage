@@ -1,0 +1,17 @@
+# Functional authority (development contract)
+
+This is dormant app-v31 source support. It is not available in the published v11.24.5 release. The compiled ceiling is 31; unattended upgrade readiness remains 29. No existing chain is activated by installing this code.
+
+A functional assignment is distinct from an RBAC role, profile, domain owner or access grant. The current local Root can create an immutable function/domain policy with a future activation height, then assign or revoke an exact function/domain/ordinary-subject tuple. Designations use monotonically increasing compare-and-swap revisions and remain in replicated Badger state after revocation. Root rotation does not turn the retired credential into an ordinary actor.
+
+`POST /v1/access/function-authority` uses the normal signed, localhost-only Root request and consensus transaction path. Its eight required JSON fields are `action`, `function`, `domain`, `scope`, `subject`, `activation_height`, `expected_revision` and `expires_at`. The signed `scope` must exactly match the executing chain's immutable Root scope, preventing the request from being rewrapped for another chain. Duplicate, unknown, missing, case-variant or null JSON fields are rejected in both HTTP and consensus proof verification. The actions are:
+
+- `activate`: empty subject, zero revision/expiry, and an activation height strictly after the executing block. A different existing policy cannot be overwritten.
+- `assign`: active ordinary Member/Manager subject, activation height zero, exact current revision (zero for creation), and optional future Unix expiry.
+- `revoke`: existing subject designation, exact current revision, and zero activation height/expiry. The revoked row is retained and its revision advances.
+
+The sync and async Python clients expose `set_function_authority` with these fields. This does not create or change a domain write grant. At use, a designated subject still needs an exact, unexpired level-2 or level-3 grant and must pass ordinary enrollment, profile, capability, classification and domain admission checks. Domain ownership, an ancestor grant, an unrelated write grant, a self-asserted functional role or generic Admin/Root privilege cannot substitute for designation.
+
+Providers register a legacy validator and an optional contextual validator using `RegisterFunctionContentValidator`. Core chooses the contextual path only after both app-v31 H+1 and the exact function/domain policy's activation height. Earlier submissions keep the legacy path. Once a registered functional policy is active on a closed domain, unknown or missing content classes are also rejected through the domain's existing routing rules. The contextual validator receives `ValidationContext` for the executing submission; its `AuthorizeFunction` closure reads that execution's scoped consensus transaction and canonical block height/time. It never captures a boot-time store or reads SQL, a network service or wall time. The result repeats the exact function/domain/subject evaluated.
+
+The new transaction byte 41 retains the old decoder's invalid-envelope/unknown-type results before app-v31. The fork requires an actual app-v30 predecessor and is deliberately outside automatic upgrade readiness. Source implementation and unit tests are not a released artifact, a live upgrade, deployment acceptance or permission to activate a chain.

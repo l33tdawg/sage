@@ -135,6 +135,7 @@ type Server struct {
 	// postV23ForNextTxFn gates local enrollment, mutable roles, and Access
 	// Group-derived read authority. nil preserves the historical REST policy.
 	postV23ForNextTxFn func() bool
+	postV31ForNextTxFn func() bool
 	// postV27ForNextTxFn gates canonical omitted task-status normalization.
 	postV27ForNextTxFn func() bool
 	// appV23RootKeyResolver is the local-only CEREBRUM broker seam. It resolves
@@ -352,6 +353,13 @@ func (s *Server) SetPostV23ForNextTxAccessor(fn func() bool) {
 
 func (s *Server) isPostV23ForNextTx() bool {
 	return s.postV23ForNextTxFn != nil && s.postV23ForNextTxFn()
+}
+
+// SetPostV31ForNextTxAccessor wires the dormant functional-authority gate.
+func (s *Server) SetPostV31ForNextTxAccessor(fn func() bool) { s.postV31ForNextTxFn = fn }
+
+func (s *Server) isPostV31ForNextTx() bool {
+	return s.postV31ForNextTxFn != nil && s.postV31ForNextTxFn()
 }
 
 // SetPostV27ForNextTxAccessor wires the dynamic app-v27 lifecycle and proof
@@ -859,6 +867,7 @@ func (s *Server) setupRouter() chi.Router {
 		// Access control endpoints
 		r.Post("/v1/access/request", s.handleAccessRequest)
 		r.Post("/v1/access/grant", s.handleAccessGrant)
+		r.Post("/v1/access/function-authority", s.handleFunctionAuthority)
 		r.Post("/v1/access/revoke", s.handleAccessRevoke)
 		r.Get("/v1/access/grants/{agent_id}", s.handleListGrants)
 		r.Post("/v1/domain/register", s.handleDomainRegister)

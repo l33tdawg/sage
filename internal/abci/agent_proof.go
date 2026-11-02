@@ -192,7 +192,8 @@ func txUsesAgentIdentity(txType tx.TxType) bool {
 		tx.TxTypeLocalAgentApprove,
 		tx.TxTypeAgentRoleChange,
 		tx.TxTypeAccessGroupMutate,
-		tx.TxTypeRootCredentialRotate:
+		tx.TxTypeRootCredentialRotate,
+		tx.TxTypeFunctionAuthority:
 		return true
 	default:
 		return false
@@ -526,6 +527,15 @@ func (app *SageApp) verifySignedAgentAction(
 	expected := &tx.ParsedTx{Type: actual.Type}
 
 	switch actual.Type {
+	case tx.TxTypeFunctionAuthority:
+		if _, err := requireAgentRoute(req, "POST", "v1", "access", "function-authority"); err != nil {
+			return err
+		}
+		body, err := tx.DecodeFunctionAuthorityRequest(req.body)
+		if err != nil {
+			return err
+		}
+		expected.FunctionAuthority = body
 	case tx.TxTypeMemorySubmit:
 		if _, err := requireAgentRoute(req, "POST", "v1", "memory", "submit"); err != nil {
 			return err

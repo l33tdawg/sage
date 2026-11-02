@@ -36,7 +36,9 @@ type validatorKey struct {
 // that gates submissions of that shape. The maps are populated once at boot and
 // are treated as read-only (frozen) for the lifetime of the process.
 type ContentValidatorRegistry struct {
-	m map[validatorKey]ContentValidator
+	m                map[validatorKey]ContentValidator
+	contextual       map[validatorKey]ContextContentValidator
+	contextFunctions map[validatorKey]string
 	// domains holds every domain that has at least one registered validator.
 	// It scopes closed-domain enforcement (see RegisterClosedDomain): a closed
 	// domain with zero validators is a no-op rather than a total lockout.

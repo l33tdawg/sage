@@ -215,7 +215,8 @@ func appV23ControlPlaneType(txType tx.TxType) bool {
 		tx.TxTypeUpgradePropose, tx.TxTypeUpgradeCancel, tx.TxTypeUpgradeRevert,
 		tx.TxTypeDomainReassign,
 		tx.TxTypeCrossFedSet, tx.TxTypeCrossFedRevoke,
-		tx.TxTypeLocalAgentApprove, tx.TxTypeAgentRoleChange, tx.TxTypeAccessGroupMutate:
+		tx.TxTypeLocalAgentApprove, tx.TxTypeAgentRoleChange, tx.TxTypeAccessGroupMutate,
+		tx.TxTypeFunctionAuthority:
 		return true
 	default:
 		return false

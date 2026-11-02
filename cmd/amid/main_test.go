@@ -142,6 +142,7 @@ type recordingRESTForkAccessors struct {
 	postV22 func() bool
 	postV23 func() bool
 	postV27 func() bool
+	postV31 func() bool
 }
 
 func (r *recordingRESTForkAccessors) SetPostV8ForkAccessor(fn func() bool) {
@@ -164,6 +165,8 @@ func (r *recordingRESTForkAccessors) SetPostV23ForNextTxAccessor(fn func() bool)
 	r.postV23 = fn
 }
 
+func (r *recordingRESTForkAccessors) SetPostV31ForNextTxAccessor(fn func() bool) { r.postV31 = fn }
+
 func (r *recordingRESTForkAccessors) SetPostV27ForNextTxAccessor(fn func() bool) {
 	r.postV27 = fn
 }
@@ -175,6 +178,7 @@ type mutableAppForkAccessors struct {
 	postV22 bool
 	postV23 bool
 	postV27 bool
+	postV31 bool
 }
 
 func (a *mutableAppForkAccessors) IsPostV8Fork() bool            { return a.postV8 }
@@ -182,6 +186,7 @@ func (a *mutableAppForkAccessors) IsAppV17ActiveForNextTx() bool { return a.post
 func (a *mutableAppForkAccessors) IsAppV20ActiveForNextTx() bool { return a.postV20 }
 func (a *mutableAppForkAccessors) IsAppV22ActiveForNextTx() bool { return a.postV22 }
 func (a *mutableAppForkAccessors) IsAppV23ActiveForNextTx() bool { return a.postV23 }
+func (a *mutableAppForkAccessors) IsAppV31ActiveForNextTx() bool { return a.postV31 }
 func (a *mutableAppForkAccessors) IsAppV27ActiveForNextTx() bool { return a.postV27 }
 
 func TestWireRESTForkAccessorsIncludesAppV23AndStaysDynamic(t *testing.T) {
@@ -191,11 +196,18 @@ func TestWireRESTForkAccessorsIncludesAppV23AndStaysDynamic(t *testing.T) {
 	wireRESTForkAccessors(server, app)
 
 	if server.postV8 == nil || server.postV17 == nil || server.postV20 == nil ||
-		server.postV22 == nil || server.postV23 == nil || server.postV27 == nil {
+		server.postV22 == nil || server.postV23 == nil || server.postV27 == nil || server.postV31 == nil {
 		t.Fatal("amid did not wire every REST fork accessor")
 	}
 	if server.postV23() {
 		t.Fatal("app-v23 accessor unexpectedly active before the app reports activation")
+	}
+	if server.postV31() {
+		t.Fatal("app-v31 accessor active before activation")
+	}
+	app.postV31 = true
+	if !server.postV31() {
+		t.Fatal("app-v31 accessor did not remain dynamic")
 	}
 	app.postV23 = true
 	if !server.postV23() {

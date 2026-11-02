@@ -215,6 +215,7 @@ type restForkAccessorSetter interface {
 	SetPostV20ForNextTxAccessor(func() bool)
 	SetPostV22ForNextTxAccessor(func() bool)
 	SetPostV23ForNextTxAccessor(func() bool)
+	SetPostV31ForNextTxAccessor(func() bool)
 	SetPostV27ForNextTxAccessor(func() bool)
 }
 
@@ -224,6 +225,7 @@ type appForkAccessorSource interface {
 	IsAppV20ActiveForNextTx() bool
 	IsAppV22ActiveForNextTx() bool
 	IsAppV23ActiveForNextTx() bool
+	IsAppV31ActiveForNextTx() bool
 	IsAppV27ActiveForNextTx() bool
 }
 
@@ -237,6 +239,7 @@ func wireRESTForkAccessors(server restForkAccessorSetter, app appForkAccessorSou
 	server.SetPostV20ForNextTxAccessor(app.IsAppV20ActiveForNextTx)
 	server.SetPostV22ForNextTxAccessor(app.IsAppV22ActiveForNextTx)
 	server.SetPostV23ForNextTxAccessor(app.IsAppV23ActiveForNextTx)
+	server.SetPostV31ForNextTxAccessor(app.IsAppV31ActiveForNextTx)
 	server.SetPostV27ForNextTxAccessor(app.IsAppV27ActiveForNextTx)
 }
 

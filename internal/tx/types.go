@@ -784,6 +784,7 @@ type ParsedTx struct {
 	AccessGroupMutate    *AccessGroupMutate
 	RootCredentialRotate *RootCredentialRotate
 	MemoryTaintWork      *MemoryTaintWork
+	FunctionAuthority    *FunctionAuthority
 	Signature            []byte // Node validator Ed25519 signature (64 bytes)
 	PublicKey            []byte // Node validator Ed25519 public key (32 bytes)
 	Nonce                uint64
