@@ -2,6 +2,7 @@ package store
 
 import (
 	"crypto/sha256"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -85,4 +86,57 @@ func TestClassifyMemoryTaintHoldsIncompleteAuthenticatedAncestor(t *testing.T) {
 	_, disposition, err = s.ClassifyMemoryProjection(grandchild)
 	require.NoError(t, err)
 	require.Equal(t, MemoryProjectionExact, disposition)
+}
+
+func TestMemoryProjectionPreservesTaintClassificationErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want error
+		seed func(*testing.T, *BadgerStore, *memory.MemoryRecord)
+	}{
+		{
+			name: "malformed decision header",
+			want: ErrTaintStateMalformed,
+			seed: func(t *testing.T, s *BadgerStore, record *memory.MemoryRecord) {
+				decisionID := testTaintDecisionID("malformed-serving-header")
+				ref := testTaintParent(record.MemoryID)
+				copy(ref.ContentHash[:], record.ContentHash)
+				_, err := s.ApplyTaintDecision("sage", decisionID, ref, testTaintPayloadHash("serving-header"))
+				require.NoError(t, err)
+				require.NoError(t, s.SetRawForTest(taint.DecisionKey(decisionID), []byte("invalid header")))
+			},
+		},
+		{
+			name: "ancestor walk budget",
+			want: ErrTaintServingWalkBudget,
+			seed: func(t *testing.T, s *BadgerStore, record *memory.MemoryRecord) {
+				childID := record.MemoryID
+				for i := 0; i < taint.MaxServingAncestorWalk; i++ {
+					parent := testTaintParent(fmt.Sprintf("serving-ancestor-%03d", i))
+					require.NoError(t, s.SetMemoryLineage(childID, []tx.ParentRef{parent}))
+					childID = parent.MemoryID
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := openTaintStore(t)
+			record := servingMemoryRecord("classification-error", "preserved content")
+			require.NoError(t, s.SetMemoryHash(record.MemoryID, record.ContentHash, string(record.Status)))
+			tc.seed(t, s, record)
+			_, classifyErr := s.ClassifyMemoryTaint(record.MemoryID)
+			require.ErrorIs(t, classifyErr, tc.want)
+
+			_, projectionErr := s.ValidateMemoryProjection(record)
+			require.ErrorIs(t, projectionErr, tc.want)
+			require.NotErrorIs(t, projectionErr, ErrMemoryProjectionUnpublished,
+				"an incomplete classification must not become a skippable record denial")
+
+			batch, err := s.ClassifyMemoryProjections([]*memory.MemoryRecord{record})
+			require.NoError(t, err)
+			require.Len(t, batch, 1)
+			require.ErrorIs(t, batch[0].Err, tc.want)
+			require.NotErrorIs(t, batch[0].Err, ErrMemoryProjectionUnpublished)
+		})
+	}
 }
