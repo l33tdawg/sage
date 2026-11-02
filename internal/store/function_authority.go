@@ -209,11 +209,11 @@ func (s *BadgerStore) ListFunctionAuthorityPoliciesForDomain(domain string) ([]*
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			key := it.Item().KeyCopy(nil)
 			var policy FunctionAuthorityPolicy
-			if err := readFunctionAuthorityJSON(txn, key, &policy); err != nil {
-				return fmt.Errorf("read domain function policy: %w", err)
+			if readErr := readFunctionAuthorityJSON(txn, key, &policy); readErr != nil {
+				return fmt.Errorf("read domain function policy: %w", readErr)
 			}
-			if err := validateFunctionAuthorityPolicy(&policy); err != nil {
-				return err
+			if validationErr := validateFunctionAuthorityPolicy(&policy); validationErr != nil {
+				return validationErr
 			}
 			expectedKey, _ := functionAuthorityPolicyKey(policy.Function, policy.Domain)
 			if policy.Domain != domain || !bytes.Equal(key, expectedKey) {
