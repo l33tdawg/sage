@@ -208,6 +208,7 @@ func (s *BadgerStore) recordAppV30StagedMutation(
 func isAppV30GeneratedWriteKey(key []byte) bool {
 	for _, prefix := range [][]byte{
 		[]byte("taintdec:"),
+		[]byte("tainttarget:"),
 		[]byte("taintm:"),
 		[]byte("taintd:"),
 		[]byte("taintq:"),

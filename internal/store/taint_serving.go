@@ -4,8 +4,6 @@ import (
 	"errors"
 	"fmt"
 
-	badger "github.com/dgraph-io/badger/v4"
-
 	"github.com/l33tdawg/sage/internal/taint"
 )
 
@@ -33,12 +31,19 @@ type TaintServingVerdict struct {
 // path in one Badger snapshot. It never treats an absent materialized
 // membership as proof that an incomplete ancestor decision is independent.
 func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict, error) {
+	return s.classifyMemoryTaintForRead(memoryID, NewTaintServingReadScope())
+}
+
+func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintServingReadScope) (TaintServingVerdict, error) {
+	if scope == nil {
+		scope = NewTaintServingReadScope()
+	}
 	var verdict TaintServingVerdict
 	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
 		return verdict, fmt.Errorf("%w: invalid memory ID", ErrTaintServingState)
 	}
-	err := s.view(func(txn *badger.Txn) error {
-		reader := &BadgerStore{db: s.db, txn: txn}
+	err := s.withTaintServingReadSnapshot(func(reader *BadgerStore) error {
+		txn := reader.txn
 		queue := []string{memoryID}
 		visited := make(map[string]struct{}, taint.MaxServingAncestorWalk)
 		headers := make(map[string]taint.Header)
@@ -87,6 +92,16 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 					verdict.Outcome = TaintServingTainted
 				}
 				return nil
+			}
+
+			if current == memoryID {
+				status, headerErr := reader.incompleteTaintStatus(scope)
+				if headerErr != nil {
+					return headerErr
+				}
+				if status == taintIncompleteNone {
+					return nil
+				}
 			}
 
 			parents, err := s.memoryLineageTxn(txn, current)

@@ -505,9 +505,16 @@ func runServe(startupProof string) (rerr error) {
 	if err != nil {
 		return fmt.Errorf("open SQLite: %w", err)
 	}
+	storeCleanup := serveStoreCleanup{closeSQLite: sqliteStore.Close}
 	defer func() {
 		stopWorkers()
-		_ = sqliteStore.Close()
+		if closeErr := storeCleanup.close(); closeErr != nil {
+			logger.Error().Err(closeErr).Msg("close serving stores")
+			if errors.Is(rerr, errCoordinatedRestart) {
+				preservePIDForExec = false
+			}
+			rerr = serveStoreCleanupResult(rerr, closeErr)
+		}
 	}()
 
 	privateMedia, closePrivateMedia, mediaErr := configurePrivateMediaStore(ctx, cfg.PrivateMedia, sqliteStore, sqlitePath, newPrivateMediaSpaceProbe)
@@ -651,12 +658,12 @@ func runServe(startupProof string) (rerr error) {
 	if err != nil {
 		return fmt.Errorf("open BadgerDB: %w", err)
 	}
-	badgerOwnedByRuntime := false
+	storeCleanup.closeConsensus = badgerStore.CloseBadger
 	defer func() {
 		stopWorkers()
-		if !badgerOwnedByRuntime {
-			_ = badgerStore.CloseBadger()
-		}
+		// Retain this result for the earlier SQLite defer, which must not
+		// close the projection when consensus cleanup could not join a worker.
+		_ = storeCleanup.closeConsensusState()
 	}()
 
 	// Create SAGE ABCI app with SQLite backend
@@ -664,6 +671,11 @@ func runServe(startupProof string) (rerr error) {
 	if err != nil {
 		return fmt.Errorf("create SAGE app: %w", err)
 	}
+	// Construction starts the advisory worker. Register its join obligation
+	// before any later startup return, including bundle construction failure.
+	// The bundle and the startup fallback share one cached cleanup result.
+	closeInitialApp := sync.OnceValue(app.CloseConsensusState)
+	storeCleanup.closeConsensus = closeInitialApp
 	app.Version = version
 	if domainErr := app.SetExpectedGovernanceDelegationDomain(cfg.ChainID); domainErr != nil {
 		return fmt.Errorf("configure app-v20 governance domain from genesis chain_id: %w", domainErr)
@@ -766,7 +778,7 @@ func runServe(startupProof string) (rerr error) {
 	// CometBFT receives only the boot runtime, never a raw SageApp pointer. The
 	// runtime is dormant for now: normal ABCI calls delegate to this complete
 	// bundle while network state-sync endpoints remain empty/reject/abort.
-	consensusBundle, err := sageabci.NewConsensusBundleWithCleanup(ctx, app, app.CloseConsensusState)
+	consensusBundle, err := sageabci.NewConsensusBundleWithCleanup(ctx, app, closeInitialApp)
 	if err != nil {
 		return fmt.Errorf("create consensus bundle: %w", err)
 	}
@@ -774,6 +786,9 @@ func runServe(startupProof string) (rerr error) {
 	if err != nil {
 		return fmt.Errorf("create boot state-sync runtime: %w", err)
 	}
+	// From here cleanup must follow the runtime's active bundle, including a
+	// state-sync replacement, rather than the original app/store pointers.
+	storeCleanup.closeConsensus = bootRuntime.Close
 	if err := bootRuntime.ConfigureApplicationBundles(func(application abcitypes.Application) error {
 		return configureStateSyncApplicationBundle(application, version, retainBlocks, cfg.ChainID)
 	}); err != nil {
@@ -782,13 +797,6 @@ func runServe(startupProof string) (rerr error) {
 	if vaultLockedAtStartup {
 		bootRuntime.SetLocalTxAdmissionBlocked(true)
 	}
-	badgerOwnedByRuntime = true
-	defer func() {
-		stopWorkers()
-		if closeErr := bootRuntime.Close(); closeErr != nil {
-			logger.Error().Err(closeErr).Msg("close active consensus bundle")
-		}
-	}()
 	// State-sync is opt-in and must be completely authorized, configured, and
 	// armed before node.NewNode can expose the P2P reactor. Providers publish a
 	// verified app-v20 snapshot here; receivers install their one-shot finalizer

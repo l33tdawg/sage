@@ -104,8 +104,8 @@ type QueryOptions struct {
 	// committed rows are returned byte-for-byte as before. Off-chain only; never a
 	// consensus input.
 	IncludeDisputed bool `json:"-"`
-	// ExcludeTainted applies the SQL taint prefilter only when the caller has
-	// proven the mirror revision matches canonical Badger state.
+	// ExcludeTainted requires stable mirror and canonical revisions through
+	// selection and disclosure; one freshness observation is insufficient.
 	ExcludeTainted bool   `json:"-"`
 	TopK           int    `json:"top_k"`
 	Cursor         string `json:"cursor,omitempty"`
@@ -270,8 +270,8 @@ type ListOptions struct {
 	// App-v23 authorization walks multiple raw pages and enables this flag;
 	// historical one-page callers retain their exact ordering.
 	StablePaging bool
-	// ExcludeTainted mirrors QueryOptions and must be enabled only while the
-	// SQL taint mirror is fresh.
+	// ExcludeTainted has QueryOptions' stable-revision contract; a freshness
+	// observation alone does not fence SQL selection or canonical disclosure.
 	ExcludeTainted bool
 	// SkipTotal avoids the separate COUNT query when a caller is walking
 	// additional presentation-only windows and already obtained the total from
