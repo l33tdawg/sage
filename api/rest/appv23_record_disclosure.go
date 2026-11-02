@@ -56,6 +56,18 @@ func (s *Server) evaluateAppV23RecordDisclosure(
 	record *memory.MemoryRecord,
 	at time.Time,
 ) (appV23RecordDisclosure, error) {
+	return s.evaluateAppV23RecordDisclosureScoped(credentialID, record, at, nil)
+}
+
+// A nil request scope is the strict contract used by exact-only callers.
+// Broad serving paths explicitly supply one shared scope for candidate filters,
+// final authorization rechecks, and every raw page in the request.
+func (s *Server) evaluateAppV23RecordDisclosureScoped(
+	credentialID string,
+	record *memory.MemoryRecord,
+	at time.Time,
+	scope *appV23ReadScope,
+) (appV23RecordDisclosure, error) {
 	if !s.isPostV23ForNextTx() {
 		return appV23RecordDisclosure{Allowed: true}, nil
 	}
@@ -68,49 +80,53 @@ func (s *Server) evaluateAppV23RecordDisclosure(
 		)
 	}
 
-	canonical, err := s.badgerStore.ValidateMemoryProjection(record)
-	if err != nil {
-		return appV23RecordDisclosure{}, err
+	var readScope *store.TaintServingReadScope
+	if scope != nil {
+		readScope = scope.taint
 	}
-	domain := record.DomainTag
-	if canonical.DomainRecorded {
-		domain = canonical.Domain
-	}
-	// Historical rows can predate app-v23's unambiguous domain grammar. They
-	// remain preserved for governed recovery/audit, but no current RBAC lookup
-	// can safely interpret a domain containing whitespace, control syntax, or an
-	// empty segment. Treat that as a record-local quarantine: broad list/search/
-	// status reads omit only this row, while exact reads still fail closed. Do
-	// not classify policy/backend errors this way; those continue to abort the
-	// entire request below.
-	if domainErr := store.ValidateAppV23DomainName(domain); domainErr != nil {
-		return appV23RecordDisclosure{}, fmt.Errorf(
-			"%w: invalid canonical memory domain: %w",
-			store.ErrMemoryProjectionQuarantined,
-			domainErr,
-		)
-	}
-	author := record.SubmittingAgent
-	if canonical.AuthorRecorded {
-		author = canonical.Author
-	}
-	decision, err := appv23disclosure.Evaluate(
-		s.badgerStore,
-		credentialID,
-		appv23disclosure.Record{
-			SubmittingAgent: author,
-			Domain:          domain,
-			Classification:  canonical.Classification,
+	canonical, _, policyAllowed, err := s.badgerStore.ClassifyMemoryProjectionForRead(
+		record, readScope,
+		func(reader *store.BadgerStore, canonical *store.MemoryDisclosureState) (bool, error) {
+			domain := record.DomainTag
+			if canonical.DomainRecorded {
+				domain = canonical.Domain
+			}
+			// Keep the explicit legacy projection fallback, but never derive
+			// policy from a row that failed canonical envelope validation.
+			if domainErr := store.ValidateAppV23DomainName(domain); domainErr != nil {
+				return false, fmt.Errorf("%w: invalid canonical memory domain: %w",
+					store.ErrMemoryProjectionQuarantined, domainErr)
+			}
+			author := record.SubmittingAgent
+			if canonical.AuthorRecorded {
+				author = canonical.Author
+			}
+			decision, policyErr := appv23disclosure.Evaluate(
+				reader, credentialID,
+				appv23disclosure.Record{
+					SubmittingAgent: author,
+					Domain:          domain,
+					Classification:  canonical.Classification,
+				}, at,
+			)
+			return decision.Allowed, policyErr
 		},
-		at,
 	)
 	if err != nil {
+		// Only an authorized, typed ancestor-budget uncertainty has a partial
+		// response shape. Backend, malformed state, and policy errors still abort.
+		if scope != nil && scope.allowPartial && policyAllowed &&
+			errors.Is(err, store.ErrMemoryProjectionTaintIndeterminate) &&
+			errors.Is(err, store.ErrTaintServingWalkBudget) {
+			scope.uncertain.Store(true)
+			return appV23RecordDisclosure{}, nil
+		}
 		return appV23RecordDisclosure{}, err
 	}
-	return appV23RecordDisclosure{
-		Allowed:        decision.Allowed,
-		Classification: canonical.Classification,
-	}, nil
+	if !policyAllowed {
+		return appV23RecordDisclosure{}, nil
+	}
+	return appV23RecordDisclosure{Allowed: true, Classification: canonical.Classification}, nil
 }
 
 // collectAppV23VisibleRecords fills a caller-visible page from a stable raw
@@ -121,6 +137,16 @@ func (s *Server) collectAppV23VisibleRecords(
 	credentialID string,
 	visibleLimit int,
 	fetch func(context.Context, int, int) ([]*memory.MemoryRecord, error),
+) ([]*memory.MemoryRecord, error) {
+	return s.collectAppV23VisibleRecordsScoped(ctx, credentialID, visibleLimit, fetch, newAppV23StrictReadScope())
+}
+
+func (s *Server) collectAppV23VisibleRecordsScoped(
+	ctx context.Context,
+	credentialID string,
+	visibleLimit int,
+	fetch func(context.Context, int, int) ([]*memory.MemoryRecord, error),
+	scope *appV23ReadScope,
 ) ([]*memory.MemoryRecord, error) {
 	if visibleLimit <= 0 {
 		return []*memory.MemoryRecord{}, nil
@@ -138,8 +164,8 @@ func (s *Server) collectAppV23VisibleRecords(
 		}
 		rawCount := len(batch)
 		for _, rec := range batch {
-			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosure(
-				credentialID, rec, now,
+			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosureScoped(
+				credentialID, rec, now, scope,
 			)
 			if disclosureErr != nil {
 				if isUnsafeAppV23Projection(disclosureErr) {
