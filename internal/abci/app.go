@@ -378,6 +378,9 @@ type SageApp struct {
 	logger        zerolog.Logger
 	Version       string
 
+	// Process-owned advisory worker; never copied to speculative app clones.
+	memoryTaintMirrorWorker *memoryTaintMirrorWorker
+
 	// runtimeViewMu publishes the committed in-memory application view as one
 	// coherent unit to off-consensus readers. CometBFT may run CheckTx, Query,
 	// Info, and voter callbacks concurrently with Commit. Post-app-v20 Commit
@@ -2523,6 +2526,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshPoEWeights()
 
 	app.armContentValidatorsFromProvider()
+	app.startMemoryTaintMirrorWorker()
 
 	return app, nil
 }
@@ -2654,6 +2658,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshPoEWeights()
 
 	app.armContentValidatorsFromProvider()
+	app.startMemoryTaintMirrorWorker()
 
 	return app, nil
 }
@@ -10583,6 +10588,7 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 			panic(fmt.Sprintf("sage: legacy Commit projection failed: %v", err))
 		}
 	}
+	app.requestMemoryTaintMirrorRefresh()
 
 	// v7.5 snapshot scheduler: post-SaveState is the only point where
 	// BadgerDB + SQLite + CometBFT-state-as-of-this-height are mutually
@@ -11380,6 +11386,9 @@ func (app *SageApp) Close() error {
 // sync uses this while replacing a complete SageApp graph; the off-chain
 // projection is process-owned and must remain open for the replacement bundle.
 func (app *SageApp) CloseConsensusState() error {
+	if err := app.stopMemoryTaintMirrorWorker(); err != nil {
+		return err
+	}
 	if app.pendingAppV20Finalize != nil {
 		app.pendingAppV20Finalize.store.DiscardConsensusTransaction()
 		app.pendingAppV20Finalize = nil
