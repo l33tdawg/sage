@@ -166,6 +166,7 @@ jobs:
           test "$(go env GOARCH)" = "${{ matrix.arch }}"
           go test ./internal/poe -run '^TestDeterministic' -v -count=1
           go test ./internal/store -run '^TestUpdateVerdictStatsDeterministic_GoldenBits$' -v -count=1
+          go test ./internal/abci -run '^TestAppV30CanonicalStateAppHashGolden$' -v -count=1
 
   test:
     name: Test
@@ -185,6 +186,8 @@ jobs:
 
   v119-fault-gates:
     name: Consensus Fault Gates
+    # Component PRs retain required tests; main runs the full integrated consensus suite.
+    if: github.event_name != 'pull_request'
     # Deliberately NOT `needs: test`. Nothing here consumes a test output --
     # there is no needs.test.* reference anywhere in this file -- so the edge
     # only serialized two independent suites and left the runner idle for the
@@ -195,10 +198,11 @@ jobs:
     # edge rather than relying on incidental ordering.
     uses: ./.github/workflows/v11.9-fault-gates.yml
     with:
-      # PR/main green must carry the same evidence required before a release
+      # Main green must carry the same evidence required before a release
       # tag can publish artifacts.
       require_scoped_reconfiguration: true
       require_authorized_state_sync: true
+      release_ref: ${{ github.sha }}
 
   frontend-static:
     name: Frontend Static Checks
@@ -234,7 +238,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [lint, vulncheck, test, frontend-static, benchmark-protocol, v119-fault-gates]
+    # Do not skip Build/downstream checks when consensus is intentionally omitted on a PR.
+    if: ${{ always() && !cancelled() }}
     steps:
+      - name: Require successful build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ needs.lint.result }}" = "success"
+          test "${{ needs.vulncheck.result }}" = "success"
+          test "${{ needs.test.result }}" = "success"
+          test "${{ needs.frontend-static.result }}" = "success"
+          test "${{ needs.benchmark-protocol.result }}" = "success"
+          if [ "${{ needs.v119-fault-gates.result }}" != "success" ]; then
+            test "${{ github.event_name }}" = "pull_request"
+            test "${{ needs.v119-fault-gates.result }}" = "skipped"
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
