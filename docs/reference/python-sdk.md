@@ -2019,13 +2019,23 @@ SageError                  # base
 └── SageAPIError           # all 4xx/5xx
     ├── SageAuthError      # HTTP 401/403
     ├── SageNotFoundError  # HTTP 404
-    └── SageValidationError # HTTP 422
+    ├── SageValidationError # HTTP 422
+    └── SageTaintError     # typed memory-taint problem
 ```
 
 `SageAPIError` attributes: `status_code: int`, `detail: str`,
 `error_type: str | None`, `reason_code: str | None`, `remedy: str | None`,
 and `retryable: bool | None`. `SageAuthError` is a `SageAPIError`, so callers
 may catch it specifically or through the API base class.
+
+Import `SageTaintError` from `sage_sdk.exceptions`. It extends `SageAPIError`
+and exposes `taint_state`: `"tainted"` for
+`https://sage.dev/errors/memory-tainted`, or `"taint_pending"` for
+`https://sage.dev/errors/memory-taint-pending`. `from_response` recognizes these
+exact problem types; callers should branch on `taint_state`, not human-readable
+`detail`. Ancestor-traversal uncertainty remains an API error, not pending taint.
+
+Source: `sdk/python/src/sage_sdk/exceptions.py:134` (`SageTaintError`).
 
 Canonical app-v23 memory-write denials have
 `error_type="https://sage.dev/errors/domain-write-denied"`, one of the seven
