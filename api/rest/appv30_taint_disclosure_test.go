@@ -2,12 +2,15 @@ package rest
 
 import (
 	"crypto/sha256"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
@@ -149,6 +152,130 @@ func TestTaintServingZeroDecisionDepthBoundaryBroadList(t *testing.T) {
 			}
 			require.NoError(t, classificationErr)
 			require.Equal(t, store.TaintServingClear, verdict.Outcome)
+		})
+	}
+}
+
+func TestTaintProjectionProblemIsMachineDistinguishable(t *testing.T) {
+	for _, tc := range []struct {
+		sentinel    error
+		problemType string
+	}{
+		{store.ErrMemoryProjectionTainted, memoryTaintedProblemType},
+		{store.ErrMemoryProjectionTaintPending, memoryTaintPendingProblemType},
+	} {
+		err := fmt.Errorf("%w: %w", store.ErrMemoryProjectionUnpublished, tc.sentinel)
+		recorder := httptest.NewRecorder()
+		require.True(t, writeAppV30TaintProjectionProblem(recorder, err))
+		require.Equal(t, http.StatusUnavailableForLegalReasons, recorder.Code)
+		var problem map[string]any
+		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &problem))
+		require.Equal(t, tc.problemType, problem["type"])
+		require.EqualValues(t, http.StatusUnavailableForLegalReasons, problem["status"])
+	}
+}
+
+// This is an actual detail-handler read over canonical Badger state and a mock
+// SQL projection. It is not a signed request, transaction or network fixture.
+func TestGetMemoryTaintProblemUsesCanonicalAuthorization(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		pending     bool
+		denied      bool
+		malformed   bool
+		budget      bool
+		status      int
+		problemType string
+		title       string
+		detail      string
+	}{
+		{name: "confirmed", status: http.StatusUnavailableForLegalReasons,
+			problemType: memoryTaintedProblemType, title: memoryTaintedProblemTitle, detail: memoryTaintedProblemDetail},
+		{name: "pending", pending: true, status: http.StatusUnavailableForLegalReasons,
+			problemType: memoryTaintPendingProblemType, title: memoryTaintPendingProblemTitle, detail: memoryTaintPendingProblemDetail},
+		{name: "denied_confirmed", denied: true, status: http.StatusForbidden},
+		{name: "denied_pending", pending: true, denied: true, status: http.StatusForbidden},
+		{name: "denied_malformed", denied: true, malformed: true, status: http.StatusForbidden},
+		{name: "malformed", malformed: true, status: http.StatusServiceUnavailable},
+		{name: "ancestor_budget", budget: true, status: http.StatusServiceUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var srv *Server
+			var reader string
+			var record *memory.MemoryRecord
+			if tc.budget {
+				var canonical *store.BadgerStore
+				srv, canonical, _, reader, record = appV23TaintCoverageFixture(t, false, false)
+				_, err := canonical.ClassifyMemoryTaint(record.MemoryID)
+				require.ErrorIs(t, err, store.ErrTaintServingWalkBudget,
+					"the fixture must reach actual canonical ancestor-budget uncertainty")
+			} else {
+				var rows *rbacMockMemoryStore
+				var canonical *store.BadgerStore
+				var owner, outsider string
+				srv, rows, canonical, _, reader, owner, outsider = appV23DisclosureFixture(t)
+				record = appV23PagingRecord("typed-taint-detail", owner, "owner.home",
+					"protected detail fixture content", memory.TypeObservation, memory.StatusCommitted, time.Now())
+				rows.memories[record.MemoryID] = record
+				publishAppV23RESTRecord(t, canonical, record, 0)
+				ref := tx.ParentRef{SourceChainID: "sage", MemoryID: record.MemoryID}
+				copy(ref.ContentHash[:], record.ContentHash)
+				if tc.pending {
+					ref.MemoryID = "typed-taint-parent"
+					ref.ContentHash = sha256.Sum256([]byte("typed parent content"))
+					require.NoError(t, canonical.SetMemoryHash(ref.MemoryID, ref.ContentHash[:], string(memory.StatusCommitted)))
+					require.NoError(t, canonical.SetMemoryLineage(record.MemoryID, []tx.ParentRef{ref}))
+				}
+				decisionID := fmt.Sprintf("%x", sha256.Sum256([]byte("typed detail decision")))
+				created, err := canonical.ApplyTaintDecision("sage", decisionID, ref, sha256.Sum256([]byte("typed detail payload")))
+				require.NoError(t, err)
+				require.True(t, created)
+				if tc.malformed {
+					require.NoError(t, canonical.SetRawForTest(taint.DecisionKey(decisionID), []byte("invalid header")))
+				}
+				if tc.denied {
+					reader = outsider
+				}
+			}
+
+			router := chi.NewRouter()
+			router.Get("/v1/memory/{memory_id}", srv.handleGetMemory)
+			request := appV23DisclosureRequest(reader, http.MethodGet, "/v1/memory/"+record.MemoryID, nil)
+			out := httptest.NewRecorder()
+			router.ServeHTTP(out, request)
+			require.Equal(t, tc.status, out.Code, out.Body.String())
+			require.Equal(t, "application/problem+json", out.Header().Get("Content-Type"))
+			var problem map[string]any
+			require.NoError(t, json.Unmarshal(out.Body.Bytes(), &problem))
+			if tc.status == http.StatusUnavailableForLegalReasons {
+				require.Equal(t, map[string]any{
+					"type": tc.problemType, "title": tc.title,
+					"status": float64(tc.status), "detail": tc.detail,
+				}, problem, "typed denial must contain no content or record metadata")
+			} else {
+				require.Equal(t, fmt.Sprintf("https://sage.dev/errors/%d", tc.status), problem["type"])
+				require.NotContains(t, out.Body.String(), "memory-tainted")
+				require.NotContains(t, out.Body.String(), "memory-taint-pending")
+			}
+			for _, hidden := range []string{record.MemoryID, record.Content, record.DomainTag, record.SubmittingAgent} {
+				require.NotContains(t, out.Body.String(), hidden)
+			}
+			require.NotContains(t, out.Body.String(), `"content_hash"`)
+			require.NotContains(t, out.Body.String(), `"taint_coverage"`)
+		})
+	}
+}
+
+func TestTaintProjectionProblemRejectsUncertaintyAndBackendErrors(t *testing.T) {
+	for name, err := range map[string]error{
+		"backend":         fmt.Errorf("classify taint: %w", errors.New("backend unavailable")),
+		"malformed":       fmt.Errorf("classify taint: %w", store.ErrTaintStateMalformed),
+		"ancestor_budget": fmt.Errorf("%w: %w", store.ErrMemoryProjectionTaintIndeterminate, store.ErrTaintServingWalkBudget),
+	} {
+		t.Run(name, func(t *testing.T) {
+			out := httptest.NewRecorder()
+			require.False(t, writeAppV30TaintProjectionProblem(out, err))
+			require.Empty(t, out.Body.String(), "unrelated failures must remain with the existing caller error path")
 		})
 	}
 }
