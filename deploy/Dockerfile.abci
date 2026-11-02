@@ -2,7 +2,7 @@
 # Multi-stage build: compile Go binary, copy to minimal Alpine
 
 # ── Shared source ─────────────────────────────
-FROM golang:1.26.10-alpine AS source
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS source
 
 RUN apk add --no-cache git
 
@@ -21,7 +21,9 @@ RUN go mod download
 COPY . .
 
 FROM source AS amid-builder
-RUN CGO_ENABLED=0 go build -o /app/amid ./cmd/amid
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -o /app/amid ./cmd/amid
 
 # This stage is reachable only from the explicit v119-state-sync-fixture
 # target. The binary is intentionally fixture-named and carries the
@@ -33,16 +35,18 @@ RUN CGO_ENABLED=0 go build -o /app/amid ./cmd/amid
 # all production authorization, quorum, identity, state-sync, P2P, sealing, and
 # serving logic remains identical.
 FROM source AS v119-state-sync-fixture-builder
+ARG TARGETOS
+ARG TARGETARCH
 ARG V119_STATE_SYNC_SOURCE_ID
 RUN test "${#V119_STATE_SYNC_SOURCE_ID}" -eq 64 \
     && case "${V119_STATE_SYNC_SOURCE_ID}" in *[!0-9a-f]*) exit 1;; *) exit 0;; esac
-RUN CGO_ENABLED=0 go build -tags=v119testfixture \
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -tags=v119testfixture \
       -ldflags "-X main.version=v11.9.0-state-sync-fixture -X main.commit=${V119_STATE_SYNC_SOURCE_ID}" \
       -o /app/sage-gui-v119-fixture ./cmd/sage-gui \
-    && CGO_ENABLED=0 go build -tags=v119testfixture \
+    && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -tags=v119testfixture \
       -ldflags "-X main.version=v11.9.0-governance-fixture -X main.commit=${V119_STATE_SYNC_SOURCE_ID}" \
       -o /app/amid-v119-fixture ./cmd/amid \
-    && CGO_ENABLED=0 go build -tags=v119testfixture \
+    && CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build -tags=v119testfixture \
       -o /app/v119-governance-fixture ./cmd/v119-governance-fixture
 
 # ── Runtime base ─────────────────────────────
