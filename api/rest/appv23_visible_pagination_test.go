@@ -268,6 +268,11 @@ func TestAppV23MemoryListQuarantinesMalformedHistoricalDomainWithoutHidingValidR
 	require.Error(t, exactErr)
 	require.ErrorIs(t, exactErr, store.ErrMemoryProjectionQuarantined)
 	require.True(t, isUnsafeAppV23Projection(exactErr))
+	require.True(t, isUnsafeAppV23Projection(fmt.Errorf(
+		"%w: %w",
+		store.ErrMemoryProjectionUnpublished,
+		store.ErrMemoryProjectionTaintPending,
+	)))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/memory/list?limit=50", nil)
 	req = req.WithContext(middleware.WithAgentID(req.Context(), readerID))

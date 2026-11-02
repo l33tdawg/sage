@@ -36,7 +36,9 @@ func appV23RecordDisclosureError(err error) error {
 
 func isUnsafeAppV23Projection(err error) bool {
 	return errors.Is(err, store.ErrMemoryProjectionUnpublished) ||
-		errors.Is(err, store.ErrMemoryProjectionQuarantined)
+		errors.Is(err, store.ErrMemoryProjectionQuarantined) ||
+		errors.Is(err, store.ErrMemoryProjectionTainted) ||
+		errors.Is(err, store.ErrMemoryProjectionTaintPending)
 }
 
 // appV23RecordDisclosure is the single post-v23 content-disclosure decision.
