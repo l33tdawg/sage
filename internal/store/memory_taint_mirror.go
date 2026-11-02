@@ -258,6 +258,9 @@ func RebuildMemoryTaintMirror(
 	return 0, 0, ErrMemoryTaintMirrorNotConverged
 }
 
+// MemoryTaintMirrorFresh compares observed mirror and canonical revisions.
+// It does not lock either revision or fence subsequent selection and disclosure;
+// callers need a separate stable-revision guarantee before enabling ExcludeTainted.
 func MemoryTaintMirrorFresh(
 	ctx context.Context,
 	canonical *BadgerStore,

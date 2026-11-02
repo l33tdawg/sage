@@ -38,9 +38,31 @@ func (s *BadgerStore) ValidateTaintState() error {
 				decisions.Close()
 				return fmt.Errorf("%w: expansion cap exceeded", ErrTaintStateMalformed)
 			}
+			if targetErr := validateTaintTargetTxn(txn, decisionID, header); targetErr != nil {
+				decisions.Close()
+				return targetErr
+			}
 			headers[decisionID] = header
 		}
 		decisions.Close()
+
+		targetPrefix := []byte("tainttarget:")
+		targetOptions := badger.DefaultIteratorOptions
+		targetOptions.Prefix = targetPrefix
+		targetOptions.PrefetchValues = false
+		targets := txn.NewIterator(targetOptions)
+		for targets.Seek(targetPrefix); targets.ValidForPrefix(targetPrefix); targets.Next() {
+			decisionID := string(targets.Item().Key()[len(targetPrefix):])
+			if idErr := taint.ValidateDecisionID(decisionID); idErr != nil {
+				targets.Close()
+				return fmt.Errorf("%w: malformed target anchor key", ErrTaintStateMalformed)
+			}
+			if _, found := headers[decisionID]; !found {
+				targets.Close()
+				return fmt.Errorf("%w: target anchor has no decision header", ErrTaintStateMalformed)
+			}
+		}
+		targets.Close()
 
 		expectedActive := uint64(0)
 		for _, header := range headers {
@@ -212,15 +234,18 @@ func (s *BadgerStore) ValidateTaintState() error {
 }
 
 func parseTaintMembershipKey(key string) (memoryID, decisionID string, err error) {
-	key = strings.TrimPrefix(key, "taintm:")
-	separator := strings.LastIndexByte(key, ':')
-	if separator <= 0 || len(key)-separator-1 != taint.DecisionIDBytes {
+	const prefix = "taintm:"
+	if !strings.HasPrefix(key, prefix) || len(key) < len(prefix)+2 {
 		return "", "", fmt.Errorf("%w: malformed membership key", ErrTaintStateMalformed)
 	}
-	memoryID, decisionID = key[:separator], key[separator+1:]
-	if len(memoryID) > taint.MaxMemoryIDBytes {
-		return "", "", fmt.Errorf("%w: invalid membership memory ID", ErrTaintStateMalformed)
+	memoryLength := int(binary.BigEndian.Uint16([]byte(key[len(prefix) : len(prefix)+2])))
+	memoryStart := len(prefix) + 2
+	separator := memoryStart + memoryLength
+	if memoryLength == 0 || memoryLength > taint.MaxMemoryIDBytes ||
+		len(key) != separator+1+taint.DecisionIDBytes || key[separator] != ':' {
+		return "", "", fmt.Errorf("%w: malformed membership key", ErrTaintStateMalformed)
 	}
+	memoryID, decisionID = key[memoryStart:separator], key[separator+1:]
 	if err := taint.ValidateDecisionID(decisionID); err != nil {
 		return "", "", fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 	}
