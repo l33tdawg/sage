@@ -482,6 +482,25 @@ list applies to direct lookup. Authorship is immutable provenance, not current
 read authority: even the submitting agent receives `403` after its live domain,
 group, grant, enrollment, or clearance authority is revoked.
 
+For a valid canonical record, a policy-denied reader receives `403` before
+any taint disclosure. After live read authorization succeeds, taint denials use
+HTTP `451` with `Content-Type: application/problem+json`:
+
+| Problem `type` | Meaning |
+|---|---|
+| `https://sage.dev/errors/memory-tainted` | An active governance decision withholds the memory. |
+| `https://sage.dev/errors/memory-taint-pending` | Governance taint coverage for the memory is pending. |
+
+These responses contain only the fixed `type`, `title`, `status`, and `detail`
+fields, with no memory content or record metadata. Malformed canonical state,
+canonical-disclosure backend failures, and ancestor-traversal uncertainty remain
+`503`; uncertainty is not a pending-taint `451`. A malformed canonical envelope
+can fail before policy evaluation.
+
+Sources: `appV30TaintProjectionProblem` (`api/rest/appv30_taint_problem.go:19`),
+`handleGetMemory` (`api/rest/memory_handler.go:3398`), and
+`ClassifyMemoryProjectionForRead` (`internal/store/memory_disclosure.go:148`).
+
 ---
 
 ### `GET /v1/memory/list`
