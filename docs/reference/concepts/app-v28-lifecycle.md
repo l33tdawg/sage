@@ -90,7 +90,7 @@ A co-commit does not consult the voter: block inclusion is decisive for it.
 Before app-v28, its tombstone check existed only at the local REST submission
 boundary, so a directly broadcast transaction bypassed that guard. From H+1,
 consensus checks the content hash against the promoted reverse index before
-applying a co-commit (`processCoCommitSubmit`, `internal/abci/app.go:6043`).
+applying a co-commit (`processCoCommitSubmit`, `internal/abci/app.go:6108`).
 
 Closing that gap required an index over consensus state. State
 carries `memory:<id>` as a content hash plus status, so the predicate "these
@@ -114,7 +114,7 @@ post-fork rule: a pre-fork block replays exactly as it did before.
 
 The `maxSupportedAppVersion` ceiling in `internal/abci` is the version the
 auto-voter will not vote past, and `currentAppVersion`
-(`internal/abci/app.go:2684`) is the ladder that reports it. In personal mode
+(`internal/abci/app.go:2703`) is the ladder that reports it. In personal mode
 `personalAutoAdvanceCeiling` (`cmd/sage-gui/upgrade_watchdog.go:271`) returns
 that ceiling, so bumping it is not a constant update: a personal node advances
 its own chain to the new version on upgrade with no governance ceremony,
