@@ -115,6 +115,11 @@ func DecisionKey(decisionID string) []byte {
 	return append(DecisionPrefix(), decisionID...)
 }
 
+// TargetKey retains immutable target history after expansion and cleanup.
+func TargetKey(decisionID string) []byte {
+	return []byte("tainttarget:" + decisionID)
+}
+
 func MembershipPrefix(memoryID string) []byte {
 	// Store entry points reject invalid IDs before calling this helper. Keep
 	// invalid direct calls disjoint from every valid prefix, without uint16 wrap.
