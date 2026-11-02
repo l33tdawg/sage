@@ -7,7 +7,9 @@
 # permissions for that fixed container user.
 
 # -- Builder -------------------------------------------
-FROM golang:1.26.10-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS builder
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN apk add --no-cache git make
 
@@ -29,7 +31,7 @@ COPY third_party/cometbft/node/node.go /src/node/node.go
 COPY third_party/cometbft/node/setup.go /src/node/setup.go
 COPY third_party/cometbft/state/store.go /src/state/store.go
 COPY third_party/cometbft/store/store.go /src/store/store.go
-RUN CGO_ENABLED=0 go build \
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" go build \
     -ldflags "-X github.com/cometbft/cometbft/version.TMGitCommitHash=${COMETBFT_SOURCE_COMMIT}" \
     -o /usr/local/bin/cometbft ./cmd/cometbft
 
