@@ -15,7 +15,7 @@ import (
 	badger "github.com/dgraph-io/badger/v4"
 )
 
-const standInNotice = "STAND-IN MEASUREMENT: the taint protocol is not implemented yet. These numbers come from a stand-in over real Badger using the key layouts and costs planned in RFC #460, not from SAGE consensus code. There is no AppHash, CometBFT, SQL mirror or real node here. All constants stay provisional."
+const standInNotice = "STAND-IN MEASUREMENT: this harness models RFC #460 constants over real Badger; it is not the app-v30 consensus implementation. There is no AppHash, CometBFT, SQL mirror or live node in this command. Use the app-v30 real-code tests and CI gates for release evidence."
 
 type config struct {
 	Profile           string
