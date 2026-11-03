@@ -70,9 +70,17 @@ func appV23TaintCoverageFixture(t *testing.T, complete, denied bool) (
 		require.Equal(t, taint.StatusComplete, header.Status)
 	} else {
 		require.True(t, header.Status.Incomplete())
-		// An actual incomplete canonical header must not be bypassed by the
-		// advisory counter saying zero.
-		require.NoError(t, canonical.SetRawForTest(taint.ActiveCountKey(), make([]byte, 8)))
+	}
+	// Keep the real retained-slot count/index consistent. Corrupting only the
+	// count would test malformed state, not the intended ancestor-walk budget.
+	active, activeErr := canonical.ActiveTaintDecisionCount()
+	require.NoError(t, activeErr)
+	require.Equal(t, uint64(1), active)
+	require.NoError(t, canonical.ValidateTaintState())
+	if !complete {
+		_, budgetErr := canonical.ClassifyMemoryTaint(deep.MemoryID)
+		require.ErrorIs(t, budgetErr, store.ErrTaintServingWalkBudget,
+			"the valid incomplete fixture must reach canonical ancestor-walk uncertainty")
 	}
 	rows.listed = append(rows.listed, deep)
 	for index := 0; index < 2; index++ {
@@ -343,4 +351,38 @@ func TestAppV23TaintCoverageSurvivesRawPageBoundaryAndLookahead(t *testing.T) {
 	require.NotNil(t, response.Coverage)
 	require.NotContains(t, out.Body.String(), "denied-page")
 	require.NotContains(t, out.Body.String(), "outsider.home")
+}
+
+// Keep the former zero-counter adversarial control separate from the valid
+// ancestor-budget fixture: an indexed retained decision with a zero count is
+// malformed canonical state, never a partial-coverage or successful-empty case.
+func TestAppV23TaintCoverageZeroRetainedCountFailsClosed(t *testing.T) {
+	srv, canonical, rows, reader, deep := appV23TaintCoverageFixture(t, false, false)
+	// The corrected fixture has already proved a valid incomplete decision and
+	// an actual walk-budget error. Change only the retained-slot singleton.
+	require.NoError(t, canonical.SetRawForTest(taint.ActiveCountKey(), make([]byte, 8)))
+	active, activeErr := canonical.ActiveTaintDecisionCount()
+	require.NoError(t, activeErr)
+	require.Zero(t, active)
+
+	_, classifyErr := canonical.ClassifyMemoryTaint(deep.MemoryID)
+	require.ErrorIs(t, classifyErr, store.ErrTaintStateMalformed)
+	require.NotErrorIs(t, classifyErr, store.ErrTaintServingWalkBudget)
+	require.NoError(t, canonical.ValidateLineageIndexes(), "lineage remains valid; only the retained count was corrupted")
+	disclosure, disclosureErr := srv.evaluateAppV23RecordDisclosure(reader, deep, time.Now())
+	require.ErrorIs(t, disclosureErr, store.ErrTaintStateMalformed)
+	require.NotErrorIs(t, disclosureErr, store.ErrMemoryProjectionTaintIndeterminate)
+	require.NotErrorIs(t, disclosureErr, store.ErrTaintServingWalkBudget)
+	require.False(t, disclosure.Allowed)
+	require.False(t, isUnsafeAppV23Projection(disclosureErr), "malformed state must abort instead of becoming a skippable record denial")
+
+	out := httptest.NewRecorder()
+	srv.handleListMemoriesAuth(out, appV23DisclosureRequest(reader, http.MethodGet, "/v1/memory/list?limit=50", nil))
+	require.Equal(t, http.StatusServiceUnavailable, out.Code, out.Body.String())
+	require.NotContains(t, out.Body.String(), "taint_coverage", "malformed state is not partial ancestor-walk coverage")
+	for _, record := range rows.listed {
+		require.NotContains(t, out.Body.String(), record.MemoryID)
+		require.NotContains(t, out.Body.String(), record.Content)
+	}
+	require.NotContains(t, out.Body.String(), deep.DomainTag)
 }
