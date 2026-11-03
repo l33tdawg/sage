@@ -4,6 +4,7 @@ package integration
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -14,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,9 +32,10 @@ import (
 
 // TestAppHashDeterminism_AppV29Activation is the determinism half of the
 // app-v29 evidence bar (docs/reference/concepts/app-v29-poe-determinism.md): walk the
-// FULL app-v2..app-v27 ladder on the four-validator devnet with real
+// app-v6..app-v29 ladder (app-v6 backfills app-v2..app-v5) on the four-validator devnet with real
 // governance-approved activations, cross the app-v29 seam, and assert every
-// node's committed AppHash is byte-identical at H-1, H and H+1 of EVERY rung.
+// node's committed AppHash is byte-identical for execution A-1, A and A+1
+// of EVERY rung, using the canonical pending plan's actual activation A.
 //
 // The ladder cannot be shortened. app-v20 requires app-v19 as its immediate
 // predecessor, app-v21..app-v29 each require their immediate predecessor, and
@@ -55,18 +58,14 @@ import (
 //     DET_TEST=TestAppHashDeterminism_AppV29Activation and a short
 //     SAGE_TESTNET_TIMEOUT_COMMIT.
 func TestAppHashDeterminism_AppV29Activation(t *testing.T) {
-	requireNetwork(t)
+	require.False(t, testing.Short(), "the mandatory full ladder cannot run in short mode")
+	require.True(t, checkHealth(t), "the mandatory full ladder requires a healthy network")
 	rpcs := allCometRPCs()
-	if len(rpcs) < cometRPCCount {
-		t.Skipf("need %d validator RPCs, have %d", cometRPCCount, len(rpcs))
-	}
-	if testing.Short() {
-		t.Skip("skipping the app-v2..app-v29 ladder in -short mode")
-	}
+	require.Len(t, rpcs, cometRPCCount, "the mandatory full ladder requires exactly four validator RPCs")
 
 	preVer := readAppVersion(t, rpcs[0])
-	require.Lessf(t, preVer, uint64(8),
-		"the ladder needs a FRESH devnet, chain is already at app-v%d: the operator-admin self-grant door closes at app-v9 and app-v6..app-v8 need the pre-app-v8 legacy path", preVer)
+	require.Lessf(t, preVer, uint64(6),
+		"the complete ladder needs a FRESH devnet below app-v6, chain is already at app-v%d", preVer)
 
 	chainID := readChainID(t, rpcs[0])
 	govDomain, err := governance.DelegationDomainForChainID(chainID)
@@ -90,14 +89,15 @@ func TestAppHashDeterminism_AppV29Activation(t *testing.T) {
 			appV29ActivationHeight = activation
 		}
 	}
-	nextEpochBoundary := ((appV29ActivationHeight / 100) + 1) * 100
+	nextEpochBoundary := ladderPostActivationEpoch(appV29ActivationHeight)
+	require.Greater(t, nextEpochBoundary, appV29ActivationHeight)
 	waitForAllNodesHeight(t, rpcs, nextEpochBoundary+1, ladderRungTimeout())
 	for _, h := range []int64{nextEpochBoundary, nextEpochBoundary + 1} {
 		agreed := assertAppHashAgreement(t, rpcs, h)
 		t.Logf("post-app-v29 epoch boundary: all %d nodes byte-identical at height %d (%s)",
 			cometRPCCount, h, shortHash(agreed))
 	}
-	t.Logf("LADDER PASS: app-v2..app-v29 activated one rung at a time and crossed post-activation epoch %d in %s",
+	t.Logf("LADDER PASS: app-v6..app-v29 activated one rung at a time (app-v6 backfills app-v2..app-v5) and crossed post-activation epoch %d in %s",
 		nextEpochBoundary/100, time.Since(started).Round(time.Second))
 }
 
@@ -110,10 +110,6 @@ const appV29ActivationFloorBlocks = 200
 func climbRung(t *testing.T, rpcs []string, adminKey ed25519.PrivateKey, target uint64, govDomain string) int64 {
 	t.Helper()
 	cur := readAppVersion(t, rpcs[0])
-	if cur >= target {
-		t.Logf("app-v%d already active — rung skipped", target)
-		return readLatestHeight(t, rpcs[0])
-	}
 	// app-v6 is the one legal jump (it backfills app-v2..app-v5); every later
 	// rung is strictly next (app-v20..app-v29 require their immediate
 	// predecessor outright, and the harness walks the rest in order).
@@ -134,7 +130,6 @@ func climbRung(t *testing.T, rpcs []string, adminKey ed25519.PrivateKey, target 
 	res := broadcastParsedTxCommit(t, rpcs[0], ptx)
 	require.Equalf(t, uint32(0), res.CheckCode, "upgrade propose %s rejected in CheckTx: %s", name, res.CheckLog)
 	require.Equalf(t, uint32(0), res.TxCode, "upgrade propose %s rejected at execution: %s", name, res.TxLog)
-	activation := res.Height + appV29ActivationFloorBlocks
 
 	// From app-v8 on the propose runs the governance ballot; each node's
 	// auto-voter accepts every target at or below its auto-vote ceiling. The
@@ -151,14 +146,150 @@ func climbRung(t *testing.T, rpcs []string, adminKey ed25519.PrivateKey, target 
 		}
 	}
 
+	planCtx, cancelPlan := context.WithTimeout(context.Background(), ladderRungTimeout())
+	plan, err := waitForLadderUpgradePlan(planCtx, rpcs, cur, target, res.Height, domain, 500*time.Millisecond)
+	cancelPlan()
+	require.NoError(t, err, "observe the same canonical pending plan on all validators before activation")
+	activation := plan.ActivationHeight
+	for node, rpc := range rpcs {
+		height := readLatestHeight(t, rpc)
+		require.Less(t, height, activation, "node%d passed activation before all-node plan agreement was recorded", node)
+		t.Logf("app-v%d approved plan: node%d proposal_height=%d observed_height=%d activation_height=%d", target, node, res.Height, height, activation)
+	}
 	waitForAllNodesAppVersion(t, rpcs, target, ladderRungTimeout())
+	for node, rpc := range rpcs {
+		require.Equal(t, target, readAppVersion(t, rpc), "node%d exact activated version", node)
+	}
 	t.Logf("app-v%d activated at height %d (rung took %s)", target, activation, time.Since(rungStart).Round(time.Second))
 
-	for _, h := range []int64{activation - 1, activation, activation + 1} {
+	for _, h := range ladderActivationHeaders(activation) {
 		agreed := assertAppHashAgreement(t, rpcs, h)
-		t.Logf("app-v%d seam: all %d nodes byte-identical at height %d (%s)", target, cometRPCCount, h, shortHash(agreed))
+		t.Logf("app-v%d actual seam: all %d nodes byte-identical at header_height=%d execution_height=%d activation_height=%d (%s)", target, cometRPCCount, h, h-1, activation, shortHash(agreed))
 	}
 	return activation
+}
+
+// Signed header h commits the AppHash from execution h-1. The third sample
+// includes the first strict H+1 rules block, not merely the activation write.
+func ladderActivationHeaders(activation int64) []int64 {
+	return []int64{activation, activation + 1, activation + 2}
+}
+
+func ladderPostActivationEpoch(activation int64) int64 {
+	return ((activation / 100) + 1) * 100
+}
+
+// readLadderUpgradeStatus uses the same canonical query as upgrade status. A
+// query/decode error must never look like an absent (not yet approved) plan.
+func readLadderUpgradeStatus(ctx context.Context, rpc string) (*sageabci.UpgradeGovernanceStatus, error) {
+	endpoint := strings.TrimRight(rpc, "/") + "/abci_query?path=" + url.QueryEscape(`"/upgrade/governance-status"`)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("upgrade status HTTP %d", resp.StatusCode)
+	}
+	const limit = 1 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > limit {
+		return nil, fmt.Errorf("upgrade status exceeds response limit")
+	}
+	var envelope struct {
+		Error  json.RawMessage `json:"error"`
+		Result struct {
+			Response *struct {
+				Code  uint32 `json:"code"`
+				Log   string `json:"log"`
+				Value []byte `json:"value"`
+			} `json:"response"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, fmt.Errorf("decode upgrade query: %w", err)
+	}
+	if len(envelope.Error) != 0 && string(envelope.Error) != "null" {
+		return nil, fmt.Errorf("upgrade query RPC error: %s", envelope.Error)
+	}
+	response := envelope.Result.Response
+	if response == nil || response.Code != 0 || len(response.Value) == 0 {
+		return nil, fmt.Errorf("upgrade query missing or unsuccessful response")
+	}
+	var status sageabci.UpgradeGovernanceStatus
+	if err := json.Unmarshal(response.Value, &status); err != nil {
+		return nil, fmt.Errorf("decode upgrade status: %w", err)
+	}
+	if status.Schema != "sage-upgrade-governance-status/v1" || status.CurrentAppVersion == 0 {
+		return nil, fmt.Errorf("invalid upgrade status schema or version")
+	}
+	return &status, nil
+}
+
+// The pending plan disappears atomically at activation. Missing that observation
+// is a failed evidence run, never permission to guess proposalHeight+200.
+func waitForLadderUpgradePlan(ctx context.Context, rpcs []string, previous, target uint64, proposalHeight int64, domain string, interval time.Duration) (*sageabci.UpgradeGovernancePendingPlan, error) {
+	if len(rpcs) != cometRPCCount || target <= previous || proposalHeight <= 0 || interval <= 0 {
+		return nil, fmt.Errorf("invalid ladder plan observation inputs")
+	}
+	seen := make([]bool, len(rpcs))
+	var agreed *sageabci.UpgradeGovernancePendingPlan
+	for {
+		all := true
+		for node, rpc := range rpcs {
+			status, err := readLadderUpgradeStatus(ctx, rpc)
+			if err != nil {
+				return nil, fmt.Errorf("node%d canonical upgrade status: %w", node, err)
+			}
+			if status.CurrentAppVersion != previous {
+				return nil, fmt.Errorf("node%d version %d changed from %d before pending-plan agreement", node, status.CurrentAppVersion, previous)
+			}
+			if proposal := status.ActiveProposal; proposal != nil {
+				if proposal.OperationCode != uint8(governance.OpUpgrade) || proposal.TargetID != fmt.Sprintf("app-v%d", target) || proposal.TargetAppVersion == nil || *proposal.TargetAppVersion != target {
+					return nil, fmt.Errorf("node%d unexpected active proposal", node)
+				}
+			}
+			plan := status.PendingPlan
+			if plan == nil {
+				if seen[node] {
+					return nil, fmt.Errorf("node%d pending plan disappeared before agreement", node)
+				}
+				all = false
+				continue
+			}
+			minimum := proposalHeight + appV29ActivationFloorBlocks
+			if previous >= 8 {
+				minimum += governance.MinVotingBlocks
+			}
+			if plan.Name != fmt.Sprintf("app-v%d", target) || plan.TargetAppVersion != target || plan.GovernanceDomain != domain || plan.BinarySHA256 != "" || plan.ActivationHeight < minimum {
+				return nil, fmt.Errorf("node%d unexpected canonical pending plan: %+v", node, *plan)
+			}
+			if agreed == nil {
+				copy := *plan
+				agreed = &copy
+			} else if *agreed != *plan {
+				return nil, fmt.Errorf("node%d canonical pending plan differs from earlier observations", node)
+			}
+			seen[node] = true
+		}
+		if all {
+			return agreed, nil
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("waiting for canonical pending-plan agreement: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func shortHash(h string) string {
@@ -311,7 +442,8 @@ type parsedTxCommit struct {
 
 // broadcastParsedTxCommit pushes a signed tx through CometBFT's
 // /broadcast_tx_commit RPC and returns both verdicts plus the commit height —
-// the height is what pins the chain-computed activation height.
+// this is the proposal commit height, NOT the later governance execution height.
+// Read the canonical pending plan to obtain the actual activation height.
 func broadcastParsedTxCommit(t *testing.T, rpc string, ptx *tx.ParsedTx) parsedTxCommit {
 	t.Helper()
 	encoded, err := tx.EncodeTx(ptx)
