@@ -535,8 +535,8 @@ func (s *BadgerStore) InspectMemoryLegacyAdoptionCandidates(
 		return nil, fmt.Errorf("legacy adoption candidate inspection exceeds 1024 rows")
 	}
 	results := make([]MemoryLegacyAdoptionCandidateState, len(memoryIDs))
-	err := s.view(func(txn *badger.Txn) error {
-		reader := &BadgerStore{db: s.db, txn: txn}
+	err := s.withMemoryIdentitySnapshot(func(reader *BadgerStore, mode memoryIdentityMode) error {
+		txn := reader.txn
 		for i, memoryID := range memoryIDs {
 			results[i].MemoryID = memoryID
 			if memoryID == "" {
@@ -548,7 +548,7 @@ func (s *BadgerStore) InspectMemoryLegacyAdoptionCandidates(
 			} else if !errors.Is(err, badger.ErrKeyNotFound) {
 				return fmt.Errorf("inspect legacy adoption receipt %s: %w", memoryID, err)
 			}
-			state, err := reader.GetMemoryDisclosureState(memoryID)
+			state, err := reader.memoryDisclosureForIdentityMode(memoryID, mode)
 			switch {
 			case err == nil:
 				results[i].State = state

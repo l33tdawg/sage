@@ -127,7 +127,7 @@ func (app *SageApp) preflightAppV30Admission(
 			}
 		}
 		for _, parent := range parents {
-			state, stateErr := app.badgerStore.GetMemoryDisclosureState(parent.MemoryID)
+			state, stateErr := app.memoryDisclosureStateForConsensus(parent.MemoryID, height)
 			if stateErr != nil {
 				return "", appV30LineageParentUnavailable()
 			}

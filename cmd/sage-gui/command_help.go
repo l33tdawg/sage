@@ -34,19 +34,49 @@ func handleCommandHelp(args []string) bool {
 		printNeverCompactUsage()
 	case "upgrade":
 		printUpgradeUsage()
+	case "quorum-init", "quorum-join":
+		fmt.Println(freshQuorumGenesisGuidance)
+	case "init-fresh-node":
+		fmt.Println(`Usage: sage-gui init-fresh-node --genesis-sha256 <lowercase SHA-256>
+
+Initialize a prepared, pristine SAGE_HOME from the exact shared signed genesis
+on a supported Unix platform; Windows initialization is unsupported.
+Requires local validator key, unused signing state, config and private directories.
+Creates node-local transport/P2P keys if absent and fences version/fork markers
+with a completion receipt. No Root private key is needed. Incomplete or used
+homes are refused; existing chains use the ordinary startup/upgrade route.
+After success, run sage-gui serve with the same SAGE_HOME.`)
+	case "init-genesis":
+		fmt.Println(`Usage: sage-gui init-genesis --chain-id <id> --root-key <path> --validators <roster.json> --output <genesis.json>
+
+Create one signed genesis and distribute that exact artifact to every new
+validator. The public roster is a JSON array of {"validator_id":"<Ed25519 hex>","power":10}.
+Key files must already exist. This command does not start or alter a chain.
+
+Options:
+  --app-version latest|N  Default: latest release-supported app version;
+                          dormant compiled versions require an explicit integer
+  --agent-key <path>      Optional Companion key; requires --home-domain
+  --home-domain <domain>  Companion-owned non-shared domain
+  --clearance 0..4        Companion clearance (default: 1)
+  --genesis-time <UTC>    Optional RFC3339Nano genesis time
+
+Install the generated file as config/genesis.json alongside each node's own
+validator key, unused signing state and quorum configuration. On each prepared
+Unix node, run sage-gui init-fresh-node --genesis-sha256 <shared-genesis-sha256>
+before sage-gui serve. Existing genesis output is never overwritten; existing
+chains use the normal startup/upgrade route, not fresh initialization.`)
 	default:
 		usage := map[string]string{
 			"serve": "serve", "setup": "setup", "mcp": "mcp [install [--token <claim-token>]]",
 			"codex": "codex install", "seed": "seed <file> [--domain <domain>]",
-			"export":      "export [output.vault] [--encrypt]",
-			"import":      "import <file.vault> [--key <key-file>]",
-			"backup":      "backup [--full [--out <archive.tar.gz>]]",
-			"restore":     "restore --from <archive.tar.gz>",
-			"snapshot":    "snapshot list | prune [--keep N]",
-			"recover":     "recover --key <recovery-key> --passphrase <new-passphrase>",
-			"quorum-init": "quorum-init --address HOST:PORT [--name <name>]",
-			"quorum-join": "quorum-join --manifest <path> --address HOST:PORT [--name <name>]",
-			"pair":        "pair <token>",
+			"export":   "export [output.vault] [--encrypt]",
+			"import":   "import <file.vault> [--key <key-file>]",
+			"backup":   "backup [--full [--out <archive.tar.gz>]]",
+			"restore":  "restore --from <archive.tar.gz>",
+			"snapshot": "snapshot list | prune [--keep N]",
+			"recover":  "recover --key <recovery-key> --passphrase <new-passphrase>",
+			"pair":     "pair <token>",
 		}[args[0]]
 		if usage == "" {
 			usage = args[0]

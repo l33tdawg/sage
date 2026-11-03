@@ -215,10 +215,14 @@ func (s *BadgerStore) GetEffectiveTaintDecisions(memoryID string) ([]string, err
 }
 
 func getEffectiveTaintDecisionsTxn(txn *badger.Txn, memoryID string, meter *taintUnitMeter) ([]string, map[string]taint.Header, error) {
-	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
-		return nil, nil, fmt.Errorf("%w: invalid memory ID", ErrTaintStateMalformed)
+	return getEffectiveTaintDecisionsWithIdentityTxn(txn, memoryID, meter, taintReadIdentityPolicy{})
+}
+
+func getEffectiveTaintDecisionsWithIdentityTxn(txn *badger.Txn, memoryID string, meter *taintUnitMeter, identity taintReadIdentityPolicy) ([]string, map[string]taint.Header, error) {
+	prefix, identityErr := identity.membershipPrefix(memoryID)
+	if identityErr != nil {
+		return nil, nil, fmt.Errorf("%w: invalid memory ID: %v", ErrTaintStateMalformed, identityErr)
 	}
-	prefix := taint.MembershipPrefix(memoryID)
 	if err := chargeTaintUnits(meter, 1); err != nil {
 		return nil, nil, err
 	}

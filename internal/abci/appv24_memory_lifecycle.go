@@ -13,7 +13,7 @@ import (
 // activation block itself remains under app-v23 semantics so every historical
 // block and the activation block replay byte-identically.
 func (app *SageApp) postAppV24Fork(height int64) bool {
-	return app.appV24AppliedHeight > 0 && height > app.appV24AppliedHeight
+	return app.postFreshGenesisRules(24, height) || app.appV24AppliedHeight > 0 && height > app.appV24AppliedHeight
 }
 
 func (app *SageApp) postAppV24Rules(height int64) bool {
@@ -157,6 +157,9 @@ func (app *SageApp) requireAppV24ForDirectGenesisCompanion(
 func (app *SageApp) setTerminalMemoryStatus(memoryID, status string, height int64) error {
 	if !app.postAppV24Rules(height) {
 		return app.badgerStore.SetMemoryHash(memoryID, nil, status)
+	}
+	if app.useAppV30RawMemoryIdentity(memoryID, height) {
+		return app.badgerStore.SetMemoryStatusPreservingHashAppV30(memoryID, status)
 	}
 	return app.badgerStore.SetMemoryStatusPreservingHash(memoryID, status)
 }

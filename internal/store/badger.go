@@ -1125,6 +1125,10 @@ func (s *BadgerStore) SetMemoryStatusPreservingHash(memoryID, status string) err
 	if strings.TrimSpace(memoryID) == "" {
 		return errors.New("memory id is required")
 	}
+	return s.setMemoryStatusPreservingHashExact(memoryID, status)
+}
+
+func (s *BadgerStore) setMemoryStatusPreservingHashExact(memoryID, status string) error {
 	if strings.TrimSpace(status) == "" {
 		return errors.New("memory status is required")
 	}
@@ -1218,6 +1222,10 @@ func (s *BadgerStore) GetMemoryDisclosureState(memoryID string) (*MemoryDisclosu
 	if strings.TrimSpace(memoryID) == "" {
 		return nil, errors.New("memory disclosure state requires a memory id")
 	}
+	return s.getMemoryDisclosureStateExact(memoryID)
+}
+
+func (s *BadgerStore) getMemoryDisclosureStateExact(memoryID string) (*MemoryDisclosureState, error) {
 	state := &MemoryDisclosureState{Classification: uint8(ClearanceInternal)}
 	err := s.view(func(txn *badger.Txn) error {
 		item, getErr := txn.Get(memoryKey(memoryID))

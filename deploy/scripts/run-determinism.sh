@@ -33,7 +33,30 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-PROJECT=sage-det
+echo "--- source commit: $(git rev-parse HEAD) ---"
+if ! git diff --quiet HEAD --; then
+  echo "--- source has tracked local changes; images use the working tree ---"
+fi
+
+PROJECT="${DET_PROJECT:-sage-det}"
+case "${PROJECT}" in
+  sage-det|sage-fresh-v30) ;;
+  *) echo "ERROR: unsupported isolated determinism project '${PROJECT}'" >&2; exit 1 ;;
+esac
+FRESH_PROJECT=
+FRESH_VALIDATOR_KEY_DIR=
+if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+  if [ "${PROJECT}" != "sage-fresh-v30" ]; then
+    echo "ERROR: fresh-v30 proof requires its own sage-fresh-v30 project" >&2
+    exit 1
+  fi
+  FRESH_PROJECT="${PROJECT}"
+  DET_TEST="${DET_TEST:-^TestAppV30FreshGenesisFourValidators$}"
+  if [ "${DET_TEST}" != '^TestAppV30FreshGenesisFourValidators$' ]; then
+    echo "ERROR: fresh-v30 proof requires its exact four-validator test" >&2
+    exit 1
+  fi
+fi
 COMPOSE=(docker compose -p "${PROJECT}"
   -f deploy/docker-compose.yml
   -f deploy/docker-compose.test.yml
@@ -44,10 +67,18 @@ fi
 
 cleanup() {
   echo "--- tearing down ${PROJECT} ---"
+  if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+    mkdir -p output/fresh-v30
+    POSTGRES_PASSWORD=ci_test_password "${COMPOSE[@]}" logs --no-color \
+      > output/fresh-v30/container.log 2>&1 || true
+  fi
   # The password is required at interpolation time even for `down`; without it
   # the teardown aborts and every container and volume of the run is left
   # behind. It is the same throwaway value `up` used, never a real secret.
   POSTGRES_PASSWORD=ci_test_password "${COMPOSE[@]}" down -v --remove-orphans || true
+  if [ -n "${FRESH_VALIDATOR_KEY_DIR}" ]; then
+    rm -rf -- "${FRESH_VALIDATOR_KEY_DIR}"
+  fi
 }
 trap cleanup EXIT
 
@@ -57,6 +88,15 @@ echo "--- regenerating a fresh 4-node testnet genesis (app_version 0) ---"
 export SAGE_TESTNET_TIMEOUT_COMMIT="${DET_BLOCK_TIME:-3s}"
 echo "--- devnet block time: ${SAGE_TESTNET_TIMEOUT_COMMIT} ---"
 bash deploy/init-testnet.sh
+
+if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+  mkdir -p output/fresh-v30
+  SAGE_TEST_PREPARE_FRESH_V30=1 go test -mod=readonly ./test/integration/ \
+    -tags=integration -run '^TestPrepareAppV30FreshGenesisFixture$' -count=1 -json \
+    | tee output/fresh-v30/preparation-events.jsonl
+  python3 deploy/scripts/assert-go-test-json.py output/fresh-v30/preparation-events.jsonl \
+    github.com/l33tdawg/sage/test/integration TestPrepareAppV30FreshGenesisFixture
+fi
 
 # Build the two shared images ONCE (docker-compose.det.yml resets the per-service
 # build blocks — 8 independent cold builds exhausted Docker's VM disk). Sequential
@@ -91,10 +131,30 @@ else
   build_det_image "sage-det-node:local" deploy/Dockerfile.node
 fi
 
+if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+  # init-testnet deliberately gives the original signing keys to the ABCI uid.
+  # A Linux host runner cannot read them. Export only this throwaway fixture's
+  # vote keys through a read-only mount; host redirection keeps the copies owned
+  # by the runner, with no secret bytes in logs or evidence artifacts.
+  FRESH_VALIDATOR_KEY_DIR="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/sage-fresh-v30-vote-keys.XXXXXX")"
+  (
+    umask 077
+    key_image=sage-det-node:local
+    if [ "${DET_MIXED_ARCH:-0}" = "1" ]; then
+      key_image=sage-det-node:local-arm64
+    fi
+    for node in 0 1 2 3; do
+      docker run --rm --pull=never --network none --read-only --entrypoint cat \
+        -v "${PWD}/deploy/genesis:/genesis:ro" "${key_image}" \
+        "/genesis/node${node}/config/priv_validator_key.json" \
+        > "${FRESH_VALIDATOR_KEY_DIR}/node${node}.json"
+    done
+  )
+fi
+
 echo "--- starting the isolated cluster ---"
-# Only the services the determinism test needs: it submits NO memories, so the
-# ollama embedding stack (which pulls ~1.3GB of models) is skipped — abci depends
-# only on postgres, not ollama.
+# The optional fresh-v30 proof submits memories; unavailable embeddings are
+# queued for repair. Neither proof needs the Ollama model-download service.
 POSTGRES_PASSWORD=ci_test_password "${COMPOSE[@]}" up -d --build \
   postgres abci0 abci1 abci2 abci3 cometbft0 cometbft1 cometbft2 cometbft3
 
@@ -149,12 +209,24 @@ echo "--- running the determinism test ---"
 # e.g. DET_TEST=TestAppHashDeterminism_AppV11Activation to exercise the app-v11 seam.
 DET_TEST="${DET_TEST:-TestAppHashDeterminism_FourValidators}"
 echo "--- test: ${DET_TEST} ---"
-SAGE_TEST_API_URL=http://localhost:18090 \
-SAGE_TEST_API0=http://localhost:18090 SAGE_TEST_API1=http://localhost:18091 \
-SAGE_TEST_API2=http://localhost:18092 SAGE_TEST_API3=http://localhost:18093 \
-SAGE_TEST_RPC0=http://localhost:36657 SAGE_TEST_RPC1=http://localhost:36757 \
-SAGE_TEST_RPC2=http://localhost:36857 SAGE_TEST_RPC3=http://localhost:36957 \
-go test ./test/integration/ -run "${DET_TEST}" \
-  -tags=integration -count=1 -v -timeout "${DET_TIMEOUT:-1800s}" $SHORT_FLAG
+run_determinism_test() {
+  SAGE_TEST_API_URL=http://localhost:18090 \
+  SAGE_TEST_API0=http://localhost:18090 SAGE_TEST_API1=http://localhost:18091 \
+  SAGE_TEST_API2=http://localhost:18092 SAGE_TEST_API3=http://localhost:18093 \
+  SAGE_TEST_RPC0=http://localhost:36657 SAGE_TEST_RPC1=http://localhost:36757 \
+  SAGE_TEST_RPC2=http://localhost:36857 SAGE_TEST_RPC3=http://localhost:36957 \
+  SAGE_TEST_FRESH_V30_PROJECT="${FRESH_PROJECT}" \
+  SAGE_TEST_FRESH_V30_VALIDATOR_KEY_DIR="${FRESH_VALIDATOR_KEY_DIR}" \
+  go test ./test/integration/ -run "${DET_TEST}" \
+    -tags=integration -count=1 -v -timeout "${DET_TIMEOUT:-1800s}" $SHORT_FLAG "$@"
+}
+if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+  mkdir -p output/fresh-v30
+  run_determinism_test -json -mod=readonly | tee output/fresh-v30/quorum-events.jsonl
+  python3 deploy/scripts/assert-go-test-json.py output/fresh-v30/quorum-events.jsonl \
+    github.com/l33tdawg/sage/test/integration TestAppV30FreshGenesisFourValidators
+else
+  run_determinism_test
+fi
 
 echo "=== DETERMINISM RUN PASSED: AppHash byte-identical across all 4 nodes ==="

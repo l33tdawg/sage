@@ -66,7 +66,7 @@ func (app *SageApp) validateAppV30TaintProposal(
 		if scopeErr := app.validateAppV30TaintApplyScope(*apply); scopeErr != nil {
 			return proposal, scopeErr
 		}
-		if targetErr := app.validateAppV30TaintTarget(*apply); targetErr != nil {
+		if targetErr := app.validateAppV30TaintTarget(*apply, height); targetErr != nil {
 			return proposal, targetErr
 		}
 		payloadHash := sha256.Sum256(payload)
@@ -175,8 +175,9 @@ func (app *SageApp) validateAppV30TaintApplyScope(
 
 func (app *SageApp) validateAppV30TaintTarget(
 	apply tx.TaintApplyPayload,
+	height int64,
 ) error {
-	state, err := app.badgerStore.GetMemoryDisclosureState(apply.TargetMemoryID)
+	state, err := app.memoryDisclosureStateForConsensus(apply.TargetMemoryID, height)
 	if err != nil {
 		return fmt.Errorf("read taint target: %w", err)
 	}

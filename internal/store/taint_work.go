@@ -200,6 +200,9 @@ func (s *BadgerStore) ExpandTaintDecision(
 						header.Status = taint.StatusDepthExhausted
 					} else if header.Materialized >= taint.MaxExpansionMemberships {
 						header.Status = taint.StatusWorkExhausted
+						// The terminal status must persist even when this is the
+						// first edge and no cursor or membership changed this call.
+						changed = true
 						stopped = true
 						break
 					} else {

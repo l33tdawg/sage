@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"testing"
@@ -114,6 +115,10 @@ func captureProjectionBaselineFixture(
 	for _, memoryID := range scopedIDs {
 		publishBaselineScopedMemory(t, prepared, memoryID)
 	}
+	persistedHeight := make([]byte, 8)
+	binary.BigEndian.PutUint64(persistedHeight, height)
+	require.NoError(t, prepared.SetState("height", persistedHeight))
+	require.NoError(t, prepared.SetState("app_hash", appHash))
 	require.NoError(t, prepared.CloseBadger())
 	require.NoError(t, captureStateSyncProjectionBaselinePending(
 		preparedPath,
@@ -311,6 +316,10 @@ func TestStateSyncProjectionBaselineRevokesOmissionAfterScopedEnrollment(t *test
 		prepared,
 		"legacy-proposed",
 	)
+	persistedHeight := make([]byte, 8)
+	binary.BigEndian.PutUint64(persistedHeight, 42)
+	require.NoError(t, prepared.SetState("height", persistedHeight))
+	require.NoError(t, prepared.SetState("app_hash", appHash[:]))
 	require.NoError(t, prepared.CloseBadger())
 	require.NoError(t, captureStateSyncProjectionBaselinePending(
 		preparedPath,

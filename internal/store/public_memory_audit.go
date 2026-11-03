@@ -23,12 +23,13 @@ type PublicMemoryEnvelopeDefect struct {
 // are records the stage would refuse; Quarantined records are the legacy class
 // it skips by design.
 type PublicMemoryAudit struct {
-	Scanned     int                          `json:"scanned"`
-	Public      int                          `json:"public"`
-	Quarantined int                          `json:"quarantined"`
-	Blocking    int                          `json:"blocking"`
-	Defects     []PublicMemoryEnvelopeDefect `json:"defects"`
-	Truncated   bool                         `json:"truncated"`
+	Scanned          int                          `json:"scanned"`
+	Public           int                          `json:"public"`
+	Quarantined      int                          `json:"quarantined"`
+	Blocking         int                          `json:"blocking"`
+	Defects          []PublicMemoryEnvelopeDefect `json:"defects"`
+	Truncated        bool                         `json:"truncated"`
+	rawIdentityRules bool
 }
 
 // AuditPublicMemoryEnvelopes walks every persisted memory and reports the
@@ -42,6 +43,16 @@ func (s *BadgerStore) AuditPublicMemoryEnvelopes(maxDefects int) (*PublicMemoryA
 	if s.txn != nil {
 		return nil, fmt.Errorf("%w: audit requires a read-only root store", ErrPublicMemoryIndex)
 	}
+	var audit *PublicMemoryAudit
+	err := s.withMemoryIdentitySnapshot(func(reader *BadgerStore, mode memoryIdentityMode) error {
+		var err error
+		audit, err = reader.auditPublicMemoryEnvelopesInSnapshot(maxDefects, mode)
+		return err
+	})
+	return audit, err
+}
+
+func (s *BadgerStore) auditPublicMemoryEnvelopesInSnapshot(maxDefects int, mode memoryIdentityMode) (*PublicMemoryAudit, error) {
 	if maxDefects <= 0 {
 		maxDefects = 100
 	}
@@ -61,10 +72,10 @@ func (s *BadgerStore) AuditPublicMemoryEnvelopes(maxDefects int) (*PublicMemoryA
 		return nil, err
 	}
 
-	audit := &PublicMemoryAudit{Defects: make([]PublicMemoryEnvelopeDefect, 0, min(maxDefects, 16))}
+	audit := &PublicMemoryAudit{rawIdentityRules: mode.raw, Defects: make([]PublicMemoryEnvelopeDefect, 0, min(maxDefects, 16))}
 	for _, identifier := range identifiers {
 		audit.Scanned++
-		state, stateErr := s.GetMemoryDisclosureState(identifier)
+		state, stateErr := s.memoryDisclosureForIdentityMode(identifier, mode)
 		if stateErr != nil {
 			if !errors.Is(stateErr, ErrMemoryDisclosureCorrupt) &&
 				!errors.Is(stateErr, ErrMemoryDisclosureNotFound) {
@@ -84,7 +95,7 @@ func (s *BadgerStore) AuditPublicMemoryEnvelopes(maxDefects int) (*PublicMemoryA
 			continue
 		}
 		audit.Public++
-		defect := s.classifyPublicEnvelope(identifier, state)
+		defect := s.classifyPublicEnvelope(identifier, state, mode)
 		if len(defect.Reasons) == 0 {
 			continue
 		}
@@ -126,6 +137,7 @@ func disclosureErrorReason(err error) string {
 func (s *BadgerStore) classifyPublicEnvelope(
 	identifier string,
 	state *MemoryDisclosureState,
+	mode memoryIdentityMode,
 ) PublicMemoryEnvelopeDefect {
 	defect := PublicMemoryEnvelopeDefect{
 		MemoryID: identifier,
@@ -170,7 +182,9 @@ func (s *BadgerStore) classifyPublicEnvelope(
 		Status:          state.Status,
 	}
 	copy(leaf.ContentHash[:], state.ContentHash)
-	if _, err := leaf.canonical(); err != nil {
+	_, encodeErr := leaf.canonical()
+	identityErr := validatePublicMemoryIdentity(identifier, mode.useRaw(identifier))
+	if encodeErr != nil || identityErr != nil {
 		defect.Reasons = []string{"canonical_encode_failed"}
 		// An explicitly recorded but empty/malformed field is not the legacy
 		// missing-binding class; keep it blocking on every record.

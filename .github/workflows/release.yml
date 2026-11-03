@@ -248,6 +248,12 @@ jobs:
             packages: ./internal/mcp ./internal/p2p
           - group: storage-snapshot
             packages: ./internal/store ./internal/snapshot
+            test_skip: '^TestTaintAdversarial(TenThousandFanoutDiamondAndBeforeCursor|SQLiteSparseCandidateTail8192And8193)$'
+          # Keep the real large fixtures on their own package timeout budget.
+          # The complementary selectors preserve every store test and subtest.
+          - group: storage-adversarial
+            packages: ./internal/store
+            test_run: '^TestTaintAdversarial(TenThousandFanoutDiamondAndBeforeCursor|SQLiteSparseCandidateTail8192And8193)$'
           - group: tx-statesync-rest
             packages: ./internal/statesync ./internal/tx ./api/rest
           - group: app-and-shell
@@ -262,8 +268,12 @@ jobs:
           cache: true
       - name: Race-check shared-state boundaries
         if: matrix.packages != ''
+        env:
+          TEST_RUN: ${{ matrix.test_run || '.' }}
+          TEST_SKIP: ${{ matrix.test_skip || '^$' }}
         run: >-
           go test -race -count=1 -timeout 30m
+          -run "$TEST_RUN" -skip "$TEST_SKIP"
           ${{ matrix.packages }}
       - name: Race-check app and UI concurrency regressions
         if: matrix.packages == ''

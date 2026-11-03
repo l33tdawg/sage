@@ -183,7 +183,7 @@ func runFreshPersonalInit(args []string) error {
 		return err
 	}
 	defer func() { _ = lock.Close() }()
-	result, err := initializeFreshPersonalSage(profile, cfg, initCometBFTConfigWithBootstrap, func(path string) (string, error) {
+	result, err := initializeFreshPersonalSage(profile, cfg, initCometBFTConfigForFreshChain, func(path string) (string, error) {
 		key, keyErr := loadOrGenerateKey(path)
 		if keyErr != nil {
 			return "", keyErr

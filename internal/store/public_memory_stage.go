@@ -190,6 +190,16 @@ func (s *BadgerStore) ValidatePublicMemoryStage() error {
 }
 
 func (s *BadgerStore) SyncPublicMemoryChanges() error {
+	return s.syncPublicMemoryChanges(false)
+}
+
+// SyncPublicMemoryChangesAppV30 accepts raw 1–512-byte identities. Consensus
+// callers must select this only after the strict app-v30 H+1 boundary.
+func (s *BadgerStore) SyncPublicMemoryChangesAppV30() error {
+	return s.syncPublicMemoryChanges(true)
+}
+
+func (s *BadgerStore) syncPublicMemoryChanges(appV30 bool) error {
 	if s.txn == nil {
 		return ErrPublicMemoryIndex
 	}
@@ -199,7 +209,7 @@ func (s *BadgerStore) SyncPublicMemoryChanges() error {
 	}
 	sort.Strings(keys)
 	for _, identifier := range keys {
-		if err := s.SyncPublicMemoryIndex(identifier); err != nil {
+		if err := s.syncPublicMemoryIndex(identifier, appV30); err != nil {
 			return err
 		}
 	}

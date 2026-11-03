@@ -91,7 +91,7 @@ func (s *BadgerStore) ClassifyMemoryProjections(
 ) ([]MemoryProjectionClassification, error) {
 	results := make([]MemoryProjectionClassification, len(records))
 	scope := NewTaintServingReadScope()
-	err := s.withTaintServingReadSnapshot(func(reader *BadgerStore) error {
+	err := s.withMemoryIdentitySnapshot(func(reader *BadgerStore, mode memoryIdentityMode) error {
 		for i, record := range records {
 			// Preserve the batch API's outer error for a failed disclosure-gate
 			// read. Record-local envelope and taint errors remain per-row.
@@ -100,9 +100,12 @@ func (s *BadgerStore) ClassifyMemoryProjections(
 					return err
 				}
 			}
-			state, disposition, _, err := reader.ClassifyMemoryProjectionForRead(
-				record, scope, allowMemoryProjectionRead,
+			state, disposition, _, err := reader.classifyMemoryProjectionForReadInSnapshot(
+				record, scope, allowMemoryProjectionRead, mode,
 			)
+			if disposition != MemoryProjectionTaintIndeterminate {
+				reader.observeMemoryProjectionDisposition(disposition)
+			}
 			results[i] = MemoryProjectionClassification{State: state, Disposition: disposition, Err: err}
 		}
 		return nil
@@ -162,25 +165,40 @@ func (s *BadgerStore) ClassifyMemoryProjectionForRead(
 	if scope == nil {
 		scope = NewTaintServingReadScope()
 	}
-	resultErr = s.withTaintServingReadSnapshot(func(reader *BadgerStore) error {
+	resultErr = s.withMemoryIdentitySnapshot(func(reader *BadgerStore, mode memoryIdentityMode) error {
+		projection, disposition, policyAllowed, resultErr = reader.classifyMemoryProjectionForReadInSnapshot(record, scope, authorize, mode)
+		return resultErr
+	})
+	return projection, disposition, policyAllowed, resultErr
+}
+
+// Caller owns the read-only snapshot and its once-computed identity mode.
+func (s *BadgerStore) classifyMemoryProjectionForReadInSnapshot(record *memory.MemoryRecord, scope *TaintServingReadScope, authorize func(*BadgerStore, *MemoryDisclosureState) (bool, error), mode memoryIdentityMode) (projection *MemoryDisclosureState, disposition MemoryProjectionDisposition, policyAllowed bool, resultErr error) {
+	disposition = MemoryProjectionUnpublished
+	resultErr = func() error {
 		requireCompleteEnvelope := false
 		if record != nil {
 			var err error
-			requireCompleteEnvelope, err = reader.appV25MemoryEnvelopeRequired(record.MemoryID)
+			requireCompleteEnvelope, err = s.appV25MemoryEnvelopeRequired(record.MemoryID)
 			if err != nil {
 				return fmt.Errorf("%w: read app-v25 disclosure gate: %w", ErrMemoryProjectionUnpublished, err)
 			}
 		}
-		state, envelopeDisposition, err := reader.classifyMemoryProjectionEnvelope(record, requireCompleteEnvelope)
+		state, envelopeDisposition, err := s.classifyMemoryProjectionEnvelope(record, requireCompleteEnvelope, mode)
 		disposition = envelopeDisposition
 		if err != nil {
 			return err
 		}
-		policyAllowed, err = authorize(reader, state)
+		policyAllowed, err = authorize(s, state)
 		if err != nil || !policyAllowed {
 			return err
 		}
-		verdict, err := reader.classifyMemoryTaintForRead(record.MemoryID, scope)
+		identity, identityErr := s.taintIdentityForAuthorizedEnvelope(record.MemoryID, state)
+		if identityErr != nil {
+			disposition = MemoryProjectionUnpublished
+			return fmt.Errorf("classify taint identity: %w", identityErr)
+		}
+		verdict, err := s.classifyMemoryTaintWithIdentityForRead(record.MemoryID, scope, identity)
 		if err != nil {
 			if errors.Is(err, ErrTaintServingWalkBudget) {
 				disposition = MemoryProjectionTaintIndeterminate
@@ -199,7 +217,7 @@ func (s *BadgerStore) ClassifyMemoryProjectionForRead(
 		}
 		projection = state
 		return nil
-	})
+	}()
 	return projection, disposition, policyAllowed, resultErr
 }
 
@@ -212,7 +230,13 @@ func (s *BadgerStore) appV25MemoryEnvelopeRequired(memoryID string) (bool, error
 		return false, err
 	}
 	if applied == nil {
-		return false, nil
+		fresh, freshErr := s.GetFreshGenesisActivation()
+		if freshErr != nil {
+			return false, freshErr
+		}
+		// A fresh-v25+ origin has no historical corpus eligible for the
+		// compatibility projection, and carries no synthetic applied record.
+		return fresh != nil && fresh.AppVersion >= 25, nil
 	}
 	// app-v25 records the first consensus submission height for every memory
 	// born under its rules. That AppHash-covered marker is the safe disclosure
@@ -230,13 +254,14 @@ func (s *BadgerStore) appV25MemoryEnvelopeRequired(memoryID string) (bool, error
 func (s *BadgerStore) classifyMemoryProjectionEnvelope(
 	record *memory.MemoryRecord,
 	requireCompleteEnvelope bool,
+	mode memoryIdentityMode,
 ) (projection *MemoryDisclosureState, disposition MemoryProjectionDisposition, resultErr error) {
 	if s == nil || record == nil || record.MemoryID == "" {
 		return nil, MemoryProjectionUnpublished, fmt.Errorf(
 			"%w: missing store or record identity", ErrMemoryProjectionUnpublished,
 		)
 	}
-	state, err := s.GetMemoryDisclosureState(record.MemoryID)
+	state, err := s.memoryDisclosureForIdentityMode(record.MemoryID, mode)
 	if err != nil {
 		disposition = MemoryProjectionUnpublished
 		if errors.Is(err, ErrMemoryDisclosureNotFound) {

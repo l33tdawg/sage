@@ -5,7 +5,7 @@ import "fmt"
 // postAppV29Fork is the strict H+1 boundary for architecture-independent PoE
 // factor calculation, EWMA updates, and epoch-weight persistence.
 func (app *SageApp) postAppV29Fork(height int64) bool {
-	return app.appV29AppliedHeight > 0 && height > app.appV29AppliedHeight
+	return app.postFreshGenesisRules(29, height) || app.appV29AppliedHeight > 0 && height > app.appV29AppliedHeight
 }
 
 func (app *SageApp) refreshAppV29Fork() error {
@@ -34,6 +34,9 @@ func (app *SageApp) refreshAppV29Fork() error {
 }
 
 func (app *SageApp) validateAppV29Predecessor() (int64, error) {
+	if app.freshGenesisAppVersion == 28 {
+		return 0, nil
+	}
 	if app.appV28AppliedHeight <= 0 {
 		return 0, fmt.Errorf("missing active %s predecessor", appV28UpgradeName)
 	}
@@ -56,7 +59,7 @@ func (app *SageApp) validateAppV29Prerequisite() error {
 	if err != nil {
 		return fmt.Errorf("applied %s has invalid predecessor: %w", appV29UpgradeName, err)
 	}
-	if app.appV29AppliedHeight <= predecessorHeight {
+	if predecessorHeight > 0 && app.appV29AppliedHeight <= predecessorHeight {
 		return fmt.Errorf(
 			"applied %s height %d must be after applied %s predecessor height %d",
 			appV29UpgradeName, app.appV29AppliedHeight,

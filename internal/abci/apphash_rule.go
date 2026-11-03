@@ -52,10 +52,11 @@ func (rule appHashRule) String() string {
 // provider refused to serve with "persisted AppHash does not match Badger
 // state" while every pre-v28 chain stayed green.
 type appHashRuleInputs struct {
-	appV12AppliedHeight int64
-	appV13AppliedHeight int64
-	appV23GenesisActive bool
-	appV28AppliedHeight int64
+	appV12AppliedHeight    int64
+	appV13AppliedHeight    int64
+	appV23GenesisActive    bool
+	appV28AppliedHeight    int64
+	freshGenesisAppVersion uint64
 }
 
 // selectAppHashRule is the single source of truth for AppHash-rule precedence.
@@ -65,9 +66,9 @@ type appHashRuleInputs struct {
 // byte for byte.
 func selectAppHashRule(height int64, inputs appHashRuleInputs) appHashRule {
 	switch {
-	case inputs.appV28AppliedHeight > 0 && height > inputs.appV28AppliedHeight:
+	case (inputs.freshGenesisAppVersion >= 28 && height > 0) || inputs.appV28AppliedHeight > 0 && height > inputs.appV28AppliedHeight:
 		return appHashRuleV28
-	case (inputs.appV23GenesisActive && height > 0) ||
+	case ((inputs.appV23GenesisActive || inputs.freshGenesisAppVersion >= 23) && height > 0) ||
 		(inputs.appV13AppliedHeight > 0 && height > inputs.appV13AppliedHeight):
 		return appHashRuleV13
 	case inputs.appV12AppliedHeight > 0 && height > inputs.appV12AppliedHeight:
@@ -80,10 +81,11 @@ func selectAppHashRule(height int64, inputs appHashRuleInputs) appHashRule {
 // appHashRuleInputsFromApp reads the activation heights cached on a live app.
 func (app *SageApp) appHashRuleInputsFromApp() appHashRuleInputs {
 	return appHashRuleInputs{
-		appV12AppliedHeight: app.appV12AppliedHeight,
-		appV13AppliedHeight: app.appV13AppliedHeight,
-		appV23GenesisActive: app.appV23GenesisActive,
-		appV28AppliedHeight: app.appV28AppliedHeight,
+		appV12AppliedHeight:    app.appV12AppliedHeight,
+		appV13AppliedHeight:    app.appV13AppliedHeight,
+		appV23GenesisActive:    app.appV23GenesisActive,
+		appV28AppliedHeight:    app.appV28AppliedHeight,
+		freshGenesisAppVersion: app.freshGenesisAppVersion,
 	}
 }
 
@@ -102,6 +104,16 @@ func appHashRuleInputsForOfflineState(badgerStore *store.BadgerStore) (appHashRu
 	inputs := appHashRuleInputs{
 		appV12AppliedHeight: 1,
 		appV13AppliedHeight: 1,
+	}
+	fresh, err := badgerStore.GetFreshGenesisActivation()
+	if err != nil {
+		return appHashRuleInputs{}, err
+	}
+	if fresh != nil {
+		if lineageErr := badgerStore.ValidateFreshGenesisLineage(); lineageErr != nil {
+			return appHashRuleInputs{}, lineageErr
+		}
+		inputs.freshGenesisAppVersion = fresh.AppVersion
 	}
 	record, err := badgerStore.GetAppliedUpgrade(appV28UpgradeName)
 	if err != nil {

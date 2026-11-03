@@ -504,7 +504,7 @@ The `FederationID` is deterministic: computed from the two org IDs + height to a
 
 ### MaxClearance Cap
 
-`checkFederationAccess` (`badger.go:6481-6561`) enforces: `if memoryClassification > maxClearance → deny`. This means a federation with `max_clearance=1` (INTERNAL) cannot expose CONFIDENTIAL (2) or higher memories to the federated org, regardless of the individual agent's clearance within their own org.
+`checkFederationAccess` (`badger.go:6489-6569`) enforces: `if memoryClassification > maxClearance → deny`. This means a federation with `max_clearance=1` (INTERNAL) cannot expose CONFIDENTIAL (2) or higher memories to the federated org, regardless of the individual agent's clearance within their own org.
 
 Every proposal remains `"proposed"` until an explicit target-organization
 approval changes it to `"active"`, regardless of the stored

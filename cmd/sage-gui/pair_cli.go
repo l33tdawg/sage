@@ -58,7 +58,7 @@ func runPair(args []string) error {
 	// node id (and so applyNodeJoinBundle has keys to keep).
 	home := SageHome()
 	cometHome := filepath.Join(home, "data", "cometbft")
-	if initErr := initCometBFTConfig(cometHome); initErr != nil {
+	if initErr := initCometBFTConfigForFreshChain(cometHome, filepath.Join(home, "agent.key"), nil); initErr != nil {
 		return fmt.Errorf("init CometBFT: %w", initErr)
 	}
 	nodeKey, err := p2p.LoadNodeKey(filepath.Join(cometHome, "config", "node_key.json"))

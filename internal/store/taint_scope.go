@@ -511,8 +511,12 @@ func authorProvenanceTxn(
 	memoryID string,
 	meter *taintUnitMeter,
 ) (AuthorProvenance, error) {
+	return authorProvenanceWithIdentityTxn(txn, memoryID, meter, taintReadIdentityPolicy{})
+}
+
+func authorProvenanceWithIdentityTxn(txn *badger.Txn, memoryID string, meter *taintUnitMeter, identity taintReadIdentityPolicy) (AuthorProvenance, error) {
 	var provenance AuthorProvenance
-	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
+	if identity.validate(memoryID) != nil {
 		return provenance, fmt.Errorf("%w: invalid author provenance memory ID", ErrTaintServingState)
 	}
 	raw, found, err := readMeteredTaintValueTxn(txn, AppV30ProvenanceKey(memoryID), meter)
@@ -675,11 +679,14 @@ func sortedUniqueDecisionIDs(decisionIDs []string) []string {
 
 // servingScopeParentsTxn preserves forward/reverse and exact parent identities,
 // but bounds keys/values and charges the request before each mandatory read.
-func servingScopeParentsTxn(txn *badger.Txn, childID string, meter *taintUnitMeter) ([]tx.ParentRef, error) {
+func servingScopeParentsWithIdentityTxn(txn *badger.Txn, childID string, meter *taintUnitMeter, identity taintReadIdentityPolicy) ([]tx.ParentRef, error) {
 	if err := chargeTaintUnits(meter, 1); err != nil {
 		return nil, err
 	}
-	prefix := lineage.ForwardPrefix(childID)
+	prefix, identityErr := identity.forwardPrefix(childID)
+	if identityErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMemoryLineageMalformed, identityErr)
+	}
 	options := badger.DefaultIteratorOptions
 	options.Prefix = prefix
 	options.PrefetchValues = false
@@ -698,7 +705,7 @@ func servingScopeParentsTxn(txn *badger.Txn, childID string, meter *taintUnitMet
 			return nil, fmt.Errorf("%w: malformed parent key/value", ErrMemoryLineageMalformed)
 		}
 		id := string(key[len(prefix):])
-		if err := lineage.ValidateIDs(childID, id); err != nil {
+		if err := identity.validateLineageIDs(childID, id); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrMemoryLineageMalformed, err)
 		}
 		raw, err := it.Item().ValueCopy(nil)

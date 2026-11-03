@@ -8,6 +8,8 @@ import (
 	"unicode/utf8"
 
 	badger "github.com/dgraph-io/badger/v4"
+
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 var ErrPublicMemoryIndex = errors.New("public memory index unavailable or inconsistent")
@@ -38,8 +40,15 @@ func (leaf PublicMemoryLeaf) canonical() ([]byte, error) {
 	default:
 		return nil, ErrPublicMemoryIndex
 	}
+	// Proof serialization accepts every app-v30 identity. Consensus and legacy
+	// migration selection retain their own stricter historical policy.
+	if err := validatePublicMemoryIdentity(leaf.MemoryID, true); err != nil {
+		return nil, err
+	}
 	output := []byte("sage.public-memory.leaf.v1\x00")
-	for _, field := range []string{leaf.MemoryID, leaf.Author, leaf.AuthorPrincipal, leaf.Domain, leaf.Status} {
+	output = binary.BigEndian.AppendUint16(output, uint16(len(leaf.MemoryID))) // #nosec G115 -- identity is bounded to 512 bytes
+	output = append(output, leaf.MemoryID...)
+	for _, field := range []string{leaf.Author, leaf.AuthorPrincipal, leaf.Domain, leaf.Status} {
 		if len(field) == 0 || len(field) > 256 || !utf8.ValidString(field) {
 			return nil, ErrPublicMemoryIndex
 		}
@@ -143,11 +152,29 @@ func VerifyPublicMemoryBranch(proof PublicMemoryBranch, expectedRoot [32]byte) e
 	return nil
 }
 
-func publicLeafFromCanonical(reader *BadgerStore, identifier string) (*PublicMemoryLeaf, error) {
-	if len(identifier) == 0 || len(identifier) > 256 || !utf8.ValidString(identifier) {
-		return nil, ErrPublicMemoryIndex
+func validatePublicMemoryIdentity(identifier string, appV30 bool) error {
+	if len(identifier) == 0 || len(identifier) > tx.MaxDerivedFromMemoryIDBytes {
+		return ErrPublicMemoryIndex
 	}
-	state, err := reader.GetMemoryDisclosureState(identifier)
+	if !appV30 && (len(identifier) > 256 || !utf8.ValidString(identifier)) {
+		return ErrPublicMemoryIndex
+	}
+	return nil
+}
+
+func publicLeafFromCanonical(reader *BadgerStore, identifier string) (*PublicMemoryLeaf, error) {
+	return publicLeafFromCanonicalWithIdentityPolicy(reader, identifier, false)
+}
+
+func publicLeafFromCanonicalWithIdentityPolicy(reader *BadgerStore, identifier string, appV30 bool) (*PublicMemoryLeaf, error) {
+	if err := validatePublicMemoryIdentity(identifier, appV30); err != nil {
+		return nil, err
+	}
+	readState := reader.GetMemoryDisclosureState
+	if appV30 {
+		readState = reader.GetMemoryDisclosureStateAppV30
+	}
+	state, err := readState(identifier)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +255,12 @@ func (s *BadgerStore) InitializeEmptyPublicMemoryIndex() error {
 	})
 }
 
-func (s *BadgerStore) SyncPublicMemoryIndex(identifier string) (err error) {
+// SyncPublicMemoryIndex preserves the legacy app-v28 identity rules.
+func (s *BadgerStore) SyncPublicMemoryIndex(identifier string) error {
+	return s.syncPublicMemoryIndex(identifier, false)
+}
+
+func (s *BadgerStore) syncPublicMemoryIndex(identifier string, appV30 bool) (err error) {
 	if s.txn == nil {
 		return ErrPublicMemoryIndex
 	}
@@ -239,7 +271,7 @@ func (s *BadgerStore) SyncPublicMemoryIndex(identifier string) (err error) {
 	}()
 	return s.update(func(txn *badger.Txn) error {
 		reader := &BadgerStore{db: s.db, txn: txn}
-		leaf, err := publicLeafFromCanonical(reader, identifier)
+		leaf, err := publicLeafFromCanonicalWithIdentityPolicy(reader, identifier, appV30)
 		if err != nil {
 			return err
 		}
@@ -287,7 +319,9 @@ func (s *BadgerStore) PublicMemoryBranch(identifier string) (*PublicMemoryBranch
 	}
 	var proof *PublicMemoryBranch
 	err := s.view(func(txn *badger.Txn) error {
-		leaf, err := publicLeafFromCanonical(&BadgerStore{db: s.db, txn: txn}, identifier)
+		// The stored root, verified below, binds the exact raw identity bytes.
+		// Wider proof reconstruction cannot add a leaf to a legacy root.
+		leaf, err := publicLeafFromCanonicalWithIdentityPolicy(&BadgerStore{db: s.db, txn: txn}, identifier, true)
 		if err != nil {
 			return err
 		}

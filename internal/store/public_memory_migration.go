@@ -29,7 +29,19 @@ type publicMigrationRecord struct {
 	adoptionReceipt []byte
 }
 
+// BuildPublicMemoryMigration preserves strict app-v28 staging semantics.
 func (s *BadgerStore) BuildPublicMemoryMigration(ctx context.Context, target *BadgerStore) (*PublicMemoryMigration, error) {
+	return s.buildPublicMemoryMigration(ctx, target, false)
+}
+
+// BuildPublicMemoryMigrationAppV30 exports raw 1–512-byte identities from a
+// separately qualified app-v30 snapshot. It does not activate a fork or change
+// the source database. App-v28 activation staging must use the legacy method.
+func (s *BadgerStore) BuildPublicMemoryMigrationAppV30(ctx context.Context, target *BadgerStore) (*PublicMemoryMigration, error) {
+	return s.buildPublicMemoryMigration(ctx, target, true)
+}
+
+func (s *BadgerStore) buildPublicMemoryMigration(ctx context.Context, target *BadgerStore, appV30 bool) (*PublicMemoryMigration, error) {
 	if s == nil || target == nil || s.db == target.db || s.txn != nil || target.txn != nil {
 		return nil, ErrPublicMemoryIndex
 	}
@@ -88,7 +100,7 @@ func (s *BadgerStore) BuildPublicMemoryMigration(ctx context.Context, target *Ba
 			if classErr := transaction.SetMemoryClassification(leaf.MemoryID, 0); classErr != nil {
 				return classErr
 			}
-			if syncErr := transaction.SyncPublicMemoryIndex(leaf.MemoryID); syncErr != nil {
+			if syncErr := transaction.syncPublicMemoryIndex(leaf.MemoryID, appV30); syncErr != nil {
 				return syncErr
 			}
 			if metadataErr := transaction.copyAppV30MigrationMetadata(
@@ -115,7 +127,7 @@ func (s *BadgerStore) BuildPublicMemoryMigration(ctx context.Context, target *Ba
 			return nil, scanCtxErr
 		}
 		identifier := string(iterator.Item().Key()[len(prefix):])
-		leaf, leafErr := publicLeafFromCanonical(reader, identifier)
+		leaf, leafErr := publicLeafFromCanonicalWithIdentityPolicy(reader, identifier, appV30)
 		if leafErr != nil {
 			return nil, leafErr
 		}

@@ -252,9 +252,9 @@ func doWipeAndAdopt(b NodeJoinBundle, genesisBytes []byte) error {
 	}
 
 	// Ensure this node has its own CometBFT identity (node key + validator key).
-	// A brand-new joiner has none; initCometBFTConfig creates them and seeds a
-	// throwaway local genesis we immediately overwrite below.
-	if initErr := initCometBFTConfig(cometHome); initErr != nil {
+	// A brand-new joiner has none; use the current fresh origin even for the
+	// throwaway local genesis, so a failed join can never leave a legacy install.
+	if initErr := initCometBFTConfigForFreshChain(cometHome, cfg.AgentKey, nil); initErr != nil {
 		return fmt.Errorf("init CometBFT: %w", initErr)
 	}
 

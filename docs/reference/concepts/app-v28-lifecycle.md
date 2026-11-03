@@ -19,7 +19,7 @@ The index is a sparse SHA-256 tree over the canonical form of every committed
 public record included in the committed public set, and has that set been
 rewritten since.
 
-`PublicMemoryCompositeHash` (`internal/store/public_memory_index.go:321`) is the
+`PublicMemoryCompositeHash` (`internal/store/public_memory_index.go:355`) is the
 rule: SHA-256 over the domain tag `sage.app.public-memory.v1`, the legacy state
 root, and the public-memory root. A node that has promoted the index computes a
 different AppHash than a node that has not, for every block after H.

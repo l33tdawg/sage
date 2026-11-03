@@ -47,7 +47,7 @@ type taintCoverageNode struct {
 	bound    bool
 }
 
-func (s *BadgerStore) discoverTaintCoverage(memoryID string, scope *TaintServingReadScope, nonDirectScopes []activeTaintDecisionScope) (observation taintCoverageObservation) {
+func (s *BadgerStore) discoverTaintCoverageWithIdentity(memoryID string, scope *TaintServingReadScope, nonDirectScopes []activeTaintDecisionScope, identity taintReadIdentityPolicy) (observation taintCoverageObservation) {
 	// Mandatory classification may return at an earlier direct membership.
 	// Scope completeness must still cover every observed ancestor branch.
 	// These optional provenance reads spend only the shared metadata allowance.
@@ -87,11 +87,11 @@ func (s *BadgerStore) discoverTaintCoverage(memoryID string, scope *TaintServing
 			return observation
 		}
 		hashes[current.id] = hash
-		if membershipErr := s.taintCoverageMemberships(current.id, scope, headers, &observation, &incomplete); membershipErr != nil {
+		if membershipErr := s.taintCoverageMembershipsWithIdentity(current.id, scope, headers, &observation, &incomplete, identity); membershipErr != nil {
 			return observation
 		}
 		if len(nonDirectScopes) > 0 {
-			provenance, provenanceErr := authorProvenanceTxn(s.txn, current.id, scopeMeter)
+			provenance, provenanceErr := authorProvenanceWithIdentityTxn(s.txn, current.id, scopeMeter, identity)
 			if provenanceErr != nil || !provenance.CoverageKnown {
 				return observation
 			}
@@ -106,7 +106,7 @@ func (s *BadgerStore) discoverTaintCoverage(memoryID string, scope *TaintServing
 				}
 			}
 		}
-		parents, err := s.taintCoverageParents(current.id, scope)
+		parents, err := s.taintCoverageParentsWithIdentity(current.id, scope, identity)
 		if err != nil {
 			return observation
 		}
@@ -171,8 +171,11 @@ func (s *BadgerStore) taintCoverageValue(key []byte, maximum int, scope *TaintSe
 	return raw, err == nil, err
 }
 
-func (s *BadgerStore) taintCoverageMemberships(memoryID string, scope *TaintServingReadScope, headers map[string]taint.Header, observation *taintCoverageObservation, incomplete *bool) error {
-	prefix := taint.MembershipPrefix(memoryID)
+func (s *BadgerStore) taintCoverageMembershipsWithIdentity(memoryID string, scope *TaintServingReadScope, headers map[string]taint.Header, observation *taintCoverageObservation, incomplete *bool, identity taintReadIdentityPolicy) error {
+	prefix, prefixErr := identity.membershipPrefix(memoryID)
+	if prefixErr != nil {
+		return prefixErr
+	}
 	options := badger.DefaultIteratorOptions
 	options.Prefix = prefix
 	options.PrefetchValues = false
@@ -225,8 +228,11 @@ func (s *BadgerStore) taintCoverageMemberships(memoryID string, scope *TaintServ
 	return nil
 }
 
-func (s *BadgerStore) taintCoverageParents(memoryID string, scope *TaintServingReadScope) ([]tx.ParentRef, error) {
-	prefix := lineage.ForwardPrefix(memoryID)
+func (s *BadgerStore) taintCoverageParentsWithIdentity(memoryID string, scope *TaintServingReadScope, identity taintReadIdentityPolicy) ([]tx.ParentRef, error) {
+	prefix, identityErr := identity.forwardPrefix(memoryID)
+	if identityErr != nil {
+		return nil, identityErr
+	}
 	options := badger.DefaultIteratorOptions
 	options.Prefix = prefix
 	options.PrefetchValues = false
@@ -242,7 +248,7 @@ func (s *BadgerStore) taintCoverageParents(memoryID string, scope *TaintServingR
 			return nil, errTaintCoverageUnproved
 		}
 		id := string(bytes.TrimPrefix(key, prefix))
-		if err := lineage.ValidateIDs(memoryID, id); err != nil {
+		if err := identity.validateLineageIDs(memoryID, id); err != nil {
 			return nil, err
 		}
 		if it.Item().ValueSize() > 2+tx.MaxDerivedFromChainIDBytes+2+tx.MaxDerivedFromMemoryIDBytes+sha256.Size {

@@ -5388,10 +5388,17 @@ func (s *BadgerStore) validateAppV23StateTxn(
 			var activation AppV23GenesisActivation
 			if err := appV23ReadJSON(
 				txn, appV23GenesisActivationKey(), &activation,
-			); err != nil {
-				return errors.New(
-					"app-v23 state without migration has no genesis activation",
-				)
+			); errors.Is(err, badger.ErrKeyNotFound) {
+				var fresh FreshGenesisActivation
+				if freshErr := appV23ReadJSON(txn, freshGenesisActivationKey(), &fresh); freshErr != nil {
+					return errors.New("app-v23 state without migration has no genesis activation")
+				}
+				if freshErr := ValidateFreshGenesisActivation(fresh); freshErr != nil {
+					return freshErr
+				}
+				activation.RootID, activation.Scope, activation.BootstrapDigest = fresh.RootID, fresh.Scope, fresh.BootstrapDigest
+			} else if err != nil {
+				return err
 			}
 			if activation.RootID != root.PrincipalID ||
 				activation.Scope != root.Scope ||

@@ -51,11 +51,15 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 }
 
 func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintServingReadScope) (TaintServingVerdict, error) {
+	return s.classifyMemoryTaintWithIdentityForRead(memoryID, scope, taintReadIdentityPolicy{})
+}
+
+func (s *BadgerStore) classifyMemoryTaintWithIdentityForRead(memoryID string, scope *TaintServingReadScope, identity taintReadIdentityPolicy) (TaintServingVerdict, error) {
 	if scope == nil {
 		scope = NewTaintServingReadScope()
 	}
 	var verdict TaintServingVerdict
-	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
+	if identity.validate(memoryID) != nil {
 		return verdict, fmt.Errorf("%w: invalid memory ID", ErrTaintServingState)
 	}
 	err := s.withTaintServingReadSnapshot(func(reader *BadgerStore) (classificationErr error) {
@@ -68,7 +72,7 @@ func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintSe
 				verdict.CoverageComplete = false
 				return
 			}
-			coverage := reader.discoverTaintCoverage(memoryID, scope, nonDirectScopes)
+			coverage := reader.discoverTaintCoverageWithIdentity(memoryID, scope, nonDirectScopes, identity)
 			verdict.CoverageComplete = coverage.complete
 			verdict.LineageMissing = coverage.missing
 			verdict.DepthExhausted = verdict.DepthExhausted || coverage.depth
@@ -78,6 +82,9 @@ func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintSe
 		meter := newTaintUnitMeter(taint.MaxServingRequestUnits, ErrTaintServingWalkBudget)
 		meter.request = scope
 		defer func() { verdict.Units = meter.units }()
+		if err := identity.validatePhysicalRootTxn(txn, meter); err != nil {
+			return err
+		}
 		activeScopes, err := readActiveTaintDecisionScopesTxn(txn, meter)
 		if err != nil {
 			return err
@@ -120,7 +127,7 @@ func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintSe
 				}
 			}
 
-			decisions, currentHeaders, err := getEffectiveTaintDecisionsTxn(txn, current, meter)
+			decisions, currentHeaders, err := getEffectiveTaintDecisionsWithIdentityTxn(txn, current, meter, identity)
 			if err != nil {
 				return err
 			}
@@ -129,7 +136,7 @@ func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintSe
 			}
 			scopeMatched := false
 			if len(nonDirectScopes) > 0 {
-				provenance, provenanceErr := authorProvenanceTxn(txn, current, meter)
+				provenance, provenanceErr := authorProvenanceWithIdentityTxn(txn, current, meter, identity)
 				if provenanceErr != nil {
 					return provenanceErr
 				}
@@ -171,7 +178,7 @@ func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintSe
 				}
 			}
 
-			parents, err := servingScopeParentsTxn(txn, current, meter)
+			parents, err := servingScopeParentsWithIdentityTxn(txn, current, meter, identity)
 			if err != nil {
 				return err
 			}

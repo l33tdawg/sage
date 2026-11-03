@@ -48,38 +48,48 @@ func PlanMemoryHashReanchorEntries(
 	if !ok {
 		return nil, false, errors.New("memory hash reanchor planning requires exact SQL classification reads")
 	}
-	memoryIDs, err := CanonicalMemoryIDs(canonical)
+	err = canonical.withMemoryIdentitySnapshot(func(reader *BadgerStore, mode memoryIdentityMode) error {
+		var inspectErr error
+		entries, remaining, inspectErr = func() ([]MemoryHashReanchorEntry, bool, error) {
+			memoryIDs, inventoryErr := reader.canonicalMemoryIDsInSnapshot(mode)
+			if inventoryErr != nil {
+				return nil, false, inventoryErr
+			}
+			for _, memoryID := range memoryIDs {
+				state, stateErr := reader.memoryDisclosureForIdentityMode(memoryID, mode)
+				if stateErr != nil {
+					return nil, false, fmt.Errorf("inspect canonical memory %s for reanchor: %w", memoryID, stateErr)
+				}
+				if len(state.ContentHash) != 0 || !state.AuthorPrincipalRecorded {
+					continue
+				}
+				record, recordErr := memories.GetMemory(ctx, memoryID)
+				if recordErr != nil {
+					return nil, false, fmt.Errorf("load SQL evidence for reanchor memory %s: %w", memoryID, recordErr)
+				}
+				contentHash, validateErr := validateMemoryHashReanchorProjection(
+					ctx, classifications, record, state,
+				)
+				if validateErr != nil {
+					return nil, false, validateErr
+				}
+				if len(entries) == limit {
+					return entries, true, nil
+				}
+				entries = append(entries, MemoryHashReanchorEntry{
+					MemoryID:       memoryID,
+					ExpectedStatus: state.Status,
+					ContentHash:    contentHash,
+				})
+			}
+			return entries, false, nil
+		}()
+		return inspectErr
+	})
 	if err != nil {
 		return nil, false, err
 	}
-	for _, memoryID := range memoryIDs {
-		state, stateErr := canonical.GetMemoryDisclosureState(memoryID)
-		if stateErr != nil {
-			return nil, false, fmt.Errorf("inspect canonical memory %s for reanchor: %w", memoryID, stateErr)
-		}
-		if len(state.ContentHash) != 0 || !state.AuthorPrincipalRecorded {
-			continue
-		}
-		record, recordErr := memories.GetMemory(ctx, memoryID)
-		if recordErr != nil {
-			return nil, false, fmt.Errorf("load SQL evidence for reanchor memory %s: %w", memoryID, recordErr)
-		}
-		contentHash, validateErr := validateMemoryHashReanchorProjection(
-			ctx, classifications, record, state,
-		)
-		if validateErr != nil {
-			return nil, false, validateErr
-		}
-		if len(entries) == limit {
-			return entries, true, nil
-		}
-		entries = append(entries, MemoryHashReanchorEntry{
-			MemoryID:       memoryID,
-			ExpectedStatus: state.Status,
-			ContentHash:    contentHash,
-		})
-	}
-	return entries, false, nil
+	return entries, remaining, nil
 }
 
 // AttestMemoryHashReanchorEntries independently recomputes every local SQL
@@ -101,29 +111,31 @@ func AttestMemoryHashReanchorEntries(
 	if !ok {
 		return errors.New("memory hash reanchor attestation requires exact SQL classification reads")
 	}
-	for _, entry := range entries {
-		state, err := canonical.GetMemoryDisclosureState(entry.MemoryID)
-		if err != nil {
-			return fmt.Errorf("inspect canonical reanchor memory %s: %w", entry.MemoryID, err)
+	return canonical.withMemoryIdentitySnapshot(func(reader *BadgerStore, mode memoryIdentityMode) error {
+		for _, entry := range entries {
+			state, err := reader.memoryDisclosureForIdentityMode(entry.MemoryID, mode)
+			if err != nil {
+				return fmt.Errorf("inspect canonical reanchor memory %s: %w", entry.MemoryID, err)
+			}
+			record, err := memories.GetMemory(ctx, entry.MemoryID)
+			if err != nil {
+				return fmt.Errorf("load SQL reanchor evidence for %s: %w", entry.MemoryID, err)
+			}
+			contentHash, err := validateMemoryHashReanchorProjection(
+				ctx, classifications, record, state,
+			)
+			if err != nil {
+				return err
+			}
+			if state.Status != entry.ExpectedStatus {
+				return fmt.Errorf("memory hash reanchor status changed for %s", entry.MemoryID)
+			}
+			if !bytes.Equal(contentHash, entry.ContentHash) {
+				return fmt.Errorf("memory hash reanchor content evidence changed for %s", entry.MemoryID)
+			}
 		}
-		record, err := memories.GetMemory(ctx, entry.MemoryID)
-		if err != nil {
-			return fmt.Errorf("load SQL reanchor evidence for %s: %w", entry.MemoryID, err)
-		}
-		contentHash, err := validateMemoryHashReanchorProjection(
-			ctx, classifications, record, state,
-		)
-		if err != nil {
-			return err
-		}
-		if state.Status != entry.ExpectedStatus {
-			return fmt.Errorf("memory hash reanchor status changed for %s", entry.MemoryID)
-		}
-		if !bytes.Equal(contentHash, entry.ContentHash) {
-			return fmt.Errorf("memory hash reanchor content evidence changed for %s", entry.MemoryID)
-		}
-	}
-	return nil
+		return nil
+	})
 }
 
 // CanonicalMemoryIDs returns the complete sorted memory:<id> inventory from
@@ -135,6 +147,16 @@ func CanonicalMemoryIDs(canonical *BadgerStore) ([]string, error) {
 		return nil, errors.New("canonical memory inventory requires a store")
 	}
 	var ids []string
+	err := canonical.withMemoryIdentitySnapshot(func(reader *BadgerStore, mode memoryIdentityMode) error {
+		var err error
+		ids, err = reader.canonicalMemoryIDsInSnapshot(mode)
+		return err
+	})
+	return ids, err
+}
+
+func (canonical *BadgerStore) canonicalMemoryIDsInSnapshot(mode memoryIdentityMode) ([]string, error) {
+	var ids []string
 	err := canonical.view(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = false
@@ -144,7 +166,7 @@ func CanonicalMemoryIDs(canonical *BadgerStore) ([]string, error) {
 		for it.Seek(opts.Prefix); it.ValidForPrefix(opts.Prefix); it.Next() {
 			key := it.Item().Key()
 			memoryID := string(key[len(opts.Prefix):])
-			if strings.TrimSpace(memoryID) == "" {
+			if len(memoryID) == 0 || (!mode.useRaw(memoryID) && strings.TrimSpace(memoryID) == "") {
 				return errors.New("canonical memory inventory contains an empty ID")
 			}
 			ids = append(ids, memoryID)

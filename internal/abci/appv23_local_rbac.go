@@ -25,7 +25,7 @@ func (app *SageApp) postAppV23Fork(height int64) bool {
 }
 
 func (app *SageApp) postAppV23GenesisRules(height int64) bool {
-	return app.appV23GenesisActive && height > 0
+	return (app.appV23GenesisActive || app.freshGenesisAppVersion >= 23) && height > 0
 }
 
 func (app *SageApp) postAppV23Rules(height int64) bool {
@@ -45,6 +45,12 @@ func (app *SageApp) isAppV23ActiveForNextTx() bool {
 func (app *SageApp) refreshAppV23Fork() error {
 	app.appV23AppliedHeight = 0
 	app.appV23GenesisActive = false
+	if err := app.refreshFreshGenesis(); err != nil {
+		return err
+	}
+	if app.freshGenesisAppVersion > 0 {
+		return nil
+	}
 	genesis, err := app.badgerStore.GetAppV23GenesisActivation()
 	if err != nil {
 		return fmt.Errorf("read app-v23 genesis activation: %w", err)
@@ -131,7 +137,15 @@ func (app *SageApp) validateAppV23StateForCurrentUpgrade() error {
 		return strictErr
 	}
 	v25, err := app.badgerStore.GetAppliedUpgrade(appV25UpgradeName)
-	if err != nil || v25 == nil || v25.TargetAppVersion != 25 {
+	if err != nil {
+		return strictErr
+	}
+	if v25 == nil {
+		fresh, err := app.badgerStore.GetFreshGenesisActivation()
+		if err != nil || fresh == nil || fresh.AppVersion != 25 {
+			return strictErr
+		}
+	} else if v25.TargetAppVersion != 25 {
 		return strictErr
 	}
 	if err := app.badgerStore.ValidateAppV23StateForPreV26Recovery(); err != nil {

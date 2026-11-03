@@ -115,15 +115,24 @@ func TestTaintScopeModernRequestAllowanceAndPolicyFirst(t *testing.T) {
 	require.Equal(t, taint.MaxServingRequestUnits-first.Units, scope.mandatoryRemaining)
 	// Actual repeated canonical reads, not calls to the counter helper, show
 	// the same allowance is shared by subsequent filter/final/page passes.
+	spent := first.Units
 	for i := 1; i < taint.MaxServingRequestUnits/first.Units; i++ {
 		got, err := s.classifyMemoryTaintForRead(record.MemoryID, scope)
 		require.NoError(t, err)
 		require.Equal(t, first.Units, got.Units)
+		spent += got.Units
 	}
-	_, err = s.classifyMemoryTaintForRead(record.MemoryID, scope)
+	refused, err := s.classifyMemoryTaintForRead(record.MemoryID, scope)
 	require.ErrorIs(t, err, ErrTaintServingWalkBudget)
-	_, err = s.classifyMemoryTaintForRead(record.MemoryID, scope)
-	require.ErrorIs(t, err, ErrTaintServingWalkBudget, "a later pass must not reset the allowance")
+	spent += refused.Units
+	require.Equal(t, taint.MaxServingRequestUnits, spent,
+		"real canonical reads must consume the exact 65,536-unit boundary")
+	require.Zero(t, scope.mandatoryRemaining)
+	refused, err = s.classifyMemoryTaintForRead(record.MemoryID, scope)
+	require.ErrorIs(t, err, ErrTaintServingWalkBudget, "the 65,537th unit must not reset the allowance")
+	require.Zero(t, refused.Units, "the first read of a later pass must be refused")
+	require.Zero(t, scope.mandatoryRemaining)
+	t.Logf("shared request: charged=%d next unit refused; no synthetic counter adjustment", spent)
 	_, err = s.ClassifyMemoryTaint(record.MemoryID)
 	require.NoError(t, err, "a distinct request receives its own allowance")
 }

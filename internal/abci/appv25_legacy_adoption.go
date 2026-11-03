@@ -13,7 +13,7 @@ const appV25MemoryLegacyAdoptionOperationName = "memory_legacy_adopt"
 
 // postAppV25Fork is the strict H+1 consensus boundary for app-v25.
 func (app *SageApp) postAppV25Fork(height int64) bool {
-	return app.appV25AppliedHeight > 0 && height > app.appV25AppliedHeight
+	return app.postFreshGenesisRules(25, height) || app.appV25AppliedHeight > 0 && height > app.appV25AppliedHeight
 }
 
 func (app *SageApp) postAppV25Rules(height int64) bool {
@@ -52,6 +52,9 @@ func (app *SageApp) refreshAppV25Fork() error {
 }
 
 func (app *SageApp) validateAppV25Predecessor() (int64, error) {
+	if app.freshGenesisAppVersion == 24 {
+		return 0, nil
+	}
 	if app.appV24AppliedHeight <= 0 {
 		return 0, fmt.Errorf("missing active %s predecessor", appV24UpgradeName)
 	}
@@ -75,7 +78,7 @@ func (app *SageApp) validateAppV25Prerequisite() error {
 	if err != nil {
 		return fmt.Errorf("applied %s has invalid predecessor: %w", appV25UpgradeName, err)
 	}
-	if app.appV25AppliedHeight <= predecessorHeight {
+	if predecessorHeight > 0 && app.appV25AppliedHeight <= predecessorHeight {
 		return fmt.Errorf(
 			"applied %s height %d must be after applied %s predecessor height %d",
 			appV25UpgradeName, app.appV25AppliedHeight,
