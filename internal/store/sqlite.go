@@ -442,21 +442,21 @@ func (s *SQLiteStore) RequirePristineStateSyncProjection(ctx context.Context) er
 			}
 			continue
 		}
-		if table == "memory_taint_mirror_revision" {
-			var id, revision int64
-			if err := s.conn.QueryRowContext(ctx,
-				`SELECT singleton, revision FROM memory_taint_mirror_revision`,
-			).Scan(&id, &revision); err != nil || id != 1 || revision != 0 {
-				return errors.New("state sync receiving requires a pristine memory taint mirror revision")
-			}
-			continue
-		}
 		if table == "graph_projection_revision" {
 			var id, revision int64
 			if err := s.conn.QueryRowContext(ctx,
 				`SELECT singleton, revision FROM graph_projection_revision`,
 			).Scan(&id, &revision); err != nil || id != 1 || revision != 0 {
 				return errors.New("state sync receiving requires a pristine graph projection revision")
+			}
+			continue
+		}
+		if table == "memory_taint_mirror_revision" {
+			var count, id, revision int64
+			if err := s.conn.QueryRowContext(ctx,
+				`SELECT COUNT(*), COALESCE(MIN(singleton), 0), COALESCE(MIN(revision), 0) FROM memory_taint_mirror_revision`,
+			).Scan(&count, &id, &revision); err != nil || count != 1 || id != 1 || revision != 0 {
+				return errors.New("state sync receiving requires a pristine memory taint mirror revision")
 			}
 			continue
 		}
@@ -1791,29 +1791,13 @@ func (s *SQLiteStore) CountMemoriesByProvider(ctx context.Context) (map[string]i
 func (s *SQLiteStore) DomainSpaceCompleteness(
 	ctx context.Context, domain, activeSpace string, cap int,
 ) (hasOutside, established bool, err error) {
-	return s.DomainSpaceCompletenessFiltered(ctx, domain, activeSpace, cap, false)
-}
-
-func (s *SQLiteStore) DomainSpaceCompletenessFiltered(
-	ctx context.Context,
-	domain, activeSpace string,
-	cap int,
-	excludeTainted bool,
-) (hasOutside, established bool, err error) {
-	query := `SELECT CASE WHEN embedding IS NULL THEN 1 ELSE 0 END,
+	rows, qerr := s.conn.QueryContext(ctx,
+		`SELECT CASE WHEN embedding IS NULL THEN 1 ELSE 0 END,
 		        COALESCE(embedding_provider, '')
 		 FROM memories
-		 WHERE domain_tag = ? AND status IN ('committed','challenged')`
-	if excludeTainted {
-		query += ` AND NOT EXISTS (
-			SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id=memories.memory_id
-		)`
-	}
-	query += `
+		 WHERE domain_tag = ? AND status IN ('committed','challenged')
 		 ORDER BY status, memory_id
-		 LIMIT ?`
-	rows, qerr := s.conn.QueryContext(ctx,
-		query,
+		 LIMIT ?`,
 		domain, cap+1)
 	if qerr != nil {
 		return false, false, fmt.Errorf("domain space-completeness scan: %w", qerr)
