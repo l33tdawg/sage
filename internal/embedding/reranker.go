@@ -210,6 +210,10 @@ type RerankerConfig struct {
 	Kind       string // RerankKindTEI (default) or RerankKindLlamaCpp
 	TimeoutMS  int
 	Oversample int // RRF returns TopK * Oversample candidates before rerank
+	// MaxCandidates hard-caps the candidates one rerank call scores; 0 means
+	// no cap beyond TopK * Oversample. Set it low (about 10) for a CPU-only
+	// reranker such as the managed llama.cpp sidecar on Linux/Windows.
+	MaxCandidates int
 }
 
 // Default knobs picked so the reranker is OFF unless an operator explicitly
@@ -246,6 +250,11 @@ func ResolveRerankerConfig() RerankerConfig {
 	if v := os.Getenv("SAGE_RERANK_OVERSAMPLE"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
 			cfg.Oversample = n
+		}
+	}
+	if v := os.Getenv("SAGE_RERANK_MAX_CANDIDATES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			cfg.MaxCandidates = n
 		}
 	}
 	return cfg

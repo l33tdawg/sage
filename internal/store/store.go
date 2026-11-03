@@ -109,6 +109,12 @@ type QueryOptions struct {
 	ExcludeTainted bool   `json:"-"`
 	TopK           int    `json:"top_k"`
 	Cursor         string `json:"cursor,omitempty"`
+	// RerankTopK, when > 0 and below TopK, is the result count the caller will
+	// actually keep. SearchHybrid sizes the reranker's candidate pool from it
+	// instead of TopK, so an authorization over-fetch (app-v23 recall scans to
+	// the disclosure limit, then trims) does not widen the cross-encoder pass.
+	// Rows past the reranked head keep their fused order. Zero keeps TopK.
+	RerankTopK int `json:"-"`
 	// DecayFloor, when > 0, drops records whose task-aware DECAYED confidence
 	// (memory.ComputeConfidenceForRecord — time decay + corroboration boost, open
 	// tasks exempt) is below the floor. Unlike MinConfidence it is applied in Go

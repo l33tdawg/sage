@@ -552,9 +552,14 @@ func runServe(startupProof string) (rerr error) {
 				Str("model", rerankCfg.Model).
 				Int("oversample", rerankCfg.Oversample).
 				Int("timeout_ms", rerankCfg.TimeoutMS).
+				Int("max_candidates", rerankCfg.MaxCandidates).
 				Msg("hybrid recall reranker enabled")
 		}
 	}
+	// The cap and the fallback log apply to any reranker attached later too
+	// (saved preferences, the managed sidecar, the Settings toggle).
+	sqliteStore.SetRerankMaxCandidates(embedding.ResolveRerankerConfig().MaxCandidates)
+	sqliteStore.SetRerankFallbackObserver(rerankFallbackLogger(logger))
 	// Manager for the optional llama.cpp reranker sidecar (guided setup from
 	// the dashboard; adopt-or-spawn on boot when the operator enabled it).
 	rerankdMgr := rerankd.New(SageHome())
