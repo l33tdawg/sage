@@ -84,6 +84,7 @@ type appV23ProjectionAuditResult struct {
 	cacheable        bool
 	legacyCompatible bool
 	quarantined      bool
+	taintOmitted     bool
 	subset           bool
 	stale            bool
 	cacheState       string
@@ -350,6 +351,14 @@ func isAppV23BroadOmittableDashboardRecord(
 		errors.Is(err, store.ErrMemoryProjectionQuarantined)
 }
 
+func isAppV23TaintedDashboardRecord(
+	disposition store.MemoryProjectionDisposition,
+	err error,
+) bool {
+	return disposition == store.MemoryProjectionTainted &&
+		errors.Is(err, store.ErrMemoryProjectionTainted)
+}
+
 // filterAppV23BroadDashboardRecords omits unsafe rows before they consume a
 // visible result/count. Exact/detail and export paths intentionally do not use
 // this helper: they retain fail-closed behavior. Broad callers must surface the
@@ -358,35 +367,50 @@ func isAppV23BroadOmittableDashboardRecord(
 func (h *DashboardHandler) filterAppV23BroadDashboardRecords(
 	records []*memory.MemoryRecord,
 ) ([]*memory.MemoryRecord, error) {
+	kept, _, err := h.filterAppV23BroadDashboardRecordsObserved(records)
+	return kept, err
+}
+
+// The omitted count describes only projection quarantine. A canonical row
+// withheld by definitive governance taint must not be reported as corrupt.
+func (h *DashboardHandler) filterAppV23BroadDashboardRecordsObserved(
+	records []*memory.MemoryRecord,
+) ([]*memory.MemoryRecord, int, error) {
 	if !h.appV23IsActive() {
-		return records, nil
+		return records, 0, nil
 	}
 	kept := make([]*memory.MemoryRecord, 0, len(records))
+	quarantined := 0
 	classifications, err := h.BadgerStore.ClassifyMemoryProjections(records)
 	if err != nil {
-		return nil, appV23DashboardProjectionError(err)
+		return nil, 0, appV23DashboardProjectionError(err)
 	}
 	for i, record := range records {
 		disposition := classifications[i].Disposition
 		projectionErr := classifications[i].Err
 		if projectionErr != nil {
+			if isAppV23TaintedDashboardRecord(disposition, projectionErr) {
+				continue
+			}
 			projectionErr = appV23DashboardProjectionError(projectionErr)
 			if isAppV23BroadOmittableDashboardRecord(disposition, projectionErr) {
 				// The shared batched classifier already records this proven
 				// degradation while retaining one canonical Badger snapshot for
 				// the page. Never reopen one transaction per hidden row here.
+				quarantined++
 				continue
 			}
-			return nil, projectionErr
+			return nil, 0, projectionErr
 		}
 		kept = append(kept, record)
 	}
-	return kept, nil
+	return kept, quarantined, nil
 }
 
 type appV23ProjectionWalkAudit struct {
 	legacyCompatible bool
 	quarantined      bool
+	taintOmitted     bool
 	hiddenCount      int
 	seenMemoryIDs    map[string]struct{}
 }
@@ -811,6 +835,13 @@ func (h *DashboardHandler) walkAppV23BroadDashboardRecords(
 			disposition := classifications[i].Disposition
 			projectionErr := classifications[i].Err
 			if projectionErr != nil {
+				if isAppV23TaintedDashboardRecord(disposition, projectionErr) {
+					// The classifier verified the canonical envelope before
+					// applying taint. Retain its inventory ID, withhold content,
+					// and keep policy filtering distinct from corruption.
+					audit.taintOmitted = true
+					continue
+				}
 				projectionErr = appV23DashboardProjectionError(projectionErr)
 				if isAppV23BroadOmittableDashboardRecord(disposition, projectionErr) {
 					audit.quarantined = true
@@ -982,6 +1013,7 @@ func (h *DashboardHandler) appV23ProjectionIsExactForCurrentSource(
 	last := h.projectionAuditLast
 	return source, last != nil &&
 		last.cacheable &&
+		!last.taintOmitted &&
 		last.source == source &&
 		last.projection != nil &&
 		last.projection.Complete &&
@@ -1072,11 +1104,11 @@ func (h *DashboardHandler) appV23CanonicalDashboardPageObserved(
 		if err != nil {
 			return nil, 0, "", false, observedHidden, err
 		}
-		safe, err := h.filterAppV23BroadDashboardRecords(records)
+		safe, quarantined, err := h.filterAppV23BroadDashboardRecordsObserved(records)
 		if err != nil {
 			return nil, 0, "", false, observedHidden, err
 		}
-		observedHidden += len(records) - len(safe)
+		observedHidden += quarantined
 		safeIndex := 0
 		for rawIndex, record := range records {
 			if safeIndex >= len(safe) || safe[safeIndex] != record {
@@ -1191,11 +1223,11 @@ func (h *DashboardHandler) appV23CanonicalKeywordPage(
 		if listErr != nil {
 			return nil, 0, "", false, observedHidden, listErr
 		}
-		safe, filterErr := h.filterAppV23BroadDashboardRecords(records)
+		safe, quarantined, filterErr := h.filterAppV23BroadDashboardRecordsObserved(records)
 		if filterErr != nil {
 			return nil, 0, "", false, observedHidden, filterErr
 		}
-		observedHidden += len(records) - len(safe)
+		observedHidden += quarantined
 		safeIDs := make(map[string]struct{}, len(safe))
 		for _, record := range safe {
 			safeIDs[record.MemoryID] = struct{}{}
@@ -1523,6 +1555,7 @@ func (h *DashboardHandler) cerebrumVisibleStatsAndActivityOnce(
 		projection:       projection,
 		legacyCompatible: audit.legacyCompatible,
 		quarantined:      audit.quarantined,
+		taintOmitted:     audit.taintOmitted,
 		subset:           subsetAllowed,
 		cacheState:       projection.State,
 	}, nil
