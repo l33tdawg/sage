@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.24.5`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.0`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,29 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.24.5 and earlier)</summary>
+<summary>Recent release notes (v11.25.0 and earlier)</summary>
+
+## What's New in v11.25.0
+
+**Fresh chains start at the supported app version.** A new personal `sage-gui serve`
+starts directly at app29. For a shared chain, create one signed, full-roster
+artifact with `init-genesis`, then run `init-fresh-node` on each Unix node against
+its exact genesis digest before starting `serve`. Existing chains keep their
+keys, genesis and governed upgrade history. See the
+[fresh-genesis guide](docs/reference/fresh-genesis.md).
+
+**App30 taint and authenticated lineage ship as explicit rules.** The merged
+implementation includes immutable multi-parent `derived_from` references,
+governed apply/clear decisions, bounded canonical traversal, provenance and
+recovery/state-sync support. `latest` and automatic upgrade voting remain at
+app29; an explicit signed app30 genesis or quorum-approved plan selects app30.
+
+**The native-shell control contract accepts v11.25 daemons.** Native standalone
+packages retain their preview identity and separate promotion requirements.
+Evidence-operator integration and complete count, coverage and error parity
+across clients/backends remain open in [#460](https://github.com/l33tdawg/sage/issues/460).
+
+Container: `ghcr.io/l33tdawg/sage:11.25.0`. SDK 11.25.0.
 
 ## What's New in v11.24.5
 

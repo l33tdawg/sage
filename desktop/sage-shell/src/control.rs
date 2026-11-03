@@ -189,7 +189,7 @@ fn supported_daemon_version(value: &str) -> bool {
     }
     let major = parts[0].parse::<u64>().ok();
     let minor = parts[1].parse::<u64>().ok();
-    major == Some(11) && matches!(minor, Some(10..=24))
+    major == Some(11) && matches!(minor, Some(10..=25))
 }
 
 fn valid_semver_number(value: &str) -> bool {
@@ -662,11 +662,54 @@ mod tests {
         assert!(supported_daemon_version("11.21.0"));
         assert!(supported_daemon_version("11.23.10"));
         assert!(supported_daemon_version("11.24.5"));
-        assert!(!supported_daemon_version("11.25.0"));
+        assert!(supported_daemon_version("11.25.0"));
+        assert!(supported_daemon_version("v11.25.1-rc.1+build.7"));
+        assert!(!supported_daemon_version("11.26.0"));
         assert!(!supported_daemon_version("eleven"));
         assert!(valid_generation(&"A".repeat(43)));
         assert!(!valid_generation(&"B".repeat(43)));
         assert!(!valid_generation(&"A".repeat(42)));
+    }
+
+    #[test]
+    fn release_11_25_preserves_protocol_validation() {
+        let status = || Status {
+            control_protocol: 1,
+            daemon_version: "11.25.0".into(),
+            api_schema: 1,
+            min_shell_protocol: 1,
+            max_shell_protocol: 1,
+            instance_generation: "A".repeat(43),
+            state: DaemonState::Ready,
+            ui_origin: "http://127.0.0.1:8080".into(),
+            startup_proof: String::new(),
+        };
+        assert!(validate(&status()).is_ok());
+        for incompatible in [
+            Status {
+                control_protocol: 2,
+                ..status()
+            },
+            Status {
+                api_schema: 2,
+                ..status()
+            },
+            Status {
+                min_shell_protocol: 2,
+                max_shell_protocol: 2,
+                ..status()
+            },
+            Status {
+                max_shell_protocol: 0,
+                ..status()
+            },
+            Status {
+                daemon_version: "11.26.0".into(),
+                ..status()
+            },
+        ] {
+            assert!(validate(&incompatible).is_err());
+        }
     }
 
     #[test]
