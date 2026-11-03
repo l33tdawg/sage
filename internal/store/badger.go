@@ -210,6 +210,12 @@ type BadgerStore struct {
 	poisoned       error
 	writeFaultHook func(int) error
 	writeAttempts  int
+
+	// appV30WriteStage is installed around one app-v30 transaction. It records
+	// before-images for every successful mutation so an over-budget transaction
+	// can be rolled back inside the same Badger transaction, preserving the
+	// transaction's read set and conflict detection.
+	appV30WriteStage *appV30WriteStage
 }
 
 // view executes fn against the transaction snapshot when this is a scoped
@@ -282,6 +288,14 @@ func (s *BadgerStore) update(fn func(*badger.Txn) error) error {
 // boundary that errors after touching the transaction poisons the whole outer
 // transaction and Commit is refused.
 func (s *BadgerStore) txnSetPrimitive(txn *badger.Txn, key, value []byte) error {
+	var staged *appV30MutationBeforeImage
+	if s.appV30WriteStage != nil {
+		var err error
+		staged, err = s.prepareAppV30StagedMutation(txn, key, value, false)
+		if err != nil {
+			return err
+		}
+	}
 	if s.txn != nil {
 		s.writeAttempts++
 		if s.writeFaultHook != nil {
@@ -292,6 +306,9 @@ func (s *BadgerStore) txnSetPrimitive(txn *badger.Txn, key, value []byte) error 
 		}
 	}
 	err := txn.Set(key, value)
+	if err == nil && staged != nil {
+		s.recordAppV30StagedMutation(key, staged)
+	}
 	if err == nil {
 		s.trackPublicMemoryChange(key)
 	}
@@ -361,6 +378,14 @@ func (s *BadgerStore) txnSet(txn *badger.Txn, key, value []byte) error {
 }
 
 func (s *BadgerStore) txnDelete(txn *badger.Txn, key []byte) error {
+	var staged *appV30MutationBeforeImage
+	if s.appV30WriteStage != nil {
+		var err error
+		staged, err = s.prepareAppV30StagedMutation(txn, key, nil, true)
+		if err != nil {
+			return err
+		}
+	}
 	if s.txn != nil {
 		s.writeAttempts++
 		if s.writeFaultHook != nil {
@@ -376,6 +401,9 @@ func (s *BadgerStore) txnDelete(txn *badger.Txn, key []byte) error {
 		}
 	}
 	err := txn.Delete(key)
+	if err == nil && staged != nil {
+		s.recordAppV30StagedMutation(key, staged)
+	}
 	if err == nil {
 		s.trackPublicMemoryChange(key)
 	}
@@ -690,6 +718,9 @@ func (s *BadgerStore) CommitConsensusTransactionWithPublication(
 	if s.txn == nil {
 		return errors.New("store: no consensus transaction to commit")
 	}
+	if s.appV30WriteStage != nil {
+		return errors.New("store: cannot commit with an active app-v30 write stage")
+	}
 	if s.poisoned != nil {
 		err := s.poisoned
 		s.DiscardConsensusTransaction()
@@ -788,6 +819,7 @@ func (s *BadgerStore) DiscardConsensusTransaction() {
 	}
 	s.txn.Discard()
 	s.txn = nil
+	s.appV30WriteStage = nil
 }
 
 // DB returns the underlying *badger.DB handle. Intended for the v7.5

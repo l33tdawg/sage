@@ -160,22 +160,29 @@ func TestAppV30PendingGovernanceBudgetPreflight(t *testing.T) {
 				Payload: []byte{1, action},
 			}
 			before := appV30BudgetSetActiveProposal(t, app, proposal)
-			txs := make([][]byte, 10)
+			// These wire/estimate-only submits exercise byte pressure without
+			// consuming any of the four expand/cleanup proposal slots.
+			txs := make([][]byte, 45)
 			for i := range txs {
-				txs[i] = makeAppV30WorkRawTx(t, uint64(i+1))
+				txs[i] = makeAppV30BudgetSubmitRawTx(t, uint64(i+1))
 			}
-			fit, err := app.appV30BlockGeneratedWriteEstimate(txs[:9], 21)
+			perTx := app.appV30EstimatedTxBytes(txs[0], 21)
+			require.EqualValues(t, 80_221, perTx)
+			require.LessOrEqual(t, perTx*45, appV30BlockWriteBudgetBytes,
+				"the pending reservation must be what makes this block exceed the byte budget")
+			fit, err := app.appV30BlockGeneratedWriteEstimate(txs[:44], 21)
 			require.NoError(t, err)
-			require.EqualValues(t, 634_948+9*383_076, fit)
+			require.EqualValues(t, 634_948+44*80_221, fit)
 			_, err = app.appV30BlockGeneratedWriteEstimate(txs, 21)
 			require.ErrorIs(t, err, errAppV30GeneratedWriteBudgetExceeded)
+			require.NotErrorIs(t, err, errAppV30TaintWorkLimitExceeded)
 			prepared, err := app.PrepareProposal(context.Background(), &abcitypes.RequestPrepareProposal{
 				Height: 21, Time: time.Unix(1_700_000_021, 0).UTC(), Txs: txs, MaxTxBytes: 2_000_000,
 			})
 			require.NoError(t, err)
-			require.Equal(t, txs[:9], prepared.Txs)
+			require.Equal(t, txs[:44], prepared.Txs)
 			accepted, err := app.ProcessProposal(context.Background(), &abcitypes.RequestProcessProposal{
-				Height: 21, Txs: txs[:9],
+				Height: 21, Txs: txs[:44],
 			})
 			require.NoError(t, err)
 			require.Equal(t, abcitypes.ResponseProcessProposal_ACCEPT, accepted.Status)
@@ -188,7 +195,7 @@ func TestAppV30PendingGovernanceBudgetPreflight(t *testing.T) {
 				Height: 21, Time: time.Unix(1_700_000_021, 0).UTC(), Txs: txs,
 			})
 			require.NoError(t, err)
-			require.Len(t, finalized.TxResults, 10)
+			require.Len(t, finalized.TxResults, 45)
 			for _, result := range finalized.TxResults {
 				require.Equal(t, appV30GeneratedWriteBudgetCode, result.Code)
 				require.Equal(t, appV30GeneratedWriteBudgetLog, result.Log)

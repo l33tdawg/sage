@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"strings"
 	"testing"
+	"time"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/stretchr/testify/require"
@@ -88,6 +89,47 @@ func TestMemoryTaintWorkGatesAndAdvancesExpansion(t *testing.T) {
 		20,
 	)
 	require.Equal(t, appV30TaintWorkLimitCode, limited.Code)
+}
+
+func TestMemoryTaintWorkRunsInsideMeteredAppV30Stage(t *testing.T) {
+	app, root, target, chainID := setupAppV30TaintGovernance(t)
+	app.state.Height = 19
+	decisionID := strings.Repeat("c", taint.DecisionIDBytes)
+	created, err := app.badgerStore.ApplyTaintDecision(
+		chainID,
+		decisionID,
+		target,
+		sha256.Sum256([]byte("metered taint work payload")),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+
+	work := &tx.MemoryTaintWork{
+		Version:      tx.MemoryTaintWorkVersion,
+		Kind:         tx.MemoryTaintWorkExpand,
+		DecisionID:   decisionID,
+		Generation:   1,
+		FrontierHead: 0,
+	}
+	parsed := makeMemoryTaintWorkTx(t, root, work, 1)
+	scoped := app.badgerStore.BeginConsensusTransaction(nil)
+	working := app.cloneForAppV20Finalize(scoped)
+	result, err := working.processAppV30MeteredTx(
+		parsed,
+		20,
+		time.Unix(parsed.AgentTimestamp, 0).UTC(),
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), result.Code, result.Log)
+	require.NoError(t, scoped.CommitConsensusTransaction())
+
+	header, found, err := app.badgerStore.GetTaintDecision(decisionID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, taint.StatusComplete, header.Status)
+	require.Equal(t, uint64(1), header.FrontierHead)
+	require.EqualValues(t, 1, working.appV30WorkTxCount)
+	require.Zero(t, working.badgerStore.AppV30WriteStageStats())
 }
 
 func TestMemoryTaintWorkAdvancesCleanup(t *testing.T) {

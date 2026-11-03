@@ -2,13 +2,16 @@ package abci
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	abcitypes "github.com/cometbft/cometbft/abci/types"
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -31,6 +34,34 @@ func makeAppV30WorkRawTx(t *testing.T, nonce uint64) []byte {
 	return encoded
 }
 
+// makeAppV30BudgetSubmitRawTx is a wire/estimate fixture, not an admitted
+// memory submission. Its parent assertions are never executed by these tests.
+func makeAppV30BudgetSubmitRawTx(t *testing.T, nonce uint64) []byte {
+	t.Helper()
+	submit := &tx.MemorySubmit{
+		MemoryID:        fmt.Sprintf("%0512d", nonce),
+		ContentHash:     make([]byte, 32),
+		MemoryType:      tx.MemoryTypeObservation,
+		DomainTag:       "general",
+		ConfidenceScore: 0.8,
+	}
+	for i := 0; i < taint.MaxParents; i++ {
+		submit.DerivedFrom = append(submit.DerivedFrom, tx.ParentRef{
+			SourceChainID: strings.Repeat("c", tx.MaxDerivedFromChainIDBytes),
+			MemoryID:      strings.Repeat(string(rune('a'+i)), taint.MaxMemoryIDBytes),
+			ContentHash:   [32]byte{byte(i + 1)},
+		})
+	}
+	encoded, err := tx.EncodeTx(&tx.ParsedTx{
+		Type:         tx.TxTypeMemorySubmit,
+		Nonce:        nonce,
+		Timestamp:    time.Unix(1_700_000_000, 0).UTC(),
+		MemorySubmit: submit,
+	})
+	require.NoError(t, err)
+	return encoded
+}
+
 func TestAppV30GeneratedWriteBudgetPrepareProcessAndFinalize(t *testing.T) {
 	app := setupTestApp(t)
 	app.state.Height = 19
@@ -46,14 +77,17 @@ func TestAppV30GeneratedWriteBudgetPrepareProcessAndFinalize(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 
-	txs := make([][]byte, 11)
+	txs := make([][]byte, 53)
 	for i := range txs {
-		txs[i] = makeAppV30WorkRawTx(t, uint64(i+1))
+		txs[i] = makeAppV30BudgetSubmitRawTx(t, uint64(i+1))
 	}
 	perTx := app.appV30EstimatedTxBytes(txs[0], 20)
-	require.EqualValues(t, 383_076, perTx)
-	require.LessOrEqual(t, perTx*10, appV30BlockWriteBudgetBytes)
-	require.Greater(t, perTx*11, appV30BlockWriteBudgetBytes)
+	require.EqualValues(t, 80_221, perTx)
+	require.LessOrEqual(t, perTx*52, appV30BlockWriteBudgetBytes)
+	require.Greater(t, perTx*53, appV30BlockWriteBudgetBytes)
+	_, err = app.appV30BlockGeneratedWriteEstimate(txs, 20)
+	require.ErrorIs(t, err, errAppV30GeneratedWriteBudgetExceeded)
+	require.NotErrorIs(t, err, errAppV30TaintWorkLimitExceeded)
 
 	prepared, err := app.PrepareProposal(context.Background(), &abcitypes.RequestPrepareProposal{
 		Height:     20,
@@ -62,11 +96,11 @@ func TestAppV30GeneratedWriteBudgetPrepareProcessAndFinalize(t *testing.T) {
 		MaxTxBytes: 2_000_000,
 	})
 	require.NoError(t, err)
-	require.Len(t, prepared.Txs, 10)
+	require.Len(t, prepared.Txs, 52)
 
 	accepted, err := app.ProcessProposal(context.Background(), &abcitypes.RequestProcessProposal{
 		Height: 20,
-		Txs:    txs[:10],
+		Txs:    txs[:52],
 	})
 	require.NoError(t, err)
 	require.Equal(t, abcitypes.ResponseProcessProposal_ACCEPT, accepted.Status)
@@ -113,4 +147,146 @@ func TestAppV30WorstSubmitEstimateMatchesBenchmarkBound(t *testing.T) {
 	require.EqualValues(t, 80_221, estimate)
 	require.LessOrEqual(t, estimate*52, appV30BlockWriteBudgetBytes)
 	require.Greater(t, estimate*53, appV30BlockWriteBudgetBytes)
+}
+
+func TestAppV30PendingGovernanceReserveCountsBeforeExecutionVote(t *testing.T) {
+	app, root, target, _ := setupAppV30TaintGovernance(t)
+	payload, err := tx.EncodeTaintApplyPayload(appV30ApplyPayload(target))
+	require.NoError(t, err)
+	decisionID, err := tx.TaintApplyDecisionID(payload)
+	require.NoError(t, err)
+
+	pubKey, sig, bodyHash, timestamp := signAgentProof(t, root, []byte("reserved taint proposal"))
+	parsed := &tx.ParsedTx{
+		Type:  tx.TxTypeGovPropose,
+		Nonce: 1,
+		GovPropose: &tx.GovPropose{
+			Operation: tx.GovOpMemoryTaint,
+			TargetID:  decisionID,
+			Payload:   payload,
+			Reason:    "reserved taint proposal",
+		},
+		AgentPubKey:    pubKey,
+		AgentSig:       sig,
+		AgentBodyHash:  bodyHash,
+		AgentTimestamp: timestamp,
+	}
+	require.NoError(t, tx.SignTx(parsed, root.priv))
+	result := app.processGovPropose(parsed, 20, appV23BlockTime())
+	require.Equal(t, uint32(0), result.Code, result.Log)
+
+	want := int64(appV30PendingGovernanceBytes)
+	reserve, err := app.appV30PendingGovernanceReservation(20)
+	require.NoError(t, err)
+	require.Equal(t, want, reserve)
+	total, err := app.appV30BlockGeneratedWriteEstimate(nil, 20)
+	require.NoError(t, err)
+	require.Equal(t, want, total)
+
+	txs := make([][]byte, 53)
+	for i := range txs {
+		txs[i] = makeAppV30BudgetSubmitRawTx(t, uint64(i+1))
+	}
+	selected, err := app.selectAppV30Proposal(txs, 20)
+	require.NoError(t, err)
+	require.Len(t, selected, 44, "the canonical pre-block execution reserve remains outside byte-budget selection")
+	_, err = app.appV30BlockGeneratedWriteEstimate(txs, 20)
+	require.ErrorIs(t, err, errAppV30GeneratedWriteBudgetExceeded)
+}
+
+func TestAppV30WorstSubmitActualGeneratedWritesStayWithinEstimate(t *testing.T) {
+	app := setupTestApp(t)
+	chainID := strings.Repeat("c", tx.MaxDerivedFromChainIDBytes)
+	parents := make([]tx.ParentRef, taint.MaxParents)
+	for i := range parents {
+		parents[i] = tx.ParentRef{
+			SourceChainID: chainID,
+			MemoryID:      strings.Repeat(string(rune('a'+i)), taint.MaxMemoryIDBytes),
+			ContentHash:   [32]byte{byte(i + 1)},
+		}
+	}
+
+	decisions := make([]string, taint.MaxActiveDecisions)
+	for i := range decisions {
+		decisions[i] = testTaintDecisionIDForBudget(i)
+		created, err := app.badgerStore.ApplyTaintDecision(
+			chainID,
+			decisions[i],
+			parents[0],
+			[32]byte{byte(i + 1)},
+		)
+		require.NoError(t, err)
+		require.True(t, created)
+	}
+	require.NoError(t, app.badgerStore.DB().Update(func(txn *badger.Txn) error {
+		for _, decisionID := range decisions {
+			item, err := txn.Get(taint.MembershipKey(parents[0].MemoryID, decisionID))
+			require.NoError(t, err)
+			value, err := item.ValueCopy(nil)
+			require.NoError(t, err)
+			for _, parent := range parents[1:] {
+				require.NoError(t, txn.Set(taint.MembershipKey(parent.MemoryID, decisionID), value))
+				require.NoError(t, txn.Set(taint.DecisionIndexKey(decisionID, parent.MemoryID), []byte{}))
+			}
+		}
+		return nil
+	}))
+
+	childID := strings.Repeat("z", taint.MaxMemoryIDBytes)
+	signerID := strings.Repeat("a", 64)
+	scoped := app.badgerStore.BeginConsensusTransaction(nil)
+	t.Cleanup(scoped.DiscardConsensusTransaction)
+	require.NoError(t, scoped.BeginAppV30WriteStage(1<<20))
+	require.NoError(t, scoped.SetMemoryLineage(childID, parents))
+	inherited, err := scoped.InheritTaintMemberships(chainID, childID, parents)
+	require.NoError(t, err)
+	require.Equal(t, taint.MaxActiveDecisions, inherited.Decisions)
+	require.NoError(t, scoped.SetAppV30Provenance(
+		childID,
+		[]store.AppV30ProvenanceSigner{{
+			CredentialID: signerID,
+			PrincipalID:  signerID,
+			Exact:        true,
+		}},
+	))
+	stats, err := scoped.CommitAppV30WriteStage()
+	require.NoError(t, err)
+	require.Positive(t, stats.Generated)
+	require.LessOrEqual(t, stats.Generated, int64(80_221))
+}
+
+func testTaintDecisionIDForBudget(i int) string {
+	return fmt.Sprintf("%064x", i+1)
+}
+
+func TestAppV30RejectedSubmitRollsBackPendingMirrors(t *testing.T) {
+	app, root, target, _ := setupAppV30TaintGovernance(t)
+	const domain = "stage.rollback"
+	parsed := makeMemorySubmitTx(t, root, domain, "conflicting canonical envelope")
+	parsed.MemorySubmit.MemoryID = target.MemoryID
+	parsed.Nonce = 1
+	require.NoError(t, tx.SignTx(parsed, root.priv))
+
+	scoped := app.badgerStore.BeginConsensusTransaction(nil)
+	t.Cleanup(scoped.DiscardConsensusTransaction)
+	working := app.cloneForAppV20Finalize(scoped)
+	working.pendingWrites = []pendingWrite{{writeType: "earlier-transaction"}}
+	result, err := working.processAppV30MeteredTx(parsed, 20, appV23BlockTime())
+	require.NoError(t, err)
+	require.Equal(t, uint32(11), result.Code, result.Log)
+	require.Contains(t, result.Log, "different canonical envelope")
+	_, ownerErr := scoped.GetDomainOwner(domain)
+	require.Error(t, ownerErr, "the rejected transaction's domain claim must roll back")
+	require.Len(t, working.pendingWrites, 1, "rolled-back domain and grant mirrors must not publish")
+	require.Equal(t, "earlier-transaction", working.pendingWrites[0].writeType)
+
+	accepted := makeMemorySubmitTx(t, root, domain, "accepted after rollback")
+	accepted.Nonce = 2
+	require.NoError(t, tx.SignTx(accepted, root.priv))
+	result, err = working.processAppV30MeteredTx(accepted, 20, appV23BlockTime())
+	require.NoError(t, err)
+	require.Equal(t, uint32(0), result.Code, result.Log)
+	require.Len(t, working.pendingWrites, 5, "the later accepted transaction must retain its mirrors")
+	require.Equal(t, "earlier-transaction", working.pendingWrites[0].writeType)
+	require.NoError(t, scoped.CommitConsensusTransaction())
 }

@@ -159,6 +159,58 @@ func TestAppV30MemoryTaintApplyAndClearExecuteAtProposalBoundary(t *testing.T) {
 	require.Empty(t, decisions)
 }
 
+func TestAppV30TaintExecutionActualWritesFitReservation(t *testing.T) {
+	app, _, target, _ := setupAppV30TaintGovernance(t)
+	applyPayload, err := tx.EncodeTaintApplyPayload(appV30ApplyPayload(target))
+	require.NoError(t, err)
+	decisionID, err := tx.TaintApplyDecisionID(applyPayload)
+	require.NoError(t, err)
+	applyProposal := &governance.ProposalState{
+		Operation: governance.OpMemoryTaint,
+		TargetID:  decisionID,
+		Payload:   applyPayload,
+	}
+
+	applyReservation := appV30TaintExecutionEstimate(applyPayload)
+	scoped := app.badgerStore.BeginConsensusTransaction(nil)
+	working := app.cloneForAppV20Finalize(scoped)
+	require.NoError(t, working.badgerStore.BeginAppV30WriteStage(applyReservation))
+	require.NoError(t, working.applyAppV30TaintProposal(applyProposal, 20))
+	applyStats, err := working.badgerStore.CommitAppV30WriteStage()
+	require.NoError(t, err)
+	require.LessOrEqual(t, applyStats.Generated, applyReservation)
+	require.NoError(t, scoped.CommitConsensusTransaction())
+
+	decisionBytes, err := hex.DecodeString(decisionID)
+	require.NoError(t, err)
+	clearEvidence := sha256.Sum256([]byte("bounded clear evidence"))
+	clearPayload, err := tx.EncodeTaintClearPayload(tx.TaintClearPayload{
+		Version:        tx.TaintClearPayloadVersion,
+		Action:         tx.TaintActionClear,
+		DecisionID:     decisionBytes,
+		ReasonCategory: 2,
+		EvidenceDigest: clearEvidence[:],
+	})
+	require.NoError(t, err)
+	clearTargetID, err := tx.TaintClearTargetID(clearPayload)
+	require.NoError(t, err)
+	clearProposal := &governance.ProposalState{
+		Operation: governance.OpMemoryTaint,
+		TargetID:  clearTargetID,
+		Payload:   clearPayload,
+	}
+
+	clearReservation := appV30TaintExecutionEstimate(clearPayload)
+	clearScoped := app.badgerStore.BeginConsensusTransaction(nil)
+	clearWorking := app.cloneForAppV20Finalize(clearScoped)
+	require.NoError(t, clearWorking.badgerStore.BeginAppV30WriteStage(clearReservation))
+	require.NoError(t, clearWorking.applyAppV30TaintProposal(clearProposal, 21))
+	clearStats, err := clearWorking.badgerStore.CommitAppV30WriteStage()
+	require.NoError(t, err)
+	require.LessOrEqual(t, clearStats.Generated, clearReservation)
+	require.NoError(t, clearScoped.CommitConsensusTransaction())
+}
+
 func TestAppV30MemoryTaintValidatesRootAndCredentialScopes(t *testing.T) {
 	app, _, target, _ := setupAppV30TaintGovernance(t)
 	rootState, err := app.badgerStore.GetAppV23Root()
