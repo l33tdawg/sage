@@ -230,7 +230,36 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 		20,
 		appV23BlockTime(),
 	)
-	require.ErrorContains(t, err, "outside caller clearance")
+	require.ErrorIs(t, err, store.ErrMemoryLineageUnavailable)
+	require.NotContains(t, err.Error(), parent.MemoryID)
+
+	wrongHash := parent
+	wrongHash.ContentHash = sha256.Sum256([]byte("wrong parent hash"))
+	_, wrongHashErr := app.preflightAppV30Lineage(
+		submit,
+		member.id,
+		memoryIDForSubmit(submit.MemorySubmit, 20, member.id),
+		[]tx.ParentRef{wrongHash},
+		20,
+		appV23BlockTime(),
+	)
+	require.ErrorIs(t, wrongHashErr, store.ErrMemoryLineageUnavailable)
+	require.Equal(t, err.Error(), wrongHashErr.Error(),
+		"unauthorized and wrong-hash parent probes must be indistinguishable")
+
+	missing := parent
+	missing.MemoryID = "missing-parent"
+	_, missingErr := app.preflightAppV30Lineage(
+		submit,
+		member.id,
+		memoryIDForSubmit(submit.MemorySubmit, 20, member.id),
+		[]tx.ParentRef{missing},
+		20,
+		appV23BlockTime(),
+	)
+	require.ErrorIs(t, missingErr, store.ErrMemoryLineageUnavailable)
+	require.Equal(t, err.Error(), missingErr.Error(),
+		"unauthorized and missing-parent probes must be indistinguishable")
 }
 
 func TestAppV30CoCommitWritesEverySignerProvenance(t *testing.T) {
