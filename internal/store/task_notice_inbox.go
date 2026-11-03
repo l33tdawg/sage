@@ -19,7 +19,7 @@ func (s *SQLiteStore) PeekAgentNotificationPage(ctx context.Context, agentID str
 	if agentID == "" || limit < 1 || limit > 20 {
 		return nil, "", errors.New("invalid notice page")
 	}
-	afterTime, afterID, err := DecodeInboxCursor(cursor)
+	afterTime, afterID, err := decodeSQLiteTaskNoticeCursor(cursor)
 	if err != nil {
 		return nil, "", err
 	}
@@ -34,6 +34,7 @@ func (s *SQLiteStore) PeekAgentNotificationPage(ctx context.Context, agentID str
 	}
 	defer func() { _ = rows.Close() }()
 	items := make([]*AgentNotification, 0, limit+1)
+	var boundaryTime string
 	for rows.Next() {
 		var n AgentNotification
 		var createdAt string
@@ -42,18 +43,29 @@ func (s *SQLiteStore) PeekAgentNotificationPage(ctx context.Context, agentID str
 		}
 		n.CreatedAt = parseTime(createdAt)
 		items = append(items, &n)
+		if len(items) == limit {
+			boundaryTime = createdAt
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, "", err
 	}
-	return noticePage(items, limit)
+	if len(items) > limit {
+		items = items[:limit]
+		next, err := encodeTaskNoticeRawCursor(boundaryTime, items[len(items)-1].NotificationID)
+		if err != nil {
+			return nil, "", err
+		}
+		return items, next, nil
+	}
+	return items, "", nil
 }
 
 func (s *PostgresStore) PeekAgentNotificationPage(ctx context.Context, agentID string, limit int, cursor string) ([]*AgentNotification, string, error) {
 	if agentID == "" || limit < 1 || limit > 20 {
 		return nil, "", errors.New("invalid notice page")
 	}
-	afterTime, afterID, err := DecodeInboxCursor(cursor)
+	afterTime, afterID, err := DecodeTaskNoticeCursor(cursor)
 	if err != nil {
 		return nil, "", err
 	}

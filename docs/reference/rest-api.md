@@ -2961,9 +2961,13 @@ so the operator can triage it safely.
 `GET /v1/dashboard/task-notifications/inbox?limit=5` is a passive signed
 agent projection. It accepts an opaque `cursor`, returns unread notices with
 `passive:true`, `has_more`, and `next_cursor` when needed, and rechecks
-current agent status and task read permission. Denied or transiently
-unavailable notices are filtered without changing their stored state. The
-parent `GET /v1/dashboard/task-notifications` is also passive.
+current agent status and task read permission. For valid canonical tasks,
+policy-denied, tainted, and taint-pending notices are omitted. Unavailable
+authorization, malformed canonical state, or authorized taint-walk uncertainty
+returns HTTP 503 without consuming notices. Successful pages preserve raw
+continuation cursors even when every notice on a page is omitted; follow
+`next_cursor` while `has_more` is true. The parent
+`GET /v1/dashboard/task-notifications` is also passive.
 
 Explicit `PUT /v1/dashboard/task-notifications/{notification_id}/ack`
 acknowledges one current, authorized exact-owner notice. Retries are
