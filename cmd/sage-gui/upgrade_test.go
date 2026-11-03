@@ -460,9 +460,10 @@ func TestUpgradeStatusReportsAuthoritativePlanAndBallot(t *testing.T) {
 }
 
 // TestUpgradeVoteCarriesCeilingBallotAndRefusesUnsupportedTarget pins the
-// deliberate-vote boundary. App-v29 is the converged ceiling, so its ballot is
-// carried normally; a target above the compiled ceiling must be refused before
-// any vote reaches the wire because this binary cannot execute it.
+// deliberate-vote boundary. App-v29 is the supported ceiling; an explicit
+// app-v30 ballot is compiled but remains dormant for automatic voting. A target
+// above the compiled ceiling must be refused before any vote reaches the wire
+// because this binary cannot execute it.
 func TestUpgradeVoteCarriesCeilingBallotAndRefusesUnsupportedTarget(t *testing.T) {
 	for _, tc := range []struct {
 		name               string
@@ -473,7 +474,8 @@ func TestUpgradeVoteCarriesCeilingBallotAndRefusesUnsupportedTarget(t *testing.T
 		wantUnsupportedErr bool
 	}{
 		{name: "ballot at the converged ceiling", current: 28, target: 29, proposalID: "proposal-29"},
-		{name: "ballot above the compiled ceiling", current: 29, target: 30, proposalID: "proposal-30", wantUnsupportedErr: true},
+		{name: "ballot at the compiled dormant ceiling", current: 29, target: 30, proposalID: "proposal-30", wantDormant: true},
+		{name: "ballot above the compiled ceiling", current: sageabci.MaxCompiledAppVersion(), target: sageabci.MaxCompiledAppVersion() + 1, proposalID: "proposal-unsupported", wantUnsupportedErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			target := tc.target

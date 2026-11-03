@@ -1,10 +1,10 @@
 package store
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
-
-	badger "github.com/dgraph-io/badger/v4"
 
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -24,34 +24,76 @@ const (
 )
 
 type TaintServingVerdict struct {
-	Outcome          TaintServingOutcome
-	DecisionIDs      []string
-	Nodes            int
-	Units            int
+	Outcome     TaintServingOutcome
+	DecisionIDs []string
+	Nodes       int
+	Units       int
+
+	// Optional, bounded metadata about the stored, hash-bound ancestor graph.
+	// Complete requires every observed branch to close at an exact-provenance
+	// root, no effective incomplete membership or scope, and no error/cap/cycle. It says
+	// nothing about omitted derivations or global provenance completeness.
+	// False Complete + false Missing is unproved, not a positive absence proof.
 	CoverageComplete bool
-	LineageMissing   bool
-	DepthExhausted   bool
-	WorkExhausted    bool
+	// Missing is positive evidence: a checked leaf had no provenance record.
+	// Optional read/decoder errors and exhausted metadata work do not set it.
+	LineageMissing bool
+	// These report observed effective decision statuses, never serving caps.
+	DepthExhausted bool
+	WorkExhausted  bool
 }
 
 // ClassifyMemoryTaint checks direct memberships and the authenticated ancestor
 // path in one Badger snapshot. It never treats an absent materialized
 // membership as proof that an incomplete ancestor decision is independent.
 func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict, error) {
-	verdict := TaintServingVerdict{CoverageComplete: true}
+	return s.classifyMemoryTaintForRead(memoryID, NewTaintServingReadScope())
+}
+
+func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintServingReadScope) (TaintServingVerdict, error) {
+	if scope == nil {
+		scope = NewTaintServingReadScope()
+	}
+	var verdict TaintServingVerdict
 	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
 		return verdict, fmt.Errorf("%w: invalid memory ID", ErrTaintServingState)
 	}
-	err := s.view(func(txn *badger.Txn) error {
+	err := s.withTaintServingReadSnapshot(func(reader *BadgerStore) (classificationErr error) {
+		var nonDirectScopes []activeTaintDecisionScope
+		// Discovery is optional: it shares this exact reader and request scope,
+		// but spends only its separate metadata allowance. Its uncertainty must
+		// never change the mandatory disposition, errors, Nodes or Units.
+		defer func() {
+			if classificationErr != nil {
+				verdict.CoverageComplete = false
+				return
+			}
+			coverage := reader.discoverTaintCoverage(memoryID, scope, nonDirectScopes)
+			verdict.CoverageComplete = coverage.complete
+			verdict.LineageMissing = coverage.missing
+			verdict.DepthExhausted = verdict.DepthExhausted || coverage.depth
+			verdict.WorkExhausted = verdict.WorkExhausted || coverage.work
+		}()
+		txn := reader.txn
 		meter := newTaintUnitMeter(taint.MaxServingRequestUnits, ErrTaintServingWalkBudget)
+		meter.request = scope
+		defer func() { verdict.Units = meter.units }()
 		activeScopes, err := readActiveTaintDecisionScopesTxn(txn, meter)
 		if err != nil {
 			return err
 		}
-		queue := []string{memoryID}
+		nonDirectScopes = make([]activeTaintDecisionScope, 0, len(activeScopes))
+		for _, active := range activeScopes {
+			if active.Scope.Kind != tx.TaintScopeDirect {
+				nonDirectScopes = append(nonDirectScopes, active)
+			}
+		}
+		queue := []taintCoverageNode{{id: memoryID}}
 		visited := make(map[string]struct{}, taint.MaxServingAncestorWalk)
+		headers := make(map[string]taint.Header)
 		for len(queue) > 0 {
-			current := queue[0]
+			node := queue[0]
+			current := node.id
 			queue = queue[1:]
 			if _, seen := visited[current]; seen {
 				continue
@@ -61,108 +103,86 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 			}
 			visited[current] = struct{}{}
 			verdict.Nodes++
+			if err := meter.charge(1); err != nil {
+				return err
+			}
+			if node.bound {
+				raw, found, err := readBoundedMeteredTaintValueTxn(txn, memoryKey(current), 4+sha256.Size+taint.MaxCursorBytes, meter)
+				if err != nil {
+					return err
+				}
+				if !found {
+					return fmt.Errorf("%w: missing canonical ancestor", ErrMemoryLineageMalformed)
+				}
+				hash, _, err := decodeMemoryHashEntry(raw)
+				if err != nil || !bytes.Equal(hash, node.expected[:]) {
+					return fmt.Errorf("%w: canonical ancestor hash mismatch", ErrMemoryLineageMalformed)
+				}
+			}
 
-			decisions, decisionHeaders, err := getEffectiveTaintDecisionsTxn(
-				txn,
-				current,
-				meter,
-			)
+			decisions, currentHeaders, err := getEffectiveTaintDecisionsTxn(txn, current, meter)
 			if err != nil {
 				return err
 			}
-			provenance, err := authorProvenanceTxn(txn, current, meter)
-			if err != nil {
-				return err
+			for id, header := range currentHeaders {
+				headers[id] = header
 			}
-
-			matched := append([]string(nil), decisions...)
-			directTainted := false
-			scopeTainted := false
-			for _, decisionID := range decisions {
-				header := decisionHeaders[decisionID]
-				if header.Status.Incomplete() {
-					verdict.CoverageComplete = false
+			scopeMatched := false
+			if len(nonDirectScopes) > 0 {
+				provenance, provenanceErr := authorProvenanceTxn(txn, current, meter)
+				if provenanceErr != nil {
+					return provenanceErr
 				}
-				if current == memoryID || !header.Status.Incomplete() {
-					directTainted = true
+				for _, active := range nonDirectScopes {
+					if active.Scope.Matches(provenance) {
+						scopeMatched = true
+						decisions = appendDecisionIDUnique(decisions, active.DecisionID)
+						headers[active.DecisionID] = active.Header
+					}
 				}
-				recordTaintExhaustion(&verdict, header.Status)
 			}
-			for _, active := range activeScopes {
-				if !active.Scope.Matches(provenance) {
-					continue
+			decisions = sortedUniqueDecisionIDs(decisions)
+			if len(decisions) > 0 {
+				pendingOnly := current != memoryID && !scopeMatched
+				for _, decisionID := range decisions {
+					header := headers[decisionID]
+					if !header.Status.Incomplete() {
+						pendingOnly = false
+					}
+					verdict.DepthExhausted = verdict.DepthExhausted || header.Status == taint.StatusDepthExhausted
+					verdict.WorkExhausted = verdict.WorkExhausted || header.Status == taint.StatusWorkExhausted
 				}
-				scopeTainted = true
-				matched = appendDecisionIDUnique(matched, active.DecisionID)
-				if active.Header.Status.Incomplete() {
-					verdict.CoverageComplete = false
-				}
-				recordTaintExhaustion(&verdict, active.Header.Status)
-			}
-			if len(matched) > 0 {
-				verdict.DecisionIDs = sortedUniqueDecisionIDs(matched)
-				if directTainted || scopeTainted {
-					verdict.Outcome = TaintServingTainted
-				} else {
+				verdict.DecisionIDs = append([]string(nil), decisions...)
+				if pendingOnly {
 					verdict.Outcome = TaintServingPending
+				} else {
+					verdict.Outcome = TaintServingTainted
 				}
-				verdict.Units = meter.units
 				return nil
 			}
 
-			parents, err := s.memoryLineageTxn(txn, current)
+			if current == memoryID {
+				status, headerErr := reader.incompleteTaintStatus(scope)
+				if headerErr != nil {
+					return headerErr
+				}
+				if status == taintIncompleteNone && len(nonDirectScopes) == 0 {
+					return nil
+				}
+			}
+
+			parents, err := servingScopeParentsTxn(txn, current, meter)
 			if err != nil {
 				return err
 			}
-			if err := meter.charge(1 + len(parents)*2); err != nil {
-				return err
-			}
-			if len(parents) == 0 {
-				if !provenance.Exact {
-					verdict.CoverageComplete = false
-					verdict.LineageMissing = true
-				}
-			}
 			for _, parent := range parents {
-				if _, seen := visited[parent.ref.MemoryID]; seen {
+				if _, seen := visited[parent.MemoryID]; seen {
 					continue
 				}
-				queue = append(queue, parent.ref.MemoryID)
+				queue = append(queue, taintCoverageNode{id: parent.MemoryID, expected: parent.ContentHash, bound: true})
 			}
 		}
-		verdict.Units = meter.units
 		return nil
 	})
 	return verdict, err
-}
-
-func recordTaintExhaustion(verdict *TaintServingVerdict, status taint.Status) {
-	switch status {
-	case taint.StatusDepthExhausted:
-		verdict.DepthExhausted = true
-	case taint.StatusWorkExhausted:
-		verdict.WorkExhausted = true
-	}
-}
-
-// TaintServingCoverageComplete reports whether every active decision has
-// completed authenticated-graph expansion. A false result means the SQL taint
-// mirror cannot be used for aggregate exclusion or completeness claims because
-// pending descendants may not have materialized memberships yet.
-func (s *BadgerStore) TaintServingCoverageComplete() (bool, error) {
-	complete := true
-	err := s.view(func(txn *badger.Txn) error {
-		activeScopes, err := readActiveTaintDecisionScopesTxn(txn, nil)
-		if err != nil {
-			return err
-		}
-		for _, active := range activeScopes {
-			if active.Header.Status.Incomplete() || active.Scope.Kind != tx.TaintScopeDirect {
-				complete = false
-				return nil
-			}
-		}
-		return nil
-	})
-	return complete, err
 }

@@ -686,3 +686,17 @@ def test_message_models_retain_additive_agent_presentation_without_making_it_aut
     assert canonical.from_agent == "agent-a"
     assert canonical.from_display_name == "Mutable display"
     assert canonical.from_registered_name is None
+
+
+@pytest.mark.parametrize("field,limit", [("source_chain_id", 64), ("memory_id", 512)])
+def test_derived_from_parent_uses_utf8_byte_limits(field, limit):
+    from sage_sdk.models import DerivedFromParent
+
+    values = {"source_chain_id": "sage", "memory_id": "parent", "content_hash": "a" * 64}
+    for value in ["a" * limit, "é" * (limit // 2), "😀" * (limit // 4)]:
+        values[field] = value
+        assert getattr(DerivedFromParent(**values), field) == value
+    for value in ["a" * (limit + 1), "é" * (limit // 2) + "a", "😀" * (limit // 4) + "a", "\ud800"]:
+        values[field] = value
+        with pytest.raises(ValueError):
+            DerivedFromParent(**values)

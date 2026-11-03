@@ -686,3 +686,19 @@ async def test_message_close_is_signed_and_carries_no_reply(async_client, mock_a
         "reason": "reviewed", "claimant_session_id": "session-a",
     }
     assert route.calls[0].request.headers["X-Signature"]
+
+
+@pytest.mark.asyncio
+async def test_propose_memory_sends_app_v30_derived_from(async_client, mock_api, sample_submit_response):
+    from sage_sdk.models import DerivedFromParent
+
+    route = mock_api.post("/v1/memory/submit").mock(
+        return_value=httpx.Response(201, json=sample_submit_response)
+    )
+    parent = DerivedFromParent(source_chain_id="sage", memory_id="parent-a", content_hash="a" * 64)
+    await async_client.propose(content="lineage child", memory_type="fact", domain_tag="general",
+                               confidence=0.9, derived_from=[parent])
+    request = route.calls.last.request
+    assert json.loads(request.content)["derived_from"] == [parent.model_dump(mode="json")]
+    assert request.headers["X-Agent-ID"]
+    assert request.headers["X-Signature"]

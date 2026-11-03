@@ -4003,6 +4003,7 @@ func (h *DashboardHandler) handleSetMemoryTags(w http.ResponseWriter, r *http.Re
 
 // handleGetTasks returns tasks from the backlog. Use ?all=true for all statuses (Kanban board).
 func (h *DashboardHandler) handleGetTasks(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withAppV30TaskReadScope(r.Context()))
 	domain := r.URL.Query().Get("domain")
 	localCandidateValidation := false
 
@@ -4168,6 +4169,7 @@ func (h *DashboardHandler) handleReorderTasksDashboard(w http.ResponseWriter, r 
 
 // handleUpdateTaskStatusDashboard updates a task's status from the dashboard.
 func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withAppV30TaskReadScope(r.Context()))
 	id := chi.URLParam(r, "id")
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "missing task id")
@@ -4275,6 +4277,7 @@ func (h *DashboardHandler) handleUpdateTaskStatusDashboard(w http.ResponseWriter
 // specific agent from the dashboard. Assigning is treated as handing the job to
 // that agent now, so the card moves to In Progress immediately.
 func (h *DashboardHandler) handleAssignTask(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withAppV30TaskReadScope(r.Context()))
 	// Assignment is a dashboard operator action. A caller presenting an agent
 	// identity cannot assign, reassign, or unassign work unless it is the exact
 	// cryptographically verified node operator. Browser callers need a valid
@@ -4362,6 +4365,7 @@ func (h *DashboardHandler) collectAppV23VisibleDashboardTasks(
 	domain, provider, agentID string,
 	visibleLimit int,
 ) ([]*memory.MemoryRecord, error) {
+	ctx = withAppV30TaskReadScope(ctx)
 	const rawPageSize = 128
 	if visibleLimit <= 0 {
 		return []*memory.MemoryRecord{}, nil
@@ -4398,7 +4402,7 @@ func (h *DashboardHandler) collectAppV23VisibleDashboardTasks(
 
 // agentTaskReadDecision distinguishes a definitive access denial from a
 // transient/unavailable authorization lookup. Notification delivery keeps a
-// notice unread on transient failures and supersedes only definitive denials.
+// notice unread on transient failures and withholds definitive denials.
 func (h *DashboardHandler) agentTaskReadDecision(ctx context.Context, agentID, memoryID, domain string) (allowed, definitive bool) {
 	if h.appV23IsActive() {
 		if memoryID == "" || domain == "" {
@@ -4459,36 +4463,42 @@ func (h *DashboardHandler) agentTaskRecordReadDecision(
 		task.MemoryID == "" || task.DomainTag == "" {
 		return false, false
 	}
-	canonical, err := h.BadgerStore.ValidateMemoryProjection(task)
+	scope := appV30TaskReadScopeFromContext(ctx)
+	_, disposition, policyAllowed, err := h.BadgerStore.ClassifyMemoryProjectionForRead(
+		task, scope.taint,
+		func(reader *store.BadgerStore, canonical *store.MemoryDisclosureState) (bool, error) {
+			domain := task.DomainTag
+			if canonical.DomainRecorded {
+				domain = canonical.Domain
+			}
+			if domainErr := store.ValidateAppV23DomainName(domain); domainErr != nil {
+				return false, fmt.Errorf("%w: invalid canonical task domain: %w",
+					store.ErrMemoryProjectionQuarantined, domainErr)
+			}
+			author := task.SubmittingAgent
+			if canonical.AuthorRecorded {
+				author = canonical.Author
+			}
+			decision, policyErr := appv23disclosure.Evaluate(
+				reader, agentID,
+				appv23disclosure.Record{
+					SubmittingAgent: author,
+					Domain:          domain,
+					Classification:  canonical.Classification,
+				}, scope.at,
+			)
+			return decision.Allowed, policyErr
+		},
+	)
 	if err != nil {
-		if errors.Is(err, store.ErrMemoryProjectionTainted) ||
-			errors.Is(err, store.ErrMemoryProjectionTaintPending) {
+		if policyAllowed &&
+			((disposition == store.MemoryProjectionTainted && errors.Is(err, store.ErrMemoryProjectionTainted)) ||
+				(disposition == store.MemoryProjectionTaintPending && errors.Is(err, store.ErrMemoryProjectionTaintPending))) {
 			return false, true
 		}
 		return false, false
 	}
-	domain := task.DomainTag
-	if canonical.DomainRecorded {
-		domain = canonical.Domain
-	}
-	author := task.SubmittingAgent
-	if canonical.AuthorRecorded {
-		author = canonical.Author
-	}
-	decision, err := appv23disclosure.Evaluate(
-		h.BadgerStore,
-		agentID,
-		appv23disclosure.Record{
-			SubmittingAgent: author,
-			Domain:          domain,
-			Classification:  canonical.Classification,
-		},
-		time.Now(),
-	)
-	if err != nil {
-		return false, false
-	}
-	return decision.Allowed, true
+	return policyAllowed, true
 }
 
 // agentDomainReadDecision applies the same explicit domain allowlist used by
@@ -4596,6 +4606,7 @@ func (h *DashboardHandler) agentCanWriteDomainAppV23(agentID, domain string) boo
 // handleTaskNotifications passively inspects one-way assignment notices.
 // Returned notices remain unread until the agent explicitly acknowledges them.
 func (h *DashboardHandler) handleTaskNotifications(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withAppV30TaskReadScope(r.Context()))
 	agentID := verifiedDashboardAgentID(r.Context())
 	if agentID == "" || !h.isActiveRegisteredDashboardAgent(r.Context(), agentID) {
 		writeError(w, http.StatusForbidden, "active signed agent identity required")
@@ -4611,7 +4622,7 @@ func (h *DashboardHandler) handleTaskNotifications(w http.ResponseWriter, r *htt
 		limit = value
 	}
 	cursor := r.URL.Query().Get("cursor")
-	if _, _, err := store.DecodeInboxCursor(cursor); err != nil {
+	if _, _, err := store.DecodeTaskNoticeCursor(cursor); err != nil {
 		writeError(w, 400, "invalid notice cursor")
 		return
 	}
@@ -4620,30 +4631,16 @@ func (h *DashboardHandler) handleTaskNotifications(w http.ResponseWriter, r *htt
 		writeError(w, 501, "passive task notices unavailable")
 		return
 	}
-	excludeTainted := h.appV30TaskTaintFilterEnabled(r.Context())
-	var items []*store.AgentNotification
-	var next string
-	var err error
-	if filtered, ok := h.store.(store.TaintAwareTaskNoticeInboxStore); ok && excludeTainted {
-		items, next, err = filtered.PeekAgentNotificationPageFiltered(
-			r.Context(), agentID, limit, cursor, true,
-		)
-	} else {
-		items, next, err = notices.PeekAgentNotificationPage(
-			r.Context(), agentID, limit, cursor,
-		)
-	}
+	items, next, err := notices.PeekAgentNotificationPage(r.Context(), agentID, limit, cursor)
 	if err != nil {
 		writeError(w, 503, "task notice inspection unavailable")
 		return
 	}
 	filtered := make([]*store.AgentNotification, 0, len(items))
 	for _, item := range items {
-		allowed, definitive := h.agentTaskReadDecision(
-			r.Context(), agentID, item.TaskID, item.Domain,
-		)
+		allowed, definitive := h.agentTaskReadDecision(r.Context(), agentID, item.TaskID, item.Domain)
 		if !allowed && !definitive {
-			writeError(w, 503, "task authorization state is unavailable; retry later")
+			writeError(w, http.StatusServiceUnavailable, "task authorization state is unavailable; retry later")
 			return
 		}
 		if allowed {
@@ -4663,6 +4660,7 @@ func (h *DashboardHandler) handleTaskNotifications(w http.ResponseWriter, r *htt
 }
 
 func (h *DashboardHandler) handleTaskNotificationAck(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withAppV30TaskReadScope(r.Context()))
 	agentID := verifiedDashboardAgentID(r.Context())
 	if agentID == "" || !h.isActiveRegisteredDashboardAgent(r.Context(), agentID) {
 		writeError(w, http.StatusForbidden, "active signed agent identity required")

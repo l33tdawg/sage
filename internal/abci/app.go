@@ -296,6 +296,37 @@ func (c *SupplementaryCache) Pop(memoryID string) *memory.SupplementaryData {
 	return nil
 }
 
+// checkpointFinalizeItem preserves one transaction's cache consumption on the
+// speculative FinalizeBlock clone. Restoring never writes to the live REST
+// cache; a later Pop still applies normal expiry checks to the restored entry.
+func (c *SupplementaryCache) checkpointFinalizeItem(memoryID string) func() {
+	if c == nil {
+		return nil
+	}
+	c.mu.RLock()
+	if c.finalizeParent == nil {
+		c.mu.RUnlock()
+		return nil
+	}
+	item, hadItem := c.items[memoryID]
+	consumed, hadConsumed := c.consumed[memoryID]
+	c.mu.RUnlock()
+	return func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if hadItem {
+			c.items[memoryID] = item
+		} else {
+			delete(c.items, memoryID)
+		}
+		if hadConsumed {
+			c.consumed[memoryID] = consumed
+		} else {
+			delete(c.consumed, memoryID)
+		}
+	}
+}
+
 // cloneForFinalize snapshots the cache without starting another eviction
 // goroutine. Entry pointers are immutable after Put; retaining the pointer also
 // lets commitConsumed avoid deleting a newer replacement inserted concurrently.
@@ -377,6 +408,9 @@ type SageApp struct {
 	state         *AppState
 	logger        zerolog.Logger
 	Version       string
+
+	// Process-owned advisory worker; never copied to speculative app clones.
+	memoryTaintMirrorWorker *memoryTaintMirrorWorker
 
 	// runtimeViewMu publishes the committed in-memory application view as one
 	// coherent unit to off-consensus readers. CometBFT may run CheckTx, Query,
@@ -2523,7 +2557,7 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 	app.refreshPoEWeights()
 
 	app.armContentValidatorsFromProvider()
-	app.refreshMemoryTaintMirror(context.Background())
+	app.startMemoryTaintMirrorWorker()
 
 	return app, nil
 }
@@ -2655,7 +2689,7 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	app.refreshPoEWeights()
 
 	app.armContentValidatorsFromProvider()
-	app.refreshMemoryTaintMirror(context.Background())
+	app.startMemoryTaintMirrorWorker()
 
 	return app, nil
 }
@@ -2796,7 +2830,7 @@ func (app *SageApp) currentAppVersion() uint64 {
 const maxSupportedAppVersion uint64 = 29
 
 // maxCompiledAppVersion is the highest app version this binary has a compiled
-// fork gate for. app-v30 stays below the auto-vote ceiling until its real-code
+// fork gate for. app-v30 stays outside the auto-vote ceiling until its real-code
 // activation evidence is complete.
 const maxCompiledAppVersion uint64 = 30
 
@@ -3826,10 +3860,11 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 	// time is acceptable in CheckTx (which is not consensus); FinalizeBlock
 	// repeats the check against req.Time and atomically consumes the proof.
 	if app.isAppV17ActiveForNextTx() {
-		if proofErr := app.enforceDelegatedAgentProof(
+		if proofErr := app.enforceDelegatedAgentProofForFork(
 			parsedTx, time.Now(), false,
 			postAppV20, app.isAppV22ActiveForNextTx(),
 			app.isAppV23ActiveForNextTx(), app.isAppV27ActiveForNextTx(),
+			app.postAppV30Fork(app.state.Height+1),
 		); proofErr != nil {
 			metrics.TxRejectedTotal.WithLabelValues("agent_proof_binding").Inc()
 			return &abcitypes.ResponseCheckTx{Code: 109, Log: fmt.Sprintf("agent proof rejected: %v", proofErr)}, nil
@@ -4146,8 +4181,16 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 	strictV20Rules := app.requiresAppV20StrictRulesAt(req.Height)
 	atomicBudgetOK := !strictV20Rules || appV20AtomicFinalizeBudget(req.Txs)
 	appV30BudgetOK := true
+	appV30BudgetCode := appV30GeneratedWriteBudgetCode
+	appV30BudgetLog := appV30GeneratedWriteBudgetLog
 	if app.postAppV30Fork(req.Height) {
 		_, appV30BudgetErr := app.appV30BlockGeneratedWriteEstimate(req.Txs, req.Height)
+		if errors.Is(appV30BudgetErr, errAppV30TaintWorkLimitExceeded) {
+			appV30BudgetCode = appV30TaintWorkLimitCode
+			appV30BudgetLog = errAppV30TaintWorkLimitExceeded.Error()
+		} else if appV30BudgetErr != nil && !errors.Is(appV30BudgetErr, errAppV30GeneratedWriteBudgetExceeded) {
+			return nil, appV30BudgetErr
+		}
 		appV30BudgetOK = appV30BudgetErr == nil
 	}
 	app.appV20StrictFinalize = strictV20Rules
@@ -4218,7 +4261,7 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 			continue
 		}
 		if !appV30BudgetOK {
-			txResults[i] = &abcitypes.ExecTxResult{Code: appV30GeneratedWriteBudgetCode, Log: appV30GeneratedWriteBudgetLog}
+			txResults[i] = &abcitypes.ExecTxResult{Code: appV30BudgetCode, Log: appV30BudgetLog}
 			continue
 		}
 
@@ -4246,6 +4289,23 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 	var invalidatedProposal *governance.ProposalState
 	var activeProposalBefore *governance.ProposalState
 	var govErr error
+	appV30GovernanceStaged := false
+	appV30GovernancePendingWrites := len(app.pendingWrites)
+	abortAppV30Governance := func() error {
+		if !appV30GovernanceStaged {
+			return nil
+		}
+		appV30GovernanceStaged = false
+		app.pendingWrites = app.pendingWrites[:appV30GovernancePendingWrites]
+		return app.badgerStore.AbortAppV30WriteStage()
+	}
+	defer func() {
+		// An intervening error or panic already discards the enclosing block.
+		// Also release its governance stage and speculative mirror writes.
+		if appV30GovernanceStaged {
+			_ = abortAppV30Governance()
+		}
+	}()
 	postAppV20Governance := app.postAppV20Fork(req.Height)
 	app.govEngine.SetMemoryTaintActivationHeight(app.appV30AppliedHeight)
 	freezeValidatorReconfiguration := app.appV20PendingPlanFreezesValidatorReconfiguration()
@@ -4285,8 +4345,7 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 		// Governance evaluation begins in the following block, disabling the old
 		// single-block auto-approve edge for target-20.
 	} else if postAppV20Governance || freezeValidatorReconfiguration {
-		appV30GovernanceStaged := false
-		if activeProposalBefore != nil &&
+		if app.postAppV30Fork(req.Height) && activeProposalBefore != nil &&
 			activeProposalBefore.Operation == governance.OpMemoryTaint &&
 			activeProposalBefore.CreatedHeight > app.appV30AppliedHeight {
 			reservation := appV30TaintExecutionEstimate(activeProposalBefore.Payload)
@@ -4324,6 +4383,7 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 					return err
 				}
 				if proposal.Operation == governance.OpMemoryTaint &&
+					app.postAppV30Fork(req.Height) &&
 					proposal.CreatedHeight > app.appV30AppliedHeight {
 					_, err := app.validateAppV30TaintProposal(
 						proposal.TargetID,
@@ -4358,28 +4418,9 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 						errors.Is(validationErr, errAppV30TaintStateDrift)
 			},
 		)
-		if appV30GovernanceStaged {
-			if app.badgerStore.AppV30WriteStageOverflowed() {
-				if err := app.badgerStore.AbortAppV30WriteStage(); err != nil {
-					return nil, fmt.Errorf("rollback over-budget app-v30 governance writes: %w", err)
-				}
-				return nil, fmt.Errorf(
-					"app-v30 governance execution exceeded its %d-byte generated-write reservation",
-					appV30TaintExecutionEstimate(activeProposalBefore.Payload),
-				)
-			}
-			if govErr != nil {
-				if err := app.badgerStore.AbortAppV30WriteStage(); err != nil {
-					return nil, fmt.Errorf("rollback failed app-v30 governance writes: %w", err)
-				}
-			} else if _, err := app.badgerStore.CommitAppV30WriteStage(); err != nil {
-				if abortErr := app.badgerStore.AbortAppV30WriteStage(); abortErr != nil {
-					return nil, fmt.Errorf(
-						"abort failed app-v30 governance write reservation: %w",
-						abortErr,
-					)
-				}
-				return nil, fmt.Errorf("finish app-v30 governance write reservation: %w", err)
+		if govErr != nil {
+			if abortErr := abortAppV30Governance(); abortErr != nil {
+				return nil, fmt.Errorf("rollback failed app-v30 governance writes: %w", abortErr)
 			}
 		}
 	} else {
@@ -4429,6 +4470,9 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 
 		update, applyErr := app.applyGovernanceProposal(executedProposal, req.Height)
 		if applyErr != nil {
+			if abortErr := abortAppV30Governance(); abortErr != nil {
+				return nil, fmt.Errorf("rollback failed app-v30 governance application: %w", abortErr)
+			}
 			if strictV20Rules {
 				return nil, fmt.Errorf("sage: app-v20 atomic governance proposal %s failed to apply: %w", executedProposal.ProposalID, applyErr)
 			}
@@ -4460,6 +4504,24 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 			},
 		})
 	}
+	if appV30GovernanceStaged {
+		// Keep the reservation open through actual Apply/Expand or Clear/Cleanup,
+		// not just the governance vote/status transition above.
+		if app.badgerStore.AppV30WriteStageOverflowed() {
+			if abortErr := abortAppV30Governance(); abortErr != nil {
+				return nil, fmt.Errorf("rollback over-budget app-v30 governance writes: %w", abortErr)
+			}
+			return nil, fmt.Errorf("app-v30 governance execution exceeded its generated-write reservation")
+		}
+		if _, finishErr := app.badgerStore.CommitAppV30WriteStage(); finishErr != nil {
+			if abortErr := abortAppV30Governance(); abortErr != nil {
+				return nil, fmt.Errorf("abort failed app-v30 governance write reservation: %w", abortErr)
+			}
+			return nil, fmt.Errorf("finish app-v30 governance write reservation: %w", finishErr)
+		}
+		appV30GovernanceStaged = false
+	}
+
 	if invalidatedProposal != nil {
 		app.logger.Info().
 			Str("proposal_id", invalidatedProposal.ProposalID).
@@ -5143,10 +5205,10 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 	// state. Same-key node-originated transactions are already action-bound by
 	// the outer signature and app-v9 nonce and bypass this delegated-only gate.
 	if app.postAppV17Rules(height) {
-		if proofErr := app.enforceDelegatedAgentProof(
+		if proofErr := app.enforceDelegatedAgentProofForFork(
 			parsedTx, blockTime, true,
 			app.postAppV20Fork(height), app.postAppV22Rules(height),
-			app.postAppV23Rules(height), app.postAppV27Rules(height),
+			app.postAppV23Rules(height), app.postAppV27Rules(height), app.postAppV30Fork(height),
 		); proofErr != nil {
 			metrics.TxRejectedTotal.WithLabelValues("agent_proof_binding_consensus").Inc()
 			return &abcitypes.ExecTxResult{Code: 109, Log: fmt.Sprintf("agent proof rejected: %v", proofErr)}
@@ -5460,29 +5522,21 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		if err != nil {
 			return appV23ControlDenied()
 		}
-		if err := app.badgerStore.ValidateAppV30Provenance(
+		if provenanceErr := app.badgerStore.ValidateAppV30Provenance(
 			appV30MemoryID,
 			appV30Signers,
-		); err != nil {
+		); provenanceErr != nil {
 			return &abcitypes.ExecTxResult{
 				Code: 11,
-				Log:  "memory submit rejected: " + err.Error(),
+				Log:  "memory submit rejected: " + provenanceErr.Error(),
 			}
 		}
 		appV30LocalChainID, err = app.preflightAppV30Admission(
-			parsedTx,
-			credentialID,
-			appV30MemoryID,
-			submit.DerivedFrom,
-			appV30Signers,
-			height,
-			blockTime,
+			parsedTx, credentialID, appV30MemoryID, submit.DerivedFrom,
+			appV30Signers, height, blockTime,
 		)
 		if err != nil {
-			return &abcitypes.ExecTxResult{
-				Code: 11,
-				Log:  "app-v30 admission rejected: " + err.Error(),
-			}
+			return &abcitypes.ExecTxResult{Code: 11, Log: "app-v30 admission rejected: " + err.Error()}
 		}
 	}
 	taskIdempotency, err := app.appV23TaskIdempotencyForSubmit(
@@ -10646,7 +10700,7 @@ func (app *SageApp) Commit(_ context.Context, req *abcitypes.RequestCommit) (*ab
 			panic(fmt.Sprintf("sage: legacy Commit projection failed: %v", err))
 		}
 	}
-	app.refreshMemoryTaintMirror(ctx)
+	app.requestMemoryTaintMirrorRefresh()
 
 	// v7.5 snapshot scheduler: post-SaveState is the only point where
 	// BadgerDB + SQLite + CometBFT-state-as-of-this-height are mutually
@@ -11218,9 +11272,9 @@ func (app *SageApp) isAuthenticatedAppV20BootstrapProposal(rawTx []byte, height 
 		return false
 	}
 	if app.postAppV17Rules(height) {
-		if proofErr := app.enforceDelegatedAgentProof(
+		if proofErr := app.enforceDelegatedAgentProofForFork(
 			parsed, blockTime, false,
-			false, app.postAppV22Rules(height), app.postAppV23Rules(height), app.postAppV27Rules(height),
+			false, app.postAppV22Rules(height), app.postAppV23Rules(height), app.postAppV27Rules(height), app.postAppV30Fork(height),
 		); proofErr != nil {
 			return false
 		}
@@ -11330,6 +11384,9 @@ func (app *SageApp) ProcessProposal(_ context.Context, req *abcitypes.RequestPro
 	}
 	if app.postAppV30Fork(req.Height) {
 		if _, err := app.appV30BlockGeneratedWriteEstimate(req.Txs, req.Height); err != nil {
+			if !errors.Is(err, errAppV30GeneratedWriteBudgetExceeded) && !errors.Is(err, errAppV30TaintWorkLimitExceeded) {
+				return nil, err
+			}
 			return &abcitypes.ResponseProcessProposal{Status: abcitypes.ResponseProcessProposal_REJECT}, nil
 		}
 	}
@@ -11441,6 +11498,9 @@ func (app *SageApp) Close() error {
 // sync uses this while replacing a complete SageApp graph; the off-chain
 // projection is process-owned and must remain open for the replacement bundle.
 func (app *SageApp) CloseConsensusState() error {
+	if err := app.stopMemoryTaintMirrorWorker(); err != nil {
+		return err
+	}
 	if app.pendingAppV20Finalize != nil {
 		app.pendingAppV20Finalize.store.DiscardConsensusTransaction()
 		app.pendingAppV20Finalize = nil

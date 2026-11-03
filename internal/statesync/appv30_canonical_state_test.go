@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"sync"
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -14,11 +15,14 @@ import (
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
+// This is an orderly local Badger reopen and canonical stream round trip,
+// not process-crash recovery or a network provider/receiver state-sync test.
 func TestCanonicalStateRoundTripPreservesAppV30TaintLineageAndProvenance(t *testing.T) {
 	ctx := context.Background()
 	sourceDir := t.TempDir()
 	source, err := store.NewBadgerStore(sourceDir)
 	require.NoError(t, err)
+	closeSource := closeAppV30CanonicalHandleOnCleanup(t, source.CloseBadger)
 
 	parent := tx.ParentRef{
 		SourceChainID: "sage",
@@ -42,7 +46,9 @@ func TestCanonicalStateRoundTripPreservesAppV30TaintLineageAndProvenance(t *test
 			"committed",
 		))
 	}
+	require.NoError(t, source.ValidateMemoryLineageParents(child.MemoryID, "sage", []tx.ParentRef{parent}))
 	require.NoError(t, source.SetMemoryLineage(child.MemoryID, []tx.ParentRef{parent}))
+	require.NoError(t, source.ValidateMemoryLineageParents(grandchild.MemoryID, "sage", []tx.ParentRef{child}))
 	require.NoError(t, source.SetMemoryLineage(grandchild.MemoryID, []tx.ParentRef{child}))
 	decisionID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	created, err := source.ApplyTaintDecision(
@@ -57,50 +63,64 @@ func TestCanonicalStateRoundTripPreservesAppV30TaintLineageAndProvenance(t *test
 	require.NoError(t, err)
 	require.Equal(t, taint.StatusComplete, expanded.Status)
 
-	signerID := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	require.NoError(t, source.SetAppV30Provenance(child.MemoryID, []store.AppV30ProvenanceSigner{{
-		CredentialID: signerID,
-		PrincipalID:  signerID,
-		Exact:        true,
-	}}))
+	expectedSigners := []store.AppV30ProvenanceSigner{
+		{
+			CredentialID:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			PrincipalID:    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			RootGeneration: 7,
+			Exact:          true,
+		},
+		{
+			CredentialID:   "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			PrincipalID:    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			RootGeneration: 11,
+			Exact:          true,
+		},
+	}
+	require.NoError(t, source.SetAppV30Provenance(child.MemoryID, expectedSigners))
 	sourceHash, err := source.ComputeAppHashExcludingBookkeeping()
 	require.NoError(t, err)
-	require.NoError(t, source.CloseBadger())
+	closeSource()
 
 	sourceDB, err := badger.Open(badger.DefaultOptions(sourceDir).WithLogger(nil))
 	require.NoError(t, err)
+	closeSourceDB := closeAppV30CanonicalHandleOnCleanup(t, sourceDB.Close)
 	var stream bytes.Buffer
 	require.NoError(t, WriteCanonicalState(ctx, sourceDB, &stream))
-	require.NoError(t, sourceDB.Close())
+	closeSourceDB()
 
 	reopened, err := store.NewBadgerStore(sourceDir)
 	require.NoError(t, err)
+	closeReopened := closeAppV30CanonicalHandleOnCleanup(t, reopened.CloseBadger)
 	reopenedHash, err := reopened.ComputeAppHashExcludingBookkeeping()
 	require.NoError(t, err)
-	require.Equal(t, sourceHash, reopenedHash, "restart must preserve the exact AppHash")
-	verifyAppV30StateSyncState(t, reopened, parent, child, grandchild, decisionID, signerID)
-	require.NoError(t, reopened.CloseBadger())
+	require.Equal(t, sourceHash, reopenedHash, "orderly reopen must preserve the exact store hash")
+	verifyAppV30StateSyncState(t, reopened, parent, child, grandchild, decisionID, expectedSigners)
+	closeReopened()
 
 	restoredDir := t.TempDir()
 	restoredDB, err := badger.Open(badger.DefaultOptions(restoredDir).WithLogger(nil))
 	require.NoError(t, err)
+	closeRestoredDB := closeAppV30CanonicalHandleOnCleanup(t, restoredDB.Close)
 	require.NoError(t, RestoreCanonicalState(ctx, bytes.NewReader(stream.Bytes()), restoredDB))
-	require.NoError(t, restoredDB.Close())
+	closeRestoredDB()
 
 	restored, err := store.OpenBadgerStoreReadOnly(restoredDir)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, restored.CloseBadger()) })
+	closeRestored := closeAppV30CanonicalHandleOnCleanup(t, restored.CloseBadger)
 	restoredHash, err := restored.ComputeAppHashExcludingBookkeeping()
 	require.NoError(t, err)
 	require.Equal(t, sourceHash, restoredHash)
-	verifyAppV30StateSyncState(t, restored, parent, child, grandchild, decisionID, signerID)
+	verifyAppV30StateSyncState(t, restored, parent, child, grandchild, decisionID, expectedSigners)
+	closeRestored()
 }
 
 func verifyAppV30StateSyncState(
 	t *testing.T,
 	reader *store.BadgerStore,
 	parent, child, grandchild tx.ParentRef,
-	decisionID, signerID string,
+	decisionID string,
+	expectedSigners []store.AppV30ProvenanceSigner,
 ) {
 	t.Helper()
 	for _, memoryID := range []string{parent.MemoryID, child.MemoryID, grandchild.MemoryID} {
@@ -114,6 +134,19 @@ func verifyAppV30StateSyncState(
 	signers, found, err := reader.GetAppV30Provenance(child.MemoryID)
 	require.NoError(t, err)
 	require.True(t, found)
-	require.Equal(t, signerID, signers[0].CredentialID)
-	require.Equal(t, signerID, signers[0].PrincipalID)
+	require.Len(t, signers, len(expectedSigners))
+	require.Equal(t, expectedSigners, signers)
+}
+
+// Each open handle registers cleanup immediately. Explicit orderly closes and
+// failure cleanup share one cached close result, so no handle is closed twice.
+func closeAppV30CanonicalHandleOnCleanup(t *testing.T, closeHandle func() error) func() {
+	t.Helper()
+	closeOnce := sync.OnceValue(closeHandle)
+	closeChecked := func() {
+		t.Helper()
+		require.NoError(t, closeOnce())
+	}
+	t.Cleanup(closeChecked)
+	return closeChecked
 }

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/binary"
 	"fmt"
 	"strings"
 
@@ -38,24 +39,40 @@ func (s *BadgerStore) ValidateTaintState() error {
 				decisions.Close()
 				return fmt.Errorf("%w: expansion cap exceeded", ErrTaintStateMalformed)
 			}
-			decisionScope, scopeFound, err := readTaintDecisionScopeTxn(
-				txn,
-				decisionID,
-				header.PayloadHash,
-				nil,
-			)
-			if err != nil {
+			if targetErr := validateTaintTargetTxn(txn, decisionID, header); targetErr != nil {
 				decisions.Close()
-				return err
+				return targetErr
 			}
-			if !scopeFound {
+			decisionScope, scopeFound, scopeErr := readTaintDecisionScopeTxn(txn, decisionID, header.PayloadHash, nil)
+			if scopeErr != nil || !scopeFound {
 				decisions.Close()
+				if scopeErr != nil {
+					return scopeErr
+				}
 				return fmt.Errorf("%w: decision has no canonical scope", ErrTaintStateMalformed)
 			}
-			headers[decisionID] = header
 			scopes[decisionID] = decisionScope
+			headers[decisionID] = header
 		}
 		decisions.Close()
+
+		targetPrefix := []byte("tainttarget:")
+		targetOptions := badger.DefaultIteratorOptions
+		targetOptions.Prefix = targetPrefix
+		targetOptions.PrefetchValues = false
+		targets := txn.NewIterator(targetOptions)
+		for targets.Seek(targetPrefix); targets.ValidForPrefix(targetPrefix); targets.Next() {
+			decisionID := string(targets.Item().Key()[len(targetPrefix):])
+			if idErr := taint.ValidateDecisionID(decisionID); idErr != nil {
+				targets.Close()
+				return fmt.Errorf("%w: malformed target anchor key", ErrTaintStateMalformed)
+			}
+			if _, found := headers[decisionID]; !found {
+				targets.Close()
+				return fmt.Errorf("%w: target anchor has no decision header", ErrTaintStateMalformed)
+			}
+		}
+		targets.Close()
 
 		expectedActive := uint64(0)
 		for _, header := range headers {
@@ -79,9 +96,14 @@ func (s *BadgerStore) ValidateTaintState() error {
 		scopePrefix := []byte("taintscope:")
 		scopeOptions := badger.DefaultIteratorOptions
 		scopeOptions.Prefix = scopePrefix
+		scopeOptions.PrefetchValues = false
 		scopeItems := txn.NewIterator(scopeOptions)
 		seenScopes := 0
 		for scopeItems.Seek(scopePrefix); scopeItems.ValidForPrefix(scopePrefix); scopeItems.Next() {
+			if len(scopeItems.Item().Key()) != len(scopePrefix)+taint.DecisionIDBytes || scopeItems.Item().ValueSize() > taintScopeValueMaxBytes {
+				scopeItems.Close()
+				return fmt.Errorf("%w: malformed scope key/value", ErrTaintStateMalformed)
+			}
 			decisionID := string(scopeItems.Item().Key()[len(scopePrefix):])
 			if err := taint.ValidateDecisionID(decisionID); err != nil {
 				scopeItems.Close()
@@ -122,18 +144,23 @@ func (s *BadgerStore) ValidateTaintState() error {
 		activeDecisionPrefix := taint.ActiveDecisionPrefix()
 		activeDecisionOptions := badger.DefaultIteratorOptions
 		activeDecisionOptions.Prefix = activeDecisionPrefix
+		activeDecisionOptions.PrefetchValues = false
 		activeDecisionItems := txn.NewIterator(activeDecisionOptions)
 		indexedActive := make(map[string]struct{}, taint.MaxActiveDecisions)
 		for activeDecisionItems.Seek(activeDecisionPrefix); activeDecisionItems.ValidForPrefix(activeDecisionPrefix); activeDecisionItems.Next() {
+			if len(activeDecisionItems.Item().Key()) != len(activeDecisionPrefix)+taint.DecisionIDBytes || activeDecisionItems.Item().ValueSize() != 0 {
+				activeDecisionItems.Close()
+				return fmt.Errorf("%w: malformed active index key/value", ErrTaintStateMalformed)
+			}
 			decisionID := string(activeDecisionItems.Item().Key()[len(activeDecisionPrefix):])
 			if err := taint.ValidateDecisionID(decisionID); err != nil {
 				activeDecisionItems.Close()
 				return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 			}
 			header, found := headers[decisionID]
-			if !found || !header.Status.Active() {
+			if !found || (!header.Status.Active() && header.Status != taint.StatusCleaning) {
 				activeDecisionItems.Close()
-				return fmt.Errorf("%w: active index references a non-active decision", ErrTaintStateMalformed)
+				return fmt.Errorf("%w: retained-slot index references a released decision", ErrTaintStateMalformed)
 			}
 			if _, duplicate := indexedActive[decisionID]; duplicate {
 				activeDecisionItems.Close()
@@ -148,7 +175,7 @@ func (s *BadgerStore) ValidateTaintState() error {
 		activeDecisionItems.Close()
 		expectedIndexedActive := 0
 		for decisionID, header := range headers {
-			if !header.Status.Active() {
+			if !header.Status.Active() && header.Status != taint.StatusCleaning {
 				continue
 			}
 			expectedIndexedActive++
@@ -259,7 +286,7 @@ func (s *BadgerStore) ValidateTaintState() error {
 		queues := txn.NewIterator(queueOptions)
 		queueCounts := make(map[string]uint64)
 		for queues.Seek(queuePrefix); queues.ValidForPrefix(queuePrefix); queues.Next() {
-			decisionID, err := parseTaintQueueDecision(string(queues.Item().Key()))
+			decisionID, generation, sequence, err := parseTaintQueueKey(string(queues.Item().Key()))
 			if err != nil {
 				queues.Close()
 				return err
@@ -272,6 +299,11 @@ func (s *BadgerStore) ValidateTaintState() error {
 			if header.Status == taint.StatusClean {
 				queues.Close()
 				return fmt.Errorf("%w: clean decision retains frontier", ErrTaintStateMalformed)
+			}
+			if header.Status.Active() &&
+				(generation != header.Generation || sequence < header.FrontierHead || sequence >= header.FrontierTail) {
+				queues.Close()
+				return fmt.Errorf("%w: frontier key does not match active decision cursor", ErrTaintStateMalformed)
 			}
 			raw, err := queues.Item().ValueCopy(nil)
 			if err != nil {
@@ -287,9 +319,8 @@ func (s *BadgerStore) ValidateTaintState() error {
 		queues.Close()
 
 		for decisionID, header := range headers {
-			switch {
-			case header.Status == taint.StatusExpanding ||
-				header.Status == taint.StatusDepthExhausted:
+			switch header.Status {
+			case taint.StatusExpanding, taint.StatusDepthExhausted:
 				if header.FrontierTail-header.FrontierHead != queueCounts[decisionID] {
 					return fmt.Errorf(
 						"%w: frontier cardinality mismatch for %s",
@@ -297,7 +328,7 @@ func (s *BadgerStore) ValidateTaintState() error {
 						decisionID,
 					)
 				}
-			case header.Status == taint.StatusComplete:
+			case taint.StatusComplete:
 				if header.FrontierHead != header.FrontierTail || queueCounts[decisionID] != 0 {
 					return fmt.Errorf(
 						"%w: terminal active decision retains frontier for %s",
@@ -312,29 +343,35 @@ func (s *BadgerStore) ValidateTaintState() error {
 }
 
 func parseTaintMembershipKey(key string) (memoryID, decisionID string, err error) {
-	key = strings.TrimPrefix(key, "taintm:")
-	separator := strings.LastIndexByte(key, ':')
-	if separator <= 0 || len(key)-separator-1 != taint.DecisionIDBytes {
+	const prefix = "taintm:"
+	if !strings.HasPrefix(key, prefix) || len(key) < len(prefix)+2 {
 		return "", "", fmt.Errorf("%w: malformed membership key", ErrTaintStateMalformed)
 	}
-	memoryID, decisionID = key[:separator], key[separator+1:]
-	if len(memoryID) > taint.MaxMemoryIDBytes {
-		return "", "", fmt.Errorf("%w: invalid membership memory ID", ErrTaintStateMalformed)
+	memoryLength := int(binary.BigEndian.Uint16([]byte(key[len(prefix) : len(prefix)+2])))
+	memoryStart := len(prefix) + 2
+	separator := memoryStart + memoryLength
+	if memoryLength == 0 || memoryLength > taint.MaxMemoryIDBytes ||
+		len(key) != separator+1+taint.DecisionIDBytes || key[separator] != ':' {
+		return "", "", fmt.Errorf("%w: malformed membership key", ErrTaintStateMalformed)
 	}
+	memoryID, decisionID = key[memoryStart:separator], key[separator+1:]
 	if err := taint.ValidateDecisionID(decisionID); err != nil {
 		return "", "", fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 	}
 	return memoryID, decisionID, nil
 }
 
-func parseTaintQueueDecision(key string) (string, error) {
+func parseTaintQueueKey(key string) (decisionID string, generation, sequence uint64, err error) {
 	key = strings.TrimPrefix(key, "taintq:")
-	if len(key) < taint.DecisionIDBytes+18 || key[taint.DecisionIDBytes] != ':' {
-		return "", fmt.Errorf("%w: malformed frontier key", ErrTaintStateMalformed)
+	if len(key) != taint.DecisionIDBytes+18 || key[taint.DecisionIDBytes] != ':' ||
+		key[taint.DecisionIDBytes+9] != ':' {
+		return "", 0, 0, fmt.Errorf("%w: malformed frontier key", ErrTaintStateMalformed)
 	}
-	decisionID := key[:taint.DecisionIDBytes]
-	if err := taint.ValidateDecisionID(decisionID); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+	decisionID = key[:taint.DecisionIDBytes]
+	if decisionErr := taint.ValidateDecisionID(decisionID); decisionErr != nil {
+		return "", 0, 0, fmt.Errorf("%w: %v", ErrTaintStateMalformed, decisionErr)
 	}
-	return decisionID, nil
+	generation = binary.BigEndian.Uint64([]byte(key[taint.DecisionIDBytes+1 : taint.DecisionIDBytes+9]))
+	sequence = binary.BigEndian.Uint64([]byte(key[taint.DecisionIDBytes+10:]))
+	return decisionID, generation, sequence, nil
 }

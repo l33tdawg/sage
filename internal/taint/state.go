@@ -23,9 +23,10 @@ const (
 	MaxMemoryIDBytes         = 512
 	MaxCursorBytes           = 512
 	DecisionIDBytes          = 64
-	// MaxProvenanceAdmissionTaintUnits includes parent membership inheritance,
-	// per-signer provenance matching and decision-scope reads.
-	MaxProvenanceAdmissionTaintUnits = 722
+	// MaxProvenanceAdmissionTaintUnits is the 625-unit parent inheritance
+	// ceiling plus 98 bounded retained-slot inventory reads. Scope matching
+	// is bounded local computation, not an additional KV read per signer.
+	MaxProvenanceAdmissionTaintUnits = 723
 )
 
 const minimumHeaderBytes = 79
@@ -109,24 +110,47 @@ type QueueEntry struct {
 
 var errState = errors.New("invalid taint state")
 
-func DecisionKey(decisionID string) []byte {
-	return []byte("taintdec:" + decisionID)
+// DecisionPrefix is the existing canonical decision-header namespace.
+func DecisionPrefix() []byte {
+	return []byte("taintdec:")
 }
 
+func DecisionKey(decisionID string) []byte {
+	return append(DecisionPrefix(), decisionID...)
+}
+
+// TargetKey retains immutable target history after expansion and cleanup.
+// ActiveDecisionPrefix indexes all retained capacity slots, including Cleaning.
+// Only Status.Active scopes match; the slot is released atomically at Clean.
 func ActiveDecisionPrefix() []byte {
 	return []byte("taintactivedec:")
 }
 
 func ActiveDecisionKey(decisionID string) []byte {
-	return []byte("taintactivedec:" + decisionID)
+	return append(ActiveDecisionPrefix(), decisionID...)
+}
+
+func TargetKey(decisionID string) []byte {
+	return []byte("tainttarget:" + decisionID)
 }
 
 func MembershipPrefix(memoryID string) []byte {
-	return []byte("taintm:" + memoryID + ":")
+	// Store entry points reject invalid IDs before calling this helper. Keep
+	// invalid direct calls disjoint from every valid prefix, without uint16 wrap.
+	if len(memoryID) > MaxMemoryIDBytes {
+		return []byte("taintm:\x00\x00:")
+	}
+	// Memory IDs may contain any bytes. The fixed-width length makes this an
+	// exact identity prefix, rather than also scanning IDs such as memoryID+":x".
+	prefix := make([]byte, 0, len("taintm:")+2+len(memoryID)+1)
+	prefix = append(prefix, "taintm:"...)
+	prefix = binary.BigEndian.AppendUint16(prefix, uint16(len(memoryID))) // #nosec G115 -- validated IDs are at most MaxMemoryIDBytes
+	prefix = append(prefix, memoryID...)
+	return append(prefix, ':')
 }
 
 func MembershipKey(memoryID, decisionID string) []byte {
-	return []byte("taintm:" + memoryID + ":" + decisionID)
+	return append(MembershipPrefix(memoryID), decisionID...)
 }
 
 func DecisionIndexPrefix(decisionID string) []byte {
