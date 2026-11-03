@@ -49,12 +49,12 @@ func amidLocalAgentKeyResolver(root func(string) (ed25519.PrivateKey, bool), dir
 		}
 		// Only the canonical identity's direct file is eligible. Refuse a
 		// symlink directory/file, special files and a replacement during open.
-		dir, err := os.Lstat(directory)
+		dir, err := os.Lstat(directory) //nolint:gosec // G703: explicit operator-configured directory, never a request path
 		if err != nil || !dir.IsDir() {
 			return nil, false
 		}
 		path := filepath.Join(directory, agentID+".key")
-		before, err := os.Lstat(path)
+		before, err := os.Lstat(path) //nolint:gosec // G703: fixed directory plus canonical 64-character lowercase public-key hex
 		if err != nil || !before.Mode().IsRegular() {
 			return nil, false
 		}
