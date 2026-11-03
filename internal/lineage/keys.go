@@ -1,6 +1,7 @@
 package lineage
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 
@@ -10,11 +11,22 @@ import (
 const ParentIDBytes = 32
 
 func ForwardPrefix(childID string) []byte {
-	return []byte("lineage:" + childID + ":")
+	// Invalid callers cannot wrap a length into another valid child's prefix.
+	// Store entry points reject this input; recovery rejects the zero length.
+	if len(childID) > tx.MaxDerivedFromMemoryIDBytes {
+		return []byte("lineage:\x00\x00:")
+	}
+	// Length-delimit the arbitrary child ID so another child's edges cannot
+	// enter this bounded scan. This layout is only used by dormant app-v30.
+	prefix := make([]byte, 0, len("lineage:")+2+len(childID)+1)
+	prefix = append(prefix, "lineage:"...)
+	prefix = binary.BigEndian.AppendUint16(prefix, uint16(len(childID))) // #nosec G115 -- validated IDs are at most MaxDerivedFromMemoryIDBytes
+	prefix = append(prefix, childID...)
+	return append(prefix, ':')
 }
 
 func ForwardKey(childID, parentID string) []byte {
-	return []byte("lineage:" + childID + ":" + parentID)
+	return append(ForwardPrefix(childID), parentID...)
 }
 
 func ReversePrefix(parentID string) []byte {

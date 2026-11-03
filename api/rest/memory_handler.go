@@ -231,10 +231,11 @@ func (s *Server) recallMemoryClassification(memoryID string) (uint8, error) {
 
 // QueryMemoryResponse is the JSON body for a successful query.
 type QueryMemoryResponse struct {
-	Results    []*MemoryResult `json:"results"`
-	NextCursor string          `json:"next_cursor,omitempty"`
-	TotalCount int             `json:"total_count"`
-	Filtered   *FilterInfo     `json:"filtered,omitempty"`
+	TaintCoverage *taintCoverage  `json:"taint_coverage,omitempty"`
+	Results       []*MemoryResult `json:"results"`
+	NextCursor    string          `json:"next_cursor,omitempty"`
+	TotalCount    int             `json:"total_count"`
+	Filtered      *FilterInfo     `json:"filtered,omitempty"`
 	// Federation discloses the cross-network fan-out when a federated recall
 	// ran: which peers were queried and which failed (fail-closed peers are
 	// reported, never silently dropped).
@@ -1884,19 +1885,18 @@ func (s *Server) disclosureRecallTopK(topK int) int {
 	return topK
 }
 
-// appV23RecallCandidateFilter moves live disclosure ahead of the store's TopK
+// appV23RecallCandidateFilterScoped moves live disclosure ahead of the store's TopK
 // consumption. Ranked stores keep walking bounded pages until they fill TopK
 // with authorized rows or exhaust the stream. Handlers still re-evaluate every
 // returned record immediately before serialization to close revocation races.
-func (s *Server) appV23RecallCandidateFilter(
-	agentID string,
-	at time.Time,
+func (s *Server) appV23RecallCandidateFilterScoped(
+	agentID string, at time.Time, scope *appV23ReadScope,
 ) func(*memory.MemoryRecord) (bool, error) {
 	if !s.isPostV23ForNextTx() {
 		return nil
 	}
 	return func(rec *memory.MemoryRecord) (bool, error) {
-		disclosure, err := s.evaluateAppV23RecordDisclosure(agentID, rec, at)
+		disclosure, err := s.evaluateAppV23RecordDisclosureScoped(agentID, rec, at, scope)
 		if err != nil {
 			if isUnsafeAppV23Projection(err) {
 				return false, nil
@@ -2041,6 +2041,7 @@ func applyChallengeRoundProgress(result *MemoryResult, progress challengeRoundPr
 
 // handleQueryMemory handles POST /v1/memory/query.
 func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
+	readScope := newAppV23ReadScope()
 	var req QueryMemoryRequest
 	var err error
 	if err = decodeJSON(r, &req); err != nil {
@@ -2142,7 +2143,6 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		DomainTag:      req.DomainTag,
 		Provider:       req.Provider,
 		VectorProvider: activeVectorSpace,
-		ExcludeTainted: s.memoryTaintFilterEnabled(r.Context()),
 		MinConfidence:  req.MinConfidence,
 		StatusFilter:   req.StatusFilter,
 		TopK:           s.disclosureRecallTopK(req.TopK),
@@ -2156,7 +2156,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	if filterApplied {
 		opts.SubmittingAgents = allowedAgents
 	}
-	opts.CandidateFilter = s.appV23RecallCandidateFilter(queryAgentID, start)
+	opts.CandidateFilter = s.appV23RecallCandidateFilterScoped(queryAgentID, start, readScope)
 	// min_confidence is a DECAYED-confidence floor (rest-api.md): hand it to the
 	// store as DecayFloor, which filters the decayed value over the full candidate
 	// set before the top-K trim, pinned to `start` so it matches what we serialize.
@@ -2220,8 +2220,8 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	for _, rec := range records {
 		var memClass uint8
 		if s.isPostV23ForNextTx() {
-			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosure(
-				queryAgentID, rec, now,
+			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosureScoped(
+				queryAgentID, rec, now, readScope,
 			)
 			if disclosureErr != nil {
 				if isUnsafeAppV23Projection(disclosureErr) {
@@ -2394,57 +2394,27 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		case !indexStatusSourceExact:
 			resp.IndexStatus = "unavailable"
 		default:
-			taintRevision, taintErr := s.badgerStore.TaintRevision()
-			if taintErr != nil {
-				s.logger.Warn().Err(taintErr).Str("domain", req.DomainTag).
-					Msg("recall index-status taint revision unavailable")
-				resp.IndexStatus = "unavailable"
-				break
-			}
-			excludeTainted := taintRevision > 0
-			var hasOutside, established bool
-			var cErr error
-			if excludeTainted {
-				taintStore, ok := s.store.(store.TaintAwareDomainSpaceCompletenessStore)
-				if !ok || !s.memoryTaintFilterEnabled(r.Context()) {
-					resp.IndexStatus = "unavailable"
-					break
+			taintRevision, coverageComplete, cErr := s.badgerStore.TaintServingCoverageSnapshot(
+				r.Context(), readScope.taint)
+			var hasOutside, established, mirrorMatched bool
+			if cErr == nil && coverageComplete {
+				if probe, ok := s.store.(store.TaintAwareDomainSpaceCompletenessStore); ok {
+					hasOutside, established, mirrorMatched, cErr = probe.DomainSpaceCompletenessAtTaintRevision(
+						r.Context(), req.DomainTag, activeSpace,
+						store.CandidateFilterScanBudget, taintRevision)
 				}
-				coverageComplete, coverageErr := s.badgerStore.TaintServingCoverageComplete()
-				if coverageErr != nil || !coverageComplete {
-					if coverageErr != nil {
-						s.logger.Warn().Err(coverageErr).Str("domain", req.DomainTag).
-							Msg("recall index-status taint coverage unavailable")
-					}
-					resp.IndexStatus = "unavailable"
-					break
-				}
-				hasOutside, established, cErr = taintStore.DomainSpaceCompletenessFiltered(
-					r.Context(),
-					req.DomainTag,
-					activeSpace,
-					store.CandidateFilterScanBudget,
-					true,
-				)
-			} else {
-				hasOutside, established, cErr = s.store.DomainSpaceCompleteness(
-					r.Context(), req.DomainTag, activeSpace, store.CandidateFilterScanBudget)
 			}
-			taintSourceUnchanged := true
-			if excludeTainted {
-				currentTaintRevision, revisionErr := s.badgerStore.TaintRevision()
-				taintSourceUnchanged = revisionErr == nil &&
-					currentTaintRevision == taintRevision &&
-					s.memoryTaintFilterEnabled(r.Context())
-			}
+			currentTaintRevision, revisionErr := s.badgerStore.TaintRevision()
 			switch {
 			case !s.canonicalMemoryProjectionSourceUnchanged(r.Context(), indexStatusSource),
-				!taintSourceUnchanged:
+				revisionErr != nil, currentTaintRevision != taintRevision:
 				resp.IndexStatus = "unavailable"
 			case cErr != nil:
 				s.logger.Warn().Err(cErr).Str("domain", req.DomainTag).Msg("recall index-status disclosure unavailable")
 				resp.IndexStatus = "unavailable"
-			case !established:
+			case !coverageComplete, !mirrorMatched, !established:
+				// Probe uncertainty changes only index_status. It is not an
+				// ancestor-walk event and must not fabricate taint_coverage.
 				resp.IndexStatus = "unavailable"
 			case hasOutside:
 				resp.IndexStatus = "incomplete"
@@ -2454,6 +2424,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	readScope.applyRecallCoverage(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -2913,6 +2884,7 @@ type SearchMemoryRequest struct {
 // handleSearchMemory handles POST /v1/memory/search — FTS5 full-text search.
 // Same access control as handleQueryMemory but uses text matching instead of embeddings.
 func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
+	readScope := newAppV23ReadScope()
 	var req SearchMemoryRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -2988,13 +2960,12 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
 	opts := store.QueryOptions{
-		DomainTag:      req.DomainTag,
-		Provider:       req.Provider,
-		ExcludeTainted: s.memoryTaintFilterEnabled(r.Context()),
-		MinConfidence:  req.MinConfidence,
-		StatusFilter:   req.StatusFilter,
-		TopK:           s.disclosureRecallTopK(req.TopK),
-		Tags:           req.Tags,
+		DomainTag:     req.DomainTag,
+		Provider:      req.Provider,
+		MinConfidence: req.MinConfidence,
+		StatusFilter:  req.StatusFilter,
+		TopK:          s.disclosureRecallTopK(req.TopK),
+		Tags:          req.Tags,
 		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
 		// at serialize). A no-op unless the caller's filter is "committed".
 		IncludeDisputed: true,
@@ -3003,7 +2974,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	if filterApplied {
 		opts.SubmittingAgents = allowedAgents
 	}
-	opts.CandidateFilter = s.appV23RecallCandidateFilter(queryAgentID, start)
+	opts.CandidateFilter = s.appV23RecallCandidateFilterScoped(queryAgentID, start, readScope)
 	// min_confidence is a DECAYED-confidence floor (rest-api.md): hand it to the
 	// store as DecayFloor, which filters the decayed value over the full candidate
 	// set before the top-K trim, pinned to `start` so it matches what we serialize.
@@ -3063,8 +3034,8 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		}
 		var memClass uint8
 		if s.isPostV23ForNextTx() {
-			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosure(
-				queryAgentID, rec, now,
+			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosureScoped(
+				queryAgentID, rec, now, readScope,
 			)
 			if disclosureErr != nil {
 				if isUnsafeAppV23Projection(disclosureErr) {
@@ -3185,6 +3156,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		PlanAuthorizationAttestations: authorizationAttestations,
 	})
 
+	readScope.applyRecallCoverage(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -3235,6 +3207,7 @@ const maxHybridExpansions = 8
 // the underlying store call and that the request carries both a query string
 // and an embedding.
 func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request) {
+	readScope := newAppV23ReadScope()
 	var req HybridSearchMemoryRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -3322,7 +3295,6 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		DomainTag:      req.DomainTag,
 		Provider:       req.Provider,
 		VectorProvider: s.activeEmbeddingProvider(),
-		ExcludeTainted: s.memoryTaintFilterEnabled(r.Context()),
 		MinConfidence:  req.MinConfidence,
 		StatusFilter:   req.StatusFilter,
 		TopK:           s.disclosureRecallTopK(req.TopK),
@@ -3335,7 +3307,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	if filterApplied {
 		opts.SubmittingAgents = allowedAgents
 	}
-	opts.CandidateFilter = s.appV23RecallCandidateFilter(queryAgentID, start)
+	opts.CandidateFilter = s.appV23RecallCandidateFilterScoped(queryAgentID, start, readScope)
 	// min_confidence is a DECAYED-confidence floor (rest-api.md): hand it to the
 	// store as DecayFloor. Carried on the fused opts, both hybrid sub-queries filter
 	// the decayed value before their trim, pinned to `start` for serialize-parity.
@@ -3394,8 +3366,8 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		}
 		var memClass uint8
 		if s.isPostV23ForNextTx() {
-			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosure(
-				queryAgentID, rec, now,
+			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosureScoped(
+				queryAgentID, rec, now, readScope,
 			)
 			if disclosureErr != nil {
 				if isUnsafeAppV23Projection(disclosureErr) {
@@ -3516,6 +3488,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		PlanAuthorizationAttestations: authorizationAttestations,
 	})
 
+	readScope.applyRecallCoverage(&resp)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -4328,6 +4301,7 @@ const openTaskVisibleLimit = 500
 
 // handleGetOpenTasks handles GET /v1/memory/tasks.
 func (s *Server) handleGetOpenTasks(w http.ResponseWriter, r *http.Request) {
+	readScope := newAppV23StrictReadScope()
 	domain := r.URL.Query().Get("domain")
 	provider := r.URL.Query().Get("provider")
 
@@ -4368,13 +4342,13 @@ func (s *Server) handleGetOpenTasks(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if s.isPostV23ForNextTx() {
 		if pager, ok := s.store.(store.OpenTaskPageStore); ok {
-			tasks, err = s.collectAppV23VisibleRecords(
+			tasks, err = s.collectAppV23VisibleRecordsScoped(
 				r.Context(), agentID, openTaskVisibleLimit,
 				func(ctx context.Context, limit, offset int) ([]*memory.MemoryRecord, error) {
 					return pager.GetOpenTasksPage(
 						ctx, domain, provider, agentID, limit, offset,
 					)
-				},
+				}, readScope,
 			)
 		} else {
 			// Compatibility fallback for external MemoryStore implementations.
@@ -4410,8 +4384,8 @@ func (s *Server) handleGetOpenTasks(w http.ResponseWriter, r *http.Request) {
 		kept := tasks[:0]
 		for _, rec := range tasks {
 			if s.isPostV23ForNextTx() {
-				disclosure, disclosureErr := s.evaluateAppV23RecordDisclosure(
-					agentID, rec, now,
+				disclosure, disclosureErr := s.evaluateAppV23RecordDisclosureScoped(
+					agentID, rec, now, readScope,
 				)
 				if disclosureErr != nil {
 					if isUnsafeAppV23Projection(disclosureErr) {
@@ -4527,6 +4501,12 @@ func (s *Server) listAppV23VisibleMemories(
 	opts store.ListOptions,
 	agentID string,
 ) ([]*memory.MemoryRecord, int, bool, bool, error) {
+	return s.listAppV23VisibleMemoriesScoped(ctx, opts, agentID, newAppV23StrictReadScope())
+}
+
+func (s *Server) listAppV23VisibleMemoriesScoped(
+	ctx context.Context, opts store.ListOptions, agentID string, scope *appV23ReadScope,
+) ([]*memory.MemoryRecord, int, bool, bool, error) {
 	requestedLimit, requestedOffset := opts.Limit, opts.Offset
 	if requestedOffset < 0 {
 		return nil, 0, false, false, errors.New("offset must not be negative")
@@ -4555,7 +4535,7 @@ func (s *Server) listAppV23VisibleMemories(
 		}
 		batchExhaustsStream := len(batch) < scan.Limit || scan.Offset+len(batch) >= total
 		for _, rec := range batch {
-			disclosure, err := s.evaluateAppV23RecordDisclosure(agentID, rec, now)
+			disclosure, err := s.evaluateAppV23RecordDisclosureScoped(agentID, rec, now, scope)
 			if err != nil {
 				if isUnsafeAppV23Projection(err) {
 					continue
@@ -4592,13 +4572,14 @@ func (s *Server) listAppV23VisibleMemories(
 	// stream has not been counted to completion because unvisited rows remain
 	// in that batch. A page with has_more=true is therefore always a lower
 	// bound, never an exact total.
-	totalExact := exhausted && !hasMore
+	totalExact := exhausted && !hasMore && scope.coverage() == nil
 	return visible, totalVisibleLowerBound, hasMore, totalExact, nil
 }
 
 // handleListMemoriesAuth handles GET /v1/memory/list (authenticated, agent-isolated).
 // Mirrors the dashboard list endpoint but applies RBAC agent isolation.
 func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) {
+	readScope := newAppV23ReadScope()
 	q := r.URL.Query()
 	limit, _ := strconv.Atoi(q.Get("limit"))
 	if limit <= 0 || limit > 200 {
@@ -4682,14 +4663,13 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 	}
 
 	opts := store.ListOptions{
-		DomainTag:      domainFilter,
-		Tag:            q.Get("tag"),
-		Provider:       q.Get("provider"),
-		Status:         q.Get("status"),
-		Limit:          limit,
-		Offset:         offset,
-		Sort:           q.Get("sort"),
-		ExcludeTainted: s.memoryTaintFilterEnabled(r.Context()),
+		DomainTag: domainFilter,
+		Tag:       q.Get("tag"),
+		Provider:  q.Get("provider"),
+		Status:    q.Get("status"),
+		Limit:     limit,
+		Offset:    offset,
+		Sort:      q.Get("sort"),
 	}
 	// Apply single-agent filter from query param (only if allowed)
 	if agent := q.Get("agent"); agent != "" {
@@ -4705,8 +4685,8 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 	var hasMore, totalExact bool
 	var err error
 	if postV23 {
-		records, total, hasMore, totalExact, err = s.listAppV23VisibleMemories(
-			r.Context(), opts, agentID,
+		records, total, hasMore, totalExact, err = s.listAppV23VisibleMemoriesScoped(
+			r.Context(), opts, agentID, readScope,
 		)
 	} else {
 		records, total, err = s.store.ListMemories(r.Context(), opts)
@@ -4776,6 +4756,9 @@ func (s *Server) handleListMemoriesAuth(w http.ResponseWriter, r *http.Request) 
 	if s.isPostV23ForNextTx() {
 		body["has_more"] = hasMore
 		body["total_exact"] = totalExact
+		if coverage := readScope.coverage(); coverage != nil {
+			body["taint_coverage"] = coverage
+		}
 		if filterApplied {
 			info := &FilterInfo{By: []string{filterBySubmittingAgts}}
 			w.Header().Set(filterHeader, filterBySubmittingAgts)
@@ -4870,19 +4853,19 @@ func (s *Server) getAppV23VisibleTimeline(
 	from, to time.Time,
 	domain, bucket string,
 ) ([]store.TimelineBucket, error) {
+	readScope := newAppV23StrictReadScope()
 	const pageSize = 200
 	formatter, hasFormatter := s.store.(store.TimelinePeriodFormatter)
 	// SQLite stores RFC3339Nano as text, whose optional fractional component is
 	// not perfectly lexicographic at a whole-second boundary. Widen the SQL
 	// range by one second and apply the exact time predicate below.
 	opts := store.ListOptions{
-		DomainTag:      domain,
-		CreatedFrom:    from.UTC().Add(-time.Second).Format(time.RFC3339Nano),
-		CreatedTo:      to.UTC().Add(time.Second).Format(time.RFC3339Nano),
-		Limit:          pageSize,
-		Sort:           "oldest",
-		StablePaging:   true,
-		ExcludeTainted: s.memoryTaintFilterEnabled(ctx),
+		DomainTag:    domain,
+		CreatedFrom:  from.UTC().Add(-time.Second).Format(time.RFC3339Nano),
+		CreatedTo:    to.UTC().Add(time.Second).Format(time.RFC3339Nano),
+		Limit:        pageSize,
+		Sort:         "oldest",
+		StablePaging: true,
 	}
 	counts := make(map[string]int)
 	now := time.Now()
@@ -4899,8 +4882,8 @@ func (s *Server) getAppV23VisibleTimeline(
 			if rec.CreatedAt.Before(from) || rec.CreatedAt.After(to) {
 				continue
 			}
-			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosure(
-				agentID, rec, now,
+			disclosure, disclosureErr := s.evaluateAppV23RecordDisclosureScoped(
+				agentID, rec, now, readScope,
 			)
 			if disclosureErr != nil {
 				if isUnsafeAppV23Projection(disclosureErr) {

@@ -1444,7 +1444,10 @@ func (s *Server) toolRecall(ctx context.Context, params map[string]any) (any, er
 	// set is fully reachable ("complete"), has rows recall can't return
 	// ("incomplete"), or couldn't be evaluated exactly ("unavailable"). Never a
 	// count — so it cannot report rows the caller may not see.
-	if queryResp.IndexStatus != "" {
+	relayTaintCoverage(out, queryResp.TaintCoverage)
+	if queryResp.TaintCoverage != nil && len(queryResp.Results) == 0 {
+		out["index_status"] = "unavailable"
+	} else if queryResp.IndexStatus != "" {
 		out["index_status"] = queryResp.IndexStatus
 	}
 	if queryResp.Federation != nil {
@@ -1485,7 +1488,8 @@ const disputedContentPrefix = "[DISPUTED] "
 // semantic path can be invoked from both the primary branch and the
 // belt-and-braces retry-on-vault-encryption branch in toolRecall.
 type recallResp struct {
-	Results []struct {
+	TaintCoverage *taintCoverage `json:"taint_coverage,omitempty"`
+	Results       []struct {
 		MemoryID                string  `json:"memory_id"`
 		SubmittingAgent         string  `json:"submitting_agent"`
 		Content                 string  `json:"content"`
@@ -1521,6 +1525,36 @@ type recallResp struct {
 	// below the threshold must say so: the observed failure was an agent reading
 	// "no results" as "this memory was never written".
 	Filtered *recallFilterInfo `json:"filtered,omitempty"`
+}
+
+// taintCoverage carries only the public, content-free uncertainty contract.
+// Invalid or future shapes fail decoding instead of silently becoming exact.
+type taintCoverage struct {
+	Complete  bool   `json:"complete"`
+	Truncated bool   `json:"truncated"`
+	Reason    string `json:"reason"`
+}
+
+func (coverage *taintCoverage) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		Complete  *bool  `json:"complete"`
+		Truncated *bool  `json:"truncated"`
+		Reason    string `json:"reason"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if wire.Complete == nil || *wire.Complete || wire.Truncated == nil || !*wire.Truncated || wire.Reason != "ancestor_walk_budget" {
+		return errors.New("unsupported taint coverage metadata")
+	}
+	*coverage = taintCoverage{Complete: false, Truncated: true, Reason: "ancestor_walk_budget"}
+	return nil
+}
+
+func relayTaintCoverage(result map[string]any, coverage *taintCoverage) {
+	if coverage != nil {
+		result["taint_coverage"] = coverage
+	}
 }
 
 // recallFilterInfo is the node's silent-hide envelope for one recall.
@@ -2814,7 +2848,8 @@ func (s *Server) toolList(ctx context.Context, params map[string]any) (any, erro
 
 	path := "/v1/memory/list?" + q.Encode()
 	var listResp struct {
-		Memories []struct {
+		TaintCoverage *taintCoverage `json:"taint_coverage,omitempty"`
+		Memories      []struct {
 			MemoryID        string  `json:"memory_id"`
 			Content         string  `json:"content"`
 			DomainTag       string  `json:"domain_tag"`
@@ -2846,12 +2881,16 @@ func (s *Server) toolList(ctx context.Context, params map[string]any) (any, erro
 	}
 
 	hasMore, totalExact := callerListMetadata(listResp.HasMore, listResp.TotalExact)
+	if listResp.TaintCoverage != nil {
+		totalExact = false
+	}
 	result := map[string]any{
 		"memories":    memories,
 		"total_count": listResp.Total,
 		"has_more":    hasMore,
 		"total_exact": totalExact,
 	}
+	relayTaintCoverage(result, listResp.TaintCoverage)
 	if len(listResp.Filtered) > 0 {
 		// Never turn a caller-scoped partial/filtered list into an apparently
 		// authoritative empty result. The REST surface intentionally avoids
@@ -3175,6 +3214,11 @@ func (s *Server) callerBoundedStatus(ctx context.Context, self selfWritePolicy) 
 		return standing
 	}
 	homeStats, err := s.callerScopedMemoryCountForDomain(diagnosticCtx, self.HomeDomain)
+	if homeStats != nil {
+		if coverage, ok := homeStats["taint_coverage"]; ok {
+			standing["taint_coverage"] = coverage
+		}
+	}
 	if err != nil || !callerStatusCountsAreReportable(homeStats) {
 		standing["counts_degraded_reason"] = "home-domain memory counts exceeded the bounded status budget; authenticated self-standing and readable domains remain valid"
 		return standing
@@ -3230,9 +3274,10 @@ func (s *Server) callerScopedMemoryCount(ctx context.Context) (map[string]any, e
 
 func (s *Server) callerScopedMemoryCountForDomain(ctx context.Context, domain string) (map[string]any, error) {
 	var listResp struct {
-		Total      int   `json:"total"`
-		HasMore    *bool `json:"has_more"`
-		TotalExact *bool `json:"total_exact"`
+		TaintCoverage *taintCoverage `json:"taint_coverage,omitempty"`
+		Total         int            `json:"total"`
+		HasMore       *bool          `json:"has_more"`
+		TotalExact    *bool          `json:"total_exact"`
 	}
 	path := "/v1/memory/list?limit=1&status=committed"
 	if domain != "" {
@@ -3248,12 +3293,17 @@ func (s *Server) callerScopedMemoryCountForDomain(ctx context.Context, domain st
 		return nil, err
 	}
 	hasMore, totalExact := callerListMetadata(listResp.HasMore, listResp.TotalExact)
-	return map[string]any{
+	if listResp.TaintCoverage != nil {
+		totalExact = false
+	}
+	result := map[string]any{
 		"total_memories": listResp.Total,
 		"total_exact":    totalExact,
 		"has_more":       hasMore,
 		"scope":          "caller",
-	}, nil
+	}
+	relayTaintCoverage(result, listResp.TaintCoverage)
+	return result, nil
 }
 
 // callerScopedMemoryStats preserves sage_status's historical breakdowns while
@@ -3281,10 +3331,11 @@ func (s *Server) callerScopedMemoryStatsForDomain(
 		CreatedAt string `json:"created_at"`
 	}
 	type statusPage struct {
-		Memories   []statusMemory `json:"memories"`
-		Total      int            `json:"total"`
-		HasMore    *bool          `json:"has_more"`
-		TotalExact *bool          `json:"total_exact"`
+		TaintCoverage *taintCoverage `json:"taint_coverage,omitempty"`
+		Memories      []statusMemory `json:"memories"`
+		Total         int            `json:"total"`
+		HasMore       *bool          `json:"has_more"`
+		TotalExact    *bool          `json:"total_exact"`
 	}
 	byDomain := make(map[string]int)
 	byStatus := make(map[string]int)
@@ -3296,6 +3347,7 @@ func (s *Server) callerScopedMemoryStatsForDomain(
 	breakdownsComplete := true
 	scanned := 0
 	var exactTotal *int
+	var coverage *taintCoverage
 
 	for page := 0; page < maxPages; page++ {
 		offset := page * pageSize
@@ -3314,10 +3366,13 @@ func (s *Server) callerScopedMemoryStatsForDomain(
 		if response.Total > total {
 			total = response.Total
 		}
-		// A later page may prove exhaustion and replace an earlier lower-bound
-		// total. The newest page is therefore authoritative for exactness,
-		// subject to the consistency checks below.
-		totalExact = pageTotalExact
+		// Separate requests may observe different snapshots. A later exact page
+		// cannot erase earlier uncertainty, including a withheld taint row.
+		totalExact = totalExact && pageTotalExact
+		if response.TaintCoverage != nil {
+			coverage = response.TaintCoverage
+			totalExact = false
+		}
 		if pageTotalExact {
 			if exactTotal == nil {
 				value := response.Total
@@ -3364,7 +3419,10 @@ func (s *Server) callerScopedMemoryStatsForDomain(
 			totalExact = false
 		}
 	}
-	return map[string]any{
+	if !totalExact {
+		breakdownsComplete = false
+	}
+	result := map[string]any{
 		"total_memories":      total,
 		"by_domain":           byDomain,
 		"by_status":           byStatus,
@@ -3373,7 +3431,9 @@ func (s *Server) callerScopedMemoryStatsForDomain(
 		"has_more":            hasMore,
 		"breakdowns_complete": breakdownsComplete,
 		"scope":               "caller",
-	}, nil
+	}
+	relayTaintCoverage(result, coverage)
+	return result, nil
 }
 
 func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, error) {
@@ -3536,8 +3596,12 @@ func (s *Server) toolTurn(ctx context.Context, params map[string]any) (any, erro
 	// appendTurnRecallResult returns before setting anything when the recall is
 	// empty — exactly the case index_status exists to describe — so relay the
 	// caller-scoped completeness here rather than dropping it at the early return.
-	if _, hasErr := result["recall_error"]; !hasErr && turnRecall.IndexStatus != "" {
-		result["index_status"] = turnRecall.IndexStatus
+	if _, hasErr := result["recall_error"]; !hasErr {
+		if turnRecall.TaintCoverage != nil && len(turnRecall.Results) == 0 {
+			result["index_status"] = "unavailable"
+		} else if turnRecall.IndexStatus != "" {
+			result["index_status"] = turnRecall.IndexStatus
+		}
 	}
 
 	// Phase 3: Pipeline — check for incoming work and completed results.
@@ -3563,6 +3627,10 @@ func isFirstUseDomainReadDenial(err error) bool {
 }
 
 func appendTurnRecallResult(result map[string]any, recall recallResp, domain string) {
+	relayTaintCoverage(result, recall.TaintCoverage)
+	if recall.TaintCoverage != nil && len(recall.Results) == 0 {
+		result["index_status"] = "unavailable"
+	}
 	if recall.Federation != nil {
 		result["federation"] = recall.Federation
 		if len(recall.Federation.Queried) == 0 && len(recall.Federation.Errors) > 0 {
