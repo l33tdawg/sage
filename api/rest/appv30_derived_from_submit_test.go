@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
@@ -59,7 +61,9 @@ func TestSubmitMemoryRejectsExplicitEmptyDerivedFromBeforeAppV30Gate(t *testing.
 func TestSubmitMemoryRejectsCrossChainDerivedFromAtEdge(t *testing.T) {
 	srv, _, _ := newTestServer(t, "")
 	srv.SetPostV30ForNextTxAccessor(func() bool { return true })
-	srv.SetGovernanceDomainAccessor(func() string { return "local-chain" })
+	domain, err := governance.DelegationDomainForChainID("local-chain")
+	require.NoError(t, err)
+	srv.SetGovernanceDomainAccessor(func() string { return domain })
 	body := []byte(`{
 		"content":"lineage child",
 		"memory_type":"fact",
@@ -120,6 +124,9 @@ func TestSubmitMemoryCarriesDerivedFromOnlyAfterAppV30(t *testing.T) {
 
 	postV30, _, _ := newTestServer(t, cometMock.URL)
 	postV30.SetPostV30ForNextTxAccessor(func() bool { return true })
+	domain, err := governance.DelegationDomainForChainID("sage")
+	require.NoError(t, err)
+	postV30.SetGovernanceDomainAccessor(func() string { return domain })
 	req, _ = signedRequest(
 		t,
 		http.MethodPost,
@@ -133,4 +140,22 @@ func TestSubmitMemoryCarriesDerivedFromOnlyAfterAppV30(t *testing.T) {
 	require.Len(t, captured.DerivedFrom, 1)
 	require.Equal(t, "parent-a", captured.DerivedFrom[0].MemoryID)
 	require.Equal(t, hash, hex.EncodeToString(captured.DerivedFrom[0].ContentHash[:]))
+}
+
+func TestSubmitMemoryDerivedFromRequiresCommittedChainBinding(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(fmt.Sprintf("empty-accessor-%t", configured), func(t *testing.T) {
+			srv, _, _ := newTestServer(t, "")
+			srv.SetPostV30ForNextTxAccessor(func() bool { return true })
+			if configured {
+				srv.SetGovernanceDomainAccessor(func() string { return "" })
+			}
+			body := []byte(`{"content":"lineage child","memory_type":"fact","domain_tag":"general","confidence_score":0.9,"derived_from":[{"source_chain_id":"sage","memory_id":"parent-a","content_hash":"` + strings.Repeat("a", 64) + `"}]}`)
+			req, _ := signedRequest(t, http.MethodPost, "/v1/memory/submit", body)
+			recorder := httptest.NewRecorder()
+			srv.Router().ServeHTTP(recorder, req)
+			require.Equal(t, http.StatusServiceUnavailable, recorder.Code, recorder.Body.String())
+			require.Contains(t, recorder.Body.String(), "consensus chain binding is unavailable")
+		})
+	}
 }

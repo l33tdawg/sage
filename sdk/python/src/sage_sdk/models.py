@@ -58,6 +58,20 @@ class DerivedFromParent(BaseModel):
     memory_id: str = Field(min_length=1, max_length=512)
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
+    @field_validator("source_chain_id")
+    @classmethod
+    def validate_source_chain_id_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 64:
+            raise ValueError("source_chain_id exceeds 64 UTF-8 bytes")
+        return value
+
+    @field_validator("memory_id")
+    @classmethod
+    def validate_memory_id_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 512:
+            raise ValueError("memory_id exceeds 512 UTF-8 bytes")
+        return value
+
 
 class MemoryRecord(BaseModel):
     memory_id: str

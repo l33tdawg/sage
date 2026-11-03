@@ -53,6 +53,18 @@ func (app *SageApp) enforceDelegatedAgentProof(
 	consensusTime time.Time,
 	claim, postAppV20, postAppV22, postAppV23, postAppV27 bool,
 ) error {
+	return app.enforceDelegatedAgentProofForFork(
+		parsedTx, consensusTime, claim, postAppV20, postAppV22, postAppV23, postAppV27, false,
+	)
+}
+
+// enforceDelegatedAgentProofForFork receives the deterministic app-v30 gate
+// from each production caller. The historical wrapper retains pre-v30 behavior.
+func (app *SageApp) enforceDelegatedAgentProofForFork(
+	parsedTx *tx.ParsedTx,
+	consensusTime time.Time,
+	claim, postAppV20, postAppV22, postAppV23, postAppV27, postAppV30 bool,
+) error {
 	usesAgentIdentity := txUsesAgentIdentity(parsedTx.Type)
 	governanceProof := postAppV20 && isProofBearingGovernanceRequest(parsedTx)
 	if (!usesAgentIdentity && !governanceProof) ||
@@ -93,8 +105,8 @@ func (app *SageApp) enforceDelegatedAgentProof(
 	if err != nil {
 		return err
 	}
-	if bindErr := app.verifySignedAgentAction(
-		parsedTx, agentID, req, postAppV20, postAppV22, postAppV23, postAppV27,
+	if bindErr := app.verifySignedAgentActionForFork(
+		parsedTx, agentID, req, postAppV20, postAppV22, postAppV23, postAppV27, postAppV30,
 	); bindErr != nil {
 		return fmt.Errorf("delegated agent action mismatch: %w", bindErr)
 	}
@@ -557,6 +569,17 @@ func (app *SageApp) verifySignedAgentAction(
 	agentID string,
 	req signedAgentRequest,
 	bindMemoryTags, postAppV22, postAppV23, postAppV27 bool,
+) error {
+	return app.verifySignedAgentActionForFork(
+		actual, agentID, req, bindMemoryTags, postAppV22, postAppV23, postAppV27, false,
+	)
+}
+
+func (app *SageApp) verifySignedAgentActionForFork(
+	actual *tx.ParsedTx,
+	agentID string,
+	req signedAgentRequest,
+	bindMemoryTags, postAppV22, postAppV23, postAppV27, postAppV30 bool,
 ) error { //nolint:gocyclo,maintidx // exhaustive protocol routing is intentionally centralized
 	expected := &tx.ParsedTx{Type: actual.Type}
 
@@ -566,16 +589,15 @@ func (app *SageApp) verifySignedAgentAction(
 			return err
 		}
 		var body struct {
-			Content         string                   `json:"content"`
-			MemoryType      string                   `json:"memory_type"`
-			DomainTag       string                   `json:"domain_tag"`
-			ConfidenceScore float64                  `json:"confidence_score"`
-			Classification  int                      `json:"classification,omitempty"`
-			Embedding       []float32                `json:"embedding,omitempty"`
-			ParentHash      string                   `json:"parent_hash,omitempty"`
-			TaskStatus      json.RawMessage          `json:"task_status,omitempty"`
-			Tags            []string                 `json:"tags,omitempty"`
-			DerivedFrom     []derivedFromProofParent `json:"derived_from,omitempty"`
+			Content         string          `json:"content"`
+			MemoryType      string          `json:"memory_type"`
+			DomainTag       string          `json:"domain_tag"`
+			ConfidenceScore float64         `json:"confidence_score"`
+			Classification  int             `json:"classification,omitempty"`
+			Embedding       []float32       `json:"embedding,omitempty"`
+			ParentHash      string          `json:"parent_hash,omitempty"`
+			TaskStatus      json.RawMessage `json:"task_status,omitempty"`
+			Tags            []string        `json:"tags,omitempty"`
 		}
 		if err := decodeSignedJSON(req.body, &body, false); err != nil {
 			return err
@@ -587,9 +609,31 @@ func (app *SageApp) verifySignedAgentAction(
 		if body.Content == "" || body.ConfidenceScore < 0 || body.ConfidenceScore > 1 || body.Classification < 0 || body.Classification > 4 {
 			return fmt.Errorf("signed memory submission fails the REST contract")
 		}
-		expectedDerivedFrom, err := decodeDerivedFromProofParents(body.DerivedFrom)
-		if err != nil {
-			return err
+		var expectedDerivedFrom []tx.ParentRef
+		if postAppV30 {
+			// Decode the new field only after activation. Before app-v30,
+			// json.Unmarshal ignored its unknown value, including non-array
+			// values, and historical delegated requests must still replay.
+			var lineageBody struct {
+				DerivedFrom json.RawMessage `json:"derived_from"`
+			}
+			if lineageErr := json.Unmarshal(req.body, &lineageBody); lineageErr != nil {
+				return fmt.Errorf("decode signed derived_from: %w", lineageErr)
+			}
+			if len(lineageBody.DerivedFrom) != 0 {
+				var parents []derivedFromProofParent
+				if lineageErr := json.Unmarshal(lineageBody.DerivedFrom, &parents); lineageErr != nil {
+					return fmt.Errorf("signed derived_from must be a parent array: %w", lineageErr)
+				}
+				if len(parents) == 0 {
+					return fmt.Errorf("signed derived_from must contain between 1 and %d parents", tx.MaxDerivedFromParents)
+				}
+				var lineageErr error
+				expectedDerivedFrom, lineageErr = decodeDerivedFromProofParents(parents)
+				if lineageErr != nil {
+					return lineageErr
+				}
+			}
 		}
 		canonicalTaskStatus := ""
 		if len(body.TaskStatus) != 0 {

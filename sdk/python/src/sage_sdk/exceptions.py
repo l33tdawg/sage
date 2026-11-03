@@ -50,10 +50,10 @@ class SageAPIError(SageError):
             remedy = None
             retryable = None
 
-        if error_type in {
+        if error_type in (
             "https://sage.dev/errors/memory-tainted",
             "https://sage.dev/errors/memory-taint-pending",
-        }:
+        ):
             return SageTaintError(
                 status_code=status_code,
                 detail=detail,
