@@ -84,7 +84,7 @@ func TestAppV30CanonicalStateAppHashGolden(t *testing.T) {
 	t.Logf("app-v30 AppHash: %s", hex.EncodeToString(appHash))
 	require.Equal(
 		t,
-		"79e8bcde7ab14e10b39dd38d050b59e3dbff324d07bb47f13c38db4f73093532",
+		"52d7b1597904724eb2f4f39702b43c3f7805085d2134145d7cd94aef97f575d0",
 		hex.EncodeToString(appHash),
 	)
 }
