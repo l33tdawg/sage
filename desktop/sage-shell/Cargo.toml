@@ -39,3 +39,8 @@ lto = true
 opt-level = "s"
 panic = "abort"
 strip = true
+
+# Wry's macOS URL getter is also used by Tauri's page-load delegate.
+# Keep the nullable-URL guards until the fix ships in a compatible release.
+[patch.crates-io]
+wry = { path = "vendor/wry-0.55.1" }
