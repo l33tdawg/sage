@@ -3302,6 +3302,9 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
 		// at serialize). A no-op unless the caller's filter is "committed".
 		IncludeDisputed: true,
+		// The reranker scores the caller's result size, not the disclosure
+		// over-fetch above; the response is trimmed to that size anyway.
+		RerankTopK: requestedRecallTopK(req.TopK),
 	}
 	filterApplied := !seeAll
 	if filterApplied {

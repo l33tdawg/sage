@@ -716,4 +716,13 @@ The managed flow persists its choices as preferences, but the reranker can also 
 configured entirely via env vars (they set the startup default the dashboard then
 overrides). See [`environment-variables.md`](environment-variables.md) - notably the
 v11 `SAGE_RERANK_KIND` selector alongside `SAGE_RERANK_ENABLED` / `SAGE_RERANK_URL` /
-`SAGE_RERANK_MODEL` / `SAGE_RERANK_TIMEOUT_MS` / `SAGE_RERANK_OVERSAMPLE`.
+`SAGE_RERANK_MODEL` / `SAGE_RERANK_TIMEOUT_MS` / `SAGE_RERANK_OVERSAMPLE` /
+`SAGE_RERANK_MAX_CANDIDATES`.
+
+Rerank cost grows with every candidate. Hybrid recall sends the reranker the caller's
+`top_k` × `SAGE_RERANK_OVERSAMPLE` fused candidates, even though app-v23 recall scans
+wider for authorization; `SAGE_RERANK_MAX_CANDIDATES` caps that further. The managed
+sidecar runs a CPU build everywhere except macOS on Apple silicon, and on CPU even a
+modest pool can exceed `SAGE_RERANK_TIMEOUT_MS`. A call that fails or times out keeps
+RRF order and logs a rate-limited `hybrid recall reranker failed` warning with the
+pool size.

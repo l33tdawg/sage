@@ -181,6 +181,7 @@ legacy Ollama vector space over a requested custom one (`cmd/amid/main.go`).
 | `SAGE_RERANK_KIND` | **v11.** Endpoint dialect: `tei` (default) or `llamacpp` (the managed sidecar). Trimmed + lower-cased; unknown values fall back to TEI. | `tei` | `internal/embedding/reranker.go:217` |
 | `SAGE_RERANK_TIMEOUT_MS` | Reranker request timeout (ms, int > 0). | `2000` | `internal/embedding/reranker.go:224` |
 | `SAGE_RERANK_OVERSAMPLE` | Candidates pulled before reranking (int ≥ 1). | `2` | `internal/embedding/reranker.go:229` |
+| `SAGE_RERANK_MAX_CANDIDATES` | Hard cap on candidates sent to the reranker per recall (int ≥ 1). The pool is otherwise the caller's `top_k` × `SAGE_RERANK_OVERSAMPLE`. Set about `10` for a CPU-only reranker such as the managed llama.cpp sidecar on Linux/Windows. | (no cap) | `ResolveRerankerConfig` (`internal/embedding/reranker.go:255`) |
 
 ---
 
