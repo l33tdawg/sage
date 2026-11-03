@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/store"
@@ -79,12 +80,26 @@ func TestAppV30CanonicalStateAppHashGolden(t *testing.T) {
 		}},
 	))
 
+	adoptionReceipt := sha256.Sum256([]byte("app-v30 adoption receipt"))
+	require.NoError(t, badgerStore.DB().Update(func(txn *badger.Txn) error {
+		if err := txn.Set(
+			[]byte("memprov:migrated:app-v30-child"),
+			[]byte{1},
+		); err != nil {
+			return err
+		}
+		return txn.Set(
+			[]byte("appv25:legacy-adoption:app-v30-parent"),
+			adoptionReceipt[:],
+		)
+	}))
+
 	appHash, err := ComputeAppHash(badgerStore)
 	require.NoError(t, err)
 	t.Logf("app-v30 AppHash: %s", hex.EncodeToString(appHash))
 	require.Equal(
 		t,
-		"52d7b1597904724eb2f4f39702b43c3f7805085d2134145d7cd94aef97f575d0",
+		"bbc39e8c28835a652a07cf3893708a3b4ad06893413924fcbeb3d4ac5288079c",
 		hex.EncodeToString(appHash),
 	)
 }
