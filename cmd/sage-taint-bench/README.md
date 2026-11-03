@@ -4,6 +4,12 @@ Measures the provisional constants of the governance taint RFC ([#460](https://g
 
 **This is a stand-in harness.** It models the RFC constants over real Badger, using the planned key layouts and unit costs with Badger opened the same way as `store.NewBadgerStore`. The app-v30 implementation now exists, but this command does not execute it and has no AppHash, CometBFT, SQL mirror or live node. Memory content and existing index writes are represented only by the keys the fixture writes. Each result says so in `stand_in` and `notice`; use the real-code tests and CI gates for release evidence.
 
+The real store/scope/admission/expansion counterpart is
+[`sage-taint-realbench`](../sage-taint-realbench/README.md). It emits a
+cross-architecture deterministic digest and AppHash evidence while still
+leaving live CometBFT, SQL mirror and restart/state-sync proof to their dedicated
+gates.
+
 ## Running it
 
 ```sh
