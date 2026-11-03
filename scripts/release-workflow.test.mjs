@@ -247,11 +247,53 @@ test('superseded checks stop spending runner minutes without weakening the newes
 
 test('CI builds Docker once and keeps CometBFT hardening in the mandatory fault gate', () => {
   assert.doesNotMatch(ciWorkflow, /^  docker:\n/m);
-  assert.match(ciJob('byzantine'), /docker compose -f deploy\/docker-compose\.yml up -d --build/);
+  assert.match(ciJob('byzantine'), /docker compose -p sage -f deploy\/docker-compose\.yml -f deploy\/docker-compose\.test\.yml up -d --build/);
   assert.doesNotMatch(ciJob('test'), /make test-cometbft-patch/);
   assert.doesNotMatch(job('test'), /make test-cometbft-patch/);
   assert.match(faultWorkflow, /make test-cometbft-patch/);
   assert.doesNotMatch(job('v119-fault-gates'), /needs: test/);
+});
+
+test('Byzantine runs after a successful Build even when an earlier PR consensus ancestor was skipped', () => {
+  const oracle = ciJob('byzantine');
+  assert.match(oracle, /^    needs: \[build\]$/m);
+  assert.match(oracle, /^    if: \$\{\{ always\(\) && !cancelled\(\) && needs\.build\.result == 'success' \}\}$/m);
+  assert.match(oracle, /^    timeout-minutes: 20$/m);
+  assert.doesNotMatch(oracle, /continue-on-error/);
+});
+
+test('Byzantine controls the same explicitly named network through published test-only RPC ports', () => {
+  const oracle = ciJob('byzantine');
+  const compose = 'docker compose -p sage -f deploy/docker-compose.yml -f deploy/docker-compose.test.yml';
+  assert.equal(oracle.split(compose).length - 1, 3, 'startup, diagnostics and cleanup must use the same project and overrides');
+  assert.ok(oracle.includes(`${compose} up -d --build`));
+  assert.ok(oracle.includes(`${compose} down -v --remove-orphans`));
+  assert.match(oracle, /SAGE_BYZANTINE_RPC_URL: http:\/\/127\.0\.0\.1:36657/);
+  assert.match(oracle, /for port in 18080 18081 18082 18083/);
+  assert.match(oracle, /for port in 36657 36757 36857 36957/);
+  assert.match(oracle, /latest_block_height/);
+  assert.match(oracle, /catching_up/);
+});
+
+test('Byzantine requires all three actual runtime passes and keeps their JSON receipt', () => {
+  const oracle = ciJob('byzantine');
+  const selected = 'TestOneNodeDown|TestTwoNodesDown|TestRecovery';
+  assert.ok(oracle.includes(`-run '^(${selected})$'`));
+  assert.match(oracle, /go test .* -v -count=1 -timeout 120s -tags=byzantine -json/);
+  assert.match(oracle, /set -euo pipefail/);
+  assert.match(oracle, /python3 deploy\/scripts\/assert-go-test-json\.py output\/byzantine\/run\.jsonl github\.com\/l33tdawg\/sage\/test\/byzantine TestOneNodeDown TestTwoNodesDown TestRecovery/);
+  assert.match(oracle, /path: output\/byzantine/);
+  const runtimeTests = readFileSync(new URL('../test/byzantine/fault_test.go', import.meta.url), 'utf8');
+  assert.doesNotMatch(runtimeTests, /t\.Skip\(/);
+  assert.match(runtimeTests, /SAGE_BYZANTINE_RPC_URL/);
+});
+
+test('CI runs only the tagged canonical ladder helpers alongside the ordinary suite', () => {
+  const suite = ciJob('test-suite');
+  assert.match(suite, /go test \.\/\.\.\. -v -count=1 -timeout 30m/);
+  assert.match(suite, /timeout-minutes: 45/);
+  assert.ok(suite.includes("go test -race -tags=integration -count=1 -timeout 60s -run '^TestLadderCanonicalPlan(DelayedQuorum|RejectsInconsistentOrMissedEvidence|QueryFailsClosed|LegacyAndDomain)$' ./test/integration"));
+  assert.doesNotMatch(suite, /-run ['"]?\^?TestAppHashDeterminism_AppV29Activation/);
 });
 
 test('native shell evidence is version-locked, private, and cannot promote an unsigned standalone release', () => {
