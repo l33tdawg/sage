@@ -4495,6 +4495,7 @@ func testSageInceptionSignedAgentSurvivesQuarantinedProjection(
 	))
 
 	dashboard := web.NewDashboardHandler(sqlStore, "11.16.2")
+	t.Cleanup(dashboard.WaitBackground)
 	dashboard.BadgerStore = badgerStore
 	dashboard.AdminSigningKey = rootKey
 	dashboard.AppV23ActiveFn = func() bool { return true }
