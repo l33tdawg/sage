@@ -2680,7 +2680,7 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*memory.MemoryRecord, 0, min(len(merged), requestedTopK))
+	out := make([]*memory.MemoryRecord, 0)
 	out = append(out, reranked...)
 	out = append(out, merged[len(head):]...)
 	if len(out) > requestedTopK {
