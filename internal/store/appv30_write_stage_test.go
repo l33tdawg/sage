@@ -184,6 +184,8 @@ func TestAppV30WriteStageApplyReservationIncludesTargetAnchor(t *testing.T) {
 	keys := [][]byte{
 		taint.DecisionKey(decisionID),
 		taint.TargetKey(decisionID),
+		TaintDecisionScopeKey(decisionID),
+		taint.ActiveDecisionKey(decisionID),
 		taint.MembershipKey(target.MemoryID, decisionID),
 		taint.DecisionIndexKey(decisionID, target.MemoryID),
 		taint.FrontierKey(decisionID, 1, 0),

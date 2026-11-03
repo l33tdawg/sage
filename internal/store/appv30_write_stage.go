@@ -209,6 +209,8 @@ func isAppV30GeneratedWriteKey(key []byte) bool {
 	for _, prefix := range [][]byte{
 		[]byte("taintdec:"),
 		[]byte("tainttarget:"),
+		[]byte("taintscope:"),
+		[]byte("taintactivedec:"),
 		[]byte("taintm:"),
 		[]byte("taintd:"),
 		[]byte("taintq:"),

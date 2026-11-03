@@ -246,6 +246,19 @@ func TestTaintTargetAtomicVisibilityAndWriteFailures(t *testing.T) {
 	id := testTaintDecisionID("atomic")
 	target := testTaintParent("atomic-target")
 	payload := testTaintPayloadHash("atomic")
+	// Exercise every primitive Apply write, including the immutable scope
+	// and retained-slot index added alongside the target anchor.
+	applyKeys := [][]byte{
+		taint.DecisionKey(id),
+		taint.TargetKey(id),
+		TaintDecisionScopeKey(id),
+		taint.ActiveDecisionKey(id),
+		taint.MembershipKey(target.MemoryID, id),
+		taint.DecisionIndexKey(id, target.MemoryID),
+		taint.FrontierKey(id, 1, 0),
+		taint.ActiveCountKey(),
+		taint.RevisionKey(),
+	}
 	foundIn := func(reader *BadgerStore) bool {
 		t.Helper()
 		var found bool
@@ -264,7 +277,7 @@ func TestTaintTargetAtomicVisibilityAndWriteFailures(t *testing.T) {
 	require.False(t, foundIn(s))
 	scoped.DiscardConsensusTransaction()
 	require.False(t, foundIn(s))
-	for failAt := 1; failAt <= 7; failAt++ {
+	for failAt := 1; failAt <= len(applyKeys); failAt++ {
 		scoped = s.BeginConsensusTransaction(nil)
 		injected := errors.New("injected anchor transaction failure")
 		scoped.writeFaultHook = func(attempt int) error {
@@ -275,17 +288,25 @@ func TestTaintTargetAtomicVisibilityAndWriteFailures(t *testing.T) {
 		}
 		_, err = scoped.ApplyTaintDecision("sage", id, target, payload)
 		require.ErrorIs(t, err, injected)
-		require.Error(t, scoped.CommitConsensusTransaction())
+		require.Equal(t, failAt, scoped.writeAttempts)
+		require.ErrorIs(t, scoped.CommitConsensusTransaction(), injected)
 		require.False(t, foundIn(s))
-		_, found, err := s.GetTaintDecision(id)
-		require.NoError(t, err)
-		require.False(t, found)
+		require.NoError(t, s.view(func(txn *badger.Txn) error {
+			for _, key := range applyKeys {
+				_, found, readErr := readTaintValueTxn(txn, key)
+				if readErr != nil {
+					return readErr
+				}
+				require.False(t, found, "failed apply published key %x", key)
+			}
+			return nil
+		}))
 		require.NoError(t, s.ValidateTaintState())
 	}
 	scoped = s.BeginConsensusTransaction(nil)
 	_, err = scoped.ApplyTaintDecision("sage", id, target, payload)
 	require.NoError(t, err)
-	require.Equal(t, 7, scoped.writeAttempts)
+	require.Equal(t, len(applyKeys), scoped.writeAttempts)
 	revision := s.CanonicalMemoryProjectionRevision()
 	require.NoError(t, scoped.CommitConsensusTransaction())
 	require.True(t, foundIn(s))

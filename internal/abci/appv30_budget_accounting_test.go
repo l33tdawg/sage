@@ -65,9 +65,9 @@ func TestAppV30GeneratedWriteAccountingMatchesCanonicalTaintSizes(t *testing.T) 
 		},
 	})
 	require.EqualValues(t, 383_076, workEstimate)
-	require.EqualValues(t, 383_797, proposalEstimate(tx.TaintActionApply))
-	require.EqualValues(t, appV30TargetAnchorBytes, proposalEstimate(tx.TaintActionApply)-workEstimate)
-	require.EqualValues(t, 634_948, proposalEstimate(tx.TaintActionClear))
+	require.EqualValues(t, 386_083, proposalEstimate(tx.TaintActionApply))
+	require.EqualValues(t, appV30TargetAnchorBytes+appV30ScopeStateMaxBytes+appV30ActiveIndexBytes, proposalEstimate(tx.TaintActionApply)-workEstimate)
+	require.EqualValues(t, 635_048, proposalEstimate(tx.TaintActionClear))
 	require.Equal(t, proposalEstimate(tx.TaintActionClear), appV30PendingGovernanceBytes)
 	require.GreaterOrEqual(t, appV30PendingGovernanceBytes, proposalEstimate(tx.TaintActionApply))
 }
@@ -104,9 +104,9 @@ func TestAppV30PendingGovernanceReservationPrestate(t *testing.T) {
 		{name: "other_operation", active: true, op: governance.OpAddValidator, created: 20},
 		{name: "historical_before_activation", active: true, op: governance.OpMemoryTaint, created: 18},
 		{name: "historical_at_activation", active: true, op: governance.OpMemoryTaint, created: 19},
-		{name: "pending_apply", active: true, op: governance.OpMemoryTaint, created: 20, status: governance.StatusVoting, action: tx.TaintActionApply, want: 634_948},
-		{name: "pending_clear", active: true, op: governance.OpMemoryTaint, created: 20, status: governance.StatusVoting, action: tx.TaintActionClear, want: 634_948},
-		{name: "status_not_used_to_forecast", active: true, op: governance.OpMemoryTaint, created: 20, status: governance.StatusExecuted, action: tx.TaintActionApply, want: 634_948},
+		{name: "pending_apply", active: true, op: governance.OpMemoryTaint, created: 20, status: governance.StatusVoting, action: tx.TaintActionApply, want: 635_048},
+		{name: "pending_clear", active: true, op: governance.OpMemoryTaint, created: 20, status: governance.StatusVoting, action: tx.TaintActionClear, want: 635_048},
+		{name: "status_not_used_to_forecast", active: true, op: governance.OpMemoryTaint, created: 20, status: governance.StatusExecuted, action: tx.TaintActionApply, want: 635_048},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			app := appV30BudgetPreflightApp(t)
@@ -172,7 +172,7 @@ func TestAppV30PendingGovernanceBudgetPreflight(t *testing.T) {
 				"the pending reservation must be what makes this block exceed the byte budget")
 			fit, err := app.appV30BlockGeneratedWriteEstimate(txs[:44], 21)
 			require.NoError(t, err)
-			require.EqualValues(t, 634_948+44*80_221, fit)
+			require.EqualValues(t, 635_048+44*80_221, fit)
 			_, err = app.appV30BlockGeneratedWriteEstimate(txs, 21)
 			require.ErrorIs(t, err, errAppV30GeneratedWriteBudgetExceeded)
 			require.NotErrorIs(t, err, errAppV30TaintWorkLimitExceeded)

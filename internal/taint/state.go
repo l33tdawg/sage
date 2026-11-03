@@ -23,6 +23,10 @@ const (
 	MaxMemoryIDBytes         = 512
 	MaxCursorBytes           = 512
 	DecisionIDBytes          = 64
+	// MaxProvenanceAdmissionTaintUnits is the 625-unit parent inheritance
+	// ceiling plus 98 bounded retained-slot inventory reads. Scope matching
+	// is bounded local computation, not an additional KV read per signer.
+	MaxProvenanceAdmissionTaintUnits = 723
 )
 
 const minimumHeaderBytes = 79
@@ -116,6 +120,16 @@ func DecisionKey(decisionID string) []byte {
 }
 
 // TargetKey retains immutable target history after expansion and cleanup.
+// ActiveDecisionPrefix indexes all retained capacity slots, including Cleaning.
+// Only Status.Active scopes match; the slot is released atomically at Clean.
+func ActiveDecisionPrefix() []byte {
+	return []byte("taintactivedec:")
+}
+
+func ActiveDecisionKey(decisionID string) []byte {
+	return append(ActiveDecisionPrefix(), decisionID...)
+}
+
 func TargetKey(decisionID string) []byte {
 	return []byte("tainttarget:" + decisionID)
 }

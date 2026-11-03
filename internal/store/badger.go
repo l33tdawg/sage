@@ -435,6 +435,8 @@ func isCanonicalMemoryProjectionKey(key []byte) bool {
 		[]byte("cocommit:shared:"),
 		[]byte("taintdec:"),
 		[]byte("tainttarget:"),
+		[]byte("taintscope:"),
+		[]byte("taintactivedec:"),
 		[]byte("taintm:"),
 		[]byte("taintd:"),
 		[]byte("taintq:"),

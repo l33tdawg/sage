@@ -19,12 +19,16 @@ import (
 // Iterator setup/seek is bounded by the charged node/edge/membership reads.
 // These local caps are not consensus byte limits or wall-clock guarantees.
 func (s *TaintServingReadScope) takeCoverageRead() bool {
+	return s.takeCoverageUnits(1)
+}
+
+func (s *TaintServingReadScope) takeCoverageUnits(units int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.coverageRemaining == 0 {
+	if units < 0 || units > s.coverageRemaining {
 		return false
 	}
-	s.coverageRemaining--
+	s.coverageRemaining -= units
 	return true
 }
 
@@ -43,7 +47,12 @@ type taintCoverageNode struct {
 	bound    bool
 }
 
-func (s *BadgerStore) discoverTaintCoverage(memoryID string, scope *TaintServingReadScope) (observation taintCoverageObservation) {
+func (s *BadgerStore) discoverTaintCoverage(memoryID string, scope *TaintServingReadScope, nonDirectScopes []activeTaintDecisionScope) (observation taintCoverageObservation) {
+	// Mandatory classification may return at an earlier direct membership.
+	// Scope completeness must still cover every observed ancestor branch.
+	// These optional provenance reads spend only the shared metadata allowance.
+	scopeMeter := newTaintUnitMeter(taint.MaxServingAncestorWalk, errTaintCoverageUnproved)
+	scopeMeter.coverageRequest = scope
 	queue := []taintCoverageNode{{id: memoryID}}
 	hashes := make(map[string][sha256.Size]byte)
 	graph := make(map[string][]string)
@@ -80,6 +89,22 @@ func (s *BadgerStore) discoverTaintCoverage(memoryID string, scope *TaintServing
 		hashes[current.id] = hash
 		if membershipErr := s.taintCoverageMemberships(current.id, scope, headers, &observation, &incomplete); membershipErr != nil {
 			return observation
+		}
+		if len(nonDirectScopes) > 0 {
+			provenance, provenanceErr := authorProvenanceTxn(s.txn, current.id, scopeMeter)
+			if provenanceErr != nil || !provenance.CoverageKnown {
+				return observation
+			}
+			for _, active := range nonDirectScopes {
+				if active.Scope.Kind == tx.TaintScopeRootGeneration && !provenance.Exact {
+					return observation
+				}
+				if active.Scope.Matches(provenance) {
+					incomplete = incomplete || active.Header.Status.Incomplete()
+					observation.depth = observation.depth || active.Header.Status == taint.StatusDepthExhausted
+					observation.work = observation.work || active.Header.Status == taint.StatusWorkExhausted
+				}
+			}
 		}
 		parents, err := s.taintCoverageParents(current.id, scope)
 		if err != nil {

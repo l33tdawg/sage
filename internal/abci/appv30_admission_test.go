@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/governance"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -197,6 +198,7 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 	const chainID = "app-v30-clearance-chain"
 	require.NoError(t, app.SetExpectedGovernanceDelegationDomain(chainID))
 	activateAppV30ForMemorySubmitTest(t, app, 20)
+	require.NoError(t, app.badgerStore.SetAccessGrant("general", member.id, 1, 0, root.id))
 
 	parentContentHash := sha256.Sum256([]byte("top secret parent"))
 	parent := tx.ParentRef{
@@ -222,11 +224,14 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 
 	submit := makeMemorySubmitTx(t, member, "general", "unauthorized child")
 	submit.MemorySubmit.DerivedFrom = []tx.ParentRef{parent}
-	_, err = app.preflightAppV30Lineage(
+	memberSigners, err := app.appV30ProvenanceSigners(member.id, member.id, 20)
+	require.NoError(t, err)
+	_, err = app.preflightAppV30Admission(
 		submit,
 		member.id,
 		memoryIDForSubmit(submit.MemorySubmit, 20, member.id),
 		submit.MemorySubmit.DerivedFrom,
+		memberSigners,
 		20,
 		appV23BlockTime(),
 	)
@@ -235,11 +240,12 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 
 	wrongHash := parent
 	wrongHash.ContentHash = sha256.Sum256([]byte("wrong parent hash"))
-	_, wrongHashErr := app.preflightAppV30Lineage(
+	_, wrongHashErr := app.preflightAppV30Admission(
 		submit,
 		member.id,
 		memoryIDForSubmit(submit.MemorySubmit, 20, member.id),
 		[]tx.ParentRef{wrongHash},
+		memberSigners,
 		20,
 		appV23BlockTime(),
 	)
@@ -249,17 +255,48 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 
 	missing := parent
 	missing.MemoryID = "missing-parent"
-	_, missingErr := app.preflightAppV30Lineage(
+	_, missingErr := app.preflightAppV30Admission(
 		submit,
 		member.id,
 		memoryIDForSubmit(submit.MemorySubmit, 20, member.id),
 		[]tx.ParentRef{missing},
+		memberSigners,
 		20,
 		appV23BlockTime(),
 	)
 	require.ErrorIs(t, missingErr, store.ErrMemoryLineageUnavailable)
 	require.Equal(t, err.Error(), missingErr.Error(),
 		"unauthorized and missing-parent probes must be indistinguishable")
+
+	childID := memoryIDForSubmit(submit.MemorySubmit, 20, member.id)
+	self := parent
+	self.MemoryID = childID
+	_, selfErr := app.preflightAppV30Admission(
+		submit, member.id, childID, []tx.ParentRef{self}, memberSigners, 20, appV23BlockTime(),
+	)
+	require.ErrorIs(t, selfErr, store.ErrMemoryLineageUnavailable)
+	require.Equal(t, err.Error(), selfErr.Error(),
+		"unauthorized and valid local self-reference probes must be indistinguishable")
+	require.NotContains(t, selfErr.Error(), childID)
+	require.NotContains(t, selfErr.Error(), parent.MemoryID)
+
+	foreignSelf := self
+	foreignSelf.SourceChainID = chainID + "-remote"
+	_, foreignErr := app.preflightAppV30Admission(
+		submit, member.id, childID, []tx.ParentRef{foreignSelf}, memberSigners, 20, appV23BlockTime(),
+	)
+	require.ErrorIs(t, foreignErr, store.ErrMemoryLineageMalformed,
+		"unsupported non-local refs remain a separate structural refusal")
+	require.NotErrorIs(t, foreignErr, store.ErrMemoryLineageUnavailable)
+
+	// A caller-readable, same-hash parent is a positive control for this
+	// exact fixture; the generic refusal is not an unconditional rejection.
+	require.NoError(t, app.badgerStore.SetMemoryClassification(parent.MemoryID, uint8(store.ClearancePublic)))
+	gotChain, readableErr := app.preflightAppV30Admission(
+		submit, member.id, childID, []tx.ParentRef{parent}, memberSigners, 20, appV23BlockTime(),
+	)
+	require.NoError(t, readableErr)
+	require.Equal(t, chainID, gotChain)
 }
 
 func TestAppV30CoCommitWritesEverySignerProvenance(t *testing.T) {
@@ -305,6 +342,30 @@ func TestAppV30CoCommitWritesEverySignerProvenance(t *testing.T) {
 	}, byCredential[foreignID])
 }
 
+func TestAppV30MemorySubmitInheritsMatchingCredentialScope(t *testing.T) {
+	app, root, target, _ := setupAppV30TaintGovernance(t)
+
+	apply := appV30ApplyPayload(target)
+	apply.ScopeKind = tx.TaintScopeCredentialSet
+	apply.Credentials = []string{root.id}
+	payload, err := tx.EncodeTaintApplyPayload(apply)
+	require.NoError(t, err)
+	decisionID, err := tx.TaintApplyDecisionID(payload)
+	require.NoError(t, err)
+	require.NoError(t, app.applyAppV30TaintProposal(&governance.ProposalState{
+		Operation: governance.OpMemoryTaint,
+		TargetID:  decisionID,
+		Payload:   payload,
+	}, 20))
+
+	submit := makeMemorySubmitTx(t, root, "general", "scope admission child")
+	result := app.processMemorySubmit(submit, 20, appV23BlockTime())
+	require.Equal(t, uint32(0), result.Code, result.Log)
+	memoryID := memoryIDForSubmit(submit.MemorySubmit, 20, root.id)
+	decisions, err := app.badgerStore.GetEffectiveTaintDecisions(memoryID)
+	require.NoError(t, err)
+	require.Equal(t, []string{decisionID}, decisions)
+}
 func TestAppV30CoCommitConflictPreservesAcceptedMemory(t *testing.T) {
 	for _, test := range []struct {
 		name   string

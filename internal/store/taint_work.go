@@ -23,7 +23,8 @@ const (
 	taintEmptyIteratorUnits = 1
 	taintMemberCleanupUnits = 3
 	taintQueueCleanupUnits  = 2
-	taintActiveReleaseUnits = 2
+	// Releasing a retained slot reads/writes its count and deletes its index.
+	taintActiveReleaseUnits = 3
 )
 
 type TaintExpandResult struct {
@@ -460,6 +461,9 @@ func (s *BadgerStore) CleanupTaintDecision(
 						active-1,
 					); writeErr != nil {
 						return writeErr
+					}
+					if deleteErr := s.txnDelete(txn, taint.ActiveDecisionKey(decisionID)); deleteErr != nil {
+						return deleteErr
 					}
 					operationUnits += taintActiveReleaseUnits
 					header.Status = taint.StatusClean

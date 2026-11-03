@@ -15,6 +15,7 @@ import (
 func (s *BadgerStore) ValidateTaintState() error {
 	return s.view(func(txn *badger.Txn) error {
 		headers := make(map[string]taint.Header)
+		scopes := make(map[string]TaintDecisionScope)
 		decisionPrefix := []byte("taintdec:")
 		options := badger.DefaultIteratorOptions
 		options.Prefix = decisionPrefix
@@ -42,6 +43,15 @@ func (s *BadgerStore) ValidateTaintState() error {
 				decisions.Close()
 				return targetErr
 			}
+			decisionScope, scopeFound, scopeErr := readTaintDecisionScopeTxn(txn, decisionID, header.PayloadHash, nil)
+			if scopeErr != nil || !scopeFound {
+				decisions.Close()
+				if scopeErr != nil {
+					return scopeErr
+				}
+				return fmt.Errorf("%w: decision has no canonical scope", ErrTaintStateMalformed)
+			}
+			scopes[decisionID] = decisionScope
 			headers[decisionID] = header
 		}
 		decisions.Close()
@@ -80,6 +90,105 @@ func (s *BadgerStore) ValidateTaintState() error {
 				ErrTaintStateMalformed,
 				active,
 				expectedActive,
+			)
+		}
+
+		scopePrefix := []byte("taintscope:")
+		scopeOptions := badger.DefaultIteratorOptions
+		scopeOptions.Prefix = scopePrefix
+		scopeOptions.PrefetchValues = false
+		scopeItems := txn.NewIterator(scopeOptions)
+		seenScopes := 0
+		for scopeItems.Seek(scopePrefix); scopeItems.ValidForPrefix(scopePrefix); scopeItems.Next() {
+			if len(scopeItems.Item().Key()) != len(scopePrefix)+taint.DecisionIDBytes || scopeItems.Item().ValueSize() > taintScopeValueMaxBytes {
+				scopeItems.Close()
+				return fmt.Errorf("%w: malformed scope key/value", ErrTaintStateMalformed)
+			}
+			decisionID := string(scopeItems.Item().Key()[len(scopePrefix):])
+			if err := taint.ValidateDecisionID(decisionID); err != nil {
+				scopeItems.Close()
+				return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+			}
+			header, found := headers[decisionID]
+			if !found {
+				scopeItems.Close()
+				return fmt.Errorf("%w: decision scope has no header", ErrTaintStateMalformed)
+			}
+			raw, err := scopeItems.Item().ValueCopy(nil)
+			if err != nil {
+				scopeItems.Close()
+				return err
+			}
+			payloadHash, decisionScope, err := decodeTaintDecisionScope(raw)
+			if err != nil {
+				scopeItems.Close()
+				return err
+			}
+			if payloadHash != header.PayloadHash ||
+				!equalTaintDecisionScope(decisionScope, scopes[decisionID]) {
+				scopeItems.Close()
+				return fmt.Errorf("%w: decision scope changed during recovery validation", ErrTaintStateMalformed)
+			}
+			seenScopes++
+		}
+		scopeItems.Close()
+		if seenScopes != len(headers) {
+			return fmt.Errorf(
+				"%w: %d decision headers have %d scopes",
+				ErrTaintStateMalformed,
+				len(headers),
+				seenScopes,
+			)
+		}
+
+		activeDecisionPrefix := taint.ActiveDecisionPrefix()
+		activeDecisionOptions := badger.DefaultIteratorOptions
+		activeDecisionOptions.Prefix = activeDecisionPrefix
+		activeDecisionOptions.PrefetchValues = false
+		activeDecisionItems := txn.NewIterator(activeDecisionOptions)
+		indexedActive := make(map[string]struct{}, taint.MaxActiveDecisions)
+		for activeDecisionItems.Seek(activeDecisionPrefix); activeDecisionItems.ValidForPrefix(activeDecisionPrefix); activeDecisionItems.Next() {
+			if len(activeDecisionItems.Item().Key()) != len(activeDecisionPrefix)+taint.DecisionIDBytes || activeDecisionItems.Item().ValueSize() != 0 {
+				activeDecisionItems.Close()
+				return fmt.Errorf("%w: malformed active index key/value", ErrTaintStateMalformed)
+			}
+			decisionID := string(activeDecisionItems.Item().Key()[len(activeDecisionPrefix):])
+			if err := taint.ValidateDecisionID(decisionID); err != nil {
+				activeDecisionItems.Close()
+				return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+			}
+			header, found := headers[decisionID]
+			if !found || (!header.Status.Active() && header.Status != taint.StatusCleaning) {
+				activeDecisionItems.Close()
+				return fmt.Errorf("%w: retained-slot index references a released decision", ErrTaintStateMalformed)
+			}
+			if _, duplicate := indexedActive[decisionID]; duplicate {
+				activeDecisionItems.Close()
+				return fmt.Errorf("%w: duplicate active decision index", ErrTaintStateMalformed)
+			}
+			indexedActive[decisionID] = struct{}{}
+			if len(indexedActive) > taint.MaxActiveDecisions {
+				activeDecisionItems.Close()
+				return fmt.Errorf("%w: active decision index exceeds cap", ErrTaintStateMalformed)
+			}
+		}
+		activeDecisionItems.Close()
+		expectedIndexedActive := 0
+		for decisionID, header := range headers {
+			if !header.Status.Active() && header.Status != taint.StatusCleaning {
+				continue
+			}
+			expectedIndexedActive++
+			if _, found := indexedActive[decisionID]; !found {
+				return fmt.Errorf("%w: active decision has no active index", ErrTaintStateMalformed)
+			}
+		}
+		if len(indexedActive) != expectedIndexedActive {
+			return fmt.Errorf(
+				"%w: %d active decisions have %d active indexes",
+				ErrTaintStateMalformed,
+				expectedIndexedActive,
+				len(indexedActive),
 			)
 		}
 

@@ -5514,20 +5514,6 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 	)
 	if app.postAppV30Fork(height) {
 		appV30MemoryID = memoryIDForSubmit(submit, height, credentialID)
-		appV30LocalChainID, err = app.preflightAppV30Lineage(
-			parsedTx,
-			credentialID,
-			appV30MemoryID,
-			submit.DerivedFrom,
-			height,
-			blockTime,
-		)
-		if err != nil {
-			return &abcitypes.ExecTxResult{
-				Code: 11,
-				Log:  "memory lineage rejected: " + err.Error(),
-			}
-		}
 		appV30Signers, err = app.appV30ProvenanceSigners(
 			credentialID,
 			authorityID,
@@ -5544,6 +5530,13 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 				Code: 11,
 				Log:  "memory submit rejected: " + provenanceErr.Error(),
 			}
+		}
+		appV30LocalChainID, err = app.preflightAppV30Admission(
+			parsedTx, credentialID, appV30MemoryID, submit.DerivedFrom,
+			appV30Signers, height, blockTime,
+		)
+		if err != nil {
+			return &abcitypes.ExecTxResult{Code: 11, Log: "app-v30 admission rejected: " + err.Error()}
 		}
 	}
 	taskIdempotency, err := app.appV23TaskIdempotencyForSubmit(
@@ -5896,15 +5889,16 @@ func (app *SageApp) processMemorySubmit(parsedTx *tx.ParsedTx, height int64, blo
 		}
 	}
 
-	if len(submit.DerivedFrom) > 0 {
-		if _, err := app.applyAppV30Lineage(
+	if len(appV30Signers) > 0 {
+		if _, err := app.applyAppV30Admission(
 			appV30LocalChainID,
 			memoryID,
 			submit.DerivedFrom,
+			appV30Signers,
 		); err != nil {
 			return &abcitypes.ExecTxResult{
 				Code: 12,
-				Log:  "persist app-v30 lineage: " + err.Error(),
+				Log:  "persist app-v30 lineage and taint admission: " + err.Error(),
 			}
 		}
 	}
@@ -6282,6 +6276,7 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 	}
 	sharedID := env.SharedID
 	var appV30Signers []store.AppV30ProvenanceSigner
+	var appV30LocalChainID string
 	if app.postAppV30Fork(height) {
 		var provenanceErr error
 		appV30Signers, provenanceErr = appV30CoCommitProvenanceSigners(
@@ -6296,6 +6291,18 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 			appV30Signers,
 		); provenanceErr != nil {
 			return &abcitypes.ExecTxResult{Code: 98, Log: "co-commit: provenance conflict: " + provenanceErr.Error()}
+		}
+		appV30LocalChainID = app.expectedConsensusChainIDValue()
+		if _, provenanceErr = app.badgerStore.ValidateTaintAdmission(
+			appV30LocalChainID,
+			sharedID,
+			nil,
+			appV30Signers,
+		); provenanceErr != nil {
+			return &abcitypes.ExecTxResult{
+				Code: 99,
+				Log:  "co-commit: taint admission preflight failed: " + provenanceErr.Error(),
+			}
 		}
 	}
 
@@ -6582,6 +6589,17 @@ func (app *SageApp) processCoCommitSubmit(parsedTx *tx.ParsedTx, height int64, b
 			return &abcitypes.ExecTxResult{
 				Code: 99,
 				Log:  "co-commit: persist app-v30 provenance: " + err.Error(),
+			}
+		}
+		if _, err := app.badgerStore.ApplyTaintAdmission(
+			appV30LocalChainID,
+			sharedID,
+			nil,
+			appV30Signers,
+		); err != nil {
+			return &abcitypes.ExecTxResult{
+				Code: 99,
+				Log:  "co-commit: apply taint admission: " + err.Error(),
 			}
 		}
 	}

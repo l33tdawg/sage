@@ -126,6 +126,10 @@ func TestAppV30MemoryTaintApplyAndClearExecuteAtProposalBoundary(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, taint.StatusComplete, header.Status)
+	decisionScope, found, err := app.badgerStore.GetTaintDecisionScope(decisionID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, store.TaintDecisionScope{Kind: tx.TaintScopeDirect}, decisionScope)
 	decisions, err := app.badgerStore.GetEffectiveTaintDecisions(target.MemoryID)
 	require.NoError(t, err)
 	require.Equal(t, []string{decisionID}, decisions)
@@ -157,6 +161,31 @@ func TestAppV30MemoryTaintApplyAndClearExecuteAtProposalBoundary(t *testing.T) {
 	decisions, err = app.badgerStore.GetEffectiveTaintDecisions(target.MemoryID)
 	require.NoError(t, err)
 	require.Empty(t, decisions)
+}
+
+func TestAppV30MemoryTaintPersistsCredentialScope(t *testing.T) {
+	app, _, target, _ := setupAppV30TaintGovernance(t)
+	rootState, err := app.badgerStore.GetAppV23Root()
+	require.NoError(t, err)
+	require.NotNil(t, rootState)
+
+	apply := appV30ApplyPayload(target)
+	apply.ScopeKind = tx.TaintScopeCredentialSet
+	apply.Credentials = []string{rootState.CredentialID}
+	payload, err := tx.EncodeTaintApplyPayload(apply)
+	require.NoError(t, err)
+	decisionID, err := tx.TaintApplyDecisionID(payload)
+	require.NoError(t, err)
+	require.NoError(t, app.applyAppV30TaintProposal(&governance.ProposalState{
+		Operation: governance.OpMemoryTaint,
+		TargetID:  decisionID,
+		Payload:   payload,
+	}, 20))
+
+	decisionScope, found, err := app.badgerStore.GetTaintDecisionScope(decisionID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, store.TaintDecisionScopeFromPayload(apply), decisionScope)
 }
 
 func TestAppV30TaintExecutionActualWritesFitReservation(t *testing.T) {

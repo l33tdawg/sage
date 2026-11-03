@@ -108,6 +108,7 @@ func TestMemoryProjectionPreservesTaintClassificationErrors(t *testing.T) {
 				childID := record.MemoryID
 				for i := 0; i < taint.MaxServingAncestorWalk; i++ {
 					parent := testTaintParent(fmt.Sprintf("serving-ancestor-%03d", i))
+					require.NoError(t, s.SetMemoryHash(parent.MemoryID, parent.ContentHash[:], string(memory.StatusCommitted)))
 					require.NoError(t, s.SetMemoryLineage(childID, []tx.ParentRef{parent}))
 					childID = parent.MemoryID
 				}
@@ -166,16 +167,28 @@ func TestClassifyMemoryTaintZeroHeadersDeepLineage(t *testing.T) {
 				require.NoError(t, err)
 				require.True(t, found)
 				require.True(t, header.Status.Incomplete())
-				// A stale zero counter is not evidence that canonical headers are absent.
-				require.NoError(t, s.SetRawForTest(taint.ActiveCountKey(), make([]byte, 8)))
 			}
 			active, err := s.ActiveTaintDecisionCount()
 			require.NoError(t, err)
-			require.Zero(t, active)
+			if withHeader {
+				require.Equal(t, uint64(1), active)
+			} else {
+				require.Zero(t, active)
+			}
 			verdict, err := s.ClassifyMemoryTaint(record.MemoryID)
 			if withHeader {
 				require.ErrorIs(t, err, ErrTaintServingWalkBudget)
 				require.Equal(t, taint.MaxServingAncestorWalk, verdict.Nodes)
+				t.Run("false_zero_counter_is_malformed", func(t *testing.T) {
+					// Counter corruption is distinct from a valid incomplete
+					// decision exhausting the ancestor budget. Neither is Clear.
+					require.NoError(t, s.SetRawForTest(taint.ActiveCountKey(), make([]byte, 8)))
+					corrupt, err := s.ClassifyMemoryTaint(record.MemoryID)
+					require.ErrorIs(t, err, ErrTaintStateMalformed)
+					require.NotErrorIs(t, err, ErrTaintServingWalkBudget)
+					require.Zero(t, corrupt.Nodes, "inventory validation precedes the ancestor walk")
+					require.False(t, corrupt.CoverageComplete)
+				})
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, TaintServingClear, verdict.Outcome)

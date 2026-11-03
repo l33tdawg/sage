@@ -362,8 +362,8 @@ replacement first, old-memory challenge second.
   can leave both memories live, but cannot leave neither.
 - `derived_from` creates the authenticated app-v30 lineage graph; it is
   distinct from legacy `parent_hash` and from mutable typed links. Missing,
-  unauthorized, deprecated, and wrong-hash parents share a generic
-  lineage-unavailable refusal. Invalid structure, self-reference, and non-local
+  hidden, unauthorized, deprecated, self-referential, and wrong-hash parents
+  share a generic lineage-unavailable refusal. Invalid structure and non-local
   chain references are separate malformed-input errors.
 
 Before this default alignment, `sage_remember(type="task")` with omitted

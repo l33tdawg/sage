@@ -19,6 +19,9 @@ const (
 	appV30MembershipTripleBytes  int64 = 1_852
 	appV30HeaderMaxBytes         int64 = 1_172
 	appV30TargetAnchorBytes      int64 = 721
+	appV30ScopeStateMaxBytes     int64 = 2_206
+	appV30ActiveIndexBytes       int64 = 80
+	appV30TombstoneBytes         int64 = 20
 	appV30GeneratedOverheadBytes int64 = 4 << 10
 	appV30SubmitOverheadBytes    int64 = 13_191
 	appV30MaxCleanupMemberPairs        = 340
@@ -26,7 +29,7 @@ const (
 	// Clear is the larger of the corrected Apply/Clear allowances.
 	appV30PendingGovernanceBytes = appV30GeneratedOverheadBytes +
 		int64(appV30MaxCleanupMemberPairs)*appV30MembershipTripleBytes +
-		appV30HeaderMaxBytes
+		appV30HeaderMaxBytes + appV30ActiveIndexBytes + appV30TombstoneBytes
 )
 
 var (
@@ -53,6 +56,9 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 		estimate := appV30SubmitOverheadBytes
 		// One app-v30 signer marker: key + count + fixed signer tuple.
 		estimate += int64(len("memprov:v30:")) + childBytes + 1 + appV30ProvenanceSignerBytes
+		// Scope matching and parent inheritance can independently materialize up
+		// to one admission membership for every active decision.
+		estimate += appV30AdmissionMembershipEstimate(childBytes)
 		if len(parsed.MemorySubmit.DerivedFrom) > 0 {
 			for _, ref := range parsed.MemorySubmit.DerivedFrom {
 				chainBytes := int64(len(ref.SourceChainID))
@@ -62,12 +68,7 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 				reverseKey := int64(len("lineage-ref:")) + 64 + 1 + childBytes
 				estimate += forwardKey + forwardValue + reverseKey
 			}
-			// Admission inheritance is bounded independently at 32 decisions.
-			for i := 0; i < taint.MaxActiveDecisions; i++ {
-				membershipKey := int64(len("taintm:")) + 2 + childBytes + 1 + 64
-				indexKey := int64(len("taintd:")) + 64 + 1 + childBytes
-				estimate += membershipKey + 11 + indexKey
-			}
+
 		}
 		return estimate
 
@@ -90,7 +91,7 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 		case tx.MemoryTaintWorkCleanup:
 			return appV30GeneratedOverheadBytes +
 				int64(appV30MaxCleanupMemberPairs)*appV30MembershipTripleBytes +
-				appV30HeaderMaxBytes
+				appV30HeaderMaxBytes + appV30ActiveIndexBytes + appV30TombstoneBytes
 		}
 
 	case tx.TxTypeCoCommitSubmit:
@@ -98,15 +99,27 @@ func appV30GeneratedWriteEstimate(parsed *tx.ParsedTx) int64 {
 			return 0
 		}
 		signers := int64(len(parsed.CoCommitSubmit.Coauthors))
+		childBytes := int64(len(parsed.CoCommitSubmit.SharedID))
 		return appV30GeneratedOverheadBytes +
 			int64(len("memprov:v30:")) +
-			int64(len(parsed.CoCommitSubmit.SharedID)) +
-			1 + signers*appV30ProvenanceSignerBytes
+			childBytes +
+			1 + signers*appV30ProvenanceSignerBytes +
+			appV30AdmissionMembershipEstimate(childBytes)
 	}
 	return 0
 }
 
 const appV30ProvenanceSignerBytes int64 = 64 + 64 + 8 + 1
+
+func appV30AdmissionMembershipEstimate(childBytes int64) int64 {
+	var estimate int64
+	for i := 0; i < taint.MaxActiveDecisions; i++ {
+		membershipKey := int64(len("taintm:")) + 2 + childBytes + 1 + 64
+		indexKey := int64(len("taintd:")) + 64 + 1 + childBytes
+		estimate += membershipKey + 11 + indexKey
+	}
+	return estimate
+}
 
 func appV30TaintExecutionEstimate(payload []byte) int64 {
 	if len(payload) < 2 {
@@ -116,11 +129,12 @@ func appV30TaintExecutionEstimate(payload []byte) int64 {
 	case tx.TaintActionApply:
 		return appV30GeneratedOverheadBytes +
 			int64(taint.MaxNewMembershipsPerExec)*appV30MembershipTripleBytes +
-			appV30HeaderMaxBytes + appV30TargetAnchorBytes
+			appV30HeaderMaxBytes + appV30TargetAnchorBytes +
+			appV30ScopeStateMaxBytes + appV30ActiveIndexBytes
 	case tx.TaintActionClear:
 		return appV30GeneratedOverheadBytes +
 			int64(appV30MaxCleanupMemberPairs)*appV30MembershipTripleBytes +
-			appV30HeaderMaxBytes
+			appV30HeaderMaxBytes + appV30ActiveIndexBytes + appV30TombstoneBytes
 	default:
 		return 0
 	}

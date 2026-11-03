@@ -13,18 +13,19 @@ import (
 const taintServingHeaderReadLimit = 256
 const taintServingCacheEntries = 4
 
-// TaintServingReadScope bounds added cold header reads and, independently,
-// optional metadata reads across one request. It contains no caller, memory
-// or decision identity. A zero value has neither allowance; callers should
+// TaintServingReadScope bounds mandatory scope/disposition work, cold header
+// discovery, and optional metadata independently across one request. It contains no caller, memory
+// or decision identity. A zero value has no allowance; callers should
 // use NewTaintServingReadScope.
 type TaintServingReadScope struct {
-	mu                sync.Mutex
-	remaining         int
-	coverageRemaining int
+	mu                 sync.Mutex
+	remaining          int
+	coverageRemaining  int
+	mandatoryRemaining int
 }
 
 func NewTaintServingReadScope() *TaintServingReadScope {
-	return &TaintServingReadScope{remaining: taintServingHeaderReadLimit, coverageRemaining: taint.MaxServingAncestorWalk}
+	return &TaintServingReadScope{remaining: taintServingHeaderReadLimit, coverageRemaining: taint.MaxServingAncestorWalk, mandatoryRemaining: taint.MaxServingRequestUnits}
 }
 
 func (s *TaintServingReadScope) takeHeaderRead() bool {
@@ -34,6 +35,19 @@ func (s *TaintServingReadScope) takeHeaderRead() bool {
 		return false
 	}
 	s.remaining--
+	return true
+}
+
+// Mandatory scope/disposition work is independent of cold-header discovery
+// and optional metadata. Sharing this object shares the budget, not any caller
+// or decision identity, including across concurrent filters/final rechecks.
+func (s *TaintServingReadScope) takeMandatoryUnits(units int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if units < 0 || units > s.mandatoryRemaining {
+		return false
+	}
+	s.mandatoryRemaining -= units
 	return true
 }
 
@@ -151,6 +165,9 @@ func (s *BadgerStore) incompleteTaintStatus(scope *TaintServingReadScope) (taint
 		}
 		read++
 		key := it.Item().Key()
+		if len(key) != len(prefix)+taint.DecisionIDBytes || it.Item().ValueSize() > 79+taint.DecisionIDBytes+taint.MaxMemoryIDBytes+taint.MaxCursorBytes {
+			return taintIncompleteUnknown, fmt.Errorf("%w: malformed decision header key/value", ErrTaintStateMalformed)
+		}
 		id := string(bytes.TrimPrefix(key, prefix))
 		if err := taint.ValidateDecisionID(id); err != nil {
 			return taintIncompleteUnknown, fmt.Errorf("%w: invalid decision header key: %v", ErrTaintStateMalformed, err)
