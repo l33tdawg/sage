@@ -88,6 +88,7 @@ Submit a memory for BFT consensus. Blocks until `broadcast_tx_commit` returns (F
 | `embedding` | []float32 | no | Compatibility field. The node regenerates the vector from `content` with its currently selected provider so stale/foreign vector spaces cannot mix. |
 | `knowledge_triples` | []KnowledgeTriple | no | `{subject, predicate, object}` triples |
 | `parent_hash` | string | no | SHA-256 hex of parent memory for lineage |
+| `derived_from` | array<DerivedFromParent> | no | App-v30 authenticated lineage, 1–16 refs. Each ref carries `source_chain_id`, `memory_id`, and lowercase SHA-256 `content_hash`. The node canonicalizes order, requires the local chain, and verifies the parent is committed/challenged, within caller clearance/read authority, and has the exact hash. A pre-v30 node rejects the field with `https://sage.dev/errors/app-v30-required`. |
 | `task_status` | string | **app-v27: no; earlier: yes for `task`** | A new task may send `planned` explicitly. After app-v27, omission is canonicalized to `planned` by REST transaction construction and consensus proof verification. Before app-v27, omission is rejected with `400 Missing task status`, preserving the historical signed-body and replay contract. Agents start or finish an assigned task through the task-status route after creation. |
 | `linked_memories` | []string | no | Related memory IDs for legacy/non-idempotent submission paths. App-v23 task creation rejects this field because links are not part of the canonical task transaction; create links separately after the task is confirmed. |
 | `tags` | []string | no | Up to 32 labels of 128 UTF-8 bytes each. Above app-v20 they are sorted/deduplicated into the signed tx; scoped-domain tags are also AppHash-covered and projection-recoverable. Ordinary-domain tags remain node-local. OR-filter on query/search. |
@@ -155,6 +156,15 @@ A confirmed replay adds `"idempotent_replay":true` and
 The node performs bounded exact-assignee projection confirmation before it
 chooses `201`, `200`, or `202`. An idempotent replay whose projection is still
 unconfirmed also returns `202` and adds `"idempotent_replay":true`.
+
+For app-v30 tasks, the receipt also binds the canonical nonempty `derived_from`
+set. Reusing the same key with a different valid lineage payload or omitted
+lineage returns `409` before replaying the receipt. Invalid or non-local
+references are rejected by normal validation before receipt matching. Request
+order is canonicalized. Tasks without lineage keep the existing digest and receipts
+unchanged (`PayloadDigest` in `internal/taskidempotency/task.go`; replay callers
+in `api/rest/appv23_task_idempotency.go` and
+`internal/abci/appv23_task_idempotency.go`).
 
 **Ambiguous outcome — `202 Accepted` with `"status":"indeterminate"`:**
 
@@ -498,7 +508,7 @@ canonical-disclosure backend failures, and ancestor-traversal uncertainty remain
 can fail before policy evaluation.
 
 Sources: `appV30TaintProjectionProblem` (`api/rest/appv30_taint_problem.go:19`),
-`handleGetMemory` (`api/rest/memory_handler.go:3410`), and
+`handleGetMemory` (`api/rest/memory_handler.go:3496`), and
 `ClassifyMemoryProjectionForRead` (`internal/store/memory_disclosure.go:148`).
 
 ---

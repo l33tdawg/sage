@@ -34,6 +34,12 @@ type signedAgentRequest struct {
 	body   []byte
 }
 
+type derivedFromProofParent struct {
+	SourceChainID string `json:"source_chain_id"`
+	MemoryID      string `json:"memory_id"`
+	ContentHash   string `json:"content_hash"`
+}
+
 // enforceDelegatedAgentProof closes the delegated-signing gap that existed in
 // the original app-v17 candidate. When the outer transaction signer is not the
 // agent, consensus must independently prove that the signed HTTP request maps
@@ -46,6 +52,18 @@ func (app *SageApp) enforceDelegatedAgentProof(
 	parsedTx *tx.ParsedTx,
 	consensusTime time.Time,
 	claim, postAppV20, postAppV22, postAppV23, postAppV27 bool,
+) error {
+	return app.enforceDelegatedAgentProofForFork(
+		parsedTx, consensusTime, claim, postAppV20, postAppV22, postAppV23, postAppV27, false,
+	)
+}
+
+// enforceDelegatedAgentProofForFork receives the deterministic app-v30 gate
+// from each production caller. The historical wrapper retains pre-v30 behavior.
+func (app *SageApp) enforceDelegatedAgentProofForFork(
+	parsedTx *tx.ParsedTx,
+	consensusTime time.Time,
+	claim, postAppV20, postAppV22, postAppV23, postAppV27, postAppV30 bool,
 ) error {
 	usesAgentIdentity := txUsesAgentIdentity(parsedTx.Type)
 	governanceProof := postAppV20 && isProofBearingGovernanceRequest(parsedTx)
@@ -87,8 +105,8 @@ func (app *SageApp) enforceDelegatedAgentProof(
 	if err != nil {
 		return err
 	}
-	if bindErr := app.verifySignedAgentAction(
-		parsedTx, agentID, req, postAppV20, postAppV22, postAppV23, postAppV27,
+	if bindErr := app.verifySignedAgentActionForFork(
+		parsedTx, agentID, req, postAppV20, postAppV22, postAppV23, postAppV27, postAppV30,
 	); bindErr != nil {
 		return fmt.Errorf("delegated agent action mismatch: %w", bindErr)
 	}
@@ -277,6 +295,35 @@ func parseSignedAgentRequest(raw []byte) (signedAgentRequest, error) {
 		return signedAgentRequest{}, fmt.Errorf("signed request line contains invalid characters")
 	}
 	return signedAgentRequest{method: method, path: path, body: body}, nil
+}
+
+func decodeDerivedFromProofParents(input []derivedFromProofParent) ([]tx.ParentRef, error) {
+	if len(input) == 0 {
+		return nil, nil
+	}
+	refs := make([]tx.ParentRef, 0, len(input))
+	for i, parent := range input {
+		decoded, err := hex.DecodeString(parent.ContentHash)
+		if err != nil || len(decoded) != sha256.Size ||
+			hex.EncodeToString(decoded) != parent.ContentHash {
+			return nil, fmt.Errorf(
+				"signed derived_from parent %d content_hash must be lowercase %d-byte hex",
+				i,
+				sha256.Size,
+			)
+		}
+		ref := tx.ParentRef{
+			SourceChainID: parent.SourceChainID,
+			MemoryID:      parent.MemoryID,
+		}
+		copy(ref.ContentHash[:], decoded)
+		refs = append(refs, ref)
+	}
+	tx.SortParentRefs(refs)
+	if _, err := tx.EncodeDerivedFromExtension(refs); err != nil {
+		return nil, fmt.Errorf("signed derived_from lineage is invalid: %w", err)
+	}
+	return refs, nil
 }
 
 func (r signedAgentRequest) pathParts() ([]string, error) {
@@ -522,6 +569,17 @@ func (app *SageApp) verifySignedAgentAction(
 	agentID string,
 	req signedAgentRequest,
 	bindMemoryTags, postAppV22, postAppV23, postAppV27 bool,
+) error {
+	return app.verifySignedAgentActionForFork(
+		actual, agentID, req, bindMemoryTags, postAppV22, postAppV23, postAppV27, false,
+	)
+}
+
+func (app *SageApp) verifySignedAgentActionForFork(
+	actual *tx.ParsedTx,
+	agentID string,
+	req signedAgentRequest,
+	bindMemoryTags, postAppV22, postAppV23, postAppV27, postAppV30 bool,
 ) error { //nolint:gocyclo,maintidx // exhaustive protocol routing is intentionally centralized
 	expected := &tx.ParsedTx{Type: actual.Type}
 
@@ -550,6 +608,32 @@ func (app *SageApp) verifySignedAgentAction(
 		}
 		if body.Content == "" || body.ConfidenceScore < 0 || body.ConfidenceScore > 1 || body.Classification < 0 || body.Classification > 4 {
 			return fmt.Errorf("signed memory submission fails the REST contract")
+		}
+		var expectedDerivedFrom []tx.ParentRef
+		if postAppV30 {
+			// Decode the new field only after activation. Before app-v30,
+			// json.Unmarshal ignored its unknown value, including non-array
+			// values, and historical delegated requests must still replay.
+			var lineageBody struct {
+				DerivedFrom json.RawMessage `json:"derived_from"`
+			}
+			if lineageErr := json.Unmarshal(req.body, &lineageBody); lineageErr != nil {
+				return fmt.Errorf("decode signed derived_from: %w", lineageErr)
+			}
+			if len(lineageBody.DerivedFrom) != 0 {
+				var parents []derivedFromProofParent
+				if lineageErr := json.Unmarshal(lineageBody.DerivedFrom, &parents); lineageErr != nil {
+					return fmt.Errorf("signed derived_from must be a parent array: %w", lineageErr)
+				}
+				if len(parents) == 0 {
+					return fmt.Errorf("signed derived_from must contain between 1 and %d parents", tx.MaxDerivedFromParents)
+				}
+				var lineageErr error
+				expectedDerivedFrom, lineageErr = decodeDerivedFromProofParents(parents)
+				if lineageErr != nil {
+					return lineageErr
+				}
+			}
 		}
 		canonicalTaskStatus := ""
 		if len(body.TaskStatus) != 0 {
@@ -614,6 +698,7 @@ func (app *SageApp) verifySignedAgentAction(
 			Classification:  tx.ClearanceLevel(body.Classification), // #nosec G115 -- range checked above
 			TaskStatus:      canonicalTaskStatus,
 			Tags:            canonicalTags,
+			DerivedFrom:     expectedDerivedFrom,
 		}
 
 	case tx.TxTypeMemoryChallenge:

@@ -23,6 +23,7 @@ from sage_sdk.models import (
     AgentRegistration,
     ChallengeRequest,
     CorroborateRequest,
+    DerivedFromParent,
     DomainReassignRequest,
     DomainReassignResponse,
     ForgetRequest,
@@ -388,6 +389,7 @@ class SageClient:
         task_status: TaskStatus | str | None = None,
         linked_memories: list[str] | None = None,
         idempotency_key: str | None = None,
+        derived_from: list[DerivedFromParent] | None = None,
     ) -> MemorySubmitResponse:
         """Submit a memory transaction and wait for its chain commit.
 
@@ -401,6 +403,11 @@ class SageClient:
         CONFIDENTIAL, SECRET, TOP SECRET). When omitted the server stores
         the memory as PUBLIC (0); pass an explicit level to classify (e.g.
         3 for SECRET, 4 for TOP SECRET).
+
+        derived_from: optional app-v30 authenticated lineage parents. Each parent
+        must be local, committed or challenged, readable by this caller, and carry
+        the exact lowercase SHA-256 content hash. This is distinct from the
+        mutable links API and the legacy ``parent_hash`` field.
 
         App-v23 tasks may pass ``domain_tag=None`` to use the caller's committed
         owned home domain. The node derives a permanent semantic idempotency key
@@ -431,6 +438,7 @@ class SageClient:
             task_status=task_status,
             linked_memories=linked_memories,
             idempotency_key=idempotency_key,
+            derived_from=derived_from,
         )
         resp = self._request(
             "POST",

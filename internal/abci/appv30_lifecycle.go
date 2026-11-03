@@ -8,6 +8,15 @@ func (app *SageApp) postAppV30Fork(height int64) bool {
 	return app.appV30AppliedHeight > 0 && height > app.appV30AppliedHeight
 }
 
+// IsAppV30ActiveForNextTx reports whether a transaction admitted now will
+// execute under app-v30 rules. REST uses this boundary when constructing the
+// optional authenticated-lineage extension.
+func (app *SageApp) IsAppV30ActiveForNextTx() bool {
+	app.runtimeViewMu.RLock()
+	defer app.runtimeViewMu.RUnlock()
+	return app.postAppV30Fork(app.state.Height + 1)
+}
+
 func (app *SageApp) refreshAppV30Fork() error {
 	app.appV30AppliedHeight = 0
 	rec, err := app.badgerStore.GetAppliedUpgrade(appV30UpgradeName)

@@ -51,6 +51,22 @@ func (s *Server) registerTools() map[string]Tool {
 					"replaces_memory_id": map[string]any{"type": "string", "description": "Optional committed memory ID this content corrects. The replacement is committed first; only then is the old memory challenged."},
 					"replacement_reason": map[string]any{"type": "string", "description": "Optional audit reason recorded when the replaced memory is challenged."},
 					"evidence":           map[string]any{"type": "string", "description": "Optional source text this memory is based on (a quote, log line or document excerpt, up to 32 KiB). It stays on this node and never enters the chain; a node running the memory gate checks that it supports the memory as stated. Not for tasks."},
+					"derived_from": map[string]any{
+						"type":        "array",
+						"minItems":    1,
+						"maxItems":    16,
+						"description": "Authenticated app-v30 parent refs. Each parent must be committed or challenged, carry the exact content hash, and be readable by this caller.",
+						"items": map[string]any{
+							"type":                 "object",
+							"additionalProperties": false,
+							"properties": map[string]any{
+								"source_chain_id": map[string]any{"type": "string", "minLength": 1, "maxLength": 64},
+								"memory_id":       map[string]any{"type": "string", "minLength": 1, "maxLength": 512},
+								"content_hash":    map[string]any{"type": "string", "pattern": "^[0-9a-f]{64}$"},
+							},
+							"required": []string{"source_chain_id", "memory_id", "content_hash"},
+						},
+					},
 				},
 				"required": []string{"content"},
 			},
@@ -1006,6 +1022,9 @@ func (s *Server) toolRemember(ctx context.Context, params map[string]any) (any, 
 	}
 	if len(tags) > 0 {
 		submitBody["tags"] = tags
+	}
+	if derivedFrom, ok := params["derived_from"]; ok {
+		submitBody["derived_from"] = derivedFrom
 	}
 	if correctionSource != nil {
 		// ParentHash is the existing consensus lineage field. Preserve the

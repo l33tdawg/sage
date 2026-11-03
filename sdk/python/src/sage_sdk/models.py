@@ -51,6 +51,28 @@ class KnowledgeTriple(BaseModel):
     object_: str = Field(alias="object")
 
 
+class DerivedFromParent(BaseModel):
+    """One authenticated app-v30 lineage parent reference."""
+
+    source_chain_id: str = Field(min_length=1, max_length=64)
+    memory_id: str = Field(min_length=1, max_length=512)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("source_chain_id")
+    @classmethod
+    def validate_source_chain_id_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 64:
+            raise ValueError("source_chain_id exceeds 64 UTF-8 bytes")
+        return value
+
+    @field_validator("memory_id")
+    @classmethod
+    def validate_memory_id_bytes(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 512:
+            raise ValueError("memory_id exceeds 512 UTF-8 bytes")
+        return value
+
+
 class MemoryRecord(BaseModel):
     memory_id: str
     submitting_agent: str
@@ -122,6 +144,13 @@ class MemorySubmitRequest(BaseModel):
     # Per-record clearance level 0-4 (PUBLIC, INTERNAL, CONFIDENTIAL, SECRET,
     # TOP SECRET). When omitted the server stores the memory as PUBLIC (0).
     classification: int | None = None
+    # App-v30 authenticated lineage refs. The node verifies each local parent's
+    # lifecycle, content hash, clearance and exact content-addressed identity.
+    derived_from: list[DerivedFromParent] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=16,
+    )
 
     @field_validator("idempotency_key")
     @classmethod

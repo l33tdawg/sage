@@ -160,7 +160,7 @@ PoE weights are computed at epoch boundaries and drive quorum vote weighting. Al
 const EpochInterval = 100  // blocks per epoch
 ```
 
-`IsEpochBoundary(height)` returns true when `height % 100 == 0 && height > 0`. At each boundary, `processEpoch` (`app.go:10289+`) recomputes weights for all validators.
+`IsEpochBoundary(height)` returns true when `height % 100 == 0 && height > 0`. At each boundary, `processEpoch` (`app.go:10290+`) recomputes weights for all validators.
 
 ### Weight Formula
 
@@ -258,7 +258,7 @@ Corroborations do not change the memory's `ConfidenceScore` column in PostgreSQL
 
 ## Corroboration via Consensus
 
-`POST /v1/memory/{id}/corroborate` → `TxTypeMemoryCorroborate` → `processMemoryCorroborate` (`app.go:8234+`):
+`POST /v1/memory/{id}/corroborate` → `TxTypeMemoryCorroborate` → `processMemoryCorroborate` (`app.go:8235+`):
 
 1. Verifies agent Ed25519 identity proof.
 2. Buffers a `Corroboration` row for PostgreSQL (via `pendingWrite{writeType:"corroborate"}`).

@@ -595,6 +595,54 @@ def test_non_task_memory_never_gains_a_task_status():
     assert "task_status" not in body
 
 
+def test_memory_submit_serializes_app_v30_derived_from():
+    from sage_sdk.models import DerivedFromParent, MemorySubmitRequest
+
+    parent = DerivedFromParent(
+        source_chain_id="sage",
+        memory_id="parent-a",
+        content_hash="a" * 64,
+    )
+    req = MemorySubmitRequest(
+        content="lineage child",
+        memory_type="fact",
+        domain_tag="general",
+        confidence_score=0.9,
+        derived_from=[parent],
+    )
+    body = req.model_dump(mode="json", exclude_none=True, by_alias=True)
+    assert body["derived_from"] == [{
+        "source_chain_id": "sage",
+        "memory_id": "parent-a",
+        "content_hash": "a" * 64,
+    }]
+
+    with pytest.raises(ValueError):
+        DerivedFromParent(
+            source_chain_id="sage",
+            memory_id="parent-b",
+            content_hash="A" * 64,
+        )
+
+    with pytest.raises(ValueError):
+        MemorySubmitRequest(
+            content="too many parents",
+            memory_type="fact",
+            domain_tag="general",
+            confidence_score=0.9,
+            derived_from=[parent] * 17,
+        )
+
+    with pytest.raises(ValueError):
+        MemorySubmitRequest(
+            content="empty parent list",
+            memory_type="fact",
+            domain_tag="general",
+            confidence_score=0.9,
+            derived_from=[],
+        )
+
+
 def test_message_models_retain_additive_agent_presentation_without_making_it_authority():
     from sage_sdk.models import MessageItem, PipeMessage
 
@@ -638,3 +686,17 @@ def test_message_models_retain_additive_agent_presentation_without_making_it_aut
     assert canonical.from_agent == "agent-a"
     assert canonical.from_display_name == "Mutable display"
     assert canonical.from_registered_name is None
+
+
+@pytest.mark.parametrize("field,limit", [("source_chain_id", 64), ("memory_id", 512)])
+def test_derived_from_parent_uses_utf8_byte_limits(field, limit):
+    from sage_sdk.models import DerivedFromParent
+
+    values = {"source_chain_id": "sage", "memory_id": "parent", "content_hash": "a" * 64}
+    for value in ["a" * limit, "é" * (limit // 2), "😀" * (limit // 4)]:
+        values[field] = value
+        assert getattr(DerivedFromParent(**values), field) == value
+    for value in ["a" * (limit + 1), "é" * (limit // 2) + "a", "😀" * (limit // 4) + "a", "\ud800"]:
+        values[field] = value
+        with pytest.raises(ValueError):
+            DerivedFromParent(**values)

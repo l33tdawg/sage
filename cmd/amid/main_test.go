@@ -142,6 +142,7 @@ type recordingRESTForkAccessors struct {
 	postV22 func() bool
 	postV23 func() bool
 	postV27 func() bool
+	postV30 func() bool
 }
 
 func (r *recordingRESTForkAccessors) SetPostV8ForkAccessor(fn func() bool) {
@@ -168,6 +169,10 @@ func (r *recordingRESTForkAccessors) SetPostV27ForNextTxAccessor(fn func() bool)
 	r.postV27 = fn
 }
 
+func (r *recordingRESTForkAccessors) SetPostV30ForNextTxAccessor(fn func() bool) {
+	r.postV30 = fn
+}
+
 type mutableAppForkAccessors struct {
 	postV8  bool
 	postV17 bool
@@ -175,6 +180,7 @@ type mutableAppForkAccessors struct {
 	postV22 bool
 	postV23 bool
 	postV27 bool
+	postV30 bool
 }
 
 func (a *mutableAppForkAccessors) IsPostV8Fork() bool            { return a.postV8 }
@@ -183,6 +189,7 @@ func (a *mutableAppForkAccessors) IsAppV20ActiveForNextTx() bool { return a.post
 func (a *mutableAppForkAccessors) IsAppV22ActiveForNextTx() bool { return a.postV22 }
 func (a *mutableAppForkAccessors) IsAppV23ActiveForNextTx() bool { return a.postV23 }
 func (a *mutableAppForkAccessors) IsAppV27ActiveForNextTx() bool { return a.postV27 }
+func (a *mutableAppForkAccessors) IsAppV30ActiveForNextTx() bool { return a.postV30 }
 
 func TestWireRESTForkAccessorsIncludesAppV23AndStaysDynamic(t *testing.T) {
 	server := &recordingRESTForkAccessors{}
@@ -191,7 +198,8 @@ func TestWireRESTForkAccessorsIncludesAppV23AndStaysDynamic(t *testing.T) {
 	wireRESTForkAccessors(server, app)
 
 	if server.postV8 == nil || server.postV17 == nil || server.postV20 == nil ||
-		server.postV22 == nil || server.postV23 == nil || server.postV27 == nil {
+		server.postV22 == nil || server.postV23 == nil || server.postV27 == nil ||
+		server.postV30 == nil {
 		t.Fatal("amid did not wire every REST fork accessor")
 	}
 	if server.postV23() {
@@ -204,6 +212,10 @@ func TestWireRESTForkAccessorsIncludesAppV23AndStaysDynamic(t *testing.T) {
 	app.postV27 = true
 	if !server.postV27() {
 		t.Fatal("app-v27 REST accessor did not track the live app predicate")
+	}
+	app.postV30 = true
+	if !server.postV30() {
+		t.Fatal("app-v30 REST accessor did not track the live app predicate")
 	}
 }
 

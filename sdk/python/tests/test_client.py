@@ -115,6 +115,32 @@ def test_propose_memory(client, mock_api, sample_submit_response):
     assert result.memory_id == sample_submit_response["memory_id"]
 
 
+def test_propose_memory_sends_app_v30_derived_from(
+    client, mock_api, sample_submit_response
+):
+    from sage_sdk.models import DerivedFromParent
+
+    route = mock_api.post("/v1/memory/submit").mock(
+        return_value=httpx.Response(201, json=sample_submit_response)
+    )
+    client.propose(
+        content="lineage child",
+        memory_type="fact",
+        domain_tag="general",
+        confidence=0.9,
+        derived_from=[DerivedFromParent(
+            source_chain_id="sage",
+            memory_id="parent-a",
+            content_hash="a" * 64,
+        )],
+    )
+    assert json.loads(route.calls.last.request.content)["derived_from"] == [{
+        "source_chain_id": "sage",
+        "memory_id": "parent-a",
+        "content_hash": "a" * 64,
+    }]
+
+
 def test_propose_task_omits_domain_and_preserves_derived_receipt(
     client, mock_api, sample_submit_response
 ):

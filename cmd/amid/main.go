@@ -216,6 +216,7 @@ type restForkAccessorSetter interface {
 	SetPostV22ForNextTxAccessor(func() bool)
 	SetPostV23ForNextTxAccessor(func() bool)
 	SetPostV27ForNextTxAccessor(func() bool)
+	SetPostV30ForNextTxAccessor(func() bool)
 }
 
 type appForkAccessorSource interface {
@@ -225,6 +226,7 @@ type appForkAccessorSource interface {
 	IsAppV22ActiveForNextTx() bool
 	IsAppV23ActiveForNextTx() bool
 	IsAppV27ActiveForNextTx() bool
+	IsAppV30ActiveForNextTx() bool
 }
 
 // wireRESTForkAccessors keeps amid's REST authorization behavior in lockstep
@@ -238,6 +240,7 @@ func wireRESTForkAccessors(server restForkAccessorSetter, app appForkAccessorSou
 	server.SetPostV22ForNextTxAccessor(app.IsAppV22ActiveForNextTx)
 	server.SetPostV23ForNextTxAccessor(app.IsAppV23ActiveForNextTx)
 	server.SetPostV27ForNextTxAccessor(app.IsAppV27ActiveForNextTx)
+	server.SetPostV30ForNextTxAccessor(app.IsAppV30ActiveForNextTx)
 }
 
 // wireAmidOperatorRoutes mounts the app-v23 access-control pair on the amid REST

@@ -108,6 +108,29 @@ components:
           type: string
           description: Object entity of the triple.
 
+    DerivedFromParent:
+      type: object
+      required:
+        - source_chain_id
+        - memory_id
+        - content_hash
+      additionalProperties: false
+      properties:
+        source_chain_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: Consensus chain ID. App-v30 currently requires the local chain ID.
+        memory_id:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Parent memory ID.
+        content_hash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+          description: Lowercase SHA-256 content hash of the exact parent memory.
+
     MemoryRecord:
       type: object
       required:
@@ -335,6 +358,16 @@ components:
         parent_hash:
           type: string
           description: Hash of a parent memory for lineage tracking.
+        derived_from:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/DerivedFromParent"
+          description: >-
+            App-v30 authenticated lineage refs. JSON order is canonicalized
+            before signing. Each parent must be local, committed or challenged,
+            readable by the caller, and carry the exact content hash.
         task_status:
           type: string
           enum:

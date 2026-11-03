@@ -3860,10 +3860,11 @@ func (app *SageApp) CheckTx(_ context.Context, req *abcitypes.RequestCheckTx) (*
 	// time is acceptable in CheckTx (which is not consensus); FinalizeBlock
 	// repeats the check against req.Time and atomically consumes the proof.
 	if app.isAppV17ActiveForNextTx() {
-		if proofErr := app.enforceDelegatedAgentProof(
+		if proofErr := app.enforceDelegatedAgentProofForFork(
 			parsedTx, time.Now(), false,
 			postAppV20, app.isAppV22ActiveForNextTx(),
 			app.isAppV23ActiveForNextTx(), app.isAppV27ActiveForNextTx(),
+			app.postAppV30Fork(app.state.Height+1),
 		); proofErr != nil {
 			metrics.TxRejectedTotal.WithLabelValues("agent_proof_binding").Inc()
 			return &abcitypes.ResponseCheckTx{Code: 109, Log: fmt.Sprintf("agent proof rejected: %v", proofErr)}, nil
@@ -5204,10 +5205,10 @@ func (app *SageApp) processTx(parsedTx *tx.ParsedTx, height int64, blockTime tim
 	// state. Same-key node-originated transactions are already action-bound by
 	// the outer signature and app-v9 nonce and bypass this delegated-only gate.
 	if app.postAppV17Rules(height) {
-		if proofErr := app.enforceDelegatedAgentProof(
+		if proofErr := app.enforceDelegatedAgentProofForFork(
 			parsedTx, blockTime, true,
 			app.postAppV20Fork(height), app.postAppV22Rules(height),
-			app.postAppV23Rules(height), app.postAppV27Rules(height),
+			app.postAppV23Rules(height), app.postAppV27Rules(height), app.postAppV30Fork(height),
 		); proofErr != nil {
 			metrics.TxRejectedTotal.WithLabelValues("agent_proof_binding_consensus").Inc()
 			return &abcitypes.ExecTxResult{Code: 109, Log: fmt.Sprintf("agent proof rejected: %v", proofErr)}
@@ -11253,9 +11254,9 @@ func (app *SageApp) isAuthenticatedAppV20BootstrapProposal(rawTx []byte, height 
 		return false
 	}
 	if app.postAppV17Rules(height) {
-		if proofErr := app.enforceDelegatedAgentProof(
+		if proofErr := app.enforceDelegatedAgentProofForFork(
 			parsed, blockTime, false,
-			false, app.postAppV22Rules(height), app.postAppV23Rules(height), app.postAppV27Rules(height),
+			false, app.postAppV22Rules(height), app.postAppV23Rules(height), app.postAppV27Rules(height), app.postAppV30Fork(height),
 		); proofErr != nil {
 			return false
 		}

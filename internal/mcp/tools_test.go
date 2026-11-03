@@ -314,6 +314,47 @@ func TestSageRemember_MissingContent(t *testing.T) {
 	assert.Contains(t, err.Error(), "content is required")
 }
 
+func TestSageRememberPassesAppV30DerivedFrom(t *testing.T) {
+	var submitted map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/memory/pre-validate", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"accepted": true})
+	})
+	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{0.1}})
+	})
+	mux.HandleFunc("/v1/memory/submit", func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&submitted))
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"memory_id": "lineage-child",
+			"status":    "proposed",
+			"committed": true,
+		})
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+	_, priv, _ := ed25519.GenerateKey(nil)
+	s := NewServer(ts.URL, priv)
+
+	_, err := s.toolRemember(context.Background(), map[string]any{
+		"content": "lineage child",
+		"domain":  "general",
+		"type":    "fact",
+		"derived_from": []any{map[string]any{
+			"source_chain_id": "sage",
+			"memory_id":       "parent-a",
+			"content_hash":    strings.Repeat("a", 64),
+		}},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []any{map[string]any{
+		"source_chain_id": "sage",
+		"memory_id":       "parent-a",
+		"content_hash":    strings.Repeat("a", 64),
+	}}, submitted["derived_from"])
+}
+
 func TestSageRememberCorrectionCommitsReplacementBeforeChallenge(t *testing.T) {
 	var ordered []string
 	mux := http.NewServeMux()

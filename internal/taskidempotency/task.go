@@ -118,7 +118,9 @@ func MemoryID(principalID, key string) (string, error) {
 // PayloadDigest covers every consensus task field plus the exact local
 // assignee. EmbeddingHash is deliberately excluded: the receiving node owns the
 // active vector space and may regenerate it between retries. The task's signed
-// semantic and policy payload remains exact.
+// semantic and policy payload remains exact. Empty lineage keeps the original
+// v1 digest byte-for-byte. App-v30 nonempty lineage uses a v2 domain and the
+// canonical transaction extension, shared by REST replay and consensus receipts.
 func PayloadDigest(
 	principalID, assigneeID string,
 	submit *tx.MemorySubmit,
@@ -152,7 +154,17 @@ func PayloadDigest(
 	for _, tag := range submit.Tags {
 		tagParts = append(tagParts, []byte(tag))
 	}
-	return digestParts("sage/app-v23/task-idempotency/payload/v1\x00", tagParts...), nil
+	if len(submit.DerivedFrom) == 0 {
+		return digestParts("sage/app-v23/task-idempotency/payload/v1\x00", tagParts...), nil
+	}
+	parents := append([]tx.ParentRef(nil), submit.DerivedFrom...)
+	tx.SortParentRefs(parents)
+	encodedLineage, lineageErr := tx.EncodeDerivedFromExtension(parents)
+	if lineageErr != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("task idempotency lineage: %w", lineageErr)
+	}
+	tagParts = append(tagParts, encodedLineage)
+	return digestParts("sage/app-v30/task-idempotency/payload/v2\x00", tagParts...), nil
 }
 
 func Hex(sum [sha256.Size]byte) string {
