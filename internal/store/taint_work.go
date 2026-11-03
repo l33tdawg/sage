@@ -109,9 +109,9 @@ func (s *BadgerStore) ExpandTaintDecision(
 					header.Generation,
 					header.FrontierHead,
 				)
-				entry, found, err := readTaintQueueEntryTxn(txn, queueKey)
-				if err != nil {
-					return err
+				entry, found, queueErr := readTaintQueueEntryTxn(txn, queueKey)
+				if queueErr != nil {
+					return queueErr
 				}
 				if !found {
 					return fmt.Errorf(
@@ -120,8 +120,8 @@ func (s *BadgerStore) ExpandTaintDecision(
 						header.FrontierHead,
 					)
 				}
-				if err := s.txnDelete(txn, queueKey); err != nil {
-					return err
+				if deleteErr := s.txnDelete(txn, queueKey); deleteErr != nil {
+					return deleteErr
 				}
 				remaining -= taintQueuePopUnits
 				operationUnits += taintQueuePopUnits
@@ -161,29 +161,29 @@ func (s *BadgerStore) ExpandTaintDecision(
 				}
 
 				childID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
-				if err := lineage.ValidateChildID(childID); err != nil {
+				if childErr := lineage.ValidateChildID(childID); childErr != nil {
 					it.Close()
-					return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+					return fmt.Errorf("%w: %v", ErrTaintStateMalformed, childErr)
 				}
 				remaining--
 				operationUnits++
 
-				membershipRaw, membershipFound, err := readTaintValueTxn(
+				membershipRaw, membershipFound, membershipErr := readTaintValueTxn(
 					txn,
 					taint.MembershipKey(childID, decisionID),
 				)
-				if err != nil {
+				if membershipErr != nil {
 					it.Close()
-					return err
+					return membershipErr
 				}
 				remaining--
 				operationUnits++
 
 				if membershipFound {
-					membership, err := taint.DecodeMembership(membershipRaw)
-					if err != nil {
+					membership, decodeErr := taint.DecodeMembership(membershipRaw)
+					if decodeErr != nil {
 						it.Close()
-						return fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
+						return fmt.Errorf("%w: %v", ErrTaintStateMalformed, decodeErr)
 					}
 					if membership.Generation != header.Generation {
 						it.Close()
@@ -243,25 +243,25 @@ func (s *BadgerStore) ExpandTaintDecision(
 						)
 						remaining -= 3
 						operationUnits += 3
-						if err := s.txnSet(
+						if membershipWriteErr := s.txnSet(
 							txn,
 							taint.MembershipKey(childID, decisionID),
 							membershipValue,
-						); err != nil {
+						); membershipWriteErr != nil {
 							it.Close()
-							return err
+							return membershipWriteErr
 						}
-						if err := s.txnSet(
+						if indexWriteErr := s.txnSet(
 							txn,
 							taint.DecisionIndexKey(decisionID, childID),
 							[]byte{},
-						); err != nil {
+						); indexWriteErr != nil {
 							it.Close()
-							return err
+							return indexWriteErr
 						}
-						if err := s.txnSet(txn, queueKey, queueValue); err != nil {
+						if queueWriteErr := s.txnSet(txn, queueKey, queueValue); queueWriteErr != nil {
 							it.Close()
-							return err
+							return queueWriteErr
 						}
 						header.FrontierTail++
 						header.Materialized++
@@ -385,16 +385,16 @@ func (s *BadgerStore) CleanupTaintDecision(
 					return fmt.Errorf("%w: invalid cleanup memory ID", ErrTaintStateMalformed)
 				}
 				key := append([]byte(nil), it.Item().Key()...)
-				if err := s.txnDelete(txn, key); err != nil {
+				if deleteErr := s.txnDelete(txn, key); deleteErr != nil {
 					it.Close()
-					return err
+					return deleteErr
 				}
-				if err := s.txnDelete(
+				if deleteErr := s.txnDelete(
 					txn,
 					taint.MembershipKey(memoryID, decisionID),
-				); err != nil {
+				); deleteErr != nil {
 					it.Close()
-					return err
+					return deleteErr
 				}
 				remaining -= taintMemberCleanupUnits
 				operationUnits += taintMemberCleanupUnits
@@ -427,9 +427,9 @@ func (s *BadgerStore) CleanupTaintDecision(
 			}
 			for it.ValidForPrefix(prefix) && remaining >= taintQueueCleanupUnits {
 				key := append([]byte(nil), it.Item().Key()...)
-				if err := s.txnDelete(txn, key); err != nil {
+				if deleteErr := s.txnDelete(txn, key); deleteErr != nil {
 					it.Close()
-					return err
+					return deleteErr
 				}
 				remaining -= taintQueueCleanupUnits
 				operationUnits += taintQueueCleanupUnits
@@ -461,7 +461,6 @@ func (s *BadgerStore) CleanupTaintDecision(
 					); writeErr != nil {
 						return writeErr
 					}
-					remaining -= taintActiveReleaseUnits
 					operationUnits += taintActiveReleaseUnits
 					header.Status = taint.StatusClean
 					header.CleanupPhase = taint.CleanupNone

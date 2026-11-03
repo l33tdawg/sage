@@ -314,8 +314,6 @@ func TestInheritTaintMembershipsUsesEffectiveParentDecisions(t *testing.T) {
 
 	parents := []tx.ParentRef{parentA, parentB}
 	tx.SortParentRefs(parents)
-	revisionBefore, err = s.TaintRevision()
-	require.NoError(t, err)
 	preflight, err := s.ValidateTaintInheritance("sage", "child", parents)
 	require.NoError(t, err)
 	assert.Equal(t, InheritedTaintResult{Decisions: 2, Units: 14}, preflight)
@@ -358,6 +356,7 @@ func TestSameConsensusTransactionAdmitsNewTaintedParentAndChild(t *testing.T) {
 	child := testTaintParent("same-block-child")
 	decisionID := testTaintDecisionID("same-block")
 	scoped := base.BeginConsensusTransaction(nil)
+	t.Cleanup(scoped.DiscardConsensusTransaction)
 
 	require.NoError(t, scoped.SetMemoryHash(
 		parent.MemoryID,
@@ -378,6 +377,15 @@ func TestSameConsensusTransactionAdmitsNewTaintedParentAndChild(t *testing.T) {
 		child.ContentHash[:],
 		"committed",
 	))
+	// Admission must resolve the new parent's canonical envelope in the same
+	// transaction. The published base snapshot cannot see that envelope yet.
+	require.NoError(t, scoped.ValidateMemoryLineageParents(
+		child.MemoryID, "sage", []tx.ParentRef{parent},
+	))
+	require.ErrorIs(t, base.ValidateMemoryLineageParents(
+		child.MemoryID, "sage", []tx.ParentRef{parent},
+	), ErrMemoryLineageUnavailable)
+
 	require.NoError(t, scoped.SetMemoryLineage(
 		child.MemoryID,
 		[]tx.ParentRef{parent},
@@ -394,6 +402,13 @@ func TestSameConsensusTransactionAdmitsNewTaintedParentAndChild(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{decisionID}, stagedDecisions)
 	require.NoError(t, scoped.CommitConsensusTransaction())
+
+	for _, ref := range []tx.ParentRef{parent, child} {
+		contentHash, status, err := base.GetMemoryHash(ref.MemoryID)
+		require.NoError(t, err)
+		require.Equal(t, ref.ContentHash[:], contentHash)
+		require.Equal(t, "committed", status)
+	}
 
 	decisions, err := base.GetEffectiveTaintDecisions(child.MemoryID)
 	require.NoError(t, err)

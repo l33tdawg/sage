@@ -79,6 +79,7 @@ func TestAppV30CanonicalStateAppHashGolden(t *testing.T) {
 			Exact:          true,
 		}},
 	))
+
 	adoptionReceipt := sha256.Sum256([]byte("app-v30 adoption receipt"))
 	require.NoError(t, badgerStore.DB().Update(func(txn *badger.Txn) error {
 		if err := txn.Set(
@@ -98,7 +99,7 @@ func TestAppV30CanonicalStateAppHashGolden(t *testing.T) {
 	t.Logf("app-v30 AppHash: %s", hex.EncodeToString(appHash))
 	require.Equal(
 		t,
-		"c900515adc1a455b307fe053d458664cb9fe04cd8400e0eef06b012b16aad253",
+		"bbc39e8c28835a652a07cf3893708a3b4ad06893413924fcbeb3d4ac5288079c",
 		hex.EncodeToString(appHash),
 	)
 }

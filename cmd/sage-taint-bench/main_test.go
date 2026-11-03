@@ -431,6 +431,20 @@ func TestRealNodeCountsReadACopyAndCountMigratedMarkers(t *testing.T) {
 	assert.NotEmpty(t, missing.MigratedReason)
 }
 
+func TestRealNodeCountsEmptyCopyReportsMeasuredZeroMigrated(t *testing.T) {
+	path := t.TempDir()
+	db, err := openBadger(path)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	counts, err := countRealNode(path)
+	require.NoError(t, err)
+	assert.True(t, counts.Measured)
+	require.NotNil(t, counts.Migrated, "an empty measured copy must differ from no measurement")
+	assert.Zero(t, *counts.Migrated)
+	assert.Empty(t, counts.MigratedReason)
+}
+
 func TestReceiptRecordsLabelAndNeverThePath(t *testing.T) {
 	path := t.TempDir()
 	db, err := openBadger(path)
