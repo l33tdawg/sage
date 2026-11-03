@@ -198,6 +198,7 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 	const chainID = "app-v30-clearance-chain"
 	require.NoError(t, app.SetExpectedGovernanceDelegationDomain(chainID))
 	activateAppV30ForMemorySubmitTest(t, app, 20)
+	require.NoError(t, app.badgerStore.SetAccessGrant("general", member.id, 1, 0, root.id))
 
 	parentContentHash := sha256.Sum256([]byte("top secret parent"))
 	parent := tx.ParentRef{
@@ -266,6 +267,36 @@ func TestAppV30LineagePreflightRejectsParentOutsideClearance(t *testing.T) {
 	require.ErrorIs(t, missingErr, store.ErrMemoryLineageUnavailable)
 	require.Equal(t, err.Error(), missingErr.Error(),
 		"unauthorized and missing-parent probes must be indistinguishable")
+
+	childID := memoryIDForSubmit(submit.MemorySubmit, 20, member.id)
+	self := parent
+	self.MemoryID = childID
+	_, selfErr := app.preflightAppV30Admission(
+		submit, member.id, childID, []tx.ParentRef{self}, memberSigners, 20, appV23BlockTime(),
+	)
+	require.ErrorIs(t, selfErr, store.ErrMemoryLineageUnavailable)
+	require.Equal(t, err.Error(), selfErr.Error(),
+		"unauthorized and valid local self-reference probes must be indistinguishable")
+	require.NotContains(t, selfErr.Error(), childID)
+	require.NotContains(t, selfErr.Error(), parent.MemoryID)
+
+	foreignSelf := self
+	foreignSelf.SourceChainID = chainID + "-remote"
+	_, foreignErr := app.preflightAppV30Admission(
+		submit, member.id, childID, []tx.ParentRef{foreignSelf}, memberSigners, 20, appV23BlockTime(),
+	)
+	require.ErrorIs(t, foreignErr, store.ErrMemoryLineageMalformed,
+		"unsupported non-local refs remain a separate structural refusal")
+	require.NotErrorIs(t, foreignErr, store.ErrMemoryLineageUnavailable)
+
+	// A caller-readable, same-hash parent is a positive control for this
+	// exact fixture; the generic refusal is not an unconditional rejection.
+	require.NoError(t, app.badgerStore.SetMemoryClassification(parent.MemoryID, uint8(store.ClearancePublic)))
+	gotChain, readableErr := app.preflightAppV30Admission(
+		submit, member.id, childID, []tx.ParentRef{parent}, memberSigners, 20, appV23BlockTime(),
+	)
+	require.NoError(t, readableErr)
+	require.Equal(t, chainID, gotChain)
 }
 
 func TestAppV30CoCommitWritesEverySignerProvenance(t *testing.T) {
@@ -334,4 +365,81 @@ func TestAppV30MemorySubmitInheritsMatchingCredentialScope(t *testing.T) {
 	decisions, err := app.badgerStore.GetEffectiveTaintDecisions(memoryID)
 	require.NoError(t, err)
 	require.Equal(t, []string{decisionID}, decisions)
+}
+func TestAppV30CoCommitConflictPreservesAcceptedMemory(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		height int64
+	}{
+		{name: "same_block", height: 20},
+		{name: "later_block", height: 21},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, root, _, _ := setupAppV30TaintGovernance(t)
+			app.appV15AppliedHeight = 5
+			frontRunner := newAgentKey(t)
+			registerAppV23Agent(t, app, frontRunner, store.AppV23RoleMember, 2, 0)
+			require.NoError(t, app.badgerStore.ApproveAppV23LocalAgent(
+				store.AppV23LocalEnrollment{
+					AgentID: frontRunner.id, ApprovedBy: root.id, RootGeneration: 1,
+					Profile: store.AppV23ProfileStandard, HomeDomain: "front-runner-home",
+					Clearance: 4, Active: true, UpdatedHeight: 19,
+				}, store.AppV23RoleMember, 0, 0,
+			))
+			envelope, _ := buildCoCommitEnvelope(
+				t, root, "general", []byte("app-v30 co-commit collision"), "sage-peer",
+			)
+
+			// An admitted ordinary member can select the predictable SharedID
+			// for a normal memory in its own home. Both transactions enter the
+			// consensus dispatcher with valid outer signatures and wire bytes.
+			submit := makeMemorySubmitTx(t, frontRunner, "front-runner-home", "accepted normal memory before co-commit")
+			submit.MemorySubmit.MemoryID = envelope.SharedID
+			submit.Nonce = 1
+			require.NoError(t, tx.SignTx(submit, frontRunner.priv))
+			rawSubmit, err := tx.EncodeTx(submit)
+			require.NoError(t, err)
+			decodedSubmit, err := tx.DecodeTx(rawSubmit)
+			require.NoError(t, err)
+			accepted := app.processTx(decodedSubmit, 20, appV23BlockTime())
+			require.Zero(t, accepted.Code, accepted.Log)
+			before, err := app.badgerStore.GetMemoryDisclosureState(envelope.SharedID)
+			require.NoError(t, err)
+			beforeProvenance, found, err := app.badgerStore.GetAppV30Provenance(envelope.SharedID)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, []store.AppV30ProvenanceSigner{{
+				CredentialID: frontRunner.id, PrincipalID: frontRunner.id, Exact: true,
+			}}, beforeProvenance)
+			beforeHash, err := app.badgerStore.ComputeAppHash()
+			require.NoError(t, err)
+			pendingBefore := len(app.pendingWrites)
+
+			coCommit := coCommitSubmitTx(t, root, envelope)
+			coCommit.Nonce = 1
+			require.NoError(t, tx.SignTx(coCommit, root.priv))
+			rawCoCommit, err := tx.EncodeTx(coCommit)
+			require.NoError(t, err)
+			decodedCoCommit, err := tx.DecodeTx(rawCoCommit)
+			require.NoError(t, err)
+			result := app.processTx(decodedCoCommit, test.height, appV23BlockTime())
+			require.Equal(t, uint32(98), result.Code)
+			require.Contains(t, result.Log, store.ErrAppV30ProvenanceConflict.Error())
+
+			after, err := app.badgerStore.GetMemoryDisclosureState(envelope.SharedID)
+			require.NoError(t, err)
+			require.Equal(t, before, after, "a rejected co-commit must preserve the accepted hash and author")
+			afterProvenance, found, err := app.badgerStore.GetAppV30Provenance(envelope.SharedID)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, beforeProvenance, afterProvenance)
+			afterHash, err := app.badgerStore.ComputeAppHash()
+			require.NoError(t, err)
+			require.Equal(t, beforeHash, afterHash, "provenance conflicts must reject before canonical mutation")
+			require.Len(t, app.pendingWrites, pendingBefore)
+			core, err := app.badgerStore.GetCoCommitCore(envelope.SharedID)
+			require.NoError(t, err)
+			require.Empty(t, core)
+		})
+	}
 }

@@ -46,12 +46,12 @@ func TestDelegatedMemorySubmitBindsAppV30DerivedFrom(t *testing.T) {
 			DerivedFrom:     []tx.ParentRef{derivedFrom},
 		},
 	}
-	require.NoError(t, app.verifySignedAgentAction(
-		actual, "delegated-agent", signed, false, false, false, false,
+	require.NoError(t, app.verifySignedAgentActionForFork(
+		actual, "delegated-agent", signed, false, false, false, false, true,
 	))
 
 	actual.MemorySubmit.DerivedFrom[0].MemoryID = "different-parent"
-	require.ErrorContains(t, app.verifySignedAgentAction(
-		actual, "delegated-agent", signed, false, false, false, false,
+	require.ErrorContains(t, app.verifySignedAgentActionForFork(
+		actual, "delegated-agent", signed, false, false, false, false, true,
 	), "transaction payload differs")
 }
