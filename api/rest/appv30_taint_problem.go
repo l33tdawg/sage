@@ -1,7 +1,6 @@
 package rest
 
 import (
-	"context"
 	"errors"
 	"net/http"
 
@@ -16,21 +15,6 @@ const (
 	memoryTaintedProblemDetail      = "An active governance decision withholds this memory."
 	memoryTaintPendingProblemDetail = "Governance taint coverage is still being determined for this memory."
 )
-
-// memoryTaintFilterEnabled opts SQL into the taint prefilter only while its
-// revision exactly matches canonical Badger state. A stale mirror must fall
-// back to the authoritative per-record classifier.
-func (s *Server) memoryTaintFilterEnabled(ctx context.Context) bool {
-	if s == nil || s.badgerStore == nil || s.store == nil {
-		return false
-	}
-	mirror, ok := s.store.(store.MemoryTaintMirrorStore)
-	if !ok {
-		return false
-	}
-	fresh, _, err := store.MemoryTaintMirrorFresh(ctx, s.badgerStore, mirror)
-	return err == nil && fresh
-}
 
 func appV30TaintProjectionProblem(err error) (problemType, title, detail string, ok bool) {
 	switch {
