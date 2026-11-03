@@ -49,7 +49,7 @@ const (
 	originAdmit
 )
 
-// The planned key layouts. Nothing below exists in the node yet.
+// Stand-in model layouts; these are not the canonical node encoding.
 func memProvKey(id string) []byte       { return []byte("memprov:v30:" + id) }
 func migratedKey(id string) []byte      { return []byte("memprov:migrated:" + id) }
 func lineagePrefix(child string) []byte { return []byte("lineage:" + child + ":") }

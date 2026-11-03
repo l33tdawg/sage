@@ -74,18 +74,33 @@ func (s *BadgerStore) ApplyTaintDecision(
 		return false, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 	}
 
+	anchorBytes, err := encodeTaintTargetAnchor(taintTargetAnchor{Target: target, PayloadHash: payloadHash})
+	if err != nil {
+		return false, err
+	}
+
 	created := false
-	err = s.update(func(txn *badger.Txn) error {
+	updateErr := s.update(func(txn *badger.Txn) error {
 		existing, found, err := readTaintHeaderTxn(txn, decisionID)
 		if err != nil {
 			return err
 		}
+		anchor, anchorFound, err := readTaintTargetTxn(txn, decisionID)
+		if err != nil {
+			return err
+		}
 		if found {
+			if !anchorFound || anchor.PayloadHash != existing.PayloadHash {
+				return fmt.Errorf("%w: missing or inconsistent target anchor", ErrTaintStateMalformed)
+			}
 			if existing.Action != taint.ActionApply ||
-				existing.PayloadHash != payloadHash {
+				existing.PayloadHash != payloadHash || anchor.Target != target {
 				return ErrTaintConflict
 			}
 			return nil
+		}
+		if anchorFound {
+			return fmt.Errorf("%w: target anchor has no decision header", ErrTaintStateMalformed)
 		}
 		active, err := readTaintUint64Txn(txn, taint.ActiveCountKey())
 		if err != nil {
@@ -99,6 +114,7 @@ func (s *BadgerStore) ApplyTaintDecision(
 			value []byte
 		}{
 			{taint.DecisionKey(decisionID), headerBytes},
+			{taint.TargetKey(decisionID), anchorBytes},
 			{taint.MembershipKey(target.MemoryID, decisionID), membership},
 			{taint.DecisionIndexKey(decisionID, target.MemoryID), []byte{}},
 			{taint.FrontierKey(decisionID, 1, 0), queueEntry},
@@ -117,7 +133,7 @@ func (s *BadgerStore) ApplyTaintDecision(
 		created = true
 		return nil
 	})
-	return created, err
+	return created, updateErr
 }
 
 func (s *BadgerStore) GetTaintDecision(decisionID string) (taint.Header, bool, error) {
@@ -384,9 +400,9 @@ func planTaintInheritanceTxn(
 			}
 			header, cached := headers[decisionID]
 			if !cached {
-				if err := charge(1); err != nil {
+				if chargeErr := charge(1); chargeErr != nil {
 					it.Close()
-					return plan, err
+					return plan, chargeErr
 				}
 				var found bool
 				header, found, err = readTaintHeaderTxn(txn, decisionID)

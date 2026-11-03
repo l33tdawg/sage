@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 
-	badger "github.com/dgraph-io/badger/v4"
-
 	"github.com/l33tdawg/sage/internal/memory"
 )
 
@@ -43,6 +41,10 @@ var ErrMemoryProjectionTainted = errors.New("memory projection is tainted")
 // decision still covers an authenticated ancestor.
 var ErrMemoryProjectionTaintPending = errors.New("memory projection taint is pending")
 
+// ErrMemoryProjectionTaintIndeterminate marks only a bounded ancestor walk.
+// It is not an unpublished row or evidence of canonical corruption.
+var ErrMemoryProjectionTaintIndeterminate = errors.New("memory projection taint is indeterminate")
+
 // MemoryProjectionDisposition describes a serving-layer row's publication state.
 // Only Exact and LegacyTerminalHashless are returned without an error.
 type MemoryProjectionDisposition string
@@ -58,11 +60,12 @@ const (
 	// MemoryProjectionLegacyUnanchored identifies a completely absent canonical
 	// memory envelope. It remains unpublished and exact reads fail; a broad
 	// reader may omit it only while reporting degraded projection state.
-	MemoryProjectionLegacyUnanchored MemoryProjectionDisposition = "legacy_unanchored"
-	MemoryProjectionQuarantined      MemoryProjectionDisposition = "quarantined"
-	MemoryProjectionUnpublished      MemoryProjectionDisposition = "unpublished"
-	MemoryProjectionTainted          MemoryProjectionDisposition = "tainted"
-	MemoryProjectionTaintPending     MemoryProjectionDisposition = "taint_pending"
+	MemoryProjectionLegacyUnanchored   MemoryProjectionDisposition = "legacy_unanchored"
+	MemoryProjectionQuarantined        MemoryProjectionDisposition = "quarantined"
+	MemoryProjectionUnpublished        MemoryProjectionDisposition = "unpublished"
+	MemoryProjectionTainted            MemoryProjectionDisposition = "tainted"
+	MemoryProjectionTaintPending       MemoryProjectionDisposition = "taint_pending"
+	MemoryProjectionTaintIndeterminate MemoryProjectionDisposition = "taint_indeterminate"
 )
 
 // MemoryProjectionClassification is one row's exact result from a shared
@@ -86,37 +89,21 @@ type MemoryProjectionClassification struct {
 func (s *BadgerStore) ClassifyMemoryProjections(
 	records []*memory.MemoryRecord,
 ) ([]MemoryProjectionClassification, error) {
-	if s == nil {
-		return nil, errors.New("canonical store is unavailable")
-	}
 	results := make([]MemoryProjectionClassification, len(records))
-	err := s.view(func(txn *badger.Txn) error {
-		reader := &BadgerStore{
-			db:                              s.db,
-			txn:                             txn,
-			canonicalMemoryProjectionHealth: s.canonicalMemoryProjectionHealth,
-		}
+	scope := NewTaintServingReadScope()
+	err := s.withTaintServingReadSnapshot(func(reader *BadgerStore) error {
 		for i, record := range records {
-			requireCompleteEnvelope := false
+			// Preserve the batch API's outer error for a failed disclosure-gate
+			// read. Record-local envelope and taint errors remain per-row.
 			if record != nil {
-				var gateErr error
-				requireCompleteEnvelope, gateErr =
-					reader.appV25MemoryEnvelopeRequired(record.MemoryID)
-				if gateErr != nil {
-					return gateErr
+				if _, err := reader.appV25MemoryEnvelopeRequired(record.MemoryID); err != nil {
+					return err
 				}
 			}
-			state, disposition, classifyErr :=
-				reader.classifyCanonicalMemoryProjection(record, requireCompleteEnvelope)
-			if classifyErr == nil {
-				classifyErr = reader.applyMemoryTaintDisposition(record.MemoryID, &disposition)
-			}
-			reader.observeMemoryProjectionDisposition(disposition)
-			results[i] = MemoryProjectionClassification{
-				Disposition: disposition,
-				State:       state,
-				Err:         classifyErr,
-			}
+			state, disposition, _, err := reader.ClassifyMemoryProjectionForRead(
+				record, scope, allowMemoryProjectionRead,
+			)
+			results[i] = MemoryProjectionClassification{State: state, Disposition: disposition, Err: err}
 		}
 		return nil
 	})
@@ -137,59 +124,83 @@ func (s *BadgerStore) ValidateMemoryProjection(
 	return state, err
 }
 
-// ValidateMemoryProjectionWithoutTaint validates the canonical SQL envelope
-// without disclosing taint state. Authorization layers use this first so a
-// caller who cannot read the record receives the ordinary denial rather than a
-// 451 that confirms the protected record exists.
-func (s *BadgerStore) ValidateMemoryProjectionWithoutTaint(
-	record *memory.MemoryRecord,
-) (*MemoryDisclosureState, error) {
-	requireCompleteEnvelope := false
-	var err error
-	if record != nil {
-		requireCompleteEnvelope, err =
-			s.appV25MemoryEnvelopeRequired(record.MemoryID)
-	}
-	if err != nil {
-		return nil, fmt.Errorf(
-			"%w: read app-v25 disclosure gate: %w",
-			ErrMemoryProjectionUnpublished, err,
-		)
-	}
-	state, _, err := s.classifyCanonicalMemoryProjection(record, requireCompleteEnvelope)
-	return state, err
-}
-
 // ClassifyMemoryProjection performs the same fail-closed validation as
 // ValidateMemoryProjection and additionally reports the narrow compatibility
 // disposition used for pre-app-v23 terminal zero-hash records.
 func (s *BadgerStore) ClassifyMemoryProjection(
 	record *memory.MemoryRecord,
-) (projection *MemoryDisclosureState, disposition MemoryProjectionDisposition, resultErr error) {
-	requireCompleteEnvelope := false
-	var err error
-	if record != nil {
-		requireCompleteEnvelope, err =
-			s.appV25MemoryEnvelopeRequired(record.MemoryID)
-	}
-	if err != nil {
-		return nil, MemoryProjectionUnpublished, fmt.Errorf(
-			"%w: read app-v25 disclosure gate: %w",
-			ErrMemoryProjectionUnpublished, err,
-		)
-	}
-	state, disposition, resultErr := s.classifyCanonicalMemoryProjection(
-		record,
-		requireCompleteEnvelope,
+) (*MemoryDisclosureState, MemoryProjectionDisposition, error) {
+	state, disposition, _, err := s.ClassifyMemoryProjectionForRead(
+		record, NewTaintServingReadScope(), allowMemoryProjectionRead,
 	)
-	if resultErr == nil {
-		resultErr = s.applyMemoryTaintDisposition(record.MemoryID, &disposition)
+	return state, disposition, err
+}
+
+func allowMemoryProjectionRead(*BadgerStore, *MemoryDisclosureState) (bool, error) {
+	return true, nil
+}
+
+// ClassifyMemoryProjectionForRead validates the complete canonical envelope,
+// runs policy against the same read-only snapshot, then classifies taint only
+// for an allowed row. The callback must use the supplied reader and must not
+// retain it. policyAllowed is a policy result, not permission to disclose when
+// an error or taint disposition is returned.
+func (s *BadgerStore) ClassifyMemoryProjectionForRead(
+	record *memory.MemoryRecord,
+	scope *TaintServingReadScope,
+	authorize func(*BadgerStore, *MemoryDisclosureState) (bool, error),
+) (projection *MemoryDisclosureState, disposition MemoryProjectionDisposition, policyAllowed bool, resultErr error) {
+	disposition = MemoryProjectionUnpublished
+	defer func() {
+		if s != nil && disposition != MemoryProjectionTaintIndeterminate {
+			s.observeMemoryProjectionDisposition(disposition)
+		}
+	}()
+	if authorize == nil {
+		return nil, disposition, false, errors.New("canonical memory authorization callback is required")
 	}
-	s.observeMemoryProjectionDisposition(disposition)
-	if resultErr != nil {
-		return nil, disposition, resultErr
+	if scope == nil {
+		scope = NewTaintServingReadScope()
 	}
-	return state, disposition, nil
+	resultErr = s.withTaintServingReadSnapshot(func(reader *BadgerStore) error {
+		requireCompleteEnvelope := false
+		if record != nil {
+			var err error
+			requireCompleteEnvelope, err = reader.appV25MemoryEnvelopeRequired(record.MemoryID)
+			if err != nil {
+				return fmt.Errorf("%w: read app-v25 disclosure gate: %w", ErrMemoryProjectionUnpublished, err)
+			}
+		}
+		state, envelopeDisposition, err := reader.classifyMemoryProjectionEnvelope(record, requireCompleteEnvelope)
+		disposition = envelopeDisposition
+		if err != nil {
+			return err
+		}
+		policyAllowed, err = authorize(reader, state)
+		if err != nil || !policyAllowed {
+			return err
+		}
+		verdict, err := reader.classifyMemoryTaintForRead(record.MemoryID, scope)
+		if err != nil {
+			if errors.Is(err, ErrTaintServingWalkBudget) {
+				disposition = MemoryProjectionTaintIndeterminate
+				return fmt.Errorf("%w: %w", ErrMemoryProjectionTaintIndeterminate, err)
+			}
+			disposition = MemoryProjectionUnpublished
+			return fmt.Errorf("classify taint: %w", err)
+		}
+		switch verdict.Outcome {
+		case TaintServingTainted:
+			disposition = MemoryProjectionTainted
+			return fmt.Errorf("%w: %w", ErrMemoryProjectionUnpublished, ErrMemoryProjectionTainted)
+		case TaintServingPending:
+			disposition = MemoryProjectionTaintPending
+			return fmt.Errorf("%w: %w", ErrMemoryProjectionUnpublished, ErrMemoryProjectionTaintPending)
+		}
+		projection = state
+		return nil
+	})
+	return projection, disposition, policyAllowed, resultErr
 }
 
 func (s *BadgerStore) appV25MemoryEnvelopeRequired(memoryID string) (bool, error) {
@@ -216,7 +227,7 @@ func (s *BadgerStore) appV25MemoryEnvelopeRequired(memoryID string) (bool, error
 	return found, nil
 }
 
-func (s *BadgerStore) classifyCanonicalMemoryProjection(
+func (s *BadgerStore) classifyMemoryProjectionEnvelope(
 	record *memory.MemoryRecord,
 	requireCompleteEnvelope bool,
 ) (projection *MemoryDisclosureState, disposition MemoryProjectionDisposition, resultErr error) {
@@ -298,36 +309,6 @@ func (s *BadgerStore) classifyCanonicalMemoryProjection(
 		)
 	}
 	return state, MemoryProjectionExact, nil
-}
-
-func (s *BadgerStore) applyMemoryTaintDisposition(
-	memoryID string,
-	disposition *MemoryProjectionDisposition,
-) error {
-	verdict, err := s.ClassifyMemoryTaint(memoryID)
-	if err != nil {
-		*disposition = MemoryProjectionUnpublished
-		return fmt.Errorf(
-			"%w: classify taint: %w",
-			ErrMemoryProjectionUnpublished, err,
-		)
-	}
-	switch verdict.Outcome {
-	case TaintServingTainted:
-		*disposition = MemoryProjectionTainted
-		return fmt.Errorf(
-			"%w: %w",
-			ErrMemoryProjectionUnpublished, ErrMemoryProjectionTainted,
-		)
-	case TaintServingPending:
-		*disposition = MemoryProjectionTaintPending
-		return fmt.Errorf(
-			"%w: %w",
-			ErrMemoryProjectionUnpublished, ErrMemoryProjectionTaintPending,
-		)
-	default:
-		return nil
-	}
 }
 
 func legacyTerminalHashlessProjectionEligible(
