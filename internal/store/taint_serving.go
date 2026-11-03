@@ -25,6 +25,19 @@ type TaintServingVerdict struct {
 	DecisionIDs []string
 	Nodes       int
 	Units       int
+
+	// Optional, bounded metadata about the stored, hash-bound ancestor graph.
+	// Complete requires every observed branch to close at an exact-provenance
+	// root, no effective incomplete decision, and no error/cap/cycle. It says
+	// nothing about omitted derivations or global provenance completeness.
+	// False Complete + false Missing is unproved, not a positive absence proof.
+	CoverageComplete bool
+	// Missing is positive evidence: a checked leaf had no provenance record.
+	// Optional read/decoder errors and exhausted metadata work do not set it.
+	LineageMissing bool
+	// These report observed effective decision statuses, never serving caps.
+	DepthExhausted bool
+	WorkExhausted  bool
 }
 
 // ClassifyMemoryTaint checks direct memberships and the authenticated ancestor
@@ -42,7 +55,21 @@ func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintSe
 	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
 		return verdict, fmt.Errorf("%w: invalid memory ID", ErrTaintServingState)
 	}
-	err := s.withTaintServingReadSnapshot(func(reader *BadgerStore) error {
+	err := s.withTaintServingReadSnapshot(func(reader *BadgerStore) (classificationErr error) {
+		// Discovery is optional: it shares this exact reader and request scope,
+		// but spends only its separate metadata allowance. Its uncertainty must
+		// never change the mandatory disposition, errors, Nodes or Units.
+		defer func() {
+			if classificationErr != nil {
+				verdict.CoverageComplete = false
+				return
+			}
+			coverage := reader.discoverTaintCoverage(memoryID, scope)
+			verdict.CoverageComplete = coverage.complete
+			verdict.LineageMissing = coverage.missing
+			verdict.DepthExhausted = verdict.DepthExhausted || coverage.depth
+			verdict.WorkExhausted = verdict.WorkExhausted || coverage.work
+		}()
 		txn := reader.txn
 		queue := []string{memoryID}
 		visited := make(map[string]struct{}, taint.MaxServingAncestorWalk)
@@ -84,6 +111,8 @@ func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintSe
 					if !header.Status.Incomplete() {
 						pendingOnly = false
 					}
+					verdict.DepthExhausted = verdict.DepthExhausted || header.Status == taint.StatusDepthExhausted
+					verdict.WorkExhausted = verdict.WorkExhausted || header.Status == taint.StatusWorkExhausted
 				}
 				verdict.DecisionIDs = append([]string(nil), decisions...)
 				if pendingOnly {

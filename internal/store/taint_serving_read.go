@@ -13,16 +13,18 @@ import (
 const taintServingHeaderReadLimit = 256
 const taintServingCacheEntries = 4
 
-// TaintServingReadScope bounds added cold header reads across one request.
-// It contains no caller, memory or decision identity. A zero value has no cold
-// allowance; callers should use NewTaintServingReadScope.
+// TaintServingReadScope bounds added cold header reads and, independently,
+// optional metadata reads across one request. It contains no caller, memory
+// or decision identity. A zero value has neither allowance; callers should
+// use NewTaintServingReadScope.
 type TaintServingReadScope struct {
-	mu        sync.Mutex
-	remaining int
+	mu                sync.Mutex
+	remaining         int
+	coverageRemaining int
 }
 
 func NewTaintServingReadScope() *TaintServingReadScope {
-	return &TaintServingReadScope{remaining: taintServingHeaderReadLimit}
+	return &TaintServingReadScope{remaining: taintServingHeaderReadLimit, coverageRemaining: taint.MaxServingAncestorWalk}
 }
 
 func (s *TaintServingReadScope) takeHeaderRead() bool {
