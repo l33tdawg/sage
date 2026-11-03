@@ -118,14 +118,16 @@ type FederationConfig struct {
 	// P2PEnabled starts the optional v11.6 libp2p connectivity substrate. It
 	// changes only how federation connections are dialed/accepted; the existing
 	// mTLS, CA pins, request signatures, and HTTP handlers still run inside.
-	P2PEnabled bool `yaml:"p2p_enabled,omitempty"`
+	// Preserve explicit false across SaveConfig and reload into defaults.
+	P2PEnabled bool `yaml:"p2p_enabled"`
 	// P2PListenAddrs are local libp2p multiaddrs. Empty uses ephemeral TCP+QUIC
 	// listeners on all interfaces; no fixed inbound port is required.
 	P2PListenAddrs []string `yaml:"p2p_listen_addrs,omitempty"`
 	// P2PRelayAddrs is an ordered list of static Circuit Relay v2 bootstrap
 	// multiaddrs. Multiple relays are supported so deployments can self-host and
 	// avoid one author-operated availability dependency.
-	P2PRelayAddrs []string `yaml:"p2p_relay_addrs,omitempty"`
+	// Preserve an empty list rather than restoring default relays on reload.
+	P2PRelayAddrs []string `yaml:"p2p_relay_addrs"`
 	// P2PPeers binds a remote SAGE chain ID to one or more scanned/persisted
 	// libp2p multiaddrs. The libp2p peer ID is connectivity identity only; the
 	// existing on-chain CA SPKI pin remains the federation trust identity.
@@ -136,8 +138,8 @@ type FederationConfig struct {
 	P2PRoutes map[string]FederationRouteSnapshot `yaml:"p2p_routes,omitempty"`
 	// P2PForcePrivate makes AutoRelay reserve a relay path even on networks
 	// where automatic reachability detection would take time. Intended for
-	// known-NAT test/deployment profiles, not enabled by default.
-	P2PForcePrivate bool `yaml:"p2p_force_private,omitempty"`
+	// known-NAT deployments; preserve explicit false across config saves.
+	P2PForcePrivate bool `yaml:"p2p_force_private"`
 }
 
 type FederationRouteSnapshot struct {

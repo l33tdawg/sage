@@ -1144,6 +1144,17 @@ func (h *DashboardHandler) handleAppV23AgentPolicy() http.HandlerFunc {
 			enrollment.RootGeneration != root.Generation
 		if enrollment == nil || !enrollment.Active || homeReapproval ||
 			generationReauthorization {
+			registered, registerErr := h.BadgerStore.GetRegisteredAgent(agentID)
+			if registerErr != nil {
+				writeAppV23AccessError(w, http.StatusInternalServerError, "agent_state_unavailable",
+					"Could not load the registered agent for approval.")
+				return
+			}
+			if registered == nil {
+				writeAppV23AccessError(w, http.StatusNotFound, "agent_not_registered",
+					"Register the local agent before approving its access policy.")
+				return
+			}
 			if generationReauthorization {
 				mode = "reauthorize"
 			} else if homeReapproval {

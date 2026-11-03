@@ -1114,14 +1114,36 @@ from the selected named profile.
 An amid-only validator fleet has no CEREBRUM SPA. `amid` mounts exactly two of
 these routes on its own REST listener — `GET /v1/dashboard/network/access` and
 `PUT /v1/dashboard/network/access/agents/{id}/policy` — with the same handlers
-and operator gate that CEREBRUM serves, so a policy write produces the
-identical `TxTypeAgentRoleChange`. The caller signs the exact request as the
+and operator gate that CEREBRUM serves, so initial approval produces
+`TxTypeLocalAgentApprove` and an existing enrollment update produces
+`TxTypeAgentRoleChange`. The caller signs the exact request as the
 current Root, using the operator key material the host already holds; that
 same configured broker key (`--cerebrum-root-key-file` /
 `SAGE_CEREBRUM_ROOT_KEY_FILE`) is what produces the elevation countersignature
-on the promoted-Admin path. Nothing else from the dashboard router is mounted
-on amid, and a node without a broker key answers `root_key_unavailable`
-instead of degrading open.
+on the promoted-Admin path. An unavailable broker answers
+`root_key_unavailable` instead of degrading open. AMID also has separately
+registered signer-fence operator routes.
+
+For initial approval of a distinct agent, configure `amid --local-agent-key-dir`
+(or `SAGE_LOCAL_AGENT_KEY_DIR`) with an explicit operator-managed directory.
+Register the target first, then provision its consenting credential as
+`<agent-id>.key`, where the filename is its canonical lowercase public-key hex.
+Files contain a raw 32-byte Ed25519 seed or a valid 64-byte private key. Keep the
+directory private (0700) and keys readable only by the service account (0600).
+Provisioning delegates consent signing to the local node; it does not register
+or approve the identity. Root still signs the exact policy request, and the
+handler binds the target signature to that policy before consensus validation.
+
+The directory is opt-in and is not inferred from `HOME` or `SAGE_HOME`.
+Lookups reject symlink directories, symlink or non-regular key files, malformed
+keys, and keys that do not match the requested identity. Keys are read on each
+request; removal disables subsequent consent signing without a restart, but
+never revokes an already committed enrollment or a transaction already signed.
+An absent target key produces `target_key_unavailable`; an unregistered target
+produces `agent_not_registered` before signing or broadcast. The existing
+`SageClient.set_agent_access_policy()` and async equivalent drive this same
+route. See `amidLocalAgentKeyResolver` (`cmd/amid/local_agent_keys.go`) and
+`handleAppV23AgentPolicy` (`web/appv23_access_handler.go`).
 
 The Add Agent wizard is identity/connection enrollment only. It creates a
 restricted pending Member and deliberately does not collect, stage, or persist
