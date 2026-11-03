@@ -962,6 +962,9 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	if err := s.migratePrivateMedia(ctx); err != nil {
 		return fmt.Errorf("migrate private media: %w", err)
 	}
+	if err := s.migrateTaintEvidence(ctx); err != nil {
+		return fmt.Errorf("migrate taint evidence: %w", err)
+	}
 	if err := s.migrateFederatedAgentExposure(ctx); err != nil {
 		return fmt.Errorf("migrate federated agent exposure: %w", err)
 	}
