@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -28,6 +29,14 @@ func TestParentWatchdogHelper(t *testing.T) {
 	stopped := make(chan os.Signal, 1)
 	signal.Notify(stopped, syscall.SIGTERM)
 	startParentWatchdog()
+	if os.Getenv("SAGE_PARENT_WATCHDOG_EXPECT_ALIVE") == "1" {
+		select {
+		case <-stopped:
+			os.Exit(5)
+		case <-time.After(1500 * time.Millisecond):
+			os.Exit(0)
+		}
+	}
 
 	select {
 	case <-stopped:
@@ -61,4 +70,18 @@ func TestParentWatchdogStopsNodeWhenLaunchingParentExits(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("watchdog did not stop the node after its launching parent exited")
+}
+
+func TestParentWatchdogLeavesLiveParentAndStandaloneNodesRunning(t *testing.T) {
+	for _, pid := range []string{strconv.Itoa(os.Getpid()), "", "invalid", "1"} {
+		t.Run("parent="+pid, func(t *testing.T) {
+			child := exec.Command(os.Args[0], "-test.run=^TestParentWatchdogHelper$")
+			child.Env = append(os.Environ(), "SAGE_PARENT_PID="+pid,
+				"SAGE_PARENT_WATCHDOG_HELPER=1", "SAGE_PARENT_WATCHDOG_EXPECT_ALIVE=1",
+				"SAGE_PARENT_WATCHDOG_MARKER="+filepath.Join(t.TempDir(), "unused"))
+			if out, err := child.CombinedOutput(); err != nil {
+				t.Fatalf("watchdog stopped a live/standalone child: %v %s", err, out)
+			}
+		})
+	}
 }

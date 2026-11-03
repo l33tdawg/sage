@@ -1114,14 +1114,15 @@ from the selected named profile.
 An amid-only validator fleet has no CEREBRUM SPA. `amid` mounts exactly two of
 these routes on its own REST listener — `GET /v1/dashboard/network/access` and
 `PUT /v1/dashboard/network/access/agents/{id}/policy` — with the same handlers
-and operator gate that CEREBRUM serves, so a policy write produces the
-identical `TxTypeAgentRoleChange`. The caller signs the exact request as the
+and operator gate that CEREBRUM serves, so initial approval produces
+`TxTypeLocalAgentApprove` and an existing enrollment update produces
+`TxTypeAgentRoleChange`. The caller signs the exact request as the
 current Root, using the operator key material the host already holds; that
 same configured broker key (`--cerebrum-root-key-file` /
 `SAGE_CEREBRUM_ROOT_KEY_FILE`) is what produces the elevation countersignature
-on the promoted-Admin path. Nothing else from the dashboard router is mounted
-on amid, and a node without a broker key answers `root_key_unavailable`
-instead of degrading open.
+on the promoted-Admin path. An unavailable broker answers
+`root_key_unavailable` instead of degrading open. AMID also has separately
+registered signer-fence operator routes.
 
 For initial approval of a distinct agent, configure `amid --local-agent-key-dir`
 (or `SAGE_LOCAL_AGENT_KEY_DIR`) with an explicit operator-managed directory.

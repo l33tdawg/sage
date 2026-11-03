@@ -237,8 +237,8 @@ func wireRESTForkAccessors(server restForkAccessorSetter, app appForkAccessorSou
 // wireAmidOperatorRoutes mounts the app-v23 access-control pair on the amid REST
 // router: the consensus-authoritative state read that exposes role and
 // enrollment revisions, and the atomic policy write that produces
-// TxTypeLocalAgentApprove or TxTypeAgentRoleChange. The handlers, gate, and control-actor resolution
-// are exactly the ones CEREBRUM serves (web.RegisterAmidOperatorRoutes), with
+// TxTypeLocalAgentApprove or TxTypeAgentRoleChange. The handlers, gate, and
+// control-actor resolution are the ones CEREBRUM serves, with
 // resolveAgentKey providing the local operator signer, promoted-Admin broker,
 // and explicitly provisioned target consent keys.
 func wireAmidOperatorRoutes(

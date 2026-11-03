@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -35,8 +37,16 @@ func newRerankFallbackLogger(logger zerolog.Logger, now func() time.Time, interv
 		folded := suppressed
 		last, suppressed = t, 0
 		mu.Unlock()
+		// Upstream errors can echo submitted queries/documents or credentials
+		// in a URL. Keep operational categories, never the raw error body.
+		reason := "upstream_error_or_invalid_scores"
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = "timeout"
+		} else if errors.Is(err, context.Canceled) {
+			reason = "canceled"
+		}
 		logger.Warn().
-			Err(err).
+			Str("reason", reason).
 			Int("candidates", candidates).
 			Int("fallbacks_since_last_log", folded).
 			Msg("hybrid recall reranker failed; results kept RRF order (lower SAGE_RERANK_MAX_CANDIDATES or raise SAGE_RERANK_TIMEOUT_MS)")
