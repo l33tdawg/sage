@@ -22,7 +22,7 @@ app-v30 on any existing chain.
 
 ## Create one artifact for the complete validator set
 
-For a consumer such as VANTARAQ, the same contract supports a single validator
+The same contract supports a single validator
 or a quorum of four or more validators, up to 256. Prepare a JSON array with
 every validator's public Ed25519 key as 64 lowercase hexadecimal characters
 and its positive voting power:
@@ -44,7 +44,7 @@ Use an existing Root key and a unique new chain ID:
 
 ```sh
 sage-gui init-genesis \
-  --chain-id vantaraq-new-chain \
+  --chain-id new-chain-example \
   --root-key /secure/root.key \
   --validators /secure/validators.json \
   --output /staging/genesis.json
@@ -52,7 +52,7 @@ sage-gui init-genesis \
 
 The default is Root-only bootstrap; ordinary agents can be enrolled later. To
 enroll one Companion at genesis, also provide
-`--agent-key /secure/companion.key --home-domain vantaraq` and optionally
+`--agent-key /secure/companion.key --home-domain private-home` and optionally
 `--clearance 0..4` (default 1). The Companion key must already exist and must
 differ from Root. Its manifest includes the Companion profile, capability mask
 15, clearance and owned non-shared home domain. Both Root and Companion sign
