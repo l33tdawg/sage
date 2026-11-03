@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"strings"
 	"testing"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -39,6 +41,87 @@ func TestPublicMemoryMigrationExistingLedgerBoundedAndSourceUntouched(t *testing
 	require.Error(t, err)
 	_, err = source.BuildPublicMemoryMigration(context.Background(), target)
 	require.Error(t, err)
+}
+
+func TestPublicMemoryMigrationCopiesAppV30ProvenanceAndAdoptionReceipt(t *testing.T) {
+	source := newTestBadger(t)
+	transaction := source.BeginConsensusTransaction(nil)
+	publicTestRecord(t, transaction, "native-provenance")
+	publicTestRecord(t, transaction, "adopted")
+	publicTestRecord(t, transaction, "bare-public")
+	signerID := strings.Repeat("a", 64)
+	signers := []AppV30ProvenanceSigner{{
+		CredentialID: signerID,
+		PrincipalID:  signerID,
+		Exact:        true,
+	}}
+	require.NoError(t, transaction.SetAppV30Provenance("native-provenance", signers))
+	adoptionReceipt := sha256.Sum256([]byte("adoption receipt"))
+	require.NoError(t, transaction.update(func(txn *badger.Txn) error {
+		return transaction.txnSet(
+			txn,
+			memoryLegacyAdoptionReceiptKey("adopted"),
+			adoptionReceipt[:],
+		)
+	}))
+	require.NoError(t, transaction.CommitConsensusTransaction())
+
+	target := newTestBadger(t)
+	result, err := source.BuildPublicMemoryMigration(context.Background(), target)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), result.Public)
+	require.Equal(t, uint64(3), result.Migrated)
+	require.Equal(t, uint64(1), result.AppV30Provenance)
+	require.Equal(t, uint64(1), result.AdoptionReceipts)
+
+	gotSigners, found, err := target.GetAppV30Provenance("native-provenance")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, signers, gotSigners)
+	require.Equal(
+		t,
+		adoptionReceipt[:],
+		readTaintValue(t, target, memoryLegacyAdoptionReceiptKey("adopted")),
+		"the adoption receipt must be copied byte-for-byte",
+	)
+	for _, memoryID := range []string{"native-provenance", "adopted", "bare-public"} {
+		migrated, markerErr := target.HasAppV30MigrationMarker(memoryID)
+		require.NoError(t, markerErr)
+		require.True(t, migrated)
+		sourceMigrated, markerErr := source.HasAppV30MigrationMarker(memoryID)
+		require.NoError(t, markerErr)
+		require.False(t, sourceMigrated, "the source store must never be rewritten")
+	}
+}
+
+func TestPublicMemoryMigrationRejectsMalformedAppV30Metadata(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  []byte
+		raw  []byte
+	}{
+		{name: "provenance", key: AppV30ProvenanceKey("public-000"), raw: []byte{1}},
+		{name: "adoption receipt", key: memoryLegacyAdoptionReceiptKey("public-000"), raw: []byte("short")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source := newTestBadger(t)
+			transaction := source.BeginConsensusTransaction(nil)
+			publicTestRecord(t, transaction, "public-000")
+			require.NoError(t, transaction.update(func(txn *badger.Txn) error {
+				return transaction.txnSet(txn, tc.key, tc.raw)
+			}))
+			require.NoError(t, transaction.CommitConsensusTransaction())
+
+			target := newTestBadger(t)
+			_, err := source.BuildPublicMemoryMigration(context.Background(), target)
+			require.Error(t, err)
+			require.NoError(t, target.db.View(func(txn *badger.Txn) error {
+				_, getErr := txn.Get([]byte(publicIndexPrefix + "migration-complete"))
+				require.ErrorIs(t, getErr, badger.ErrKeyNotFound)
+				return nil
+			}))
+		})
+	}
 }
 
 func TestPublicMemoryMigrationCancellationAndBadSourceNeverComplete(t *testing.T) {

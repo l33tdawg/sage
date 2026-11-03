@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -28,6 +29,10 @@ type AppV30ProvenanceSigner struct {
 
 func AppV30ProvenanceKey(memoryID string) []byte {
 	return []byte("memprov:v30:" + memoryID)
+}
+
+func appV30MigrationMarkerKey(memoryID string) []byte {
+	return []byte("memprov:migrated:" + memoryID)
 }
 
 // SetAppV30Provenance installs the immutable creation-time signer set for one
@@ -100,6 +105,57 @@ func (s *BadgerStore) ValidateAppV30Provenance(
 			return ErrAppV30ProvenanceConflict
 		}
 		return nil
+	})
+}
+
+// HasAppV30MigrationMarker distinguishes records copied by the app-v30
+// public-memory migration from records submitted natively on this chain.
+func (s *BadgerStore) HasAppV30MigrationMarker(memoryID string) (bool, error) {
+	if len(memoryID) == 0 || len(memoryID) > tx.MaxDerivedFromMemoryIDBytes {
+		return false, fmt.Errorf("app-v30 migration marker memory ID length %d is invalid", len(memoryID))
+	}
+	found := false
+	err := s.view(func(txn *badger.Txn) error {
+		raw, exists, err := readTaintValueTxn(txn, appV30MigrationMarkerKey(memoryID))
+		if err != nil || !exists {
+			return err
+		}
+		if !bytes.Equal(raw, []byte{1}) {
+			return fmt.Errorf("app-v30 migration marker is malformed for %s", memoryID)
+		}
+		found = true
+		return nil
+	})
+	return found, err
+}
+
+func (s *BadgerStore) copyAppV30MigrationMetadata(
+	memoryID string,
+	provenance, adoptionReceipt []byte,
+) error {
+	if len(memoryID) == 0 || len(memoryID) > tx.MaxDerivedFromMemoryIDBytes {
+		return fmt.Errorf("app-v30 migration memory ID length %d is invalid", len(memoryID))
+	}
+	if len(provenance) > 0 {
+		if _, err := decodeAppV30Provenance(provenance); err != nil {
+			return fmt.Errorf("copy app-v30 provenance for %s: %w", memoryID, err)
+		}
+	}
+	if len(adoptionReceipt) > 0 && len(adoptionReceipt) != sha256.Size {
+		return fmt.Errorf("copy adoption receipt for %s: invalid receipt length %d", memoryID, len(adoptionReceipt))
+	}
+	return s.update(func(txn *badger.Txn) error {
+		if len(provenance) > 0 {
+			if err := s.txnSet(txn, AppV30ProvenanceKey(memoryID), provenance); err != nil {
+				return err
+			}
+		}
+		if len(adoptionReceipt) > 0 {
+			if err := s.txnSet(txn, memoryLegacyAdoptionReceiptKey(memoryID), adoptionReceipt); err != nil {
+				return err
+			}
+		}
+		return s.txnSet(txn, appV30MigrationMarkerKey(memoryID), []byte{1})
 	})
 }
 
