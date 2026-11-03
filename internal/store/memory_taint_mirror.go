@@ -18,18 +18,6 @@ type MemoryTaintMirrorStore interface {
 	MemoryTaintMirrorRevision(ctx context.Context) (uint64, error)
 }
 
-// TaintAwareDomainSpaceCompletenessStore applies the revision-fenced SQL taint
-// mirror before the bounded completeness scan. Callers must enable it only
-// while the mirror exactly matches canonical taint revision.
-type TaintAwareDomainSpaceCompletenessStore interface {
-	DomainSpaceCompletenessFiltered(
-		ctx context.Context,
-		domain, activeSpace string,
-		cap int,
-		excludeTainted bool,
-	) (hasOutside, established bool, err error)
-}
-
 func ensureSQLiteMemoryTaintMirrorSchema(ctx context.Context, s *SQLiteStore) error {
 	_, err := s.writeExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS memory_taint_mirror (
@@ -161,8 +149,33 @@ func (s *BadgerStore) SnapshotEffectiveTaintMemberships() (
 	memoryIDs []string,
 	err error,
 ) {
+	return s.snapshotEffectiveTaintMemberships(context.Background(), 0, 0)
+}
+
+// Zero limits preserve the manual, unbounded snapshot API above. Automatic
+// refresh always supplies positive local work limits and a cooperative deadline.
+func (s *BadgerStore) snapshotEffectiveTaintMemberships(
+	ctx context.Context, maxVisits, maxIDs int,
+) (revision uint64, memoryIDs []string, err error) {
+	visits := 0
+	charge := func() error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if maxVisits > 0 && visits >= maxVisits {
+			return ErrMemoryTaintMirrorWorkLimit
+		}
+		visits++
+		return nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return 0, nil, ctxErr
+	}
 	tainted := make(map[string]struct{})
 	err = s.view(func(txn *badger.Txn) error {
+		if chargeErr := charge(); chargeErr != nil {
+			return chargeErr
+		}
 		var readErr error
 		revision, readErr = readTaintUint64Txn(txn, taint.RevisionKey())
 		if readErr != nil {
@@ -175,9 +188,15 @@ func (s *BadgerStore) SnapshotEffectiveTaintMemberships() (
 		it := txn.NewIterator(options)
 		defer it.Close()
 		for it.Seek(decisionPrefix); it.ValidForPrefix(decisionPrefix); it.Next() {
+			if chargeErr := charge(); chargeErr != nil {
+				return chargeErr
+			}
 			decisionID := string(it.Item().Key()[len(decisionPrefix):])
 			if validateErr := taint.ValidateDecisionID(decisionID); validateErr != nil {
 				return fmt.Errorf("%w: %v", ErrTaintStateMalformed, validateErr)
+			}
+			if chargeErr := charge(); chargeErr != nil {
+				return chargeErr
 			}
 			header, found, readErr := readTaintHeaderTxn(txn, decisionID)
 			if readErr != nil {
@@ -192,10 +211,18 @@ func (s *BadgerStore) SnapshotEffectiveTaintMemberships() (
 			indexOptions.PrefetchValues = false
 			index := txn.NewIterator(indexOptions)
 			for index.Seek(indexPrefix); index.ValidForPrefix(indexPrefix); index.Next() {
+				if chargeErr := charge(); chargeErr != nil {
+					index.Close()
+					return chargeErr
+				}
 				memoryID := string(index.Item().Key()[len(indexPrefix):])
 				if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
 					index.Close()
 					return fmt.Errorf("%w: invalid taint mirror memory ID", ErrTaintStateMalformed)
+				}
+				if chargeErr := charge(); chargeErr != nil {
+					index.Close()
+					return chargeErr
 				}
 				raw, found, readErr := readTaintValueTxn(
 					txn,
@@ -214,6 +241,10 @@ func (s *BadgerStore) SnapshotEffectiveTaintMemberships() (
 					return fmt.Errorf("%w: %v", ErrTaintStateMalformed, decodeErr)
 				}
 				if header.MembershipEffective(membership) {
+					if _, exists := tainted[memoryID]; !exists && maxIDs > 0 && len(tainted) >= maxIDs {
+						index.Close()
+						return ErrMemoryTaintMirrorWorkLimit
+					}
 					tainted[memoryID] = struct{}{}
 				}
 			}
@@ -228,7 +259,13 @@ func (s *BadgerStore) SnapshotEffectiveTaintMemberships() (
 	for memoryID := range tainted {
 		memoryIDs = append(memoryIDs, memoryID)
 	}
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
+	}
 	sort.Strings(memoryIDs)
+	if err := ctx.Err(); err != nil {
+		return 0, nil, err
+	}
 	return revision, memoryIDs, nil
 }
 
@@ -270,6 +307,9 @@ func RebuildMemoryTaintMirror(
 	return 0, 0, ErrMemoryTaintMirrorNotConverged
 }
 
+// MemoryTaintMirrorFresh compares observed mirror and canonical revisions.
+// It does not lock either revision or fence subsequent selection and disclosure;
+// callers need a separate stable-revision guarantee before enabling ExcludeTainted.
 func MemoryTaintMirrorFresh(
 	ctx context.Context,
 	canonical *BadgerStore,

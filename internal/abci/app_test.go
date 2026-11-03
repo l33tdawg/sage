@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -38,14 +39,32 @@ func TestComputeBlockHash(t *testing.T) {
 // setupTestApp creates a SageApp backed by temp BadgerDB + SQLite.
 func setupTestApp(t *testing.T) *SageApp {
 	t.Helper()
-	bs := setupTestBadger(t)
-	dbPath := filepath.Join(t.TempDir(), "test-offchain.db")
-	sqlite, err := store.NewSQLiteStore(context.Background(), dbPath)
+	// One cleanup owns worker and stores. Independent store callbacks would
+	// still run after a stop timeout and could close handles under live work.
+	dir, err := os.MkdirTemp("", "sage-test-app")
 	require.NoError(t, err)
-	t.Cleanup(func() { sqlite.Close() })
+	bs, err := store.NewBadgerStore(filepath.Join(dir, "badger"))
+	require.NoError(t, err)
+	var sqlite *store.SQLiteStore
+	var app *SageApp
+	t.Cleanup(func() {
+		if app != nil {
+			if err := app.stopMemoryTaintMirrorWorker(); err != nil {
+				t.Errorf("leave test stores open after worker stop failure: %v", err)
+				return
+			}
+		}
+		if sqlite != nil {
+			assert.NoError(t, sqlite.Close())
+		}
+		assert.NoError(t, bs.CloseBadger())
+		assert.NoError(t, os.RemoveAll(dir))
+	})
+	sqlite, err = store.NewSQLiteStore(context.Background(), filepath.Join(dir, "test-offchain.db"))
+	require.NoError(t, err)
 
 	logger := zerolog.Nop()
-	app, err := NewSageAppWithStores(bs, sqlite, logger)
+	app, err = NewSageAppWithStores(bs, sqlite, logger)
 	require.NoError(t, err)
 	return app
 }

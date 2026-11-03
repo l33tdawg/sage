@@ -1,11 +1,8 @@
 package store
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
-
-	badger "github.com/dgraph-io/badger/v4"
 
 	"github.com/l33tdawg/sage/internal/taint"
 )
@@ -34,12 +31,19 @@ type TaintServingVerdict struct {
 // path in one Badger snapshot. It never treats an absent materialized
 // membership as proof that an incomplete ancestor decision is independent.
 func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict, error) {
+	return s.classifyMemoryTaintForRead(memoryID, NewTaintServingReadScope())
+}
+
+func (s *BadgerStore) classifyMemoryTaintForRead(memoryID string, scope *TaintServingReadScope) (TaintServingVerdict, error) {
+	if scope == nil {
+		scope = NewTaintServingReadScope()
+	}
 	var verdict TaintServingVerdict
 	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
 		return verdict, fmt.Errorf("%w: invalid memory ID", ErrTaintServingState)
 	}
-	err := s.view(func(txn *badger.Txn) error {
-		reader := &BadgerStore{db: s.db, txn: txn}
+	err := s.withTaintServingReadSnapshot(func(reader *BadgerStore) error {
+		txn := reader.txn
 		queue := []string{memoryID}
 		visited := make(map[string]struct{}, taint.MaxServingAncestorWalk)
 		headers := make(map[string]taint.Header)
@@ -90,6 +94,16 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 				return nil
 			}
 
+			if current == memoryID {
+				status, headerErr := reader.incompleteTaintStatus(scope)
+				if headerErr != nil {
+					return headerErr
+				}
+				if status == taintIncompleteNone {
+					return nil
+				}
+			}
+
 			parents, err := s.memoryLineageTxn(txn, current)
 			if err != nil {
 				return err
@@ -105,51 +119,4 @@ func (s *BadgerStore) ClassifyMemoryTaint(memoryID string) (TaintServingVerdict,
 		return nil
 	})
 	return verdict, err
-}
-
-// TaintServingCoverageComplete reports whether every active decision has
-// completed authenticated-graph expansion. A false result means the SQL taint
-// mirror cannot be used for aggregate exclusion or completeness claims because
-// pending descendants may not have materialized memberships yet.
-func (s *BadgerStore) TaintServingCoverageComplete() (bool, error) {
-	complete := true
-	err := s.view(func(txn *badger.Txn) error {
-		active, err := readTaintUint64Txn(txn, taint.ActiveCountKey())
-		if err != nil {
-			return err
-		}
-		if active == 0 {
-			return nil
-		}
-		if active > taint.MaxActiveDecisions {
-			return fmt.Errorf("%w: active decision count %d exceeds %d",
-				ErrTaintServingState, active, taint.MaxActiveDecisions)
-		}
-		prefix := []byte("taintdec:")
-		options := badger.DefaultIteratorOptions
-		options.Prefix = prefix
-		options.PrefetchValues = true
-		it := txn.NewIterator(options)
-		defer it.Close()
-		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			decisionID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
-			if err := taint.ValidateDecisionID(decisionID); err != nil {
-				return fmt.Errorf("%w: %v", ErrTaintServingState, err)
-			}
-			raw, err := it.Item().ValueCopy(nil)
-			if err != nil {
-				return err
-			}
-			header, err := taint.DecodeHeader(raw)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrTaintServingState, err)
-			}
-			if header.Status.Incomplete() {
-				complete = false
-				return nil
-			}
-		}
-		return nil
-	})
-	return complete, err
 }
