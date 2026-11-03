@@ -137,6 +137,9 @@ class SAGEApp: NSObject, NSApplicationDelegate {
 
         var env = ProcessInfo.processInfo.environment
         env["SAGE_NO_BROWSER"] = "1"
+        // Force Quit skips the tray termination callbacks. The daemon observes
+        // this parent relationship and shuts down if its launching tray exits.
+        env["SAGE_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
         if let passphrase = vaultPassphrase {
             env["SAGE_PASSPHRASE"] = passphrase
         }

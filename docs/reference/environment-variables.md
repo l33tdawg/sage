@@ -243,6 +243,9 @@ The standalone `amid` binary reads these as flag defaults.
 |----------|--------------|--------|
 | `POSTGRES_URL` | Default for `--postgres-url` (PostgreSQL connection URL). | `cmd/amid/main.go:41` |
 | `COMETBFT_HOME` | Default for `--home` (CometBFT home directory). | `cmd/amid/main.go:40` |
+| `SAGE_CEREBRUM_ROOT_KEY_FILE` | Default for `--cerebrum-root-key-file`: local Root signing and promoted-Admin countersignature key (raw 32-byte seed or valid 64-byte private key). Empty leaves the broker unavailable. | `cmd/amid/main.go` |
+| `SAGE_LOCAL_AGENT_KEY_DIR` | Default for `--local-agent-key-dir`: opt-in directory of canonical `<agent-id>.key` files delegated for target approval consent. Empty disables distinct-target lookup. See [AMID approval setup](rest-api.md#app-v23-cerebrum-access-control-routes). | `cmd/amid/local_agent_keys.go`, `cmd/amid/main.go` |
+
 
 ---
 
@@ -255,4 +258,5 @@ These are read by the code but are **test-only or OS-provided** — don't rely o
 | `SAGE_CLOUDFLARED_BIN` | Honored **only under `go test`** (fake `cloudflared`). | `web/wizard_chatgpt.go:49` |
 | `SAGE_BROWSER_OPEN_BIN` | Honored **only under `go test`** (fake browser opener). | `web/wizard_chatgpt.go:60` |
 | `SAGE_TEST_POSTGRES_DSN`, `CI` | Test / CI harness internals. | various `*_test`-adjacent paths |
+| `SAGE_PARENT_PID` | Set by the macOS tray for its child daemon. Parent loss triggers graceful shutdown after startup; standalone and externally supervised nodes leave it unset. | `cmd/sage-tray/main.swift`, `cmd/sage-gui/parent_watchdog_unix.go` |
 | `PATH`, `HOME`, `APPDATA` | OS-provided; SAGE reads them only to locate binaries / the home directory. | various |

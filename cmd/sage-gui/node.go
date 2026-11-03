@@ -2536,6 +2536,8 @@ func runServe(startupProof string) (rerr error) {
 	// Wait for shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	// Start only after graceful shutdown can receive the orphan signal.
+	startParentWatchdog()
 	restarting := false
 	if startupErr == nil {
 	waitForShutdown:
