@@ -2,6 +2,8 @@ package abci
 
 import (
 	"context"
+	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -10,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/l33tdawg/sage/internal/memory"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
@@ -268,4 +271,116 @@ func TestMemoryTaintMirrorWorkerConcurrentStopFencesRequests(t *testing.T) {
 	}
 	require.NoError(t, w.stop(time.Second))
 	require.Equal(t, before, calls.Load())
+}
+
+func TestAppV30MirrorLossFallsBackToBadgerAndRebuilds(t *testing.T) {
+	app, _, target, chainID := setupAppV30TaintGovernance(t)
+	ctx := context.Background()
+	_, ok := app.offchainStore.(store.MemoryTaintMirrorStore)
+	require.True(t, ok)
+
+	// Join the constructor's worker before arranging stale SQL state. An
+	// in-flight constructor pass must not race the revision-zero assertion.
+	constructorWorker := app.memoryTaintMirrorWorker
+	require.NotNil(t, constructorWorker)
+	require.NoError(t, app.stopMemoryTaintMirrorWorker())
+
+	// Give this test a known SQL path without exposing production internals or
+	// changing the shared fixture. Its original SQL store remains fixture-owned.
+	mirrorDir, err := os.MkdirTemp("", "sage-mirror-recovery-")
+	require.NoError(t, err)
+	var recoveryMirror *store.SQLiteStore
+	t.Cleanup(func() {
+		if stopErr := app.stopMemoryTaintMirrorWorker(); stopErr != nil {
+			t.Errorf("leave recovery mirror open after worker stop failure: %v", stopErr)
+			return
+		}
+		if recoveryMirror != nil {
+			if closeErr := recoveryMirror.Close(); closeErr != nil {
+				t.Errorf("close recovery mirror: %v", closeErr)
+				return
+			}
+		}
+		require.NoError(t, os.RemoveAll(mirrorDir))
+	})
+	mirrorPath := filepath.Join(mirrorDir, "mirror-recovery.db")
+	recoveryMirror, err = store.NewSQLiteStore(ctx, mirrorPath)
+	require.NoError(t, err)
+	app.offchainStore = recoveryMirror
+	mirror := recoveryMirror
+
+	decisionID := strings.Repeat("d", taint.DecisionIDBytes)
+	created, err := app.badgerStore.ApplyTaintDecision(
+		chainID,
+		decisionID,
+		target,
+		[32]byte{1},
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	canonicalRevision, err := app.badgerStore.TaintRevision()
+	require.NoError(t, err)
+	require.NotZero(t, canonicalRevision)
+
+	// Simulate rolled-back mirror rows and revision, not a missing SQL schema.
+	// No worker can repair this stale state before the canonical check below.
+	require.NoError(t, mirror.ReplaceMemoryTaintMirror(ctx, 0, nil))
+	fresh, _, err := store.MemoryTaintMirrorFresh(ctx, app.badgerStore, mirror)
+	require.NoError(t, err)
+	require.False(t, fresh)
+
+	state, err := app.badgerStore.GetMemoryDisclosureState(target.MemoryID)
+	require.NoError(t, err)
+	record := &memory.MemoryRecord{
+		MemoryID:        target.MemoryID,
+		SubmittingAgent: state.Author,
+		Content:         "governance taint target",
+		ContentHash:     append([]byte(nil), state.ContentHash...),
+		DomainTag:       state.Domain,
+		Status:          memory.StatusCommitted,
+	}
+	_, disposition, err := app.badgerStore.ClassifyMemoryProjection(record)
+	require.ErrorIs(t, err, store.ErrMemoryProjectionTainted)
+	require.Equal(t, store.MemoryProjectionTainted, disposition)
+	mirroredRevision, err := mirror.MemoryTaintMirrorRevision(ctx)
+	require.NoError(t, err)
+	require.Zero(t, mirroredRevision, "canonical disclosure must not repair SQL as a side effect")
+
+	// Replacing the joined test worker lets the stock bounded asynchronous
+	// start/enqueue path perform recovery. No synchronous refresh is restored.
+	app.memoryTaintMirrorWorker = nil
+	app.startMemoryTaintMirrorWorker()
+	require.NotNil(t, app.memoryTaintMirrorWorker)
+	require.NotSame(t, constructorWorker, app.memoryTaintMirrorWorker)
+	require.Eventually(t, func() bool {
+		revision, readErr := mirror.MemoryTaintMirrorRevision(ctx)
+		return readErr == nil && revision == canonicalRevision
+	}, 3*time.Second, 5*time.Millisecond)
+	require.NoError(t, app.stopMemoryTaintMirrorWorker())
+
+	// A current revision alone could hide an empty or incorrect publication.
+	// Inspect the joined worker's exact SQL ID set through a read-only handle.
+	observedSQL, err := sql.Open("sqlite", "file:"+mirrorPath+"?mode=ro")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, observedSQL.Close()) })
+	rows, err := observedSQL.QueryContext(ctx, `SELECT memory_id FROM memory_taint_mirror ORDER BY memory_id`)
+	require.NoError(t, err)
+	defer rows.Close()
+	var mirroredIDs []string
+	for rows.Next() {
+		var memoryID string
+		require.NoError(t, rows.Scan(&memoryID))
+		mirroredIDs = append(mirroredIDs, memoryID)
+	}
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Equal(t, []string{target.MemoryID}, mirroredIDs, "rebuild must restore the exact target set, without missing or extra IDs")
+
+	fresh, revision, err := store.MemoryTaintMirrorFresh(ctx, app.badgerStore, mirror)
+	require.NoError(t, err)
+	require.True(t, fresh)
+	require.Equal(t, canonicalRevision, revision)
+	_, disposition, err = app.badgerStore.ClassifyMemoryProjection(record)
+	require.ErrorIs(t, err, store.ErrMemoryProjectionTainted)
+	require.Equal(t, store.MemoryProjectionTainted, disposition)
 }
