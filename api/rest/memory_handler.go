@@ -2308,15 +2308,27 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		case !indexStatusSourceExact:
 			resp.IndexStatus = "unavailable"
 		default:
-			hasOutside, established, cErr := s.store.DomainSpaceCompleteness(
-				r.Context(), req.DomainTag, activeSpace, store.CandidateFilterScanBudget)
+			taintRevision, coverageComplete, cErr := s.badgerStore.TaintServingCoverageSnapshot(
+				r.Context(), readScope.taint)
+			var hasOutside, established, mirrorMatched bool
+			if cErr == nil && coverageComplete {
+				if probe, ok := s.store.(store.TaintAwareDomainSpaceCompletenessStore); ok {
+					hasOutside, established, mirrorMatched, cErr = probe.DomainSpaceCompletenessAtTaintRevision(
+						r.Context(), req.DomainTag, activeSpace,
+						store.CandidateFilterScanBudget, taintRevision)
+				}
+			}
+			currentTaintRevision, revisionErr := s.badgerStore.TaintRevision()
 			switch {
-			case !s.canonicalMemoryProjectionSourceUnchanged(r.Context(), indexStatusSource):
+			case !s.canonicalMemoryProjectionSourceUnchanged(r.Context(), indexStatusSource),
+				revisionErr != nil, currentTaintRevision != taintRevision:
 				resp.IndexStatus = "unavailable"
 			case cErr != nil:
 				s.logger.Warn().Err(cErr).Str("domain", req.DomainTag).Msg("recall index-status disclosure unavailable")
 				resp.IndexStatus = "unavailable"
-			case !established:
+			case !coverageComplete, !mirrorMatched, !established:
+				// Probe uncertainty changes only index_status. It is not an
+				// ancestor-walk event and must not fabricate taint_coverage.
 				resp.IndexStatus = "unavailable"
 			case hasOutside:
 				resp.IndexStatus = "incomplete"

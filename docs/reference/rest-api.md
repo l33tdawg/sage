@@ -498,7 +498,7 @@ canonical-disclosure backend failures, and ancestor-traversal uncertainty remain
 can fail before policy evaluation.
 
 Sources: `appV30TaintProjectionProblem` (`api/rest/appv30_taint_problem.go:19`),
-`handleGetMemory` (`api/rest/memory_handler.go:3398`), and
+`handleGetMemory` (`api/rest/memory_handler.go:3410`), and
 `ClassifyMemoryProjectionForRead` (`internal/store/memory_disclosure.go:148`).
 
 ---

@@ -80,6 +80,10 @@ type mockMemoryStore struct {
 	// every id — used to prove the link-read path surfaces a backend outage
 	// instead of collapsing it into a false empty result.
 	getMemoryErr error
+	// Only the dedicated index-completeness test probe uses these fields.
+	taintCompletenessMirrorRevision uint64
+	taintCompletenessCalled         bool
+	taintCompletenessExpected       uint64
 }
 
 func newMockMemoryStore() *mockMemoryStore {
