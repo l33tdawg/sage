@@ -35,6 +35,7 @@ func TestSubcommandHelpHasNoSideEffects(t *testing.T) {
 		{"import", "missing.vault", "--help"}, {"backup", "--full", "--help"},
 		{"restore", "--from", "missing.tar.gz", "--help"}, {"snapshot", "prune", "--help"},
 		{"recover", "--help"}, {"quorum-init", "--help"}, {"quorum-join", "--help"},
+		{"init-genesis", "--help"}, {"init-fresh-node", "--help"},
 		{"pair", "--help"}, {"fence", "abandon", "--help"},
 		{"mcp-token", "create", "--help"}, {"org-token", "create", "--help"}, {"nevercompact", "enable", "--help"},
 		{"upgrade", "propose", "--help"}, {"hook", "session-start", "--help"},
@@ -52,6 +53,14 @@ func TestSubcommandHelpHasNoSideEffects(t *testing.T) {
 			require.NoError(t, err, string(out))
 			require.Contains(t, string(out), "sage-gui")
 			require.Contains(t, string(out), "SAGE_HOME")
+			switch args[0] {
+			case "init-genesis", "quorum-init", "quorum-join":
+				require.Contains(t, string(out), "init-fresh-node --genesis-sha256")
+				require.Contains(t, string(out), "before sage-gui serve")
+			case "init-fresh-node":
+				require.Contains(t, string(out), "After success, run sage-gui serve")
+				require.Contains(t, string(out), "Windows initialization is unsupported")
+			}
 			require.NoDirExists(t, home)
 			entries, err := os.ReadDir(dir)
 			require.NoError(t, err)

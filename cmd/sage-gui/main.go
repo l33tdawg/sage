@@ -59,6 +59,8 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "init-fresh-node":
+		err = runInitFreshNode(os.Args[2:])
 	case "init-genesis":
 		err = runInitGenesis(os.Args[2:])
 	case "init-fresh-personal-sage":
@@ -316,6 +318,7 @@ Commands:
   org-token     Manage org fleet-enrollment tokens (create | list | revoke)
   fence     Inspect or settle a held signer fence (list | abandon)
   status    Show node status
+  init-fresh-node  Initialize a pristine node from one shared signed genesis
   version   Print version
 
 Environment (common — full list: docs/reference/environment-variables.md):

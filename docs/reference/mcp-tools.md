@@ -205,6 +205,10 @@ most important operational tool.
   `sage_recall`. Narrowed or federated empty recalls relay `unavailable`; the
   empty-recall path therefore never turns incomplete coverage into authoritative
   absence.
+- Optional `taint_coverage` relays recall uncertainty as
+  `{complete:false, truncated:true, reason:"ancestor_walk_budget"}`. It survives
+  an empty recall, which reports `index_status:"unavailable"` rather than
+  authoritative absence. See `appendTurnRecallResult` in `internal/mcp/tools.go`.
 - Returns `vault_locked` error if the Synaptic Ledger is locked.
 - A typed effective write denial returns its exact stable `reason_code`,
   `retryable=false`, and operator `remedy` in `store_error`. MCP does not
@@ -358,8 +362,9 @@ replacement first, old-memory challenge second.
   can leave both memories live, but cannot leave neither.
 - `derived_from` creates the authenticated app-v30 lineage graph; it is
   distinct from legacy `parent_hash` and from mutable typed links. Missing,
-  unauthorized, deprecated, self-referential, wrong-hash, and non-local parents
-  receive the same fail-closed lineage-unavailable refusal.
+  hidden, unauthorized, deprecated, self-referential, and wrong-hash parents
+  share a generic lineage-unavailable refusal. Invalid structure and non-local
+  chain references are separate malformed-input errors.
 
 Before this default alignment, `sage_remember(type="task")` with omitted
 confidence submitted 0.80. Existing records retain that value. When deliberately
@@ -424,6 +429,11 @@ verified configurations). For a correction, call this tool once with
   app-v21 round additionally exposes `challenge_round`,
   `current_challenger_count`, and `required_challengers`.
 - `total_count`: total matching memories.
+- Optional `taint_coverage`: `{complete:false, truncated:true,
+  reason:"ancestor_walk_budget"}` when an authorized candidate was withheld at
+  the bounded taint walk. Other readable memories remain available. When no
+  memories remain, `index_status` is `unavailable` even outside the normal
+  domain-scoped semantic case. See `toolRecall` in `internal/mcp/tools.go`.
 - `recall_mode`: which path served the request — `semantic_only` | `hybrid` |
   `keyword_only`.
 - `semantic_degraded`: `true` when recall did NOT have meaningful semantic vectors —
@@ -683,7 +693,13 @@ specific status, or tagged with a label.
 
 **Returns:**
 - `memories`: array of `{memory_id, content, domain, confidence, type, status, created_at}`.
-- `total_count`: total matching memories.
+- `total_count`: exact visible total only when `total_exact` is true; otherwise
+  a visible lower bound.
+- `has_more`, `total_exact`: caller-scoped list pagination metadata.
+- Optional `taint_coverage`: `{complete:false, truncated:true,
+  reason:"ancestor_walk_budget"}`. An authorized row was withheld, so
+  `total_exact` is false even when `has_more` is false. No withheld identities or
+  counts are returned. See `toolList` in `internal/mcp/tools.go`.
 
 **REST:** When app-v23 `domain` is omitted, signed
 `GET /v1/agent/me?view=standing` followed by
@@ -773,6 +789,14 @@ and no misleading zero total. An inexact lower-bound zero is likewise omitted,
 not reported as an empty corpus. No scan budget is raised, and no roster or
 global node counts are returned. Failure to authenticate/read the self-standing
 itself still fails the tool closed.
+
+Optional `taint_coverage` uses the same content-free uncertainty object as
+`sage_list`; an inexact zero still does not become an empty-corpus claim.
+For the legacy breakdown walk, exactness is combined with AND across pages and
+taint uncertainty persists if any page reports it. A later exact page cannot
+erase earlier uncertainty; `breakdowns_complete` is false whenever the aggregate
+is inexact. See `callerScopedMemoryStatsForDomain` and `callerBoundedStatus` in
+`internal/mcp/tools.go`.
 
 App-v23 authorization and canonical-disclosure filters are applied before
 memory aggregation. The consensus-only self-standing projection comes from signed

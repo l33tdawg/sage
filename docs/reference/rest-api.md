@@ -157,6 +157,15 @@ The node performs bounded exact-assignee projection confirmation before it
 chooses `201`, `200`, or `202`. An idempotent replay whose projection is still
 unconfirmed also returns `202` and adds `"idempotent_replay":true`.
 
+For app-v30 tasks, the receipt also binds the canonical nonempty `derived_from`
+set. Reusing the same key with a different valid lineage payload or omitted
+lineage returns `409` before replaying the receipt. Invalid or non-local
+references are rejected by normal validation before receipt matching. Request
+order is canonicalized. Tasks without lineage keep the existing digest and receipts
+unchanged (`PayloadDigest` in `internal/taskidempotency/task.go`; replay callers
+in `api/rest/appv23_task_idempotency.go` and
+`internal/abci/appv23_task_idempotency.go`).
+
 **Ambiguous outcome — `202 Accepted` with `"status":"indeterminate"`:**
 
 A caller can outlive the node's own wait for block inclusion. When that happens
@@ -322,7 +331,18 @@ Vector similarity search. Requires a precomputed embedding.
 
 `confidence_score` in the response is the **decayed** value (time decay + corroboration boost applied server-side), not the raw submitted value. `initial_confidence` is the **stored** (undecayed) value — the on-chain confidence set at submission (corroboration never rewrites it) — so a client can see the authoritative floor alongside the decayed score without re-deriving it. It is present for local memories and omitted for federated results (where only the serving peer's already-decayed value is available).
 
-`index_status` is present on an **EMPTY, domain-scoped semantic recall**. `"complete"` and `"incomplete"` are restricted to the exact unnarrowed local `status_filter: "committed"` contract: no provider, tags, minimum confidence, cursor, text arm, or federation request. `"complete"` means every committed/challenged row in that local domain is reachable in the active vector space, so the empty result is genuine local absence. `"incomplete"` means a committed/challenged row has no vector or belongs to a foreign vector space; empty is **not** proof of absence (re-embed the domain, or query the matching space). `"unavailable"` is still emitted for other empty domain-scoped semantic recalls and makes no completeness claim—for example when the query is narrowed or federated, the caller is not proven to see every record, the complete canonical SQL-to-ledger projection audit is not exact, there is no exact active vector space, or the live domain exceeds the bounded scan. The enum is never a count or list and is absent whenever any result is returned. Search/hybrid endpoints do not emit it.
+`index_status` is present on an **EMPTY, domain-scoped semantic recall**. `"complete"` and `"incomplete"` are restricted to the exact unnarrowed local `status_filter: "committed"` contract: no provider, tags, minimum confidence, cursor, text arm, or federation request. `"complete"` means every committed/challenged row in that local domain is reachable in the active vector space, so the empty result is genuine local absence. `"incomplete"` means a committed/challenged row has no vector or belongs to a foreign vector space; empty is **not** proof of absence (re-embed the domain, or query the matching space). `"unavailable"` is still emitted for other empty domain-scoped semantic recalls and makes no completeness claim—for example when the query is narrowed or federated, the caller is not proven to see every record, the complete canonical SQL-to-ledger projection audit is not exact, there is no exact active vector space, or the live domain exceeds the bounded scan. The enum is never a count or list and is absent whenever any result is returned. Search/hybrid endpoints normally omit it; the taint-coverage exception below can emit `"unavailable"` on any empty recall.
+
+If an authorized candidate reaches the bounded taint ancestor-walk limit,
+query/search/hybrid withhold that candidate, return other readable results, and
+include `taint_coverage: {"complete": false, "truncated": true,
+"reason": "ancestor_walk_budget"}`. This signal persists across candidate
+filters and final authorization checks. An empty response with this metadata
+has `index_status: "unavailable"`; it does not prove absence. Denied candidates
+do not create taint-coverage metadata. Malformed taint state, policy errors,
+and storage failures still fail the request. See `evaluateAppV23RecordDisclosureScoped`
+in `api/rest/appv23_record_disclosure.go` and `applyRecallCoverage` in
+`api/rest/appv23_taint_coverage.go`.
 
 `corroboration_count` is the number of **distinct corroborating agent IDs** and
 feeds the confidence boost. `challenge_count` is the number of **distinct
@@ -472,6 +492,25 @@ list applies to direct lookup. Authorship is immutable provenance, not current
 read authority: even the submitting agent receives `403` after its live domain,
 group, grant, enrollment, or clearance authority is revoked.
 
+For a valid canonical record, a policy-denied reader receives `403` before
+any taint disclosure. After live read authorization succeeds, taint denials use
+HTTP `451` with `Content-Type: application/problem+json`:
+
+| Problem `type` | Meaning |
+|---|---|
+| `https://sage.dev/errors/memory-tainted` | An active governance decision withholds the memory. |
+| `https://sage.dev/errors/memory-taint-pending` | Governance taint coverage for the memory is pending. |
+
+These responses contain only the fixed `type`, `title`, `status`, and `detail`
+fields, with no memory content or record metadata. Malformed canonical state,
+canonical-disclosure backend failures, and ancestor-traversal uncertainty remain
+`503`; uncertainty is not a pending-taint `451`. A malformed canonical envelope
+can fail before policy evaluation.
+
+Sources: `appV30TaintProjectionProblem` (`api/rest/appv30_taint_problem.go:19`),
+`handleGetMemory` (`api/rest/memory_handler.go:3496`), and
+`ClassifyMemoryProjectionForRead` (`internal/store/memory_disclosure.go:148`).
+
 ---
 
 ### `GET /v1/memory/list`
@@ -498,9 +537,20 @@ Authorization is applied while walking bounded store pages, before the visible
 `offset`/`limit`. When `has_more` is `true`, `total` is the privacy-safe visible
 lower bound discovered so far (normally `offset + limit + 1`) and
 `total_exact` is `false`; it never exposes the underlying raw or denied count.
-When the authorized stream is exhausted, `total_exact` is `true` and `total` is
-the exact visible total. This avoids both revoked-prefix starvation and a
-full-inventory scan for the first page on mature nodes.
+When the authorized stream is exhausted and no taint uncertainty was encountered,
+`total_exact` is `true` and `total` is the exact visible total. This avoids both
+revoked-prefix starvation and a full-inventory scan for the first page on mature
+nodes.
+
+If an authorized row reaches the taint ancestor-walk limit, the response
+withholds that row and adds the same content-free `taint_coverage` object as
+recall. `total_exact` remains `false`, including at exhaustion; `total` is a
+visible lower bound, and `has_more` describes additional known readable rows.
+The metadata contains no withheld IDs, domains, counts, decisions, or paths.
+Exact-only reads and batch surfaces without a partial-result contract retain
+their error behavior. See `listAppV23VisibleMemoriesScoped` in
+`api/rest/memory_handler.go`.
+
 One app-v23 request examines at most 8,192 raw authorization candidates. An
 offset above 7,900, or a sparse result that cannot fill the requested visible
 page within that budget, returns HTTP `422` (`Offset too large` or
@@ -2759,7 +2809,7 @@ address resolved from a bounded legacy-status offline cache can be accepted
 locally while the peer is down. Delivery waits for that peer to return and pass
 the fresh live authorization preflight above.
 
-**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:771-777`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6678` declaration, `:6638` payload, `:6641` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:792-794`) to 413.
+**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:800-806`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6662` declaration, `:6661` payload, `:6664` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:821-823`) to 413.
 
 **Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`). An index-backed COUNT and its INSERT run under the same write critical section, so parallel sends cannot race past either cap. Over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
 
@@ -2921,9 +2971,13 @@ so the operator can triage it safely.
 `GET /v1/dashboard/task-notifications/inbox?limit=5` is a passive signed
 agent projection. It accepts an opaque `cursor`, returns unread notices with
 `passive:true`, `has_more`, and `next_cursor` when needed, and rechecks
-current agent status and task read permission. Denied or transiently
-unavailable notices are filtered without changing their stored state. The
-parent `GET /v1/dashboard/task-notifications` is also passive.
+current agent status and task read permission. For valid canonical tasks,
+policy-denied, tainted, and taint-pending notices are omitted. Unavailable
+authorization, malformed canonical state, or authorized taint-walk uncertainty
+returns HTTP 503 without consuming notices. Successful pages preserve raw
+continuation cursors even when every notice on a page is omitted; follow
+`next_cursor` while `has_more` is true. The parent
+`GET /v1/dashboard/task-notifications` is also passive.
 
 Explicit `PUT /v1/dashboard/task-notifications/{notification_id}/ack`
 acknowledges one current, authorized exact-owner notice. Retries are
@@ -2967,7 +3021,7 @@ the result over the original agreement-bound return route
 | `source_chain_id` | string | for foreign work | Exact local reply-source chain returned as `reply_source_chain_id` by the pipe status preflight; prevents another node relabeling the signed result |
 | `claimant_session_id` | string | for foreign work; recommended for provider-addressed compatibility work | Opaque 1–128-byte session currently holding the claim. A provider-addressed row claimed by an older sessionless caller is fenced as `legacy`, and an omitted result session selects only that exact fence; it cannot bypass a named sibling session. |
 
-`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:775`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6944`, mapping `ErrPipeResultTooLarge` at `:6904-6905`).
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:804`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:6928`, mapping `ErrPipeResultTooLarge` at `:6927-6928`).
 
 **Response** (HTTP 200):
 `{"status":"completed","journal_id":"<memory_id or empty>","journaled":true|false}`.

@@ -42,8 +42,8 @@ func (s *BadgerStore) RebuildLineageReverseIndex() (int, error) {
 			if err != nil {
 				return err
 			}
-			if forwardErr := validateForwardLineageValue(childID, parentID, value); forwardErr != nil {
-				return forwardErr
+			if valueErr := validateForwardLineageValue(childID, parentID, value); valueErr != nil {
+				return valueErr
 			}
 			reverseKey := lineage.ReverseKey(parentID, childID)
 			existing, found, err := readTaintValueTxn(txn, reverseKey)
@@ -82,9 +82,9 @@ func validateLineageIndexesTxn(txn *badger.Txn) error {
 			forward.Close()
 			return err
 		}
-		if forwardErr := validateForwardLineageValue(childID, parentID, value); forwardErr != nil {
+		if valueErr := validateForwardLineageValue(childID, parentID, value); valueErr != nil {
 			forward.Close()
-			return forwardErr
+			return valueErr
 		}
 		reverseValue, found, err := readTaintValueTxn(
 			txn,
@@ -150,13 +150,14 @@ func parseLineageForwardKey(key string) (childID, parentID string, err error) {
 	if !strings.HasPrefix(key, prefix) || len(key) < len(prefix)+2 {
 		return "", "", fmt.Errorf("%w: malformed forward key", ErrAppV30LineageIndex)
 	}
-	key = key[len(prefix):]
-	childLen := int(binary.BigEndian.Uint16([]byte(key[:2])))
-	if childLen == 0 || childLen > tx.MaxDerivedFromMemoryIDBytes ||
-		len(key) != 2+childLen+1+lineage.ParentIDBytes*2 || key[2+childLen] != ':' {
+	childLength := int(binary.BigEndian.Uint16([]byte(key[len(prefix) : len(prefix)+2])))
+	childStart := len(prefix) + 2
+	separator := childStart + childLength
+	if childLength == 0 || childLength > tx.MaxDerivedFromMemoryIDBytes ||
+		len(key) != separator+1+lineage.ParentIDBytes*2 || key[separator] != ':' {
 		return "", "", fmt.Errorf("%w: malformed forward key", ErrAppV30LineageIndex)
 	}
-	childID, parentID = key[2:2+childLen], key[2+childLen+1:]
+	childID, parentID = key[childStart:separator], key[separator+1:]
 	if err := lineage.ValidateIDs(childID, parentID); err != nil {
 		return "", "", fmt.Errorf("%w: %v", ErrAppV30LineageIndex, err)
 	}

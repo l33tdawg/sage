@@ -108,8 +108,10 @@ func TestFreshGenesisRulesHashAndRecovery(t *testing.T) {
 					require.Equal(t, initialized.AppHash, public)
 				}
 				// Reopening at H0 must retain the exact target and pristine retry contract.
+				require.NoError(t, app.stopMemoryTaintMirrorWorker())
 				reopened, err := NewSageAppWithStores(app.badgerStore, app.offchainStore, zerolog.Nop())
 				require.NoError(t, err)
+				app.memoryTaintMirrorWorker = reopened.memoryTaintMirrorWorker
 				require.Equal(t, version, reopened.currentAppVersion())
 				retried, err := reopened.InitChain(context.Background(), req)
 				require.NoError(t, err)
@@ -126,8 +128,10 @@ func TestFreshGenesisRulesHashAndRecovery(t *testing.T) {
 				require.NoError(t, err)
 				require.Equal(t, uint64(2), height)
 				require.Equal(t, reopened.state.AppHash, hash)
+				require.NoError(t, reopened.stopMemoryTaintMirrorWorker())
 				recovered, err := NewSageAppWithStores(app.badgerStore, app.offchainStore, zerolog.Nop())
 				require.NoError(t, err)
+				app.memoryTaintMirrorWorker = recovered.memoryTaintMirrorWorker
 				require.Equal(t, version, recovered.currentAppVersion())
 				require.Equal(t, version >= 30, recovered.IsAppV30ActiveForNextTx())
 				_, err = recovered.InitChain(context.Background(), req)
@@ -317,8 +321,10 @@ func TestFreshGenesisImmediateSuccessorRetainsGovernedBoundary(t *testing.T) {
 	require.NoError(t, err)
 	_, err = app.Commit(context.Background(), &abcitypes.RequestCommit{})
 	require.NoError(t, err)
+	require.NoError(t, app.stopMemoryTaintMirrorWorker())
 	recovered, err := NewSageAppWithStores(app.badgerStore, app.offchainStore, zerolog.Nop())
 	require.NoError(t, err)
+	app.memoryTaintMirrorWorker = recovered.memoryTaintMirrorWorker
 	require.Equal(t, uint64(30), recovered.currentAppVersion())
 	require.True(t, recovered.IsAppV30ActiveForNextTx())
 	_, _, err = inspectAppV20StateSyncStore(context.Background(), app.badgerStore, "successor")

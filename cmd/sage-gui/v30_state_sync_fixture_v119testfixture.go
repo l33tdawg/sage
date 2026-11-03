@@ -287,7 +287,27 @@ func verifyV30StateSyncServing(parent context.Context, restored bool) error {
 			return err
 		}
 	}
-	return nil
+	// The bounded advisory worker is asynchronous. Wait for its observable
+	// publication before the harness stops serve; never repair SQL in this
+	// verifier. The subsequent offline check still requires exact revision,
+	// canonical AppHash and the complete membership set.
+	cfg, err := LoadConfig()
+	if err != nil {
+		return err
+	}
+	wantEffective := []string{proof.Active.Parent.MemoryID, proof.Active.ChildID, proof.Ordinary.Parent.MemoryID, proof.Ordinary.ChildID}
+	slices.Sort(wantEffective)
+	for {
+		lastErr := verifyV30SQLTaintIDs(ctx, filepath.Join(cfg.DataDir, "sage.db"), wantEffective)
+		if lastErr == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("app30 advisory mirror did not publish expected IDs before inspection: %w (last error %v)", ctx.Err(), lastErr)
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 // Run only with serve stopped. No SQL bytes are copied into either receiver;

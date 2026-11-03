@@ -36,6 +36,16 @@ func handleCommandHelp(args []string) bool {
 		printUpgradeUsage()
 	case "quorum-init", "quorum-join":
 		fmt.Println(freshQuorumGenesisGuidance)
+	case "init-fresh-node":
+		fmt.Println(`Usage: sage-gui init-fresh-node --genesis-sha256 <lowercase SHA-256>
+
+Initialize a prepared, pristine SAGE_HOME from the exact shared signed genesis
+on a supported Unix platform; Windows initialization is unsupported.
+Requires local validator key, unused signing state, config and private directories.
+Creates node-local transport/P2P keys if absent and fences version/fork markers
+with a completion receipt. No Root private key is needed. Incomplete or used
+homes are refused; existing chains use the ordinary startup/upgrade route.
+After success, run sage-gui serve with the same SAGE_HOME.`)
 	case "init-genesis":
 		fmt.Println(`Usage: sage-gui init-genesis --chain-id <id> --root-key <path> --validators <roster.json> --output <genesis.json>
 
@@ -44,15 +54,18 @@ validator. The public roster is a JSON array of {"validator_id":"<Ed25519 hex>",
 Key files must already exist. This command does not start or alter a chain.
 
 Options:
-  --app-version latest|N  Default: latest release-supported app version
+  --app-version latest|N  Default: latest release-supported app version;
+                          dormant compiled versions require an explicit integer
   --agent-key <path>      Optional Companion key; requires --home-domain
   --home-domain <domain>  Companion-owned non-shared domain
   --clearance 0..4        Companion clearance (default: 1)
   --genesis-time <UTC>    Optional RFC3339Nano genesis time
 
 Install the generated file as config/genesis.json alongside each node's own
-validator key and quorum configuration before starting SAGE. Existing genesis
-output is never overwritten. Existing chains use the normal upgrade route.`)
+validator key, unused signing state and quorum configuration. On each prepared
+Unix node, run sage-gui init-fresh-node --genesis-sha256 <shared-genesis-sha256>
+before sage-gui serve. Existing genesis output is never overwritten; existing
+chains use the normal startup/upgrade route, not fresh initialization.`)
 	default:
 		usage := map[string]string{
 			"serve": "serve", "setup": "setup", "mcp": "mcp [install [--token <claim-token>]]",

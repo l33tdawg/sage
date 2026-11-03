@@ -177,8 +177,14 @@ func (app *SageApp) syncAppV28IndexesForBlock(height int64) error {
 	if !app.postFreshGenesisRules(28, height) && (app.appV28AppliedHeight <= 0 || height < app.appV28AppliedHeight) {
 		return nil
 	}
-	if err := app.badgerStore.SyncPublicMemoryChanges(); err != nil {
-		return fmt.Errorf("sync app-v28 public-memory index at height %d: %w", height, err)
+	var syncErr error
+	if app.postAppV30Fork(height) {
+		syncErr = app.badgerStore.SyncPublicMemoryChangesAppV30()
+	} else {
+		syncErr = app.badgerStore.SyncPublicMemoryChanges()
+	}
+	if syncErr != nil {
+		return fmt.Errorf("sync app-v28 public-memory index at height %d: %w", height, syncErr)
 	}
 	if height == app.appV28AppliedHeight {
 		if err := app.badgerStore.SyncCoCommitTombstoneChanges(); err != nil {

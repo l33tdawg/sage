@@ -23,9 +23,10 @@ const (
 	MaxMemoryIDBytes         = 512
 	MaxCursorBytes           = 512
 	DecisionIDBytes          = 64
-	// MaxProvenanceAdmissionTaintUnits includes parent membership inheritance,
-	// per-signer provenance matching and decision-scope reads.
-	MaxProvenanceAdmissionTaintUnits = 722
+	// MaxProvenanceAdmissionTaintUnits is the 625-unit parent inheritance
+	// ceiling plus 98 bounded retained-slot inventory reads. Scope matching
+	// is bounded local computation, not an additional KV read per signer.
+	MaxProvenanceAdmissionTaintUnits = 723
 )
 
 const minimumHeaderBytes = 79
@@ -109,16 +110,28 @@ type QueueEntry struct {
 
 var errState = errors.New("invalid taint state")
 
-func DecisionKey(decisionID string) []byte {
-	return []byte("taintdec:" + decisionID)
+// DecisionPrefix is the existing canonical decision-header namespace.
+func DecisionPrefix() []byte {
+	return []byte("taintdec:")
 }
 
+func DecisionKey(decisionID string) []byte {
+	return append(DecisionPrefix(), decisionID...)
+}
+
+// TargetKey retains immutable target history after expansion and cleanup.
+// ActiveDecisionPrefix indexes all retained capacity slots, including Cleaning.
+// Only Status.Active scopes match; the slot is released atomically at Clean.
 func ActiveDecisionPrefix() []byte {
 	return []byte("taintactivedec:")
 }
 
 func ActiveDecisionKey(decisionID string) []byte {
-	return []byte("taintactivedec:" + decisionID)
+	return append(ActiveDecisionPrefix(), decisionID...)
+}
+
+func TargetKey(decisionID string) []byte {
+	return []byte("tainttarget:" + decisionID)
 }
 
 func MembershipPrefix(memoryID string) []byte {

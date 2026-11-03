@@ -96,7 +96,7 @@ func TestAppV30FreshGenesisFourValidators(t *testing.T) {
 	require.NoError(t, err)
 	validatorKeys, err := readFreshV30ValidatorKeys(genesis, os.Getenv("SAGE_TEST_FRESH_V30_VALIDATOR_KEY_DIR"))
 	require.NoError(t, err)
-	requireNetwork(t)
+	require.True(t, checkHealth(t), "the explicitly requested fresh-v30 network must be running, not skipped")
 	rpcs, apis := allCometRPCs(), allAPIURLs()
 	rootBytes, err := os.ReadFile(filepath.Join(devnetGenesisDir(), "fresh-v30-root.key"))
 	require.NoError(t, err)

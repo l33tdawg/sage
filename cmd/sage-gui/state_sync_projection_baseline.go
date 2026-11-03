@@ -43,6 +43,7 @@ type stateSyncProjectionBaseline struct {
 	AllowedMissingIDs  []string `json:"allowed_missing_ids"`
 	Digest             string   `json:"digest"`
 	Signature          string   `json:"signature"`
+	rawV2              *stateSyncProjectionBaselineV2
 }
 
 type stateSyncProjectionBaselinePayload struct {
@@ -120,6 +121,17 @@ func signStateSyncProjectionBaseline(
 	if baseline == nil || nodeKey == nil || nodeKey.PrivKey == nil {
 		return errors.New("state-sync projection baseline signer is missing")
 	}
+	if baseline.Version == stateSyncProjectionBaselineRawVersion {
+		v2, err := baseline.verifiedRawV2()
+		if err != nil {
+			return err
+		}
+		if err := v2.sign(nodeKey); err != nil {
+			return err
+		}
+		baseline.Signature = v2.Signature
+		return nil
+	}
 	message, err := stateSyncProjectionBaselineSignatureMessage(baseline.Digest)
 	if err != nil {
 		return err
@@ -138,6 +150,13 @@ func verifyStateSyncProjectionBaselineSignature(
 ) error {
 	if baseline == nil || nodeKey == nil || nodeKey.PrivKey == nil {
 		return errors.New("state-sync projection baseline verifier is missing")
+	}
+	if baseline.Version == stateSyncProjectionBaselineRawVersion {
+		v2, err := baseline.verifiedRawV2()
+		if err != nil {
+			return err
+		}
+		return v2.verify(nodeKey)
 	}
 	signature, err := hex.DecodeString(baseline.Signature)
 	if err != nil || len(signature) == 0 ||
@@ -203,6 +222,10 @@ func validateStateSyncProjectionBaselineShape(baseline *stateSyncProjectionBasel
 	if baseline == nil {
 		return errors.New("state-sync projection baseline is missing")
 	}
+	if baseline.Version == stateSyncProjectionBaselineRawVersion {
+		_, err := baseline.verifiedRawV2()
+		return err
+	}
 	if len(baseline.AllowedMissingIDs) > maxStateSyncProjectionBaselineIDs {
 		return errors.New("state-sync projection baseline contains too many memory IDs")
 	}
@@ -240,7 +263,7 @@ func validateStateSyncProjectionBaselineIdentity(
 	if baseline == nil {
 		return errors.New("state-sync projection baseline authorization is missing")
 	}
-	if baseline.Version != stateSyncProjectionBaselineVersion {
+	if baseline.Version != stateSyncProjectionBaselineVersion && baseline.Version != stateSyncProjectionBaselineRawVersion {
 		return fmt.Errorf("unsupported state-sync projection baseline version %d", baseline.Version)
 	}
 	if strings.TrimSpace(chainID) == "" || baseline.ChainID != chainID {
@@ -295,20 +318,14 @@ func captureStateSyncProjectionBaselinePending(
 	}
 	defer func() { _ = prepared.CloseBadger() }()
 
-	canonicalIDs, err := store.CanonicalMemoryIDs(prepared)
+	inventory, err := prepared.MemoryProjectionInventory(maxStateSyncProjectionBaselineIDs, maxStateSyncProjectionBaselineBytes)
 	if err != nil {
-		return fmt.Errorf("read prepared canonical memory inventory: %w", err)
+		return fmt.Errorf("read prepared canonical projection inventory: %w", err)
 	}
-	scopedContents, err := prepared.ListScopedContents()
-	if err != nil {
-		return fmt.Errorf("read prepared scoped memory inventory: %w", err)
-	}
-	scopedIDs := make(map[string]struct{}, len(scopedContents))
-	for _, content := range scopedContents {
-		if strings.TrimSpace(content.MemoryID) == "" {
-			return errors.New("prepared scoped memory inventory contains an empty ID")
-		}
-		scopedIDs[content.MemoryID] = struct{}{}
+	canonicalIDs := inventory.MemoryIDs
+	scopedIDs := make(map[string]struct{}, len(inventory.ScopedContentIDs))
+	for _, memoryID := range inventory.ScopedContentIDs {
+		scopedIDs[memoryID] = struct{}{}
 	}
 	allowedMissingIDs := make([]string, 0, len(canonicalIDs))
 	for _, memoryID := range canonicalIDs {
@@ -316,14 +333,19 @@ func captureStateSyncProjectionBaselinePending(
 			allowedMissingIDs = append(allowedMissingIDs, memoryID)
 		}
 	}
-	pending, err := newStateSyncProjectionBaselinePending(
-		chainID,
-		nodeKey,
-		validatorPublicKey,
-		sealedHeight,
-		sealedAppHash,
-		allowedMissingIDs,
-	)
+	// Every newly minted authorization must bind the exact prepared snapshot,
+	// including legacy V1 captures. This does not reinterpret existing V1 files.
+	if sealedHeight == 0 || sealedHeight > math.MaxInt64 || !inventory.HeightPresent || inventory.FinalizedHeight != int64(sealedHeight) || !inventory.AppHashPresent || !bytes.Equal(inventory.AppHash, sealedAppHash) {
+		return errors.New("state-sync projection inventory does not match its authenticated finalized snapshot")
+	}
+	constructor := newStateSyncProjectionBaselinePending
+	if inventory.RawIdentityRules {
+		if !inventory.RawIdentityRulesAt(int64(sealedHeight)) {
+			return errors.New("state-sync raw identity rules do not apply at the authenticated snapshot")
+		}
+		constructor = newStateSyncProjectionBaselineV2Pending
+	}
+	pending, err := constructor(chainID, nodeKey, validatorPublicKey, sealedHeight, sealedAppHash, allowedMissingIDs)
 	if err != nil {
 		return err
 	}
@@ -437,10 +459,16 @@ func validateStateSyncProjectionBaseline(
 	); err != nil {
 		return err
 	}
-	canonicalIDs, err := store.CanonicalMemoryIDs(canonical)
+	inventory, err := canonical.MemoryProjectionInventory(maxStateSyncProjectionBaselineIDs, maxStateSyncProjectionBaselineBytes)
 	if err != nil {
 		return err
 	}
+	if baseline.Version == stateSyncProjectionBaselineRawVersion {
+		if !inventory.RawIdentityRulesAt(baseline.SealedHeight) || inventory.FinalizedHeight != currentHeight || !inventory.AppHashPresent || !bytes.Equal(inventory.AppHash, currentAppHash) {
+			return errors.New("state-sync V2 baseline is not qualified by canonical finalized state")
+		}
+	}
+	canonicalIDs := inventory.MemoryIDs
 	canonicalSet := make(map[string]struct{}, len(canonicalIDs))
 	for _, memoryID := range canonicalIDs {
 		canonicalSet[memoryID] = struct{}{}
@@ -460,13 +488,9 @@ func writeStateSyncProjectionBaseline(
 	if path == "" || baseline == nil {
 		return errors.New("state-sync projection baseline path and payload are required")
 	}
-	encoded, err := json.MarshalIndent(baseline, "", "  ")
+	encoded, err := encodeStateSyncProjectionBaselineDocument(baseline)
 	if err != nil {
 		return fmt.Errorf("encode state-sync projection baseline: %w", err)
-	}
-	encoded = append(encoded, '\n')
-	if len(encoded) > maxStateSyncProjectionBaselineBytes {
-		return errors.New("state-sync projection baseline exceeds the maximum size")
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create state-sync projection baseline directory: %w", err)
@@ -527,17 +551,11 @@ func loadStateSyncProjectionBaseline(path string) (*stateSyncProjectionBaseline,
 	if len(encoded) > maxStateSyncProjectionBaselineBytes {
 		return nil, errors.New("state-sync projection baseline exceeds the maximum size")
 	}
-	decoder := json.NewDecoder(bytes.NewReader(encoded))
-	decoder.DisallowUnknownFields()
-	var baseline stateSyncProjectionBaseline
-	if err := decoder.Decode(&baseline); err != nil {
+	baseline, err := decodeStateSyncProjectionBaselineDocument(encoded)
+	if err != nil {
 		return nil, fmt.Errorf("decode state-sync projection baseline: %w", err)
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, errors.New("state-sync projection baseline contains trailing data")
-	}
-	return &baseline, nil
+	return baseline, nil
 }
 
 func ensureStateSyncProjectionBaseline(

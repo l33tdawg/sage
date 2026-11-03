@@ -84,6 +84,21 @@ func (app *SageApp) preflightAppV30Admission(
 		return "", fmt.Errorf("local consensus chain ID is unavailable")
 	}
 	if len(parents) > 0 {
+		// The public admission contract deliberately hides the difference
+		// between an unavailable parent and a valid local self-reference.
+		// Keep structural and unsupported cross-chain errors distinct.
+		if _, structureErr := tx.EncodeDerivedFromExtension(parents); structureErr == nil &&
+			len(childID) > 0 && len(childID) <= tx.MaxDerivedFromMemoryIDBytes &&
+			len(localChainID) <= tx.MaxDerivedFromChainIDBytes {
+			allLocal, selfReference := true, false
+			for _, parent := range parents {
+				allLocal = allLocal && parent.SourceChainID == localChainID
+				selfReference = selfReference || parent.MemoryID == childID
+			}
+			if allLocal && selfReference {
+				return "", appV30LineageParentUnavailable()
+			}
+		}
 		if err := app.badgerStore.ValidateMemoryLineageParents(
 			childID,
 			localChainID,
@@ -112,7 +127,7 @@ func (app *SageApp) preflightAppV30Admission(
 			}
 		}
 		for _, parent := range parents {
-			state, stateErr := app.badgerStore.GetMemoryDisclosureState(parent.MemoryID)
+			state, stateErr := app.memoryDisclosureStateForConsensus(parent.MemoryID, height)
 			if stateErr != nil {
 				return "", appV30LineageParentUnavailable()
 			}

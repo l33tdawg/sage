@@ -23,7 +23,8 @@ const (
 	taintEmptyIteratorUnits = 1
 	taintMemberCleanupUnits = 3
 	taintQueueCleanupUnits  = 2
-	taintActiveReleaseUnits = 2
+	// Releasing a retained slot reads/writes its count and deletes its index.
+	taintActiveReleaseUnits = 3
 )
 
 type TaintExpandResult struct {
@@ -199,6 +200,9 @@ func (s *BadgerStore) ExpandTaintDecision(
 						header.Status = taint.StatusDepthExhausted
 					} else if header.Materialized >= taint.MaxExpansionMemberships {
 						header.Status = taint.StatusWorkExhausted
+						// The terminal status must persist even when this is the
+						// first edge and no cursor or membership changed this call.
+						changed = true
 						stopped = true
 						break
 					} else {
@@ -460,6 +464,9 @@ func (s *BadgerStore) CleanupTaintDecision(
 						active-1,
 					); writeErr != nil {
 						return writeErr
+					}
+					if deleteErr := s.txnDelete(txn, taint.ActiveDecisionKey(decisionID)); deleteErr != nil {
+						return deleteErr
 					}
 					operationUnits += taintActiveReleaseUnits
 					header.Status = taint.StatusClean

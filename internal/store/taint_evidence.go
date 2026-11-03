@@ -189,7 +189,7 @@ func (s *SQLiteStore) PutTaintEvidence(
 		if existingDomain != domain || existingDigest != digest {
 			return "", ErrTaintEvidenceConflict
 		}
-		if itemErr := requireTaintEvidenceItem(ctx, transaction, domain, digest); itemErr != nil {
+		if itemErr := s.requireTaintEvidenceItem(ctx, transaction, domain, digest); itemErr != nil {
 			return "", itemErr
 		}
 		if commitErr := transaction.Commit(); commitErr != nil {
@@ -201,7 +201,7 @@ func (s *SQLiteStore) PutTaintEvidence(
 	}
 
 	itemFound := true
-	if err := requireTaintEvidenceItem(ctx, transaction, domain, digest); errors.Is(err, ErrTaintEvidenceNotFound) {
+	if err := s.requireTaintEvidenceItem(ctx, transaction, domain, digest); errors.Is(err, ErrTaintEvidenceNotFound) {
 		itemFound = false
 	} else if err != nil {
 		return "", err
@@ -300,18 +300,9 @@ func (s *SQLiteStore) GetTaintEvidence(
 	if references == 0 && !now.UTC().Before(time.Unix(0, createdAt).Add(retention.MaxAge)) {
 		return nil, ErrTaintEvidenceNotFound
 	}
-	plain, err := s.strictPlaintext(sealed)
+	evidence, err := s.decodeTaintEvidence(sealed, plaintextBytes, digest)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTaintEvidenceVaultRequired, err)
-	}
-	evidence, err := base64.StdEncoding.DecodeString(plain)
-	if err != nil {
-		return nil, ErrTaintEvidenceCorrupt
-	}
-	computed := sha256.Sum256(evidence)
-	if int64(len(evidence)) != plaintextBytes ||
-		hex.EncodeToString(computed[:]) != digest {
-		return nil, ErrTaintEvidenceCorrupt
+		return nil, err
 	}
 	if err := transaction.Commit(); err != nil {
 		return nil, fmt.Errorf("finish taint evidence read: %w", err)
@@ -483,23 +474,47 @@ func pruneExpiredTaintEvidenceTxn(
 	return nil
 }
 
-func requireTaintEvidenceItem(
+// requireTaintEvidenceItem validates the retained bytes before a successful
+// re-upload can reuse them. Existence alone cannot establish a readable pin.
+func (s *SQLiteStore) requireTaintEvidenceItem(
 	ctx context.Context,
 	connection sqlQuerier,
 	domain, digest string,
 ) error {
-	var found int
+	var sealed string
+	var plaintextBytes int64
 	err := connection.QueryRowContext(ctx,
-		`SELECT 1 FROM taint_evidence_items WHERE domain = ? AND digest = ?`,
+		`SELECT sealed_evidence, plaintext_bytes FROM taint_evidence_items
+		 WHERE domain = ? AND digest = ?`,
 		domain, digest,
-	).Scan(&found)
+	).Scan(&sealed, &plaintextBytes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrTaintEvidenceNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("read taint evidence item: %w", err)
 	}
-	return nil
+	_, err = s.decodeTaintEvidence(sealed, plaintextBytes, digest)
+	return err
+}
+
+// decodeTaintEvidence is shared by reads and re-upload validation so both paths
+// refuse unavailable plaintext, malformed encoding, or a digest/length mismatch.
+func (s *SQLiteStore) decodeTaintEvidence(sealed string, plaintextBytes int64, digest string) ([]byte, error) {
+	plain, err := s.strictPlaintext(sealed)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrTaintEvidenceVaultRequired, err)
+	}
+	evidence, err := base64.StdEncoding.DecodeString(plain)
+	if err != nil {
+		return nil, ErrTaintEvidenceCorrupt
+	}
+	computed := sha256.Sum256(evidence)
+	if int64(len(evidence)) != plaintextBytes ||
+		hex.EncodeToString(computed[:]) != digest {
+		return nil, ErrTaintEvidenceCorrupt
+	}
+	return evidence, nil
 }
 
 func validateTaintEvidenceRetention(retention TaintEvidenceRetention) error {

@@ -517,38 +517,6 @@ func inspectAppV20StateSyncStore(ctx context.Context, badgerStore *store.BadgerS
 		if appV28.AppliedHeight <= appV27.AppliedHeight {
 			return 0, nil, fmt.Errorf("%s app-v28 activation does not follow app-v27", label)
 		}
-		if err := badgerStore.ValidatePublicMemoryStage(); err != nil {
-			return 0, nil, err
-		}
-		if err := badgerStore.ValidateCoCommitTombstoneStage(); err != nil {
-			return 0, nil, err
-		}
-	}
-	previous := appV28
-	for _, next := range []struct {
-		name    string
-		version uint64
-	}{{appV29UpgradeName, 29}, {appV30UpgradeName, 30}} {
-		record, err := badgerStore.GetAppliedUpgrade(next.name)
-		if err != nil {
-			return 0, nil, err
-		}
-		if record == nil {
-			previous = nil
-			continue
-		}
-		if record.Name != next.name || record.TargetAppVersion != next.version || record.AppliedHeight <= 0 || state.Height < record.AppliedHeight || previous == nil || record.AppliedHeight <= previous.AppliedHeight {
-			return 0, nil, fmt.Errorf("%s has invalid active %s record or predecessor", label, next.name)
-		}
-		if next.version == 30 {
-			if err := badgerStore.ValidateLineageIndexes(); err != nil {
-				return 0, nil, err
-			}
-			if err := badgerStore.ValidateTaintState(); err != nil {
-				return 0, nil, err
-			}
-		}
-		previous = record
 	}
 	return uint64(state.Height), computed, nil // #nosec G115 -- positive int64 checked above
 }

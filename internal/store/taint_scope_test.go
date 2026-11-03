@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -180,10 +181,11 @@ func TestClassifyMemoryTaintMatchesCredentialScope(t *testing.T) {
 	require.True(t, created)
 	_, err = s.ExpandTaintDecision("sage", decisionID, 64)
 	require.NoError(t, err)
-	complete, err := s.TaintServingCoverageComplete()
+	_, complete, err := s.TaintServingCoverageSnapshot(context.Background(), NewTaintServingReadScope())
 	require.NoError(t, err)
 	require.False(t, complete, "a non-direct scope cannot be represented by the membership mirror")
 
+	seedCoverageMemory(t, s, "signer-match")
 	require.NoError(t, s.SetAppV30Provenance("signer-match", []AppV30ProvenanceSigner{{
 		CredentialID: credential,
 		PrincipalID:  testCredential("e"),
@@ -195,6 +197,7 @@ func TestClassifyMemoryTaintMatchesCredentialScope(t *testing.T) {
 	require.Equal(t, []string{decisionID}, verdict.DecisionIDs)
 	require.True(t, verdict.CoverageComplete)
 
+	seedCoverageMemory(t, s, "signer-miss")
 	require.NoError(t, s.SetAppV30Provenance("signer-miss", []AppV30ProvenanceSigner{{
 		CredentialID: testCredential("f"),
 		PrincipalID:  testCredential("f"),
@@ -215,6 +218,7 @@ func TestClassifyMemoryTaintRootScopeRequiresExactRecordedGeneration(t *testing.
 		RootGeneration: 3,
 		Exact:          true,
 	}}))
+	seedCoverageMemory(t, s, "ordinary-before-root")
 	require.NoError(t, s.SetMemoryAuthorPrincipal("ordinary-before-root", rootPrincipal))
 	require.NoError(t, s.SetMemoryAuthor("ordinary-before-root", testCredential("2")))
 
@@ -245,7 +249,7 @@ func TestClassifyMemoryTaintRootScopeRequiresExactRecordedGeneration(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, TaintServingClear, verdict.Outcome)
 	require.False(t, verdict.CoverageComplete)
-	require.True(t, verdict.LineageMissing)
+	require.False(t, verdict.LineageMissing, "inexact scope provenance stops optional proof before a checked missing leaf")
 }
 
 func TestApplyTaintAdmissionAddsCredentialScopeWithoutParents(t *testing.T) {
@@ -334,6 +338,7 @@ func TestTaintScopeServingUsesBoundedActiveDecisionIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, created)
 
+	seedCoverageMemory(t, s, "bounded-history-memory")
 	require.NoError(t, s.SetAppV30Provenance("bounded-history-memory", []AppV30ProvenanceSigner{{
 		CredentialID: testCredential("b"),
 		PrincipalID:  testCredential("b"),

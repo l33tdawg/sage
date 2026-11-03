@@ -10,8 +10,8 @@ import (
 	"github.com/l33tdawg/sage/internal/store"
 )
 
-// verifyAppV23VendoredAgentReadiness is deliberately read-only. Mynah has no
-// released legacy population: an explicitly configured first-party companion
+// verifyAppV23VendoredAgentReadiness is deliberately read-only. An explicitly
+// configured first-party Companion
 // must come from an authenticated fresh genesis and already have its
 // exact committed enrollment. A legacy/mismatched chain fails startup instead
 // of being silently mutated into a lookalike policy state.
@@ -61,10 +61,19 @@ func verifyAppV23VendoredAgentReadiness(
 		activation.Capabilities != 15 {
 		return errors.New("configured first-party agent does not match immutable genesis provenance")
 	}
-	currentRootKey, ok := resolveLocalKey(root.CredentialID)
-	if !ok || len(currentRootKey) != ed25519.PrivateKeySize ||
-		appV23AgentIDForKey(currentRootKey) != root.CredentialID {
-		return errors.New("current committed CEREBRUM Root credential is not available on this node")
+	// A legacy direct-v23 node retains its original local Root-custody gate.
+	// A newer authenticated origin deliberately separates node transport from
+	// Root custody. Its canonical authority/enrollment checks still apply below.
+	fresh, err := badgerStore.GetFreshGenesisActivation()
+	if err != nil {
+		return fmt.Errorf("read fresh origin custody disposition: %w", err)
+	}
+	if fresh == nil {
+		currentRootKey, ok := resolveLocalKey(root.CredentialID)
+		if !ok || len(currentRootKey) != ed25519.PrivateKeySize ||
+			appV23AgentIDForKey(currentRootKey) != root.CredentialID {
+			return errors.New("current committed CEREBRUM Root credential is not available on this node")
+		}
 	}
 	rootGeneration, found, err :=
 		badgerStore.GetAppV23RootCredentialGeneration(root.CredentialID)

@@ -35,7 +35,7 @@ func (app *SageApp) checkTxCommittedMemoryVote(parsed *tx.ParsedTx) *abcitypes.R
 	if err != nil || !found || submitted <= app.appV25AppliedHeight || submitted > app.state.Height {
 		return nil
 	}
-	envelope, err := app.badgerStore.GetMemoryDisclosureState(id)
+	envelope, err := app.memoryDisclosureStateForConsensus(id, app.state.Height)
 	if err != nil || envelope.Status != string(memory.StatusCommitted) ||
 		len(envelope.ContentHash) != sha256.Size || !envelope.AuthorRecorded ||
 		!envelope.DomainRecorded || !envelope.ClassificationRecorded ||

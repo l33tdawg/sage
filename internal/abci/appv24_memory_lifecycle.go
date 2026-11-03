@@ -158,6 +158,9 @@ func (app *SageApp) setTerminalMemoryStatus(memoryID, status string, height int6
 	if !app.postAppV24Rules(height) {
 		return app.badgerStore.SetMemoryHash(memoryID, nil, status)
 	}
+	if app.useAppV30RawMemoryIdentity(memoryID, height) {
+		return app.badgerStore.SetMemoryStatusPreservingHashAppV30(memoryID, status)
+	}
 	return app.badgerStore.SetMemoryStatusPreservingHash(memoryID, status)
 }
 

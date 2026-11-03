@@ -5,17 +5,26 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sort"
 
 	badger "github.com/dgraph-io/badger/v4"
 
+	"github.com/l33tdawg/sage/internal/lineage"
 	"github.com/l33tdawg/sage/internal/scope"
 	"github.com/l33tdawg/sage/internal/taint"
 	"github.com/l33tdawg/sage/internal/tx"
 )
 
 const taintScopeStateVersion uint8 = 1
+
+// 1 version + 32 payload hash + 1 kind + 1 count + 16*(2 length + 64 credential).
+const taintScopeValueMaxBytes = 1 + sha256.Size + 1 + 1 + tx.MaxTaintCredentialSetEntries*(2+canonicalAgentIDHexBytes)
+
+// Legacy envelopes are independently capped before copying. The scoped codec
+// allows 1 MiB content plus bounded IDs/tags; no new wire allowance is implied.
+const taintLegacyProvenanceValueMaxBytes = 2 << 20
 
 // TaintDecisionScope is the immutable matching rule carried by one accepted
 // apply decision. The full apply payload remains bound to the decision through
@@ -44,9 +53,11 @@ type activeTaintDecisionScope struct {
 }
 
 type taintUnitMeter struct {
-	units int
-	limit int
-	err   error
+	units           int
+	limit           int
+	err             error
+	request         *TaintServingReadScope
+	coverageRequest *TaintServingReadScope
 }
 
 func newTaintUnitMeter(limit int, err error) *taintUnitMeter {
@@ -57,11 +68,17 @@ func (m *taintUnitMeter) charge(n int) error {
 	if n < 0 {
 		return fmt.Errorf("%w: negative taint unit charge", ErrTaintStateMalformed)
 	}
-	if m.limit > 0 && m.units+n > m.limit {
+	if m.limit > 0 && n > m.limit-m.units {
 		if m.err != nil {
 			return m.err
 		}
 		return ErrTaintServingWalkBudget
+	}
+	if m.request != nil && !m.request.takeMandatoryUnits(n) {
+		return ErrTaintServingWalkBudget
+	}
+	if m.coverageRequest != nil && !m.coverageRequest.takeCoverageUnits(n) {
+		return errTaintCoverageUnproved
 	}
 	m.units += n
 	return nil
@@ -69,6 +86,32 @@ func (m *taintUnitMeter) charge(n int) error {
 
 func TaintDecisionScopeKey(decisionID string) []byte {
 	return []byte("taintscope:" + decisionID)
+}
+
+// GetTaintDecisionScope returns the immutable scope bound to a retained header.
+// Header and scope are validated in one canonical snapshot, including when the
+// receiver is already pinned by a disclosure read.
+func (s *BadgerStore) GetTaintDecisionScope(decisionID string) (TaintDecisionScope, bool, error) {
+	if err := taint.ValidateDecisionID(decisionID); err != nil {
+		return TaintDecisionScope{}, false, err
+	}
+	var decisionScope TaintDecisionScope
+	found := false
+	err := s.view(func(txn *badger.Txn) error {
+		header, headerFound, err := readTaintHeaderTxn(txn, decisionID)
+		if err != nil || !headerFound {
+			return err
+		}
+		decisionScope, found, err = readTaintDecisionScopeTxn(txn, decisionID, header.PayloadHash, nil)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return fmt.Errorf("%w: retained decision scope is missing", ErrTaintStateMalformed)
+		}
+		return nil
+	})
+	return decisionScope, found, err
 }
 
 func TaintDecisionScopeFromPayload(payload tx.TaintApplyPayload) TaintDecisionScope {
@@ -99,11 +142,15 @@ func (scope TaintDecisionScope) Matches(provenance AuthorProvenance) bool {
 			return true
 		}
 	case tx.TaintScopeCredentialSet:
+		// At most 16 credentials and 64 signers. Matching is bounded local
+		// computation; provenance decoding separately charges each signer.
+		credentials := make(map[string]struct{}, len(scope.Credentials))
 		for _, credential := range scope.Credentials {
-			for _, signer := range provenance.Signers {
-				if signer.CredentialID == credential {
-					return true
-				}
+			credentials[credential] = struct{}{}
+		}
+		for _, signer := range provenance.Signers {
+			if _, matched := credentials[signer.CredentialID]; matched {
+				return true
 			}
 		}
 	}
@@ -291,17 +338,48 @@ func readTaintScopeBytes(data []byte, offset int) ([]byte, int, error) {
 	return append([]byte(nil), data[offset:offset+length]...), offset + length, nil
 }
 
-func readMeteredTaintValueTxn(
-	txn *badger.Txn,
-	key []byte,
-	meter *taintUnitMeter,
-) ([]byte, bool, error) {
-	if meter != nil {
-		if err := meter.charge(1); err != nil {
-			return nil, false, err
-		}
+func chargeTaintUnits(meter *taintUnitMeter, units int) error {
+	if meter == nil {
+		return nil
 	}
-	return readTaintValueTxn(txn, key)
+	return meter.charge(units)
+}
+
+func readBoundedMeteredTaintValueTxn(txn *badger.Txn, key []byte, maximum int64, meter *taintUnitMeter) ([]byte, bool, error) {
+	if err := chargeTaintUnits(meter, 1); err != nil {
+		return nil, false, err
+	}
+	item, err := txn.Get(key)
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if item.ValueSize() > maximum {
+		return nil, false, fmt.Errorf("%w: oversized provenance/scope value", ErrTaintStateMalformed)
+	}
+	raw, err := item.ValueCopy(nil)
+	return raw, err == nil, err
+}
+
+func readMeteredTaintValueTxn(txn *badger.Txn, key []byte, meter *taintUnitMeter) ([]byte, bool, error) {
+	maximum := int64(taintLegacyProvenanceValueMaxBytes)
+	switch {
+	case bytes.HasPrefix(key, []byte("taintscope:")):
+		maximum = taintScopeValueMaxBytes
+	case bytes.HasPrefix(key, []byte("memprov:v30:")):
+		maximum = 1 + maxAppV30ProvenanceSigners*appV30ProvenanceSignerSize
+	case bytes.HasPrefix(key, []byte("memprov:migrated:")):
+		maximum = 1
+	case bytes.HasPrefix(key, memoryLegacyAdoptionReceiptKey("")):
+		maximum = sha256.Size
+	case bytes.HasPrefix(key, memoryAuthorPrincipalKey("")):
+		maximum = tx.MaxTaintPrincipalIDBytes
+	case bytes.HasPrefix(key, memoryAuthorKey("")):
+		maximum = canonicalAgentIDHexBytes
+	}
+	return readBoundedMeteredTaintValueTxn(txn, key, maximum, meter)
 }
 
 func readTaintDecisionScopeTxn(
@@ -343,13 +421,22 @@ func readActiveTaintDecisionScopesTxn(
 		}
 	}
 	scopes := make([]activeTaintDecisionScope, 0, taint.MaxActiveDecisions)
+	retained := 0
 	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 		if meter != nil {
 			if err := meter.charge(1); err != nil {
 				return nil, err
 			}
 		}
-		decisionID := string(bytes.TrimPrefix(it.Item().Key(), prefix))
+		if retained == taint.MaxActiveDecisions {
+			return nil, fmt.Errorf("%w: active index exceeds cap", ErrTaintStateMalformed)
+		}
+		retained++
+		key := it.Item().Key()
+		if len(key) != len(prefix)+taint.DecisionIDBytes || it.Item().ValueSize() != 0 {
+			return nil, fmt.Errorf("%w: malformed active scope index", ErrTaintStateMalformed)
+		}
+		decisionID := string(key[len(prefix):])
 		if err := taint.ValidateDecisionID(decisionID); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrTaintStateMalformed, err)
 		}
@@ -365,8 +452,8 @@ func readActiveTaintDecisionScopesTxn(
 		if !found {
 			return nil, fmt.Errorf("%w: missing taint decision header", ErrTaintStateMalformed)
 		}
-		if !header.Status.Active() {
-			return nil, fmt.Errorf("%w: active index references non-active decision", ErrTaintStateMalformed)
+		if !header.Status.Active() && header.Status != taint.StatusCleaning {
+			return nil, fmt.Errorf("%w: retained-slot index references a released decision", ErrTaintStateMalformed)
 		}
 		decisionScope, found, err := readTaintDecisionScopeTxn(
 			txn,
@@ -383,14 +470,27 @@ func readActiveTaintDecisionScopesTxn(
 				ErrTaintStateMalformed,
 			)
 		}
-		scopes = append(scopes, activeTaintDecisionScope{
-			DecisionID: decisionID,
-			Header:     header,
-			Scope:      decisionScope,
-		})
-		if len(scopes) > taint.MaxActiveDecisions {
-			return nil, fmt.Errorf("%w: active taint index exceeds cap", ErrTaintStateMalformed)
+		if header.Status.Active() {
+			scopes = append(scopes, activeTaintDecisionScope{DecisionID: decisionID, Header: header, Scope: decisionScope})
 		}
+	}
+	// The singleton counts retained slots (Active or Cleaning). It never
+	// controls scan length or grants completeness; compare only after the full
+	// bounded index scan. Bidirectional startup/recovery validation is still
+	// required to detect coordinated counter+index corruption.
+	rawCount, found, err := readBoundedMeteredTaintValueTxn(txn, taint.ActiveCountKey(), 8, meter)
+	if err != nil {
+		return nil, err
+	}
+	var count uint64
+	if found {
+		if len(rawCount) != 8 {
+			return nil, fmt.Errorf("%w: invalid retained-slot counter", ErrTaintStateMalformed)
+		}
+		count = binary.BigEndian.Uint64(rawCount)
+	}
+	if count != uint64(retained) {
+		return nil, fmt.Errorf("%w: retained-slot counter/index mismatch", ErrTaintStateMalformed)
 	}
 	return scopes, nil
 }
@@ -411,8 +511,12 @@ func authorProvenanceTxn(
 	memoryID string,
 	meter *taintUnitMeter,
 ) (AuthorProvenance, error) {
+	return authorProvenanceWithIdentityTxn(txn, memoryID, meter, taintReadIdentityPolicy{})
+}
+
+func authorProvenanceWithIdentityTxn(txn *badger.Txn, memoryID string, meter *taintUnitMeter, identity taintReadIdentityPolicy) (AuthorProvenance, error) {
 	var provenance AuthorProvenance
-	if len(memoryID) == 0 || len(memoryID) > taint.MaxMemoryIDBytes {
+	if identity.validate(memoryID) != nil {
 		return provenance, fmt.Errorf("%w: invalid author provenance memory ID", ErrTaintServingState)
 	}
 	raw, found, err := readMeteredTaintValueTxn(txn, AppV30ProvenanceKey(memoryID), meter)
@@ -478,11 +582,16 @@ func authorProvenanceTxn(
 		return provenance, err
 	}
 	if coauthorFound {
+		// The historical decoder accepts trailing bytes and allocates from the
+		// count; check the count first, then require its canonical round trip.
+		if len(coauthors) < 4 || binary.BigEndian.Uint32(coauthors[:4]) > taint.MaxSigners {
+			return provenance, fmt.Errorf("%w: invalid coauthor count", ErrTaintServingState)
+		}
 		decoded, coauthorsErr := tx.DecodeCoauthorsCanonical(coauthors)
 		if coauthorsErr != nil {
 			return provenance, fmt.Errorf("%w: decode coauthors: %v", ErrTaintServingState, coauthorsErr)
 		}
-		if len(decoded) == 0 || len(decoded) > taint.MaxSigners {
+		if len(decoded) == 0 || len(decoded) > taint.MaxSigners || !bytes.Equal(tx.EncodeCoauthorsCanonical(decoded), coauthors) {
 			return provenance, fmt.Errorf("%w: invalid coauthor count", ErrTaintServingState)
 		}
 		if meter != nil {
@@ -516,6 +625,9 @@ func authorProvenanceTxn(
 		if !isCanonicalAgentID(content.SubmittingAgentID) {
 			return provenance, nil
 		}
+		if chargeErr := chargeTaintUnits(meter, 1); chargeErr != nil {
+			return provenance, chargeErr
+		}
 		provenance.Signers = []AppV30ProvenanceSigner{{
 			CredentialID: content.SubmittingAgentID,
 		}}
@@ -529,6 +641,9 @@ func authorProvenanceTxn(
 	}
 	if !authorFound || len(author) == 0 || !isCanonicalAgentID(string(author)) {
 		return provenance, nil
+	}
+	if err := chargeTaintUnits(meter, 1); err != nil {
+		return provenance, err
 	}
 	provenance.Signers = []AppV30ProvenanceSigner{{
 		CredentialID: string(author),
@@ -560,4 +675,58 @@ func sortedUniqueDecisionIDs(decisionIDs []string) []string {
 		write++
 	}
 	return decisionIDs[:write]
+}
+
+// servingScopeParentsTxn preserves forward/reverse and exact parent identities,
+// but bounds keys/values and charges the request before each mandatory read.
+func servingScopeParentsWithIdentityTxn(txn *badger.Txn, childID string, meter *taintUnitMeter, identity taintReadIdentityPolicy) ([]tx.ParentRef, error) {
+	if err := chargeTaintUnits(meter, 1); err != nil {
+		return nil, err
+	}
+	prefix, identityErr := identity.forwardPrefix(childID)
+	if identityErr != nil {
+		return nil, fmt.Errorf("%w: %v", ErrMemoryLineageMalformed, identityErr)
+	}
+	options := badger.DefaultIteratorOptions
+	options.Prefix = prefix
+	options.PrefetchValues = false
+	it := txn.NewIterator(options)
+	defer it.Close()
+	var parents []tx.ParentRef
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		if len(parents) == tx.MaxDerivedFromParents {
+			return nil, fmt.Errorf("%w: parent count exceeds cap", ErrMemoryLineageMalformed)
+		}
+		if err := chargeTaintUnits(meter, 1); err != nil {
+			return nil, err
+		}
+		key := it.Item().Key()
+		if len(key) != len(prefix)+2*lineage.ParentIDBytes || it.Item().ValueSize() > 2+tx.MaxDerivedFromChainIDBytes+2+tx.MaxDerivedFromMemoryIDBytes+sha256.Size {
+			return nil, fmt.Errorf("%w: malformed parent key/value", ErrMemoryLineageMalformed)
+		}
+		id := string(key[len(prefix):])
+		if err := identity.validateLineageIDs(childID, id); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrMemoryLineageMalformed, err)
+		}
+		raw, err := it.Item().ValueCopy(nil)
+		if err != nil {
+			return nil, err
+		}
+		ref, err := tx.DecodeParentRefValue(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrMemoryLineageMalformed, err)
+		}
+		derived, err := tx.ParentRefIDHex(ref)
+		if err != nil || derived != id {
+			return nil, fmt.Errorf("%w: parent identity mismatch", ErrMemoryLineageMalformed)
+		}
+		if _, found, err := readBoundedMeteredTaintValueTxn(txn, lineage.ReverseKey(id, childID), 0, meter); err != nil || !found {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("%w: missing reverse edge", ErrMemoryLineageMalformed)
+		}
+		parents = append(parents, ref)
+	}
+	return parents, nil
 }

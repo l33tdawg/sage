@@ -158,6 +158,7 @@ func TestFreshQuorumLegacyCommandsRefuseBeforeMutation(t *testing.T) {
 					err = runQuorumJoin()
 				}
 				require.ErrorContains(t, err, "finalized signed genesis")
+				require.ErrorContains(t, err, "init-fresh-node --genesis-sha256")
 				require.Equal(t, before, snapshotTestTree(t, home))
 			})
 		}
@@ -167,6 +168,7 @@ func TestFreshQuorumLegacyCommandsRefuseBeforeMutation(t *testing.T) {
 	cfg.Quorum.Enabled = true
 	err := ensureGenesisSeedWithConfig(filepath.Join(cfg.DataDir, "cometbft"), cfg, zerolog.Nop())
 	require.ErrorContains(t, err, "finalized signed genesis")
+	require.ErrorContains(t, err, "init-fresh-node --genesis-sha256")
 	require.NoDirExists(t, cfg.DataDir)
 }
 

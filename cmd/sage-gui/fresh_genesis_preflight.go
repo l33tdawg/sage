@@ -76,19 +76,23 @@ func preflightExistingFreshVendoredGenesis(cometHome string, cfg *Config, genesi
 	if nodeKeyErr := validateVendoredNodeKey(filepath.Join(cometHome, "config", "node_key.json")); nodeKeyErr != nil {
 		return fail(nodeKeyErr)
 	}
-	rootKey, err := readFederationTransportKey(cfg.AgentKey)
-	if err != nil || appV23AgentIDForKey(rootKey) != manifest.RootID {
-		return fail(errors.New("stable transport key differs from signed fresh genesis Root"))
+	// Transport is a per-node identity, not the shared chain's Root credential.
+	transportKey, err := readFederationTransportKey(cfg.AgentKey)
+	if err != nil || len(transportKey) != ed25519.PrivateKeySize {
+		return fail(errors.New("fresh genesis requires a valid node-local transport key"))
 	}
-	bootstrap := cfg.VendoredAgentBootstrap
-	if bootstrap == nil || manifest.Agent == nil {
-		return fail(errors.New("configured Companion is missing from signed fresh genesis"))
-	}
-	agentKey, available := parseKeyFile(bootstrap.AgentKeyFile)
-	if !available || appV23AgentIDForKey(agentKey) != manifest.Agent.AgentID ||
-		manifest.Agent.Profile != store.AppV23ProfileCompanion || manifest.Agent.Capabilities != 15 ||
-		manifest.Agent.HomeDomain != bootstrap.HomeDomain || manifest.Agent.Clearance != bootstrap.Clearance {
-		return fail(errors.New("configured Companion identity or policy differs from signed fresh genesis"))
+	// A manifest may enroll a remote Companion; only a locally configured
+	// Companion requires matching local private key and exact signed policy.
+	if bootstrap := cfg.VendoredAgentBootstrap; bootstrap != nil {
+		if manifest.Agent == nil {
+			return fail(errors.New("configured Companion is missing from signed fresh genesis"))
+		}
+		agentKey, available := parseKeyFile(bootstrap.AgentKeyFile)
+		if !available || appV23AgentIDForKey(agentKey) != manifest.Agent.AgentID ||
+			manifest.Agent.Profile != store.AppV23ProfileCompanion || manifest.Agent.Capabilities != 15 ||
+			manifest.Agent.HomeDomain != bootstrap.HomeDomain || manifest.Agent.Clearance != bootstrap.Clearance {
+			return fail(errors.New("configured Companion identity or policy differs from signed fresh genesis"))
+		}
 	}
 	if cfg.ChainID == "" {
 		cfg.ChainID = genesis.ChainID

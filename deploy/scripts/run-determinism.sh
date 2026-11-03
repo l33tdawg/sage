@@ -51,6 +51,11 @@ if [ "${DET_FRESH_V30:-0}" = "1" ]; then
     exit 1
   fi
   FRESH_PROJECT="${PROJECT}"
+  DET_TEST="${DET_TEST:-^TestAppV30FreshGenesisFourValidators$}"
+  if [ "${DET_TEST}" != '^TestAppV30FreshGenesisFourValidators$' ]; then
+    echo "ERROR: fresh-v30 proof requires its exact four-validator test" >&2
+    exit 1
+  fi
 fi
 COMPOSE=(docker compose -p "${PROJECT}"
   -f deploy/docker-compose.yml
@@ -85,8 +90,12 @@ echo "--- devnet block time: ${SAGE_TESTNET_TIMEOUT_COMMIT} ---"
 bash deploy/init-testnet.sh
 
 if [ "${DET_FRESH_V30:-0}" = "1" ]; then
-  SAGE_TEST_PREPARE_FRESH_V30=1 go test ./test/integration/ \
-    -tags=integration -run '^TestPrepareAppV30FreshGenesisFixture$' -count=1 -v
+  mkdir -p output/fresh-v30
+  SAGE_TEST_PREPARE_FRESH_V30=1 go test -mod=readonly ./test/integration/ \
+    -tags=integration -run '^TestPrepareAppV30FreshGenesisFixture$' -count=1 -json \
+    | tee output/fresh-v30/preparation-events.jsonl
+  python3 deploy/scripts/assert-go-test-json.py output/fresh-v30/preparation-events.jsonl \
+    github.com/l33tdawg/sage/test/integration TestPrepareAppV30FreshGenesisFixture
 fi
 
 # Build the two shared images ONCE (docker-compose.det.yml resets the per-service
@@ -200,14 +209,24 @@ echo "--- running the determinism test ---"
 # e.g. DET_TEST=TestAppHashDeterminism_AppV11Activation to exercise the app-v11 seam.
 DET_TEST="${DET_TEST:-TestAppHashDeterminism_FourValidators}"
 echo "--- test: ${DET_TEST} ---"
-SAGE_TEST_API_URL=http://localhost:18090 \
-SAGE_TEST_API0=http://localhost:18090 SAGE_TEST_API1=http://localhost:18091 \
-SAGE_TEST_API2=http://localhost:18092 SAGE_TEST_API3=http://localhost:18093 \
-SAGE_TEST_RPC0=http://localhost:36657 SAGE_TEST_RPC1=http://localhost:36757 \
-SAGE_TEST_RPC2=http://localhost:36857 SAGE_TEST_RPC3=http://localhost:36957 \
-SAGE_TEST_FRESH_V30_PROJECT="${FRESH_PROJECT}" \
-SAGE_TEST_FRESH_V30_VALIDATOR_KEY_DIR="${FRESH_VALIDATOR_KEY_DIR}" \
-go test ./test/integration/ -run "${DET_TEST}" \
-  -tags=integration -count=1 -v -timeout "${DET_TIMEOUT:-1800s}" $SHORT_FLAG
+run_determinism_test() {
+  SAGE_TEST_API_URL=http://localhost:18090 \
+  SAGE_TEST_API0=http://localhost:18090 SAGE_TEST_API1=http://localhost:18091 \
+  SAGE_TEST_API2=http://localhost:18092 SAGE_TEST_API3=http://localhost:18093 \
+  SAGE_TEST_RPC0=http://localhost:36657 SAGE_TEST_RPC1=http://localhost:36757 \
+  SAGE_TEST_RPC2=http://localhost:36857 SAGE_TEST_RPC3=http://localhost:36957 \
+  SAGE_TEST_FRESH_V30_PROJECT="${FRESH_PROJECT}" \
+  SAGE_TEST_FRESH_V30_VALIDATOR_KEY_DIR="${FRESH_VALIDATOR_KEY_DIR}" \
+  go test ./test/integration/ -run "${DET_TEST}" \
+    -tags=integration -count=1 -v -timeout "${DET_TIMEOUT:-1800s}" $SHORT_FLAG "$@"
+}
+if [ "${DET_FRESH_V30:-0}" = "1" ]; then
+  mkdir -p output/fresh-v30
+  run_determinism_test -json -mod=readonly | tee output/fresh-v30/quorum-events.jsonl
+  python3 deploy/scripts/assert-go-test-json.py output/fresh-v30/quorum-events.jsonl \
+    github.com/l33tdawg/sage/test/integration TestAppV30FreshGenesisFourValidators
+else
+  run_determinism_test
+fi
 
 echo "=== DETERMINISM RUN PASSED: AppHash byte-identical across all 4 nodes ==="

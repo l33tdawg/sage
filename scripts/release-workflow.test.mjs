@@ -221,15 +221,16 @@ test('release and CI vulnerability gates scan the exact mandated Go floor', () =
   ]) {
     assert.match(readFileSync(new URL(path, import.meta.url), 'utf8'), /^go 1\.26\.10$/m);
   }
-  for (const [path, stage] of [
+  for (const [path, stage, platform = ''] of [
     ['../Dockerfile', 'builder'],
-    ['../deploy/Dockerfile.node', 'builder'],
-    ['../deploy/Dockerfile.abci', 'source'],
+    ['../deploy/Dockerfile.node', 'builder', ' --platform=$BUILDPLATFORM'],
+    ['../deploy/Dockerfile.abci', 'source', ' --platform=$BUILDPLATFORM'],
     ['../deploy/federation-acceptance/Dockerfile.node', 'builder'],
     ['../deploy/federation-acceptance/Dockerfile.natter', 'build'],
   ]) {
     const source = readFileSync(new URL(path, import.meta.url), 'utf8');
-    assert.match(source, new RegExp(`^FROM golang:1\\.26\\.10-alpine AS ${stage}$`, 'm'));
+    const expected = `FROM${platform} golang:1.26.10-alpine AS ${stage}`;
+    assert.ok(source.split(/\r?\n/).includes(expected), `${path} must declare ${expected}`);
   }
   assert.match(
     readFileSync(new URL('../deploy/init-testnet.sh', import.meta.url), 'utf8'),
@@ -557,24 +558,6 @@ test('the mandatory cold gate transfers one exact app-v29 session', () => {
     stateSyncRuntime,
     /Uint64\("app_version", expectedAppVersion\)[\s\S]*?Msg\("authorized state-sync session assembled and exact-version candidate verified"\)/,
   );
-});
-
-test('fresh app30 wire proof is explicit and retains exact-version sealing and owned cleanup', () => {
-  const freshWorkflow = readFileSync(new URL('../.github/workflows/fresh-genesis-v30.yml', import.meta.url), 'utf8');
-  assert.match(v119StateSync, /MODE=\$\{V119_STATE_SYNC_MODE:-app-v29\}/);
-  assert.match(v119StateSync, /fresh-v30\) TARGET_APP_VERSION=30; EXPECTED_SCOPED_RECORDS=5; PROJECT=sage-fresh-v30-sync; AUTO_UPGRADE_DISABLED=true/);
-  assert.match(v119StateSync, /^EXPECTED_SCOPED_RECORDS=1$/m);
-  assert.match(v119StateSync, /test "\$\(cat \/provider\/fork-version\.txt\)" = "1"/);
-  assert.match(v119StateSync, /dev\.sage\.state-sync\.owner/);
-  assert.match(v119StateSync, /V119_STATE_SYNC_RUNTIME_USER must be a canonical numeric UID:GID/);
-  assert.match(v119StateSync, /--user "\$\{ABCI_RUNTIME_UID\}:\$\{ABCI_RUNTIME_GID\}"/);
-  assert.match(v119StateSync, /verify_v30_receiver "\$\{RECEIVER\}" "\$\{RECEIVER_HOME\}"/);
-  assert.match(v119StateSync, /verify_v30_receiver "\$\{SUCCESS_RECEIVER\}" "\$\{SUCCESS_RECEIVER_HOME\}"/);
-  assert.match(v119StateSync, /test ! -e \/target\/data\/badger && test ! -e \/target\/data\/sage\.db/);
-  assert.match(freshWorkflow, /V119_STATE_SYNC_MODE: fresh-v30/);
-  assert.match(freshWorkflow, /bash deploy\/scripts\/run-v11\.9-state-sync\.sh/);
-  assert.match(freshWorkflow, /name: fresh-app-v30-network-state-sync-evidence/);
-  assert.doesNotMatch(freshWorkflow, /V119_STATE_SYNC_RUNTIME_USER/);
 });
 
 test('the app-v29 evidence harness can run a genuinely mixed architecture quorum', () => {

@@ -460,10 +460,10 @@ func TestUpgradeStatusReportsAuthoritativePlanAndBallot(t *testing.T) {
 }
 
 // TestUpgradeVoteCarriesCeilingBallotAndRefusesUnsupportedTarget pins the
-// deliberate-vote boundary. App-v29 is the converged ceiling; an explicit
-// app-v30 ballot remains dormant for automatic voting. A target above the
-// compiled ceiling must be refused before
-// any vote reaches the wire because this binary cannot execute it.
+// deliberate-vote boundary. App-v29 is the supported ceiling; an explicit
+// app-v30 ballot is compiled but remains dormant for automatic voting. A target
+// above the compiled ceiling must be refused before any vote reaches the wire
+// because this binary cannot execute it.
 func TestUpgradeVoteCarriesCeilingBallotAndRefusesUnsupportedTarget(t *testing.T) {
 	for _, tc := range []struct {
 		name               string

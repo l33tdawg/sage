@@ -19,7 +19,7 @@ The index is a sparse SHA-256 tree over the canonical form of every committed
 public record included in the committed public set, and has that set been
 rewritten since.
 
-`PublicMemoryCompositeHash` (`internal/store/public_memory_index.go:321`) is the
+`PublicMemoryCompositeHash` (`internal/store/public_memory_index.go:355`) is the
 rule: SHA-256 over the domain tag `sage.app.public-memory.v1`, the legacy state
 root, and the public-memory root. A node that has promoted the index computes a
 different AppHash than a node that has not, for every block after H.
@@ -90,7 +90,7 @@ A co-commit does not consult the voter: block inclusion is decisive for it.
 Before app-v28, its tombstone check existed only at the local REST submission
 boundary, so a directly broadcast transaction bypassed that guard. From H+1,
 consensus checks the content hash against the promoted reverse index before
-applying a co-commit (`processCoCommitSubmit`, `internal/abci/app.go:6088`).
+applying a co-commit (`processCoCommitSubmit`, `internal/abci/app.go:6136`).
 
 Closing that gap required an index over consensus state. State
 carries `memory:<id>` as a content hash plus status, so the predicate "these
@@ -114,7 +114,7 @@ post-fork rule: a pre-fork block replays exactly as it did before.
 
 The `maxSupportedAppVersion` ceiling in `internal/abci` is the version the
 auto-voter will not vote past, and `currentAppVersion`
-(`internal/abci/app.go:2684`) is the ladder that reports it. In personal mode
+(`internal/abci/app.go:2715`) is the ladder that reports it. In personal mode
 `personalAutoAdvanceCeiling` (`cmd/sage-gui/upgrade_watchdog.go:271`) returns
 that ceiling, so bumping it is not a constant update: a personal node advances
 its own chain to the new version on upgrade with no governance ceremony,

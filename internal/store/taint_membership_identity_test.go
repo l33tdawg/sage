@@ -38,13 +38,13 @@ func TestTaintInheritanceBudgetExcludesPrefixNeighbours(t *testing.T) {
 	require.True(t, created)
 	_, err = s.InheritTaintMemberships("sage", "victim", []tx.ParentRef{parent})
 	require.NoError(t, err)
-	before, err := s.ValidateTaintInheritance("sage", "child", []tx.ParentRef{testTaintParent("victim")})
+	before, err := s.InheritTaintMemberships("sage", "child-before", []tx.ParentRef{testTaintParent("victim")})
 	require.NoError(t, err)
 	for i := 0; i <= taint.MaxActiveDecisions; i++ {
 		_, err = s.InheritTaintMemberships("sage", fmt.Sprintf("victim:%02d", i), []tx.ParentRef{parent})
 		require.NoError(t, err)
 	}
-	after, err := s.ValidateTaintInheritance("sage", "child", []tx.ParentRef{testTaintParent("victim")})
+	after, err := s.InheritTaintMemberships("sage", "child-after", []tx.ParentRef{testTaintParent("victim")})
 	require.NoError(t, err, "valid neighbouring memberships must not consume this parent's cap or units")
 	require.Equal(t, before, after)
 }

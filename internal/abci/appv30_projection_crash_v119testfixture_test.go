@@ -68,13 +68,66 @@ func appV30CrashOpen(t *testing.T, directory string) *SageApp {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(directory, 0o700))
 	app := openFreshGenesisH0TestApp(t, filepath.Join(directory, "badger"), filepath.Join(directory, "projection.db"))
+	returned := false
+	defer func() {
+		if !returned {
+			require.NoError(t, app.Close())
+		}
+	}()
 	// The node supplies its immutable Comet chain ID again after a restart.
 	require.NoError(t, app.SetExpectedGovernanceDelegationDomain(appV30CrashChain))
+	// Join the constructor-triggered generation before FinalizeBlock. Otherwise
+	// that already-running pass could cross the later Badger crash boundary and
+	// repair SQL before the parent has observed the deliberately stale mirror.
+	appV30CrashAwaitMirror(t, app)
+	returned = true
 	return app
 }
 
+// The production constructor and Commit only enqueue bounded advisory work.
+// Wait for the generation they already requested; do not stop/cancel that pass,
+// create a second owner, call a synchronous rebuild, or retry a failed pass.
+func appV30CrashAwaitMirror(t *testing.T, app *SageApp) {
+	t.Helper()
+	worker := app.memoryTaintMirrorWorker
+	require.NotNil(t, worker, "the fixture must use the stock owning-store worker")
+	worker.mu.Lock()
+	done, stopped := worker.done, worker.stopped
+	worker.mu.Unlock()
+	require.False(t, stopped)
+	require.NotNil(t, done)
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		t.Fatal("advisory mirror generation did not finish")
+	}
+	worker.mu.Lock()
+	running, dirty := worker.running, worker.dirty
+	worker.mu.Unlock()
+	require.False(t, running)
+	require.False(t, dirty)
+	fresh, _, err := store.MemoryTaintMirrorFresh(context.Background(), app.badgerStore, app.offchainStore.(*store.SQLiteStore))
+	require.NoError(t, err)
+	require.True(t, fresh, "this finite fixture's completed pass must publish its canonical revision")
+}
+
+// Only settled control/recovery observations use this barrier. appV30CrashRead
+// deliberately observes killed processes' stores before any constructor runs.
+func appV30CrashSettledSnapshot(t *testing.T, app *SageApp, directory string, ids []string) appV30CrashSnapshot {
+	t.Helper()
+	appV30CrashAwaitMirror(t, app)
+	result := appV30CrashObserve(t, app.badgerStore, app.offchainStore.(*store.SQLiteStore), directory, ids)
+	revision, expectedIDs, err := app.badgerStore.SnapshotEffectiveTaintMemberships()
+	require.NoError(t, err)
+	require.Equal(t, revision, result.Revision)
+	require.Equal(t, append([]string(nil), expectedIDs...), result.MirrorIDs, "a matching revision must not hide an empty, missing or extra SQL membership")
+	return result
+}
+
 // Storage constructors initialize schemas and legacy indexes. Observe before
-// NewSageApp reconciles the advisory mirror; this is not migration-free I/O.
+// NewSageApp starts advisory reconciliation; this is not migration-free I/O.
 func appV30CrashRead(t *testing.T, directory string, ids []string) appV30CrashSnapshot {
 	t.Helper()
 	canonical, err := store.NewBadgerStore(filepath.Join(directory, "badger"))
@@ -244,7 +297,7 @@ func appV30CrashCheckpoints(t *testing.T) ([]appV30CrashCheckpoint, []string) {
 		_, commitErr := app.Commit(context.Background(), &abcitypes.RequestCommit{})
 		require.NoError(t, commitErr)
 		if name != "" {
-			checkpoint.After = appV30CrashObserve(t, app.badgerStore, app.offchainStore.(*store.SQLiteStore), directory, ids)
+			checkpoint.After = appV30CrashSettledSnapshot(t, app, directory, ids)
 			checkpoints = append(checkpoints, checkpoint)
 		}
 	}
@@ -432,7 +485,7 @@ func TestAppV30ProjectionCrashWorker(t *testing.T) {
 		_, err = app.Commit(context.Background(), &abcitypes.RequestCommit{})
 		require.NoError(t, err)
 	}
-	result := appV30CrashObserve(t, app.badgerStore, app.offchainStore.(*store.SQLiteStore), config.Data, config.IDs)
+	result := appV30CrashSettledSnapshot(t, app, config.Data, config.IDs)
 	encoded, err = json.Marshal(result)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(config.Result, encoded, 0o600))
@@ -460,6 +513,12 @@ func appV30CrashRun(t *testing.T, config appV30CrashConfig) appV30CrashSnapshot 
 			}
 		})
 		require.NoError(t, command.Start())
+		t.Cleanup(func() {
+			if command.ProcessState == nil {
+				_ = command.Process.Kill()
+				_ = command.Wait()
+			}
+		})
 		waitProjectionCrashReady(t, command, config.Ready)
 		waitStatus, ok := command.ProcessState.Sys().(syscall.WaitStatus)
 		require.True(t, ok)
@@ -501,7 +560,7 @@ func appV30CrashMirrorLoss(t *testing.T, source string, expected appV30CrashSnap
 			require.Equal(t, expected.Records, beforeRepair.Records,
 				"Badger classification is authoritative while either SQL mirror shape is unavailable")
 			config.Mode, config.Data = "inspect", directory
-			require.Equal(t, expected, appV30CrashRun(t, config), "constructor repairs the advisory mirror without changing canonical state")
+			require.Equal(t, expected, appV30CrashRun(t, config), "constructor-triggered worker completes advisory repair without changing canonical state")
 		})
 	}
 }

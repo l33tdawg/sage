@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -13,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/l33tdawg/sage/internal/taint"
 )
 
 const (
@@ -137,6 +141,19 @@ func profileDefaults(name string) (profile, error) {
 	}
 }
 
+// The result cannot supply weaker ceilings than the code that produced it.
+// A change to the reviewed profile or compiled limits requires new evidence.
+func expectedConstraints() map[string]int {
+	return map[string]int{
+		"serving_request_units":      taint.MaxServingRequestUnits,
+		"per_execution_units":        taint.PerExecutionUnitBudget,
+		"new_memberships_per_exec":   taint.MaxNewMembershipsPerExec,
+		"provenance_admission_units": taint.MaxProvenanceAdmissionTaintUnits,
+		"max_active_decisions":       taint.MaxActiveDecisions,
+		"max_serving_ancestor_nodes": taint.MaxServingAncestorWalk,
+	}
+}
+
 func execute(profileName, out, dataDir, requireArch string, repeats int) error {
 	machine, err := detectMachine()
 	if err != nil {
@@ -158,28 +175,21 @@ func execute(profileName, out, dataDir, requireArch string, repeats int) error {
 		return err
 	}
 	result := &realBenchResult{
-		Schema:    resultSchema,
-		RealCode:  true,
-		Notice:    realNotice,
-		Profile:   profileName,
-		Repeats:   selected.Repeats,
-		Machine:   machine,
-		Commit:    detectCommit(),
-		Scenarios: scenarios,
-		StartedAt: started.Format(time.RFC3339),
-		ElapsedMS: float64(time.Since(started)) / float64(time.Millisecond),
-		Constraints: map[string]int{
-			"serving_request_units":      65536,
-			"per_execution_units":        1024,
-			"new_memberships_per_exec":   204,
-			"provenance_admission_units": 722,
-			"max_active_decisions":       32,
-			"max_serving_ancestor_nodes": 256,
-		},
+		Schema:      resultSchema,
+		RealCode:    true,
+		Notice:      realNotice,
+		Profile:     profileName,
+		Repeats:     selected.Repeats,
+		Machine:     machine,
+		Commit:      detectCommit(),
+		Scenarios:   scenarios,
+		StartedAt:   started.Format(time.RFC3339),
+		ElapsedMS:   float64(time.Since(started)) / float64(time.Millisecond),
+		Constraints: expectedConstraints(),
 		Notes: map[string]string{
 			"state":       "Badger consensus primitives only",
 			"excluded":    "CometBFT block execution, SQL mirror, REST/MCP serving, live-node restart",
-			"timing":      "Setup is excluded. Read scenarios reuse one canonical snapshot; mutation scenarios rebuild a fresh database per repeat.",
+			"timing":      "Setup is excluded. Read scenarios reuse unchanged database contents through separate read Views; mutation scenarios rebuild a fresh database per repeat.",
 			"app_hash":    "Computed by BadgerStore.ComputeAppHash over the exact final store state.",
 			"determinism": "Timings and machine metadata are excluded from deterministic_digest.",
 		},
@@ -223,14 +233,31 @@ func compareResults(paths []string) error {
 			return fmt.Errorf("read %s: %w", path, err)
 		}
 		var result realBenchResult
-		if decodeErr := json.Unmarshal(raw, &result); decodeErr != nil {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.DisallowUnknownFields()
+		if decodeErr := decoder.Decode(&result); decodeErr != nil {
 			return fmt.Errorf("decode %s: %w", path, decodeErr)
+		}
+		if decodeErr := decoder.Decode(new(any)); decodeErr != io.EOF {
+			return fmt.Errorf("decode %s: expected exactly one JSON object", path)
 		}
 		if result.Schema != resultSchema || !result.RealCode {
 			return fmt.Errorf("%s is not a real-code benchmark result", path)
 		}
-		if !result.Invariants.Passed {
-			return fmt.Errorf("%s has failed invariants", path)
+		if actual := checkInvariants(&result); !actual.Passed {
+			return fmt.Errorf("%s has failed recomputed invariants: %s", path, strings.Join(actual.Failures, "; "))
+		}
+		if !result.Invariants.Passed || len(result.Invariants.Failures) != 0 {
+			return fmt.Errorf("%s has inconsistent serialized invariants", path)
+		}
+		if !canonicalHex(result.Commit.SHA, 20) || result.Commit.Dirty {
+			return fmt.Errorf("%s requires a recorded clean source commit", path)
+		}
+		if result.Machine.OS == "" || result.Machine.GoVersion == "" || result.Machine.CPUs <= 0 {
+			return fmt.Errorf("%s has incomplete machine metadata", path)
+		}
+		if !matchingArchLabel(result.Machine) {
+			return fmt.Errorf("%s has unsupported or inconsistent architecture labels", path)
 		}
 		computed, err := deterministicDigest(&result)
 		if err != nil {
@@ -244,6 +271,12 @@ func compareResults(paths []string) error {
 	if results[0].Profile != results[1].Profile {
 		return fmt.Errorf("profile mismatch: %s vs %s", results[0].Profile, results[1].Profile)
 	}
+	if results[0].Repeats != results[1].Repeats {
+		return fmt.Errorf("repeat mismatch: %d vs %d", results[0].Repeats, results[1].Repeats)
+	}
+	if results[0].Commit.SHA != results[1].Commit.SHA {
+		return fmt.Errorf("source commit mismatch: %s vs %s", results[0].Commit.SHA, results[1].Commit.SHA)
+	}
 	arches := map[string]bool{results[0].Machine.GOARCH: true, results[1].Machine.GOARCH: true}
 	if !arches["amd64"] || !arches["arm64"] {
 		return fmt.Errorf("compare needs one amd64 and one arm64 result, got %v", arches)
@@ -252,8 +285,25 @@ func compareResults(paths []string) error {
 		return fmt.Errorf("deterministic digest mismatch: %s vs %s",
 			results[0].DeterministicDigest, results[1].DeterministicDigest)
 	}
-	fmt.Printf("app-v30 real-code parity: %s\n", results[0].DeterministicDigest)
+	fmt.Printf("app-v30 real-code evidence agrees: %s (source/platform labels require independent workflow verification)\n", results[0].DeterministicDigest)
 	return nil
+}
+
+func canonicalHex(value string, size int) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == size && hex.EncodeToString(decoded) == value
+}
+
+// These are consistency checks on self-reported JSON, not native attestation.
+func matchingArchLabel(machine machineContext) bool {
+	switch machine.GOARCH {
+	case "amd64":
+		return machine.UnameM == "x86_64" || machine.UnameM == "amd64"
+	case "arm64":
+		return machine.UnameM == "aarch64" || machine.UnameM == "arm64"
+	default:
+		return false
+	}
 }
 
 func printSummary(w io.Writer, result *realBenchResult) {
@@ -306,49 +356,112 @@ func deterministicScenarios(results []scenarioResult) []deterministicScenario {
 
 func checkInvariants(result *realBenchResult) invariants {
 	var failures []string
-	byName := make(map[string]deterministicScenario, len(result.Scenarios))
+	if result == nil {
+		return invariants{Failures: []string{"missing result"}}
+	}
+	if _, err := profileDefaults(result.Profile); err != nil {
+		failures = append(failures, "unsupported reviewed profile")
+	}
+	if result.Repeats <= 0 {
+		failures = append(failures, "repeats must be positive")
+	}
+	expected := expectedConstraints()
+	if len(result.Constraints) != len(expected) {
+		failures = append(failures, "constraint set differs from compiled reviewed limits")
+	}
+	for name, value := range expected {
+		if actual, ok := result.Constraints[name]; !ok || actual != value {
+			failures = append(failures, "constraint differs from compiled reviewed limit: "+name)
+		}
+	}
+	names := []string{"scope_match", "lineage_walk", "admission_plan", "fanout_expand"}
+	if len(result.Scenarios) != len(names) {
+		failures = append(failures, "require exactly four scenarios")
+	}
+	known := make(map[string]bool, len(names))
+	for _, name := range names {
+		known[name] = true
+	}
+	byName := make(map[string]deterministicScenario, len(names))
 	for _, scenario := range result.Scenarios {
 		det := scenario.Deterministic
+		if !known[det.Name] {
+			failures = append(failures, "unknown scenario: "+det.Name)
+			continue
+		}
+		if _, duplicate := byName[det.Name]; duplicate {
+			failures = append(failures, "duplicate scenario: "+det.Name)
+			continue
+		}
 		byName[det.Name] = det
-		if len(det.AppHash) != 64 {
-			failures = append(failures, det.Name+": app hash is not 32-byte hex")
+		if !canonicalHex(det.AppHash, 32) || det.AppHash == strings.Repeat("0", 64) {
+			failures = append(failures, det.Name+": app hash is not a nonzero canonical 32-byte hex root")
 		}
-		if det.Keys <= 0 || det.KeyBytes <= 0 {
-			failures = append(failures, det.Name+": empty canonical state")
+		if det.Keys <= 0 || det.KeyBytes < int64(det.Keys) || det.ValueBytes <= 0 {
+			failures = append(failures, det.Name+": empty or inconsistent canonical state counters")
+		}
+		if det.DecisionIDs < 0 || det.DecisionIDs > taint.MaxActiveDecisions ||
+			det.Nodes < 0 || det.Nodes > taint.MaxServingAncestorWalk ||
+			det.Units <= 0 || det.Decisions < 0 || det.Materialized < 0 ||
+			det.Scanned < 0 || det.Enqueued < 0 || det.DatabaseLSM < 0 || det.DatabaseValue < 0 {
+			failures = append(failures, det.Name+": invalid counters")
+		}
+		if !validTiming(scenario.Timing) {
+			failures = append(failures, det.Name+": invalid timing summary")
 		}
 	}
-	if det, ok := byName["scope_match"]; !ok {
-		failures = append(failures, "scope_match missing")
-	} else {
-		if det.Outcome != "tainted" || det.DecisionIDs != 1 {
-			failures = append(failures, "scope_match did not select exactly the matching decision")
-		}
-		if det.Units <= 0 || det.Units > 65536 {
-			failures = append(failures, "scope_match exceeded the serving unit ceiling")
+	for _, name := range names {
+		if _, ok := byName[name]; !ok {
+			failures = append(failures, name+" missing")
 		}
 	}
-	if det, ok := byName["lineage_walk"]; !ok {
-		failures = append(failures, "lineage_walk missing")
-	} else {
-		if det.Outcome != "pending" || det.Nodes != result.Constraints["max_serving_ancestor_nodes"] {
+	if det, ok := byName["scope_match"]; ok {
+		if det.Outcome != "tainted" || det.DecisionIDs != 1 || det.Units > taint.MaxServingRequestUnits {
+			failures = append(failures, "scope_match did not select exactly the matching decision within the serving budget")
+		}
+		if det.Status != "" || det.Decisions != 0 || det.Materialized != 0 || det.Scanned != 0 || det.Enqueued != 0 {
+			failures = append(failures, "scope_match has unrelated scenario fields")
+		}
+	}
+	if det, ok := byName["lineage_walk"]; ok {
+		if det.Outcome != "pending" || det.Nodes != taint.MaxServingAncestorWalk || det.Units > taint.MaxServingRequestUnits {
 			failures = append(failures, "lineage_walk did not cover the bounded ancestor chain")
 		}
-	}
-	if det, ok := byName["admission_plan"]; !ok {
-		failures = append(failures, "admission_plan missing")
-	} else {
-		if det.Decisions != 32 || det.Units != result.Constraints["provenance_admission_units"] {
-			failures = append(failures, "admission_plan did not hit the exact accepted bound")
+		if det.Status != "" || det.Decisions != 0 || det.Materialized != 0 || det.Scanned != 0 || det.Enqueued != 0 {
+			failures = append(failures, "lineage_walk has unrelated scenario fields")
 		}
 	}
-	if det, ok := byName["fanout_expand"]; !ok {
-		failures = append(failures, "fanout_expand missing")
-	} else {
-		if det.Materialized <= 0 || det.Materialized > 204 || det.Units > 1024 {
-			failures = append(failures, "fanout_expand exceeded its execution budget")
+	if det, ok := byName["admission_plan"]; ok {
+		if det.Decisions != taint.MaxActiveDecisions || det.Units != taint.MaxProvenanceAdmissionTaintUnits {
+			failures = append(failures, "admission_plan did not hit the compiled accepted bound")
+		}
+		if det.Outcome != "" || det.Status != "" || det.DecisionIDs != 0 || det.Nodes != 0 ||
+			det.Materialized != 0 || det.Scanned != 0 || det.Enqueued != 0 || det.Coverage {
+			failures = append(failures, "admission_plan has unrelated scenario fields")
+		}
+	}
+	if det, ok := byName["fanout_expand"]; ok {
+		if det.Status != fmt.Sprint(taint.StatusExpanding) || det.Materialized <= 0 ||
+			det.Materialized > taint.MaxNewMembershipsPerExec || det.Units > taint.PerExecutionUnitBudget ||
+			det.Scanned <= 0 || det.Scanned > taint.PerExecutionUnitBudget ||
+			det.Enqueued <= 0 || det.Enqueued > taint.PerExecutionUnitBudget {
+			failures = append(failures, "fanout_expand did not make bounded expansion progress")
+		}
+		if det.Outcome != "" || det.DecisionIDs != 0 || det.Nodes != 0 || det.Decisions != 0 || det.Coverage {
+			failures = append(failures, "fanout_expand has unrelated scenario fields")
 		}
 	}
 	return invariants{Passed: len(failures) == 0, Failures: failures}
+}
+
+func validTiming(summary timingSummary) bool {
+	for _, value := range []float64{summary.MinMS, summary.P50MS, summary.P95MS, summary.MaxMS, summary.MeanMS} {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+			return false
+		}
+	}
+	return summary.MinMS <= summary.P50MS && summary.P50MS <= summary.P95MS &&
+		summary.P95MS <= summary.MaxMS && summary.MinMS <= summary.MeanMS && summary.MeanMS <= summary.MaxMS
 }
 
 func commandOutput(name string, args ...string) (string, error) {

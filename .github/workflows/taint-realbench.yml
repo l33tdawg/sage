@@ -40,6 +40,8 @@ jobs:
             uname: aarch64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -48,7 +50,10 @@ jobs:
         env:
           WANT_UNAME: ${{ matrix.uname }}
           WANT_GOARCH: ${{ matrix.arch }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain)"
           uname -m
           go env GOARCH
           test "$(uname -m)" = "$WANT_UNAME"
@@ -70,6 +75,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -80,7 +87,22 @@ jobs:
           path: bench/results
           merge-multiple: true
       - name: Compare deterministic digests
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          EXPECTED_PROFILE: ${{ inputs.profile || 'full' }}
         run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          python3 - <<'PYCODE'
+          import glob, json, os
+          paths = glob.glob("bench/results/taint-real-*.json")
+          assert len(paths) == 2, "expected exactly two benchmark artifacts"
+          for path in paths:
+              with open(path, encoding="utf-8") as source:
+                  result = json.load(source)
+              assert result["commit"]["sha"] == os.environ["EXPECTED_SHA"], "artifact source differs from workflow checkout"
+              assert result["commit"]["dirty"] is False, "artifact source was dirty"
+              assert result["profile"] == os.environ["EXPECTED_PROFILE"], "artifact profile differs from requested profile"
+          PYCODE
           files=(bench/results/taint-real-*.json)
           test "${#files[@]}" -eq 2
           go run ./cmd/sage-taint-realbench -compare "${files[0]},${files[1]}"
