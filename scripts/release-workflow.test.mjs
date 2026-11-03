@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import test from 'node:test';
 
 const workflowPath = new URL('../.github/workflows/release.yml', import.meta.url);
@@ -477,6 +477,65 @@ test('PR and main CI require the same v11.9 composite proofs as release', () => 
     assert.match(fanIn, /needs\.test-suite\.result/);
     assert.match(fanIn, /needs\.test-race\.result/);
     assert.match(fanIn, /needs\.poe-cross-arch\.result/);
+  }
+});
+
+test('storage race shards preserve the complete inventory and mandatory gate', () => {
+  const selected = [
+    'TestTaintAdversarialTenThousandFanoutDiamondAndBeforeCursor',
+    'TestTaintAdversarialSQLiteSparseCandidateTail8192And8193',
+  ];
+  const selector = '^TestTaintAdversarial(TenThousandFanoutDiamondAndBeforeCursor|SQLiteSparseCandidateTail8192And8193)$';
+  const inventory = (packageName) => {
+    const directory = new URL(`../internal/${packageName}/`, import.meta.url);
+    return readdirSync(directory)
+      .filter((name) => name.endsWith('_test.go'))
+      .flatMap((name) => [...readFileSync(new URL(name, directory), 'utf8')
+        .matchAll(/^func (Test\w+)\(/gm)].map((match) => match[1]));
+  };
+  const storeTests = inventory('store');
+  const snapshotTests = inventory('snapshot');
+  assert.deepEqual(storeTests.filter((name) => new RegExp(selector).test(name)).sort(), [...selected].sort());
+  assert.deepEqual(snapshotTests.filter((name) => new RegExp(selector).test(name)), []);
+
+  for (const raceJob of [ciJob('test-race'), job('test-race')]) {
+    const rows = [...raceJob.matchAll(/^          - group: ([^\n]+)\n([\s\S]*?)(?=^          - group:|^    steps:)/gm)]
+      .map((match) => {
+        const field = (key) => match[2].match(new RegExp(`^            ${key}: (.*)$`, 'm'))?.[1]
+          ?.replace(/^'|'$/g, '');
+        return { group: match[1], packages: field('packages'), run: field('test_run'), skip: field('test_skip') };
+      });
+    assert.deepEqual(rows.map((row) => row.group), [
+      'federation', 'messaging-p2p', 'storage-snapshot', 'storage-adversarial', 'tx-statesync-rest', 'app-and-shell',
+    ]);
+    const ordinary = rows.find((row) => row.group === 'storage-snapshot');
+    const adversarial = rows.find((row) => row.group === 'storage-adversarial');
+    assert.equal(ordinary.packages, './internal/store ./internal/snapshot');
+    assert.equal(ordinary.run, undefined);
+    assert.equal(ordinary.skip, selector);
+    assert.equal(adversarial.packages, './internal/store');
+    assert.equal(adversarial.run, selector);
+    assert.equal(adversarial.skip, undefined);
+    for (const row of rows.filter((row) => !row.group.startsWith('storage-'))) {
+      assert.equal(row.run, undefined, `${row.group} must retain its existing selection`);
+      assert.equal(row.skip, undefined, `${row.group} must not acquire exclusions`);
+    }
+    const runs = (row, name) => new RegExp(row.run ?? '.').test(name) && !new RegExp(row.skip ?? '^$').test(name);
+    for (const name of storeTests) {
+      assert.equal(Number(runs(ordinary, name)) + Number(runs(adversarial, name)), 1, name);
+    }
+    for (const name of snapshotTests) assert.ok(runs(ordinary, name), name);
+    assert.ok(!selector.includes('/'), 'select parent tests so every nested case executes');
+    assert.match(raceJob, /TEST_RUN: \$\{\{ matrix\.test_run \|\| '\.' \}\}/);
+    assert.match(raceJob, /TEST_SKIP: \$\{\{ matrix\.test_skip \|\| '\^\$' \}\}/);
+    assert.match(raceJob, /go test -race -count=1 -timeout 30m\s+-run "\$TEST_RUN" -skip "\$TEST_SKIP"\s+\$\{\{ matrix\.packages \}\}/);
+    assert.match(raceJob, /fail-fast: false/);
+    assert.doesNotMatch(raceJob, /continue-on-error:/);
+  }
+  for (const fanIn of [ciJob('test'), job('test')]) {
+    assert.match(fanIn, /needs: \[test-suite, test-race, poe-cross-arch\]/);
+    assert.match(fanIn, /if: always\(\)/);
+    assert.match(fanIn, /test "\$\{\{ needs\.test-race\.result \}\}" = "success"/);
   }
 });
 
