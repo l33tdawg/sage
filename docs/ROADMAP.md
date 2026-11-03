@@ -1,6 +1,6 @@
 # SAGE Roadmap
 
-**Status (2026-11):** **v11.25.0 is the current release.** Fresh personal and
+**Status (2026-11):** **v11.25.1 is the current release.** This patch adds explicit AMID target-consent keys, caller-sized reranking, private federation config persistence, and orphaned tray-daemon shutdown. Fresh personal and
 shared Unix chains can begin at supported app29 without walking old upgrade
 proposals. The merged app30 taint/lineage implementation remains explicit;
 automatic upgrades stay at app29. Evidence-operator integration and complete
@@ -164,6 +164,10 @@ ceiling is app-v27.
 upgrade in place across all future releases. Routine personal-node upgrades
 remain automatic; the exceptional legacy-lineage repair is deliberately an
 explicit, reviewed operator ceremony rather than a silent mutation.
+
+## v11.25.1 release
+
+AMID approval now resolves explicitly provisioned local consent keys while keeping operator and consensus authorization. Hybrid recall bounds reranker work independently of authorization coverage. Explicit false/empty federation settings survive saves, and tray-launched daemons stop gracefully after parent loss. App-version ceilings and the separate evidence-operator, parity, and functional-authority work remain unchanged.
 
 ## v11.25.0 release
 
