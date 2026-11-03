@@ -107,6 +107,7 @@ func TestResolveRerankerConfig_EnvOverrides(t *testing.T) {
 	t.Setenv("SAGE_RERANK_MODEL", "custom/model")
 	t.Setenv("SAGE_RERANK_TIMEOUT_MS", "5000")
 	t.Setenv("SAGE_RERANK_OVERSAMPLE", "4")
+	t.Setenv("SAGE_RERANK_MAX_CANDIDATES", "10")
 
 	cfg := ResolveRerankerConfig()
 	assert.True(t, cfg.Enabled)
@@ -114,6 +115,14 @@ func TestResolveRerankerConfig_EnvOverrides(t *testing.T) {
 	assert.Equal(t, "custom/model", cfg.Model)
 	assert.Equal(t, 5000, cfg.TimeoutMS)
 	assert.Equal(t, 4, cfg.Oversample)
+	assert.Equal(t, 10, cfg.MaxCandidates)
+}
+
+func TestResolveRerankerConfig_MaxCandidatesRejectsNonPositive(t *testing.T) {
+	for _, v := range []string{"0", "-3", "ten"} {
+		t.Setenv("SAGE_RERANK_MAX_CANDIDATES", v)
+		assert.Equal(t, 0, ResolveRerankerConfig().MaxCandidates, "value %q must leave the cap off", v)
+	}
 }
 
 func TestResolveRerankerConfig_EnabledNeedsURL(t *testing.T) {

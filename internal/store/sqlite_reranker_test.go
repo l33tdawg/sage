@@ -276,3 +276,109 @@ func TestSearchHybrid_RerankPreservesStoredConfidence(t *testing.T) {
 			"result %s must carry the STORED confidence (0.85), not the rerank score (0.99/0.01)", r.MemoryID)
 	}
 }
+
+// app-v23 recall over-fetches TopK to the disclosure scan limit and trims the
+// response afterwards. The reranker pool must follow the caller's result size
+// (RerankTopK), not that scan width, while the unreranked tail still comes
+// back in fused order so the handler can fill the response after its re-check.
+func TestSearchHybrid_RerankTopKSizesPoolNotScanWidth(t *testing.T) {
+	s := newTestStore(t)
+	seedHybridCorpus(t, s)
+
+	baseline, err := s.SearchHybrid(context.Background(),
+		"jwt auth", []float32{1.0, 0.0, 0.0}, QueryOptions{TopK: 100})
+	require.NoError(t, err)
+	require.Greater(t, len(baseline), 2, "corpus must exceed the rerank pool for this test to mean anything")
+
+	fake := &fakeReranker{winnerSubstr: "never-matches"}
+	s.SetReranker(fake, 2)
+	results, err := s.SearchHybrid(context.Background(),
+		"jwt auth", []float32{1.0, 0.0, 0.0}, QueryOptions{TopK: 100, RerankTopK: 1})
+	require.NoError(t, err)
+	require.Equal(t, 1, fake.calls)
+	assert.Len(t, fake.lastTexts, 2, "RerankTopK=1 x oversample 2 must send 2 candidates, not the 100-row scan")
+	require.Len(t, results, len(baseline), "the over-fetch must still return every fused candidate")
+	for i := 2; i < len(results); i++ {
+		assert.Equal(t, baseline[i].MemoryID, results[i].MemoryID, "rows past the reranked head keep RRF order")
+	}
+}
+
+func TestSearchHybrid_RerankMaxCandidatesCapsPool(t *testing.T) {
+	s := newTestStore(t)
+	seedHybridCorpus(t, s)
+	fake := &fakeReranker{winnerSubstr: "never-matches"}
+	s.SetReranker(fake, 3)
+	s.SetRerankMaxCandidates(2)
+
+	results, err := s.SearchHybrid(context.Background(),
+		"jwt auth", []float32{1.0, 0.0, 0.0}, QueryOptions{TopK: 3})
+	require.NoError(t, err)
+	assert.Len(t, fake.lastTexts, 2, "the hard cap wins over TopK x oversample")
+	assert.Len(t, results, 3, "a capped pool still fills TopK from the fused tail")
+
+	// The cap survives a runtime reranker swap (Settings toggle).
+	fake2 := &fakeReranker{winnerSubstr: "never-matches"}
+	s.SetReranker(fake2, 3)
+	_, err = s.SearchHybrid(context.Background(),
+		"jwt auth", []float32{1.0, 0.0, 0.0}, QueryOptions{TopK: 3})
+	require.NoError(t, err)
+	assert.Len(t, fake2.lastTexts, 2)
+}
+
+func TestSearchHybrid_RerankFallbackIsObserved(t *testing.T) {
+	s := newTestStore(t)
+	seedHybridCorpus(t, s)
+	var gotCandidates int
+	var gotErr error
+	calls := 0
+	s.SetRerankFallbackObserver(func(candidates int, err error) {
+		calls++
+		gotCandidates, gotErr = candidates, err
+	})
+
+	s.SetReranker(&errReranker{msg: "context deadline exceeded"}, 2)
+	results, err := s.SearchHybrid(context.Background(),
+		"jwt auth", []float32{1.0, 0.0, 0.0}, QueryOptions{TopK: 2})
+	require.NoError(t, err)
+	require.NotEmpty(t, results)
+	require.Equal(t, 1, calls, "a failed rerank must be reported once")
+	assert.Equal(t, 4, gotCandidates, "TopK 2 x oversample 2")
+	assert.EqualError(t, gotErr, "context deadline exceeded")
+
+	s.SetReranker(scoredReranker{nil}, 2)
+	_, err = s.SearchHybrid(context.Background(),
+		"jwt auth", []float32{1.0, 0.0, 0.0}, QueryOptions{TopK: 2})
+	require.NoError(t, err)
+	require.Equal(t, 2, calls, "an unusable score set is a fallback too")
+	assert.Error(t, gotErr)
+
+	s.SetReranker(&fakeReranker{winnerSubstr: "n+1 query"}, 2)
+	_, err = s.SearchHybrid(context.Background(),
+		"jwt auth", []float32{1.0, 0.0, 0.0}, QueryOptions{TopK: 2})
+	require.NoError(t, err)
+	assert.Equal(t, 2, calls, "a successful rerank is not reported")
+}
+
+// cancelReranker cancels the recall context mid-rerank, as a disconnecting
+// client does, and then fails the way an HTTP reranker would.
+type cancelReranker struct{ cancel context.CancelFunc }
+
+func (c cancelReranker) Rerank(ctx context.Context, _ string, _ []string) ([]embedding.RerankResult, error) {
+	c.cancel()
+	return nil, ctx.Err()
+}
+
+func TestSearchHybrid_RerankFallbackSkipsCallerCancel(t *testing.T) {
+	s := newTestStore(t)
+	seedHybridCorpus(t, s)
+	calls := 0
+	s.SetRerankFallbackObserver(func(int, error) { calls++ })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.SetReranker(cancelReranker{cancel}, 2)
+	results, err := s.SearchHybrid(ctx, "jwt auth", []float32{1.0, 0.0, 0.0}, QueryOptions{TopK: 2})
+	require.NoError(t, err)
+	require.NotEmpty(t, results, "a cancelled rerank still keeps RRF order")
+	assert.Equal(t, 0, calls, "a recall the caller cancelled is not a reranker fault")
+}

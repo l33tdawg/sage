@@ -63,6 +63,15 @@ type SQLiteStore struct {
 	reranker           embedding.Reranker
 	rerankerOversample int          // RRF candidate pool size factor when reranker is active
 	rerankerMu         sync.RWMutex // guards reranker + rerankerOversample; they are hot-swappable at runtime via SetReranker (Settings > Recall toggle), so live recall readers must synchronize
+	// rerankMaxCandidates hard-caps how many fused candidates one rerank call
+	// scores (0 = no cap beyond top-K x oversample). Cross-encoder cost grows
+	// with every candidate, so a CPU sidecar needs a much smaller pool than a
+	// GPU endpoint to finish inside its timeout. Guarded by rerankerMu.
+	rerankMaxCandidates int
+	// rerankFallback, when set, is told about every rerank call that fell back
+	// to RRF order (pool size + cause), so the node can surface a reranker that
+	// silently times out on every recall. Guarded by rerankerMu.
+	rerankFallback func(candidates int, err error)
 }
 
 // writeExecContext wraps ExecContext with writeMu for standalone (non-tx) writes.
@@ -160,6 +169,27 @@ func (s *SQLiteStore) SetReranker(r embedding.Reranker, oversample int) {
 	s.rerankerMu.Lock()
 	s.reranker = r
 	s.rerankerOversample = oversample
+	s.rerankerMu.Unlock()
+}
+
+// SetRerankMaxCandidates caps the candidates sent to the reranker per call
+// (SAGE_RERANK_MAX_CANDIDATES). n <= 0 removes the cap. It is independent of
+// SetReranker so a runtime reranker toggle keeps the operator's cap.
+func (s *SQLiteStore) SetRerankMaxCandidates(n int) {
+	if n < 0 {
+		n = 0
+	}
+	s.rerankerMu.Lock()
+	s.rerankMaxCandidates = n
+	s.rerankerMu.Unlock()
+}
+
+// SetRerankFallbackObserver registers fn to be called whenever a rerank call
+// fails or returns an unusable score set and recall falls back to RRF order.
+// fn must be cheap and non-blocking; it runs on the recall path. nil clears it.
+func (s *SQLiteStore) SetRerankFallbackObserver(fn func(candidates int, err error)) {
+	s.rerankerMu.Lock()
+	s.rerankFallback = fn
 	s.rerankerMu.Unlock()
 }
 
@@ -2547,22 +2577,39 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 	s.rerankerMu.RLock()
 	reranker := s.reranker
 	rerankerOversample := s.rerankerOversample
+	rerankMaxCandidates := s.rerankMaxCandidates
 	s.rerankerMu.RUnlock()
 
+	// The rerank pool is sized from the result count the caller will actually
+	// see. app-v23 recall over-fetches TopK to the disclosure scan limit so
+	// revoked rows cannot starve the authorized tail; that scan width is an
+	// authorization budget, not a relevance pool, and feeding all of it to a
+	// cross-encoder made every hybrid recall score 100+ documents.
+	rerankTopK := requestedTopK
+	if opts.RerankTopK > 0 && opts.RerankTopK < requestedTopK {
+		rerankTopK = opts.RerankTopK
+	}
 	rerankPool := requestedTopK
+	rerankCandidates := 0
 	rerankActive := reranker != nil && query != ""
 	if rerankActive {
 		os := rerankerOversample
 		if os <= 0 {
 			os = 2
 		}
-		if os > maxHybridTopK/requestedTopK {
-			rerankPool = maxHybridTopK
+		if os > maxHybridTopK/rerankTopK {
+			rerankCandidates = maxHybridTopK
 		} else {
-			rerankPool = requestedTopK * os
-			if rerankPool > maxHybridTopK {
-				rerankPool = maxHybridTopK
+			rerankCandidates = rerankTopK * os
+			if rerankCandidates > maxHybridTopK {
+				rerankCandidates = maxHybridTopK
 			}
+		}
+		if rerankMaxCandidates > 0 && rerankCandidates > rerankMaxCandidates {
+			rerankCandidates = rerankMaxCandidates
+		}
+		if rerankCandidates > rerankPool {
+			rerankPool = rerankCandidates
 		}
 	}
 
@@ -2623,7 +2670,23 @@ func (s *SQLiteStore) SearchHybrid(ctx context.Context, query string, embedding 
 		return merged, nil
 	}
 
-	return s.applyReranker(ctx, query, merged, requestedTopK, reranker)
+	// Rerank only the head of the fused list; the rest keeps its RRF order
+	// behind it, so the caller still gets up to requestedTopK authorized rows.
+	head := merged
+	if len(head) > rerankCandidates {
+		head = merged[:rerankCandidates]
+	}
+	reranked, err := s.applyReranker(ctx, query, head, len(head), reranker)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*memory.MemoryRecord, 0)
+	out = append(out, reranked...)
+	out = append(out, merged[len(head):]...)
+	if len(out) > requestedTopK {
+		out = out[:requestedTopK]
+	}
+	return out, nil
 }
 
 // applyReranker rescores `candidates` against `query` using the attached
@@ -2664,6 +2727,18 @@ func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidate
 		// A reranker must score every candidate exactly once with a finite
 		// score. Reject the whole malformed response before changing the
 		// healthy RRF ordering, rather than dropping unscored candidates.
+		// Recall still succeeds, so tell the observer: a reranker that times
+		// out on every call is otherwise indistinguishable from a healthy one.
+		// A recall the caller itself cancelled is not a reranker fault.
+		s.rerankerMu.RLock()
+		observe := s.rerankFallback
+		s.rerankerMu.RUnlock()
+		if observe != nil && ctx.Err() == nil {
+			if err == nil {
+				err = errors.New("reranker returned an incomplete or invalid score set")
+			}
+			observe(len(candidates), err)
+		}
 		if len(candidates) > topK {
 			candidates = candidates[:topK]
 		}

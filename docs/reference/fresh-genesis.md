@@ -4,7 +4,7 @@ This is the fresh-genesis implementation in the app-v30 stack. A new, empty
 SAGE chain starts with the selected app rules from block 1. It does not create
 an older chain and walk through historical upgrade proposals. Personal
 initialization selects the supported ceiling through
-`initCometBFTConfigForFreshChain` (`cmd/sage-gui/node.go:3674`).
+`initCometBFTConfigForFreshChain` (`cmd/sage-gui/node.go:3679`).
 
 ## Choose the initialization route
 
@@ -159,7 +159,7 @@ and recovery; it is not a substitute upgrade ledger.
 
 Keep an existing chain's genesis and history. Existing initialization returns
 without replacing its genesis in `initCometBFTConfigWithGenesisVersion`
-(`cmd/sage-gui/node.go:3678`). Its later app-version changes use the normal
+(`cmd/sage-gui/node.go:3683`). Its later app-version changes use the normal
 governed upgrade path described in [Upgrading SAGE](../UPGRADING.md).
 
 The older [direct-v23 bootstrap contract](app-v23-access-control-design.md)
