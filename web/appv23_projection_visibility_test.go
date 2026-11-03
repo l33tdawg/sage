@@ -2126,6 +2126,83 @@ func TestAppV23CerebrumExportOmitsGovernanceTaintedMemory(t *testing.T) {
 	require.NotContains(t, rec.Body.String(), "tainted-export")
 }
 
+func TestAppV23CerebrumExportOmitsPendingDescendantUntilClear(t *testing.T) {
+	fixture := newAppV23ProjectionRouteFixture(t, false)
+	const cleanID = "clean-control-export"
+	const targetID = "taint-parent-export"
+	const childID = "pending-child-export"
+	for _, memoryID := range []string{cleanID, targetID, childID} {
+		insertTestMemory(t, fixture.sql, memoryID, "backup-domain")
+		publishAppV23DashboardRecord(
+			t, fixture.sql, fixture.badger, memoryID,
+			uint8(store.ClearanceInternal), true,
+		)
+	}
+	clean, err := fixture.sql.GetMemory(context.Background(), cleanID)
+	require.NoError(t, err)
+	target, err := fixture.sql.GetMemory(context.Background(), targetID)
+	require.NoError(t, err)
+	child, err := fixture.sql.GetMemory(context.Background(), childID)
+	require.NoError(t, err)
+	require.NotEmpty(t, clean.Content)
+	require.NotEmpty(t, target.Content)
+	require.NotEmpty(t, child.Content)
+	targetHash := sha256.Sum256([]byte(target.Content))
+	require.Equal(t, targetHash[:], target.ContentHash)
+	targetRef := tx.ParentRef{
+		SourceChainID: "sage",
+		MemoryID:      targetID,
+		ContentHash:   targetHash,
+	}
+	require.NoError(t, fixture.badger.SetMemoryLineage(childID, []tx.ParentRef{targetRef}))
+	decisionID := strings.Repeat("b", taint.DecisionIDBytes)
+	created, err := fixture.badger.ApplyTaintDecision(
+		"sage", decisionID, targetRef, sha256.Sum256([]byte("pending export payload")),
+	)
+	require.NoError(t, err)
+	require.True(t, created)
+	direct, err := fixture.badger.GetEffectiveTaintDecisions(childID)
+	require.NoError(t, err)
+	require.Empty(t, direct, "the child must be pending through lineage, not directly tainted")
+	verdict, err := fixture.badger.ClassifyMemoryTaint(childID)
+	require.NoError(t, err)
+	require.Equal(t, store.TaintServingPending, verdict.Outcome)
+	require.Equal(t, []string{decisionID}, verdict.DecisionIDs)
+	_, disposition, projectionErr := fixture.badger.ClassifyMemoryProjection(child)
+	require.ErrorIs(t, projectionErr, store.ErrMemoryProjectionTaintPending)
+	require.Equal(t, store.MemoryProjectionTaintPending, disposition)
+
+	rec := requestLocalProjectionRoute(t, fixture, "/v1/dashboard/export")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), cleanID)
+	require.Contains(t, rec.Body.String(), clean.Content)
+	require.NotContains(t, rec.Body.String(), targetID)
+	require.NotContains(t, rec.Body.String(), target.Content)
+	require.NotContains(t, rec.Body.String(), childID)
+	require.NotContains(t, rec.Body.String(), child.Content)
+
+	changed, err := fixture.badger.ClearTaintDecision(decisionID)
+	require.NoError(t, err)
+	require.True(t, changed)
+	header, found, err := fixture.badger.GetTaintDecision(decisionID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, taint.StatusCleaning, header.Status)
+	require.Equal(t, taint.CleanupMembers, header.CleanupPhase)
+	// Clear invalidates the generation; no physical cleanup has run.
+	verdict, err = fixture.badger.ClassifyMemoryTaint(childID)
+	require.NoError(t, err)
+	require.Equal(t, store.TaintServingClear, verdict.Outcome)
+	rec = requestLocalProjectionRoute(t, fixture, "/v1/dashboard/export")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), cleanID)
+	require.Contains(t, rec.Body.String(), clean.Content)
+	require.Contains(t, rec.Body.String(), targetID)
+	require.Contains(t, rec.Body.String(), target.Content)
+	require.Contains(t, rec.Body.String(), childID)
+	require.Contains(t, rec.Body.String(), child.Content)
+}
+
 func TestAppV23CerebrumExportStreamsSealedSnapshotAcrossConcurrentProjectionMutation(
 	t *testing.T,
 ) {

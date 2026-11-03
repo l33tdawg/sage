@@ -10,7 +10,7 @@ import (
 
 const (
 	MemoryTaintWorkVersion    uint8 = 1
-	maxMemoryTaintCursorBytes       = 512
+	maxMemoryTaintCursorBytes int   = 512
 )
 
 var errMemoryTaintWork = errors.New("invalid memory taint work")
@@ -68,8 +68,8 @@ func decodeMemoryTaintWork(data []byte) (*MemoryTaintWork, error) {
 	if offset != len(data) {
 		return nil, fmt.Errorf("%w: %d trailing bytes", errMemoryTaintWork, len(data)-offset)
 	}
-	if err := validateMemoryTaintWork(work); err != nil {
-		return nil, err
+	if validationErr := validateMemoryTaintWork(work); validationErr != nil {
+		return nil, validationErr
 	}
 	canonical, err := encodeMemoryTaintWork(work)
 	if err != nil {

@@ -65,3 +65,27 @@ func TestTaintTypingRequiresCanonical451ProblemEnvelope(t *testing.T) {
 	require.True(t, errors.As(err, &problem))
 	require.Empty(t, problem.TaintState)
 }
+
+func TestTaintTypingRequiresExactProblemMediaType(t *testing.T) {
+	status := http.StatusUnavailableForLegalReasons
+	for _, contentType := range []string{
+		"application/problem+json-spoofed",
+		"application/problem+json; broken",
+	} {
+		t.Run(contentType, func(t *testing.T) {
+			require.Empty(t, appV30TaintStateFromProblem(
+				"https://sage.dev/errors/memory-tainted", &status, contentType, status,
+			))
+		})
+	}
+	for _, contentType := range []string{
+		"application/problem+json; charset=utf-8",
+		"Application/Problem+JSON",
+	} {
+		t.Run(contentType, func(t *testing.T) {
+			require.Equal(t, "tainted", appV30TaintStateFromProblem(
+				"https://sage.dev/errors/memory-tainted", &status, contentType, status,
+			))
+		})
+	}
+}
