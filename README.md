@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.0`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.1`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,21 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.0 and earlier)</summary>
+<summary>Recent release notes (v11.25.1 and earlier)</summary>
+
+## What's New in v11.25.1
+
+**AMID can approve a distinct local agent.** Operators can opt into `--local-agent-key-dir` (`SAGE_LOCAL_AGENT_KEY_DIR`) to supply identity-bound target consent keys to the existing access-policy route and Python SDK methods. Root authorization, same-machine checks, and consensus validation remain required. Unregistered targets are refused before signing or broadcast, and malformed Ed25519 private-key encodings fail closed.
+
+**Hybrid recall sizes reranking work from the requested results.** The authorization scan retains its full candidate coverage while the cross-encoder scores the smaller requested pool. `SAGE_RERANK_MAX_CANDIDATES` adds an optional cap. Rate-limited fallback warnings expose operational failures without logging upstream error text or submitted content.
+
+**Explicit federation settings survive config saves.** Disabled P2P, an empty relay list, and disabled force-private mode no longer disappear during serialization and revert to defaults on reload.
+
+**Force-quitting the macOS tray no longer leaves its daemon orphaned after startup.** The tray identifies itself to its child; once graceful shutdown is ready, the daemon monitors that parent and stops if it disappears. Standalone and externally supervised daemons remain independent unless explicitly configured with the parent relationship.
+
+No consensus version change or chain migration. `latest` and automatic upgrade voting remain app29; app30 remains explicit. Existing reply catch-up and v11.24.4 fixes are already included through release history.
+
+Container: `ghcr.io/l33tdawg/sage:11.25.1`. SDK 11.25.1.
 
 ## What's New in v11.25.0
 
