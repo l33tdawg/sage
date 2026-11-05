@@ -143,7 +143,7 @@ Prefer to bring your own? You can still point SAGE at any external TEI-compatibl
 
 v11.23.14 adds a managed local judge to the experimental memory gate. It is
 **off by default**. On a personal SQLite node, set
-`SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v16` in the node's environment before
+`SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v17b` in the node's environment before
 starting it. SAGE downloads and verifies the pinned model in the background;
 memories wait for review while the judge is unavailable. The current managed
 adapter judges every domain; Hunch's include/exempt settings apply only to the

@@ -43,7 +43,7 @@ func (s *Server) registerTools() map[string]Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"content":            map[string]any{"type": "string", "description": "The memory content to store"},
+					"content":            map[string]any{"type": "string", "description": "The memory content to store: one self-contained statement a later reader can act on without this conversation (name the system or person; give the reason for a decision)"},
 					"domain":             map[string]any{"type": "string", "description": "Domain tag. When omitted, a correction inherits its source domain and a new memory uses this app-v23 agent's owned home domain (legacy nodes use general). Explicit values are never silently remapped."},
 					"type":               map[string]any{"type": "string", "enum": []string{"fact", "observation", "inference", "task"}, "description": "Memory type. When omitted, a new memory defaults to observation and a correction inherits the original type. fact (0.95+): verified durable knowledge — IPs, hostnames, architecture decisions, configs, infrastructure. observation (0.80): session-level context — what happened, what was discussed. inference (0.60): hypotheses and conclusions. task: actionable items."},
 					"confidence":         map[string]any{"type": "number", "minimum": 0, "maximum": 1, "description": "Confidence score 0-1. When omitted, defaults to 0.90 for tasks (including inherited correction types), otherwise 0.80. Explicit values are preserved."},
@@ -289,7 +289,7 @@ func (s *Server) registerTools() map[string]Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"content":         map[string]any{"type": "string", "description": "Task description (for creating new tasks)"},
+					"content":         map[string]any{"type": "string", "description": "Task description (for creating new tasks): the work itself in a full sentence, without TODO:/Task: prefixes; status belongs in status"},
 					"domain":          map[string]any{"type": "string", "description": "Domain tag for the task. Omit to use your approved app-v23 owned home domain (legacy nodes use general). Explicit values are never silently remapped."},
 					"memory_id":       map[string]any{"type": "string", "description": "Existing task memory ID (for updates). A unique prefix of at least 8 characters is accepted and resolved against this agent's open tasks, so a predecessor named only by prefix in an older entry can be closed directly; an ambiguous prefix returns an error naming the matches."},
 					"status":          map[string]any{"type": "string", "enum": []string{"planned", "in_progress", "done", "dropped"}, "description": "Task status. New tasks default to planned; existing tasks require an explicit mutable status."},
