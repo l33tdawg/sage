@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.1`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.2`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,26 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.1 and earlier)</summary>
+<summary>Recent release notes (v11.25.2 and earlier)</summary>
+
+## What's New in v11.25.2
+
+**Fresh-node setup imports now use the enrolled Companion identity.** On a new
+post-v23 chain, the setup wizard's pending memories previously tried to embed and
+submit as the genesis Root, which is deliberately not an ordinary agent. The
+import now signs as the enrolled Companion, routes an unqualified entry to that
+Companion's home domain, and reports embed, submit, and zero-import failures at
+visible log levels instead of producing only `Imported 0/N`.
+
+**The optional local memory judge is pinned to v17b.** The default-off managed
+judge now uses a separate immutable model artifact, verifies both the downloaded
+GGUF and Ollama's registered blob, and keeps explicit v16 selections unchanged.
+The v17b training pass targets the short user decisions and task-shaped memories
+that v16 often rejected or held, while retaining the chat-only and session-remark
+traps. New writing guidance is linked from the write-gate reference.
+
+No consensus version change or chain migration. `latest` and automatic upgrade
+voting remain app29; app30 remains explicit.
 
 ## What's New in v11.25.1
 
@@ -331,7 +350,7 @@ uses re-enrollment; historical memory authorship is preserved.
 
 No consensus version change or chain migration. `latest` and automatic upgrade voting remain app29; app30 remains explicit. Existing reply catch-up and v11.24.4 fixes are already included through release history.
 
-Container: `ghcr.io/l33tdawg/sage:11.25.1`. SDK 11.25.1.
+Container: `ghcr.io/l33tdawg/sage:11.25.2`. SDK 11.25.2.
 
 ## What's New in v11.25.0
 
