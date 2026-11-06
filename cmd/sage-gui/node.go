@@ -4101,15 +4101,27 @@ func autoImport(ctx context.Context, cfg *Config, embedProvider embedding.Provid
 
 	baseURL := restBaseURL(cfg.RESTAddr)
 
-	// Load agent key for signing
-	keyData, err := os.ReadFile(cfg.AgentKey)
+	// Load the signing credential for the import. A chain created with the
+	// first-party Companion bootstrap already enrolled that Companion as an
+	// active ordinary agent at genesis, and the genesis Root is deliberately
+	// not an agent: once app-v23 rules are active, /v1/embed and ordinary REST
+	// task submission fail closed for Root. Signing with Root therefore wrote a
+	// silent "Imported 0/N" on every fresh post-v23 chain. Use the Companion
+	// the genesis enrolled; a node without a Companion keeps the historical
+	// Root signer (pre-v23 chains short-circuit the boundary, and a post-v23
+	// Root-only chain now reports the refusal loudly below instead of silently).
+	priv, agentID, signKeyPath, err := autoImportSigner(cfg)
 	if err != nil {
-		logger.Error().Err(err).Msg("failed to read agent key for auto-import")
+		logger.Error().Err(err).Str("key_file", signKeyPath).Msg("auto-import signer unavailable")
 		return
 	}
-	priv := ed25519.NewKeyFromSeed(keyData)
-	pub, _ := priv.Public().(ed25519.PublicKey) //nolint:errcheck
-	agentID := hex.EncodeToString(pub)
+	logger.Info().Str("agent_id", agentID).Str("key_file", signKeyPath).Msg("auto-import signer selected")
+
+	// The import acts as an ordinary agent, so an unqualified entry must land in a domain that
+	// agent can write. The Companion owns exactly the genesis home domain; "imported" is an
+	// ownerless domain the Companion profile is hard-denied from claiming. Keep "imported" only
+	// for the legacy Root signer, whose admin role may write an ownerless domain.
+	defaultDomain := autoImportDefaultDomain(cfg)
 
 	success := 0
 	for _, mem := range memories {
@@ -4117,7 +4129,7 @@ func autoImport(ctx context.Context, cfg *Config, embedProvider embedding.Provid
 			return
 		}
 		if mem.Domain == "" {
-			mem.Domain = "imported"
+			mem.Domain = defaultDomain
 		}
 		if mem.Type == "" {
 			mem.Type = "observation"
@@ -4128,7 +4140,11 @@ func autoImport(ctx context.Context, cfg *Config, embedProvider embedding.Provid
 
 		emb, err := getEmbedding(baseURL, mem.Content, agentID, priv)
 		if err != nil {
-			logger.Debug().Err(err).Msg("auto-import embed failed")
+			// The boundary refusal (e.g. "Active local agent required" for a
+			// Root-only post-v23 chain) is the reason the import cannot land.
+			// It used to be DEBUG-only, so the only visible symptom was a bare
+			// "Imported 0/N".
+			logger.Warn().Err(err).Str("agent_id", agentID).Msg("auto-import embed failed")
 			continue
 		}
 
@@ -4150,12 +4166,16 @@ func autoImport(ctx context.Context, cfg *Config, embedProvider embedding.Provid
 		body, _ := json.Marshal(submitBody)
 
 		if err := submitSigned(baseURL+"/v1/memory/submit", body, agentID, priv); err != nil {
-			logger.Debug().Err(err).Msg("auto-import submit failed")
+			logger.Warn().Err(err).Str("agent_id", agentID).Msg("auto-import submit failed")
 			continue
 		}
 		success++
 	}
 
+	if success == 0 && len(memories) > 0 {
+		logger.Error().Int("total", len(memories)).Str("agent_id", agentID).
+			Msg("auto-import imported nothing; the embed/submit refusals above name the boundary")
+	}
 	logger.Info().Int("imported", success).Int("total", len(memories)).Msg("auto-import complete")
 
 	// Remove the pending file
@@ -4164,6 +4184,39 @@ func autoImport(ctx context.Context, cfg *Config, embedProvider embedding.Provid
 	// Write a marker so we don't re-import
 	doneMsg := fmt.Sprintf("Imported %d/%d memories on %s", success, len(memories), time.Now().Format(time.RFC3339))
 	_ = os.WriteFile(filepath.Join(home, "import-done.txt"), []byte(doneMsg), 0600)
+}
+
+// autoImportSigner resolves the credential the setup-wizard import signs with.
+// The genesis-only Companion bootstrap is the ordinary agent the import must
+// act as: the genesis Root is not an agent, and post-v23 embedding and task
+// submission fail closed for it. Without a Companion the historical Root key
+// remains the signer (that is the only working path on a pre-v23 chain).
+func autoImportSigner(cfg *Config) (ed25519.PrivateKey, string, string, error) {
+	keyPath := cfg.AgentKey
+	if cfg.VendoredAgentBootstrap != nil &&
+		strings.TrimSpace(cfg.VendoredAgentBootstrap.AgentKeyFile) != "" {
+		keyPath = cfg.VendoredAgentBootstrap.AgentKeyFile
+	}
+	priv, ok := parseKeyFile(keyPath)
+	if !ok {
+		return nil, "", keyPath, errors.New("agent key is missing or malformed")
+	}
+	agentID := appV23AgentIDForKey(priv)
+	if agentID == "" {
+		return nil, "", keyPath, errors.New("agent key is not Ed25519")
+	}
+	return priv, agentID, keyPath, nil
+}
+
+// autoImportDefaultDomain is the domain an unqualified setup-wizard entry lands in. The
+// Companion owns only its genesis home domain; "imported" remains the legacy Root default.
+func autoImportDefaultDomain(cfg *Config) string {
+	if cfg.VendoredAgentBootstrap != nil {
+		if home := strings.TrimSpace(cfg.VendoredAgentBootstrap.HomeDomain); home != "" {
+			return home
+		}
+	}
+	return "imported"
 }
 
 // readPassphrase reads a line from stdin. For the DMG launcher (no terminal),
