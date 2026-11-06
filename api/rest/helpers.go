@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
+	"sort"
+	"strings"
 )
 
 // writeJSON writes a JSON response with the given status code.
@@ -52,6 +55,71 @@ func decodeJSON(r *http.Request, v interface{}) error {
 	// Replace body so downstream handlers can re-read it.
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	return json.Unmarshal(body, v)
+}
+
+// Bounds on what an ignored-field report echoes back, so a hostile body cannot
+// turn the report into a large response or log line.
+const (
+	maxIgnoredFieldsReported = 16
+	maxIgnoredFieldNameLen   = 64
+)
+
+// jsonFieldNames returns the top-level JSON names a struct type decodes.
+func jsonFieldNames(t reflect.Type) map[string]struct{} {
+	names := make(map[string]struct{}, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		names[name] = struct{}{}
+	}
+	return names
+}
+
+// ignoredJSONFields lists the top-level keys in body that json.Unmarshal into
+// a value with the known names would silently drop. Go matches keys to fields
+// case-insensitively, so a key is ignored only when no known name matches it
+// under strings.EqualFold. The result is sorted and bounded; a body that is not
+// a JSON object reports nothing.
+func ignoredJSONFields(body []byte, known map[string]struct{}) []string {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil
+	}
+	var ignored []string
+	for key := range fields {
+		if _, ok := known[key]; ok {
+			continue
+		}
+		matched := false
+		for name := range known {
+			if strings.EqualFold(key, name) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			ignored = append(ignored, key)
+		}
+	}
+	sort.Strings(ignored)
+	if len(ignored) > maxIgnoredFieldsReported {
+		ignored = ignored[:maxIgnoredFieldsReported]
+	}
+	for i, key := range ignored {
+		if len(key) > maxIgnoredFieldNameLen {
+			ignored[i] = key[:maxIgnoredFieldNameLen]
+		}
+	}
+	return ignored
 }
 
 func jsonFieldPresent(r *http.Request, field string) (bool, error) {
