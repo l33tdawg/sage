@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
-  SNAPSHOT_FILENAME, applyFallback, formatUtc, isNewerVersion, parseArgs, refreshSnapshot,
+  RELEASE_NOTES_VERSION_ATTRIBUTE, SNAPSHOT_FILENAME, applyFallback, assertReleaseNotesCurrent,
+  formatUtc, isNewerVersion, parseArgs, refreshSnapshot,
 } from './pages-download-snapshot.mjs';
 
 const workflow = readFileSync(new URL('../.github/workflows/pages-download-snapshot.yml', import.meta.url), 'utf8');
@@ -38,7 +39,19 @@ const index = `<!doctype html>
 </html>
 `;
 
-function fixture(pages = index) {
+function releaseNotes(tag) {
+  return `
+    <details class="whats-new" ${RELEASE_NOTES_VERSION_ATTRIBUTE}="${tag}">
+      <summary>Release notes: changes introduced in <span data-sage-version>${tag}</span></summary>
+      <p>Read the <a href="https://github.com/l33tdawg/sage/releases/tag/${tag}">${tag} release notes</a>.</p>
+    </details>
+    <p ${RELEASE_NOTES_VERSION_ATTRIBUTE}="${tag}">Current release: ${tag}.</p>
+  `;
+}
+
+const releaseIndex = index.replace('  <body>\n', `  <body>\n${releaseNotes(snapshot.latest)}`);
+
+function fixture(pages = releaseIndex) {
   const dir = mkdtempSync(join(tmpdir(), 'pages-snapshot-'));
   writeFileSync(join(dir, 'index.html'), pages);
   writeFileSync(join(dir, 'download-counter.mjs'),
@@ -61,6 +74,7 @@ test('the workflow refreshes after successful releases and explicitly builds gh-
     'contents: write',
     'ref: main',
     'ref: gh-pages',
+    'Refresh snapshot and verify release copy',
     'node scripts/pages-download-snapshot.mjs --pages pages',
     'git add -- downloads.json index.html',
     'git push',
@@ -86,6 +100,38 @@ test('the rewrite leaves no hand-baked value behind and is idempotent', () => {
   assert.ok(patched.includes(`content="Install SAGE ${snapshot.latest}:`));
   assert.equal(applyFallback(patched, snapshot), patched);
   assert.equal(formatUtc(snapshot.updatedAt), 'Sep 20, 2026, 00:30 UTC');
+});
+
+test('release-note copy must describe the latest published release', () => {
+  assert.doesNotThrow(() => assertReleaseNotesCurrent(releaseIndex, snapshot.latest));
+  assert.throws(
+    () => assertReleaseNotesCurrent(releaseIndex.replaceAll(snapshot.latest, previous), snapshot.latest),
+    /release-note copy is stale/,
+  );
+  assert.throws(
+    () => assertReleaseNotesCurrent(
+      releaseIndex.replace(`releases/tag/${snapshot.latest}`, `releases/tag/${previous}`),
+      snapshot.latest,
+    ),
+    /still references/,
+  );
+  assert.throws(
+    () => assertReleaseNotesCurrent(
+      releaseIndex.replace(new RegExp(` ${RELEASE_NOTES_VERSION_ATTRIBUTE}="[^"]+"`, 'g'), ''),
+      snapshot.latest,
+    ),
+    /must mark both release-note copy blocks/,
+  );
+  assert.throws(
+    () => assertReleaseNotesCurrent(
+      releaseIndex.replace(
+        `${RELEASE_NOTES_VERSION_ATTRIBUTE}="${snapshot.latest}"`,
+        `${RELEASE_NOTES_VERSION_ATTRIBUTE}="nightly"`,
+      ),
+      snapshot.latest,
+    ),
+    /invalid release-note version markers/,
+  );
 });
 
 test('a stamp is only ever moved forward, and missing markup fails loudly', () => {
@@ -137,10 +183,21 @@ test('a refresh writes the snapshot, the counter and every stamp, then reports n
   assert.ok(logged[1].includes('updated: index.html, downloads.json'));
 });
 
+test('a stale release-note block blocks every snapshot write', async () => {
+  const staleIndex = releaseIndex.replaceAll(snapshot.latest, previous);
+  const dir = fixture(staleIndex);
+  await assert.rejects(
+    refreshSnapshot({ pagesDir: dir, now: () => at, log: () => {} }),
+    /release-note copy is stale/,
+  );
+  assert.equal(readFileSync(join(dir, 'index.html'), 'utf8'), staleIndex);
+  assert.throws(() => readFileSync(join(dir, SNAPSHOT_FILENAME), 'utf8'), /ENOENT/);
+});
+
 test('a dry run reports the change without touching the pages checkout', async () => {
   const dir = fixture();
   const result = await refreshSnapshot({ pagesDir: dir, now: () => at, dryRun: true, log: () => {} });
   assert.deepEqual(result.changed, ['index.html', SNAPSHOT_FILENAME]);
-  assert.equal(readFileSync(join(dir, 'index.html'), 'utf8'), index);
+  assert.equal(readFileSync(join(dir, 'index.html'), 'utf8'), releaseIndex);
   assert.throws(() => readFileSync(join(dir, SNAPSHOT_FILENAME), 'utf8'), /ENOENT/);
 });
