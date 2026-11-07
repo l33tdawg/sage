@@ -1,6 +1,7 @@
 package rest
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,7 +67,15 @@ type SubmitMemoryRequest struct {
 	// DerivedFrom is the authenticated app-v30 lineage extension. Content hashes
 	// are lowercase 32-byte hex and refs are canonicalized before signing.
 	DerivedFrom []SubmitMemoryParent `json:"derived_from,omitempty"`
+
+	// ignoredFields holds top-level body keys this route does not know. They
+	// are dropped as before, but echoed back in the response so a client that
+	// sends a field this node lacks (e.g. one from a newer API) can tell.
+	ignoredFields []string
 }
+
+// submitMemoryRequestFields is the set of JSON names SubmitMemoryRequest decodes.
+var submitMemoryRequestFields = jsonFieldNames(reflect.TypeOf(SubmitMemoryRequest{}))
 
 type SubmitMemoryParent struct {
 	SourceChainID string `json:"source_chain_id"`
@@ -87,6 +98,9 @@ type SubmitMemoryResponse struct {
 	IdempotentReplay    bool   `json:"idempotent_replay,omitempty"`
 	EmbeddingProvider   string `json:"embedding_provider,omitempty"`
 	EmbeddingQueued     bool   `json:"embedding_queued,omitempty"`
+	// IgnoredFields names request keys this node did not recognise and did not
+	// apply. The memory is still stored; nothing in these fields took effect.
+	IgnoredFields []string `json:"ignored_fields,omitempty"`
 }
 
 func parseSubmitDerivedFrom(input []SubmitMemoryParent) ([]tx.ParentRef, error) {
@@ -1260,6 +1274,16 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
+	if body, readErr := io.ReadAll(r.Body); readErr == nil {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		req.ignoredFields = ignoredJSONFields(body, submitMemoryRequestFields)
+	}
+	if len(req.ignoredFields) > 0 {
+		s.logger.Warn().
+			Str("agent_id", middleware.ContextAgentID(r.Context())).
+			Strs("ignored_fields", req.ignoredFields).
+			Msg("memory submit carried fields this node does not apply")
+	}
 	taskStatusPresent, err := jsonFieldPresent(r, "task_status")
 	if err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
@@ -1691,6 +1715,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 				IdempotencyKey:      req.IdempotencyKey,
 				EmbeddingProvider:   embeddingProvider,
 				EmbeddingQueued:     len(req.Embedding) == 0,
+				IgnoredFields:       req.ignoredFields,
 			})
 			return
 		}
@@ -1759,6 +1784,7 @@ func (s *Server) handleSubmitMemory(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey:      req.IdempotencyKey,
 		EmbeddingProvider:   embeddingProvider,
 		EmbeddingQueued:     len(req.Embedding) == 0,
+		IgnoredFields:       req.ignoredFields,
 	})
 }
 

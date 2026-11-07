@@ -169,6 +169,7 @@ func (s *Server) writeTaskIdempotencyReplayIfCommitted(
 		ProjectionConfirmed: &confirmed,
 		IdempotencyKey:      req.IdempotencyKey,
 		IdempotentReplay:    true,
+		IgnoredFields:       req.ignoredFields,
 	}
 	if !confirmed {
 		retryable := false

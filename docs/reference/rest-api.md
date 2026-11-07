@@ -219,6 +219,13 @@ without accepting the caller's possibly mismatched vector and the response adds
 `"embedding_queued": true`. The node repairs it automatically once that same
 provider is healthy and the vault is unlocked.
 
+Top-level body fields this route does not know are dropped, as before, but the
+response now names them in `"ignored_fields"` (sorted, at most 16 names) and the
+node logs a warning. The memory is still stored; nothing in those fields took
+effect. For example, `replaces_memory_id` is not a submit field: a correction
+is a submit followed by `POST /v1/memory/{id}/challenge` on the old memory once
+the replacement is committed, which is what `sage_remember` does.
+
 **Auth:** Ed25519 required. Agent must have write access to `domain_tag` if per-domain access control is configured (`memory_handler.go:425-428`). Observer-role agents are rejected.
 
 **Effective write denial:** A recognized preflight or consensus denial returns
@@ -508,7 +515,7 @@ canonical-disclosure backend failures, and ancestor-traversal uncertainty remain
 can fail before policy evaluation.
 
 Sources: `appV30TaintProjectionProblem` (`api/rest/appv30_taint_problem.go:19`),
-`handleGetMemory` (`api/rest/memory_handler.go:3499`), and
+`handleGetMemory` (`api/rest/memory_handler.go:3525`), and
 `ClassifyMemoryProjectionForRead` (`internal/store/memory_disclosure.go:148`).
 
 ---
