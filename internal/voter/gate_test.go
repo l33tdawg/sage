@@ -341,7 +341,8 @@ func TestGate_UnreadableEvidenceIsNeverSent(t *testing.T) {
 	_, _ = g.Apply(ctx, gs, m, accept, zerolog.Nop())
 	require.Eventually(t, func() bool {
 		out, _ := g.Apply(ctx, gs, m, accept, zerolog.Nop())
-		return out == gateHold && g.recentlyFailed("m1")
+		_, hasVerdict, _ := gs.SemanticVerdict(ctx, "m1", "v1")
+		return out == gateHold && g.recentlyFailed("m1") && hasVerdict
 	}, 5*time.Second, 10*time.Millisecond, "unreadable evidence must remain held")
 	require.Zero(t, j.calls.Load()+sj.calls.Load(), "nothing is sent when the evidence cannot be read")
 	_, ok, _ := gs.SemanticVerdict(ctx, "m1", "v1")
