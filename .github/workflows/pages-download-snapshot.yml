@@ -6,7 +6,8 @@ name: Pages Download Snapshot
 #
 # The gh-pages branch is not protected; this bot commit is the only writer of downloads.json, and
 # it also refreshes the no-JS fallback (the number, its timestamp, and every marked version stamp)
-# in index.html.
+# in index.html. The refresh fails before writing if the What's New or FAQ copy still describes an
+# older release, so a published release cannot silently leave stale prose on the landing page.
 # The counter's own rules live in gh-pages/download-counter.mjs, which the script imports, so the
 # snapshot and the page cannot disagree about what counts as a package.
 
@@ -53,7 +54,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
-      - name: Refresh the snapshot
+      - name: Refresh snapshot and verify release copy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: node scripts/pages-download-snapshot.mjs --pages pages

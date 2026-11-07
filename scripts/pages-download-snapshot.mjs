@@ -20,6 +20,7 @@ import { pathToFileURL } from 'node:url';
 
 export const SNAPSHOT_FILENAME = 'downloads.json';
 export const API_HOST = 'https://api.github.com/';
+export const RELEASE_NOTES_VERSION_ATTRIBUTE = 'data-release-notes-version';
 const STABLE_TAG = /^v\d+\.\d+\.\d+$/;
 
 export function parseArgs(argv) {
@@ -102,6 +103,51 @@ export function applyVersionStamps(html, latest) {
   );
 }
 
+// The download count can update itself, but release prose and version-pinned documentation links
+// cannot. Mark the What's New block and FAQ copy so a scheduled or release-triggered refresh fails
+// before publishing a page that advertises a newer release while still describing an older one.
+export function assertReleaseNotesCurrent(html, latest) {
+  if (!STABLE_TAG.test(latest ?? '')) return;
+
+  const markerPattern = new RegExp(`\\b${RELEASE_NOTES_VERSION_ATTRIBUTE}="([^"]+)"`, 'g');
+  const declaredTags = [...html.matchAll(markerPattern)].map(match => match[1]);
+  if (declaredTags.length < 2) {
+    throw new Error(
+      `index.html must mark both release-note copy blocks with ${RELEASE_NOTES_VERSION_ATTRIBUTE}`,
+    );
+  }
+  const invalidTags = declaredTags.filter(tag => !STABLE_TAG.test(tag));
+  if (invalidTags.length) {
+    throw new Error(
+      `index.html has invalid release-note version markers: ${[...new Set(invalidTags)].join(', ')}`,
+    );
+  }
+  const staleMarkers = [...new Set(declaredTags.filter(tag => isNewerVersion(latest, tag)))];
+  if (staleMarkers.length) {
+    throw new Error(
+      `index.html release-note copy is stale at ${staleMarkers.join(', ')}; latest published release is ${latest}`,
+    );
+  }
+
+  const releaseNotesPattern = new RegExp(
+    `<details\\b[^>]*\\b${RELEASE_NOTES_VERSION_ATTRIBUTE}="[^"]+"[^>]*>([\\s\\S]*?)</details>`,
+  );
+  const releaseNotes = releaseNotesPattern.exec(html);
+  if (!releaseNotes) {
+    throw new Error(`index.html has no What's New block marked with ${RELEASE_NOTES_VERSION_ATTRIBUTE}`);
+  }
+  const versions = [...new Set(releaseNotes[1].match(/\bv\d+\.\d+\.\d+\b/g) ?? [])];
+  if (!versions.length) {
+    throw new Error("index.html What's New block has no stable release version");
+  }
+  const staleLinks = versions.filter(tag => isNewerVersion(latest, tag));
+  if (staleLinks.length) {
+    throw new Error(
+      `index.html What's New block still references ${staleLinks.join(', ')}; latest published release is ${latest}`,
+    );
+  }
+}
+
 export async function collectSnapshot({
   pagesDir, fetchImpl = globalThis.fetch, token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN,
   now = Date.now,
@@ -125,6 +171,7 @@ export async function refreshSnapshot({ pagesDir, fetchImpl, token, now = Date.n
   const snapshotPath = join(pagesDir, SNAPSHOT_FILENAME);
   const before = await readFile(indexPath, 'utf8');
   const after = applyFallback(before, snapshot);
+  assertReleaseNotesCurrent(after, snapshot.latest);
   const serialized = `${JSON.stringify(snapshot, null, 2)}\n`;
   const previous = await readFile(snapshotPath, 'utf8').catch(() => null);
 
