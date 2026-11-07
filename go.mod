@@ -15,7 +15,7 @@ require (
 	github.com/klauspost/compress v1.20.3
 	github.com/libp2p/go-libp2p v0.51.0
 	github.com/multiformats/go-multiaddr v0.16.1
-	github.com/pashagolub/pgxmock/v5 v5.2.0
+	github.com/pashagolub/pgxmock/v6 v6.0.0-beta2
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/pgvector/pgvector-go v0.4.1
 	github.com/prometheus/client_golang v1.25.0
