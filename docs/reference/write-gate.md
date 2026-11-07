@@ -95,7 +95,7 @@ separately before submitting the memory. REST clients first sign
 `POST /v1/memory/evidence` with `{"evidence":"source text"}`, then include the
 returned `evidence_id` in the same agent's signed `POST /v1/memory/submit`.
 Only that random ID enters the submission proof; the source text stays in the
-node's SQLite store. The Python SDK v11.25.1 does not yet expose this upload
+node's SQLite store. The Python SDK v11.25.2 does not yet expose this upload
 or the `evidence_id` argument. See the [REST contract](rest-api.md#post-v1memoryevidence)
 and [MCP parameter reference](mcp-tools.md#sage_remember)
 (`api/rest/memory_evidence.go`; `internal/mcp/tools.go`, `toolRemember`).
@@ -154,7 +154,7 @@ conversation, should not be asked this question. List their domain prefixes in
 
 ## Managed local judge
 
-Set `SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v16` to use the pinned judge
+Set `SAGE_LOCAL_JUDGE_MODEL=sage-memory-judge:v17b` to use the pinned judge
 through SAGE's managed Ollama. Its GGUF download is verified by SHA-256 before
 registration. Before sending content, the reader binds the managed tag to the
 pinned registered GGUF blob reported by `/api/show` and refuses mismatched weights,
@@ -176,11 +176,19 @@ invalidates cached verdicts. `SAGE_LOCAL_JUDGE_TIMEOUT` bounds the per-memory
 judge budget (default `60s`), and `SAGE_LOCAL_JUDGE_REVISION` invalidates the
 cache after changing model weights behind the same name.
 
-The v16 pin uses an immutable Hugging Face revision and separate SHA-256
+The v17b pin uses an immutable Hugging Face revision and separate SHA-256
 pins for the downloaded GGUF and the blob Ollama registers after import
 (`internal/ollamad/judge_model.go`, `JudgeModelTag`, `JudgeGGUFSHA256`,
-`JudgeModelBlobSHA256`). Upgrading SAGE does not rewrite an explicit v15
-configuration; select the v16 tag above to use the new pin.
+`JudgeModelBlobSHA256`). Upgrading SAGE does not rewrite an explicit v16
+configuration; select the v17b tag above to use the new pin.
+
+v17b keeps short user decisions and preferences ("The user prefers X.") and
+backlog tasks, including ones written with a `TODO:` or `Task:` label, which
+v16 often rejected; chat-only one-offs and session remarks are still rejected.
+The [v17b results](../../bench/judge-qualify/results/sage-judge-v17b-ollama-0.31.1-go-arm64.json)
+score the public `bench/judge-qualify` pairs for v16 and v17b through the real
+Go reader on Linux/arm64 with Ollama v0.31.1. [Writing memories](writing-memories.md)
+describes the memory shapes the judge keeps.
 
 The [v16 regression results](../../bench/judge-qualify/results/sage-judge-v16-ollama-0.31.1-go-arm64.json)
 cover a disclosed frozen 40-item synthetic set independently run through the
@@ -202,7 +210,7 @@ behavior have not been independently remeasured for v16.
 
 | Variable | Meaning |
 |---|---|
-| `SAGE_LOCAL_JUDGE_MODEL` | Managed Ollama model; `sage-memory-judge:v16` selects the pinned build. Installation runs in the background. |
+| `SAGE_LOCAL_JUDGE_MODEL` | Managed Ollama model; `sage-memory-judge:v17b` selects the pinned build. Installation runs in the background. |
 | `SAGE_LOCAL_JUDGE_DEBIAS` | Exactly `1` asks both answer orders and averages probabilities (twice the calls). |
 | `SAGE_LOCAL_JUDGE_TIMEOUT` | Managed judge budget per memory (default `60s`). |
 | `SAGE_LOCAL_JUDGE_REVISION` | Operator tag that invalidates managed-judge cached verdicts. |
