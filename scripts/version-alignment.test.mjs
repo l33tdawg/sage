@@ -83,7 +83,7 @@ test('release-facing version metadata stays aligned', () => {
     ['docs/UPGRADING.md', '| v11.23.24 | Unified agent lookup'],
     ['docs/UPGRADING.md', '| v11.23.25 | A domainless '],
     ['docs/UPGRADING.md', '| v11.25.0 | Fresh chains start at the supported app version: '],
-    ['docs/UPGRADING.md', `| v${version} | Memory submit reports unsupported top-level request fields`],
+    ['docs/UPGRADING.md', `| v${version} | Snapshot retention orders by capture time and chain identity`],
     ['docs/ROADMAP.md', `## v${version} release`],
     ['docs/UPGRADING.md', 'The recovery commands in this guide require SAGE v11.18.0 or later.'],
     ['docs/UPGRADING.md', '`backup --full`, `restore --from`,'],

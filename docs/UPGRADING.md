@@ -245,6 +245,7 @@ Use this to work out how far your chain has to climb.
 | v11.25.1 | AMID distinct-target approval uses opt-in local consent keys; hybrid recall bounds reranker work; explicit false/empty federation config survives saves; macOS tray children shut down after parent loss. No app-version change or chain migration. Configure `--local-agent-key-dir` only when delegating local target consent; existing deployments retain their current behavior without it. |
 | v11.25.2 | Fresh-node setup imports sign as the enrolled Companion and route unqualified entries to its home domain instead of failing as the genesis Root. The optional local judge pin moves to v17b with separated immutable source and registered-blob hashes; explicit v16 configurations remain unchanged. App-v29 remains active; no chain reset or data migration. |
 | v11.25.3 | Memory submit reports unsupported top-level request fields in `ignored_fields` while preserving compatibility; PostgreSQL moves to pgx 5.12.0 for two high-severity fixes and SQLite moves to 1.61.1. App-v29 remains active; no consensus change, chain reset, or data migration. |
+| v11.25.4 | Snapshot retention orders by capture time and chain identity, bounds version anchors and recovery executables, and makes release-page refreshes fail closed on stale editorial copy. Existing v1 snapshots remain readable; new snapshots use schema v2. App-v29 remains active; no consensus change, chain reset, or data migration. |
 
 ### v11.18.3 — the signer fence, and what it does *not* cover
 
