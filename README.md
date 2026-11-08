@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.3`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.4`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,28 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.3 and earlier)</summary>
+<summary>Recent release notes (v11.25.4 and earlier)</summary>
+
+## What's New in v11.25.4
+
+**Snapshot retention now survives chain redeploys and stays bounded.** Snapshot
+manifests record the chain identity, and `snapshot list` and automatic retention
+order captures by time rather than by height. A redeployed chain that restarts at
+height 1 therefore keeps its newest recovery points instead of losing them to
+obsolete high-height snapshots. Retention keeps the configured number of current
+chain captures plus a bounded set of recent version anchors. Recovery executables
+are limited to the current binary and one prior copy, with stale temporary copies
+reaped safely. New snapshots use schema v2; existing v1 snapshots remain readable.
+
+**Release-page refreshes now fail closed on stale editorial copy.** The Pages
+snapshot job refuses to write a newer version stamp when the landing page's
+What's New block, FAQ, or version-pinned documentation links still describe an
+older release. Dynamic download counts remain automatic; release copy must move
+with them.
+
+No consensus version change, app-version change, chain reset, or data migration.
+`latest` and automatic upgrade voting remain app29; app30 remains explicit.
+Container: `ghcr.io/l33tdawg/sage:11.25.4`. SDK 11.25.4.
 
 ## What's New in v11.25.3
 
@@ -369,7 +390,7 @@ voting remain app29; app30 remains explicit.
 
 No consensus version change or chain migration. `latest` and automatic upgrade voting remain app29; app30 remains explicit. Existing reply catch-up and v11.24.4 fixes are already included through release history.
 
-Container: `ghcr.io/l33tdawg/sage:11.25.3`. SDK 11.25.3.
+Container: `ghcr.io/l33tdawg/sage:11.25.4`. SDK 11.25.4.
 
 ## What's New in v11.25.0
 
