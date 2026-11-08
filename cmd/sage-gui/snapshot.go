@@ -11,9 +11,9 @@ import (
 // runSnapshot implements `sage-gui snapshot <list|prune>` — operator-facing
 // inspection and manual cleanup of the on-disk snapshot inventory under
 // DataDir/snapshots/. Pruning applies the same retention the node runs
-// automatically after each snapshot (reap crashed .staging dirs, then keep
-// the K newest plus one anchor per binary version); exposed here for a
-// one-off cleanup without restarting the node.
+// automatically after each snapshot (reap crashed staging and recovery-copy
+// files, then keep the K newest captures plus bounded recent-version
+// anchors); exposed here for a one-off cleanup without restarting the node.
 func runSnapshot(args []string) error {
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -35,17 +35,26 @@ func runSnapshot(args []string) error {
 }
 
 func snapshotList(dataDir string) error {
-	heights, err := snapshot.ListSnapshots(dataDir)
+	inventory, err := snapshot.ListSnapshotInfo(dataDir)
 	if err != nil {
 		return fmt.Errorf("list snapshots: %w", err)
 	}
-	if len(heights) == 0 {
+	if len(inventory) == 0 {
 		fmt.Printf("No snapshots under %s/snapshots.\n", dataDir)
 		return nil
 	}
-	fmt.Printf("%d snapshot(s) under %s/snapshots (newest first):\n", len(heights), dataDir)
-	for _, h := range heights {
-		fmt.Printf("  height %d\n", h)
+	fmt.Printf("%d snapshot(s) under %s/snapshots (newest capture first):\n", len(inventory), dataDir)
+	for _, info := range inventory {
+		chain := info.ChainID
+		if chain == "" {
+			chain = "unknown-chain"
+		}
+		snapshotVersion := info.BinaryVersion
+		if snapshotVersion == "" {
+			snapshotVersion = "unknown-version"
+		}
+		fmt.Printf("  height %d  captured %s  chain %s  version %s\n",
+			info.Height, info.CapturedAt.Format("2006-01-02T15:04:05Z07:00"), chain, snapshotVersion)
 	}
 	return nil
 }
@@ -58,7 +67,7 @@ func snapshotPrune(dataDir string, args []string) error {
 			keep = n
 		}
 	}
-	// --keep N overrides env/default (0 is allowed here: keep only anchors).
+	// --keep N overrides env/default. Zero keeps only recent-version anchors.
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--keep" {
 			if i+1 >= len(args) {
@@ -83,6 +92,11 @@ func snapshotPrune(dataDir string, args []string) error {
 	if kErr != nil {
 		return fmt.Errorf("prune snapshots: %w", kErr)
 	}
-	fmt.Printf("Pruned %d old snapshot(s) and reaped %d crashed staging dir(s); kept the %d newest plus one anchor per binary version.\n", removed, swept, keep)
+	recoveryRemoved, rErr := snapshot.PruneRecoveryBinaries(dataDir, "", snapshot.DefaultRecoveryKeep)
+	if rErr != nil {
+		return fmt.Errorf("prune recovery executables: %w", rErr)
+	}
+	fmt.Printf("Pruned %d old snapshot(s), reaped %d crashed staging dir(s), and removed %d stale recovery executable(s); kept the %d newest captures plus bounded recent-version anchors and %d recovery executables.\n",
+		removed, swept, recoveryRemoved, keep, snapshot.DefaultRecoveryKeep)
 	return nil
 }
