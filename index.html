@@ -990,7 +990,7 @@ footer a:hover { text-decoration: underline; }
       </div>
       <div class="brand-release">
         <div class="cta-meta">
-          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.3</strong> &middot; signed assets</span>
+          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.4</strong> &middot; signed assets</span>
           <span class="cta-count" id="minds-freed"><strong id="download-count" data-count="17764" data-updated-at="2026-11-08T00:42:18.542Z">17,764</strong><span>package downloads</span></span>
         </div>
         <div class="download-badges">
@@ -1153,14 +1153,14 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <!-- What's New -->
-      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.3">
-        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.3</span></summary>
+      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.4">
+        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.4</span></summary>
         <div class="release-notes-body">
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.3 now reports fields ignored by memory submit, closes two high-severity pgx vulnerabilities, and updates the test-only PostgreSQL mock for pgx 5.12. No chain migration is required. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.3" style="color:var(--accent);">Read the v11.25.3 release notes &rarr;</a></p>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.4 fixes snapshot retention across chain redeploys, bounds version anchors and restart recovery binaries, and makes release-page refreshes fail closed when their editorial copy is stale. No chain migration is required. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.4" style="color:var(--accent);">Read the v11.25.4 release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Visible submit diagnostics</h4><p>Unknown top-level fields remain accepted for compatibility, but responses now list them in a bounded, sorted <code>ignored_fields</code> array. The node logs field names without their values. <a href="https://github.com/l33tdawg/sage/blob/v11.25.3/docs/reference/rest-api.md">Read the REST reference</a>.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>pgx security baseline</h4><p>pgx moves to 5.12.0 and puddle to 2.2.3, closing two high-severity simple-protocol and authentication issues.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>PostgreSQL test compatibility</h4><p>The test-only PostgreSQL mock moves to the pgx 5.12-compatible v6 line, keeping integration coverage aligned with the updated driver.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Snapshots survive chain redeploys</h4><p>Snapshots now record chain identity and order by capture time, so a new chain starting again at height 1 keeps its newest recovery points. <a href="https://github.com/l33tdawg/sage/blob/v11.25.4/docs/ARCHITECTURE.md">Read the snapshot contract</a>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Recovery storage stays bounded</h4><p>Recent version anchors are capped, and restart recovery executables retain only the current binary plus one prior copy. Stale temporary copies are cleaned without touching an in-flight copy.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Release pages fail closed</h4><p>A successful release can no longer leave What’s New, FAQ, or version-pinned documentation describing an older version while the page advertises the new one.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>No chain migration</h4><p>Existing chains keep their history. App29 remains the default and app30 still requires an explicit upgrade.</p></div></div>
         </div>
         </div>
@@ -1238,7 +1238,7 @@ footer a:hover { text-decoration: underline; }
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-tag"></use></svg><span>What changed in v11?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p data-release-notes-version="v11.25.3">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.3 reports ignored memory-submit fields and closes two high-severity pgx vulnerabilities. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.3">Read the v11.25.3 release notes</a> for details.</p></div>
+          <div class="faq-a"><p data-release-notes-version="v11.25.4">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.4 fixes snapshot retention across chain redeploys and bounds recovery artifacts. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.4">Read the v11.25.4 release notes</a> for details.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-federation"></use></svg><span>What does federation mean?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
