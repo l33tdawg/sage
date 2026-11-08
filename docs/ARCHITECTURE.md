@@ -553,7 +553,7 @@ SAGE includes an in-place chain-upgrade substrate: existing chains move forward 
 
 Every committed block triggers `internal/abci/snapshot_sched.go::SnapshotScheduler.Tick`. The scheduler decides whether to fire `internal/snapshot.Take` based on cadence — by default every 10,000 blocks AND every 6 hours. Snapshots land at `~/.sage/data/snapshots/<height>/` containing:
 
-- `manifest.json` — height, AppHash, binary version, chunk hashes
+- `manifest.json` — height, AppHash, chain ID, capture time, binary version, chunk hashes
 - `badger.backup` — full `(*badger.DB).Backup` stream
 - `sage.db` — VACUUM INTO of the offchain mirror
 - `cometbft-data.tar.zst` — blockstore/state/tx_index/evidence
@@ -561,7 +561,7 @@ Every committed block triggers `internal/abci/snapshot_sched.go::SnapshotSchedul
 - `binary/sage-gui-<version>` — the running binary, bundled for rollback
 - `OK` — zero-byte sentinel written last under fsync
 
-Atomicity: stage in `.staging-<height>-<reason>/`, fsync, rename. Boot's `SweepStaging` removes any incomplete staging directories. Retention: K=5 newest + one anchor per distinct `BinaryVersion` (powers downgrade).
+Atomicity: stage in `.staging-<height>-<reason>/`, fsync, rename. Boot's `SweepStaging` removes any incomplete staging directories. Retention: K=5 newest captures for the current chain, plus at most max(K, 2) recent `BinaryVersion` anchors from that lineage for downgrade. Capture time—not height—orders snapshots because a chain redeploy restarts heights at 1. Executable fallbacks under `dataDir/recovery/` are bounded separately: the current binary plus one prior copy.
 
 Snapshot encryption inherits the vault posture. If the Synaptic Ledger vault is unlocked at boot, snapshots are wrapped in a streaming Argon2id + AES-256-GCM envelope keyed off the vault passphrase. Plaintext otherwise.
 

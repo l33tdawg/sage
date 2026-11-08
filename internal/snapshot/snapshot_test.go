@@ -212,6 +212,21 @@ func TestCandidateRemainsInvisibleUntilPublished(t *testing.T) {
 	}
 }
 
+func TestTakeCandidateRecordsGenesisChainID(t *testing.T) {
+	dataDir := t.TempDir()
+	vaultPath, appHash := seedDataDir(t, dataDir)
+	candidate, err := TakeCandidate(context.Background(), dataDir, 42, appHash, "chain-identity", Options{
+		BinaryVersion: "v11.25.4-test", VaultKeyPath: vaultPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = candidate.Discard() }()
+	if candidate.Manifest.ChainID != "snapshot-test" {
+		t.Fatalf("manifest ChainID = %q, want snapshot-test", candidate.Manifest.ChainID)
+	}
+}
+
 func TestCandidatePublishDirectorySyncFailureNeverLeavesOKAnchor(t *testing.T) {
 	dataDir := t.TempDir()
 	vaultPath, appHash := seedDataDir(t, dataDir)
@@ -941,6 +956,164 @@ func TestKeepLast(t *testing.T) {
 	for i, h := range wantH {
 		if heights[i] != h {
 			t.Fatalf("heights[%d]: got %d want %d", i, heights[i], h)
+		}
+	}
+}
+
+func writeRetentionSnapshot(t *testing.T, dataDir, name string, height int64, version, chainID string, takenAt time.Time) {
+	t.Helper()
+	dir := filepath.Join(dataDir, snapshotsDirName, name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifest := Manifest{
+		Height: height, ChainID: chainID, BinaryVersion: version,
+		SchemaVersion: SchemaVersion, TakenAt: takenAt.UTC(),
+	}
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, chunkManifest), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, OKSentinel), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeRetentionGenesis(t *testing.T, dataDir, chainID string) {
+	t.Helper()
+	configDir := filepath.Join(dataDir, "cometbft", "config")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(fmt.Sprintf(`{"chain_id":%q}`, chainID))
+	if err := os.WriteFile(filepath.Join(configDir, "genesis.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKeepLastUsesCaptureTimeAcrossChainRedeploy(t *testing.T) {
+	dataDir := t.TempDir()
+	writeRetentionGenesis(t, dataDir, "chain-new")
+	base := time.Date(2026, 11, 8, 8, 0, 0, 0, time.UTC)
+	writeRetentionSnapshot(t, dataDir, "900", 900, "v11.25.3", "chain-old", base)
+	writeRetentionSnapshot(t, dataDir, "1", 1, "v11.25.3", "chain-new", base.Add(time.Minute))
+	writeRetentionSnapshot(t, dataDir, "2", 2, "v11.25.3", "chain-new", base.Add(2*time.Minute))
+
+	heights, err := ListSnapshots(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []int64{2, 1, 900}; !equalInt64s(heights, want) {
+		t.Fatalf("capture-time inventory = %v, want %v", heights, want)
+	}
+
+	removed, err := KeepLast(dataDir, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want old-chain snapshot only", removed)
+	}
+	inventory, err := ListSnapshotInfo(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory) != 2 || inventory[0].Height != 2 || inventory[1].Height != 1 {
+		t.Fatalf("post-redeploy inventory = %+v, want current heights 2 and 1", inventory)
+	}
+}
+
+func TestKeepLastBoundsVersionAnchors(t *testing.T) {
+	dataDir := t.TempDir()
+	base := time.Date(2026, 11, 8, 9, 0, 0, 0, time.UTC)
+	for height := int64(1); height <= 18; height++ {
+		version := fmt.Sprintf("v11.%d.0", (height-1)/3+1)
+		writeRetentionSnapshot(t, dataDir, fmt.Sprintf("%d", height), height, version, "chain-current", base.Add(time.Duration(height)*time.Minute))
+	}
+
+	removed, err := KeepLast(dataDir, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 15 {
+		t.Fatalf("removed = %d, want 15; retention should keep two captures and one additional version anchor", removed)
+	}
+	inventory, err := ListSnapshotInfo(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory) != 3 {
+		t.Fatalf("retained %d snapshots, want bounded count 3: %+v", len(inventory), inventory)
+	}
+	if inventory[0].Height != 18 || inventory[1].Height != 17 || inventory[2].Height != 15 {
+		t.Fatalf("retained heights = %d,%d,%d, want 18,17,15", inventory[0].Height, inventory[1].Height, inventory[2].Height)
+	}
+}
+
+func equalInt64s(got, want []int64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func TestPruneRecoveryBinariesKeepsProtectedAndNewestPrior(t *testing.T) {
+	dataDir := t.TempDir()
+	recoveryDir := filepath.Join(dataDir, recoveryDirName)
+	if err := os.MkdirAll(recoveryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
+	for i, name := range []string{"sage-gui-v1-current", "sage-gui-v2-old", "sage-gui-v3-prior"} {
+		path := filepath.Join(recoveryDir, name)
+		if err := os.WriteFile(path, []byte(name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, base.Add(time.Duration(i)*time.Minute), base.Add(time.Duration(i)*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tempPath := filepath.Join(recoveryDir, recoveryTempPrefix+"crashed")
+	if err := os.WriteFile(tempPath, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staleAt := time.Now().Add(-2 * recoveryTempMaxAge)
+	if err := os.Chtimes(tempPath, staleAt, staleAt); err != nil {
+		t.Fatal(err)
+	}
+	freshTempPath := filepath.Join(recoveryDir, recoveryTempPrefix+"active")
+	if err := os.WriteFile(freshTempPath, []byte("in-flight"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unknownPath := filepath.Join(recoveryDir, "operator-notes.txt")
+	if err := os.WriteFile(unknownPath, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	protected := filepath.Join(recoveryDir, "sage-gui-v1-current")
+	removed, err := PruneRecoveryBinaries(dataDir, protected, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 2 {
+		t.Fatalf("removed = %d, want old recovery binary plus crashed temp", removed)
+	}
+	for _, name := range []string{"sage-gui-v1-current", "sage-gui-v3-prior", recoveryTempPrefix + "active", "operator-notes.txt"} {
+		if _, err := os.Stat(filepath.Join(recoveryDir, name)); err != nil {
+			t.Fatalf("expected %s retained: %v", name, err)
+		}
+	}
+	for _, name := range []string{"sage-gui-v2-old", recoveryTempPrefix + "crashed"} {
+		if _, err := os.Stat(filepath.Join(recoveryDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("expected %s removed, err=%v", name, err)
 		}
 	}
 }

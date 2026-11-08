@@ -55,9 +55,8 @@ import (
 
 // defaultSnapshotKeepLast is the retention default applied when
 // SnapshotSchedulerConfig.KeepLast is unset (<=0). After each successful
-// Take the scheduler keeps the K newest snapshots, plus one anchor per
-// distinct binary version (anchors are never pruned, so downgrade stays
-// possible regardless of K).
+// Take the scheduler keeps the K newest captures, plus a bounded set of
+// recent binary-version anchors for downgrade.
 const defaultSnapshotKeepLast = 5
 
 // defaultIdleFlushCheckInterval is how often the wall-clock idle-flush
@@ -78,6 +77,11 @@ type SnapshotSchedulerConfig struct {
 	// in the manifest. The launcher's anchor selection keys off this.
 	BinaryVersion string
 
+	// ChainID identifies the current chain lineage. Retention uses it to
+	// prevent stale high-height snapshots from an earlier chain redeploy
+	// replacing the current chain's newest low-height captures.
+	ChainID string
+
 	// VaultKeyPath, if non-empty, is the vault.key file included in the
 	// snapshot's config tarball so a fresh-boot or rollback can decrypt
 	// existing memories.
@@ -97,9 +101,8 @@ type SnapshotSchedulerConfig struct {
 	TimeInterval time.Duration
 
 	// KeepLast bounds snapshot retention: after each successful Take the
-	// scheduler prunes all but the K newest snapshots, plus one anchor per
-	// distinct binary version (anchors are never pruned, so a downgrade stays
-	// possible regardless of K). <=0 resolves to defaultSnapshotKeepLast.
+	// scheduler prunes all but the K newest captures, plus at most max(K, 2)
+	// recent binary-version anchors. <=0 resolves to defaultSnapshotKeepLast.
 	// Off the consensus path — pruning only touches DataDir/snapshots/.
 	KeepLast int
 
@@ -352,6 +355,7 @@ func (s *SnapshotScheduler) TakeVerified(
 	if manifest == nil {
 		var takeErr error
 		candidate, takeErr = snapshot.TakeCandidate(ctx, s.cfg.DataDir, height, appHash, reason, snapshot.Options{
+			ChainID:         s.cfg.ChainID,
 			BinaryVersion:   s.cfg.BinaryVersion,
 			VaultKeyPath:    s.cfg.VaultKeyPath,
 			VaultEncrypted:  s.cfg.VaultEncrypted,
@@ -496,6 +500,7 @@ func (s *SnapshotScheduler) PreserveRunningBinary() (string, error) {
 		if verifyErr := verify(destination); verifyErr != nil {
 			return "", verifyErr
 		}
+		s.pruneRecoveryBinaries(destination)
 		return destination, nil
 	} else if !os.IsNotExist(lstatErr) {
 		return "", fmt.Errorf("inspect recovery executable: %w", lstatErr)
@@ -547,12 +552,28 @@ func (s *SnapshotScheduler) PreserveRunningBinary() (string, error) {
 	if err := verify(destination); err != nil {
 		return "", err
 	}
+	s.pruneRecoveryBinaries(destination)
 	return destination, nil
+}
+
+func (s *SnapshotScheduler) pruneRecoveryBinaries(protected string) {
+	removed, err := snapshot.PruneRecoveryBinaries(s.cfg.DataDir, protected, snapshot.DefaultRecoveryKeep)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("recovery executable retention hit an error")
+		return
+	}
+	if removed > 0 {
+		s.logger.Info().Int("removed", removed).Int("keep", snapshot.DefaultRecoveryKeep).
+			Msg("recovery executable retention pruned stale binaries")
+	}
 }
 
 func (s *SnapshotScheduler) verifySnapshotIntrinsic(snapshotDir string, manifest *snapshot.Manifest) error {
 	if manifest == nil || manifest.Height <= 0 || len(manifest.AppHash) == 0 || manifest.BinaryVersion == "" {
 		return errors.New("snapshot manifest provenance is incomplete")
+	}
+	if s.cfg.ChainID != "" && manifest.ChainID != "" && manifest.ChainID != s.cfg.ChainID {
+		return fmt.Errorf("snapshot chain lineage %q does not match running %q", manifest.ChainID, s.cfg.ChainID)
 	}
 	wantBinaryName := filepath.ToSlash(filepath.Join("binary", "sage-gui-"+manifest.BinaryVersion))
 	if os.PathSeparator == '\\' {
@@ -756,6 +777,7 @@ func (s *SnapshotScheduler) runTake(height int64, appHash []byte, reason string)
 	s.logger.Info().Int64("height", height).Str("reason", reason).Msg("snapshot.Take starting")
 
 	manifest, err := snapshot.Take(s.scheduledCtx, s.cfg.DataDir, height, appHash, reason, snapshot.Options{
+		ChainID:         s.cfg.ChainID,
 		BinaryVersion:   s.cfg.BinaryVersion,
 		VaultKeyPath:    s.cfg.VaultKeyPath,
 		VaultEncrypted:  s.cfg.VaultEncrypted,

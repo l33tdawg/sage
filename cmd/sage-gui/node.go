@@ -1110,6 +1110,7 @@ func runServe(startupProof string) (rerr error) {
 	var snapshotScheduler *sageabci.SnapshotScheduler
 	if sched := sageabci.NewSnapshotScheduler(sageabci.SnapshotSchedulerConfig{
 		DataDir:         cfg.DataDir,
+		ChainID:         cfg.ChainID,
 		BinaryVersion:   version,
 		VaultKeyPath:    vaultKeyPath,
 		VaultEncrypted:  snapEncrypted,
@@ -1137,6 +1138,11 @@ func runServe(startupProof string) (rerr error) {
 			logger.Warn().Err(pErr).Int("keep_last", snapKeep).Msg("snapshot retention (KeepLast) hit an error at boot")
 		} else if pruned > 0 {
 			logger.Info().Int("removed", pruned).Int("keep_last", snapKeep).Msg("snapshot retention pruned old snapshots at boot")
+		}
+		if pruned, pErr := snapshot.PruneRecoveryBinaries(cfg.DataDir, "", snapshot.DefaultRecoveryKeep); pErr != nil {
+			logger.Warn().Err(pErr).Int("keep", snapshot.DefaultRecoveryKeep).Msg("recovery executable retention hit an error at boot")
+		} else if pruned > 0 {
+			logger.Info().Int("removed", pruned).Int("keep", snapshot.DefaultRecoveryKeep).Msg("recovery executable retention pruned stale binaries at boot")
 		}
 	}()
 	startWorker(func() {
