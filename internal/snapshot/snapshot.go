@@ -38,7 +38,7 @@ import (
 
 // SchemaVersion is the on-disk snapshot layout version. Bump when the
 // layout (file set, manifest fields, encryption envelope) changes.
-const SchemaVersion uint64 = 1
+const SchemaVersion uint64 = 2
 
 // OKSentinel is the zero-byte file written last that marks a snapshot
 // as fully durable. Readers MUST ignore any snapshot directory that
@@ -65,6 +65,7 @@ const (
 type Manifest struct {
 	Height        int64     `json:"height"`
 	AppHash       []byte    `json:"app_hash"`
+	ChainID       string    `json:"chain_id,omitempty"`
 	BinaryVersion string    `json:"binary_version"`
 	SchemaVersion uint64    `json:"schema_version"`
 	TakenAt       time.Time `json:"taken_at"`
@@ -85,6 +86,12 @@ type Chunk struct {
 // (e.g. cmd/sage-gui wiring) — the snapshot package itself does not
 // resolve SageHome() or read globals.
 type Options struct {
+	// ChainID identifies the chain lineage this snapshot belongs to. When
+	// empty, Take reads cometbft/config/genesis.json from dataDir so an
+	// automatic chain redeploy cannot make old snapshots look newest merely
+	// because their heights are larger.
+	ChainID string
+
 	// BinaryVersion is the human-readable version of the running binary
 	// (e.g. "v7.5.0"). Recorded in the manifest; anchor selection keys
 	// off this string. Required.
@@ -176,6 +183,10 @@ func TakeCandidate(ctx context.Context, dataDir string, height int64, appHash []
 	if opts.VaultEncrypted && opts.VaultPassphrase == "" {
 		return nil, fmt.Errorf("snapshot: VaultEncrypted=true requires VaultPassphrase")
 	}
+	chainID := strings.TrimSpace(opts.ChainID)
+	if chainID == "" {
+		chainID = readGenesisChainID(dataDir)
+	}
 
 	snapsRoot := filepath.Join(dataDir, snapshotsDirName)
 	if err := os.MkdirAll(snapsRoot, 0o700); err != nil {
@@ -266,6 +277,7 @@ func TakeCandidate(ctx context.Context, dataDir string, height int64, appHash []
 	manifest := &Manifest{
 		Height:        height,
 		AppHash:       appHash,
+		ChainID:       chainID,
 		BinaryVersion: opts.BinaryVersion,
 		SchemaVersion: SchemaVersion,
 		TakenAt:       time.Now().UTC(),
@@ -295,6 +307,20 @@ func TakeCandidate(ctx context.Context, dataDir string, height int64, appHash []
 		finalDir:       finalDir,
 		manifestSHA256: sha256.Sum256(manifestBytes),
 	}, nil
+}
+
+func readGenesisChainID(dataDir string) string {
+	raw, err := os.ReadFile(filepath.Join(dataDir, "cometbft", "config", "genesis.json"))
+	if err != nil {
+		return ""
+	}
+	var genesis struct {
+		ChainID string `json:"chain_id"`
+	}
+	if err := json.Unmarshal(raw, &genesis); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(genesis.ChainID)
 }
 
 func (c *Candidate) validateIdentity() error {

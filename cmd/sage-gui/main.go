@@ -329,7 +329,7 @@ Environment (common — full list: docs/reference/environment-variables.md):
   SAGE_PASSPHRASE     Vault passphrase (else prompted on a TTY)
   REST_ADDR           REST listen address (default: 127.0.0.1:8080)
   SAGE_TLS_ADDR       HTTPS/MCP listen address (default: 127.0.0.1:8443)
-  SAGE_SNAPSHOT_KEEP  Snapshots to retain (newest N + per-version anchors; default 5)
+  SAGE_SNAPSHOT_KEEP  Snapshots to retain (newest N by capture time + bounded recent-version anchors; default 5)
   SAGE_EMBEDDING_*    Embedding provider/model/dimension (see reference)
 
 MCP Subcommands:
