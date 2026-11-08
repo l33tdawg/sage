@@ -49,12 +49,12 @@ func snapshotList(dataDir string) error {
 		if chain == "" {
 			chain = "unknown-chain"
 		}
-		version := info.BinaryVersion
-		if version == "" {
-			version = "unknown-version"
+		snapshotVersion := info.BinaryVersion
+		if snapshotVersion == "" {
+			snapshotVersion = "unknown-version"
 		}
 		fmt.Printf("  height %d  captured %s  chain %s  version %s\n",
-			info.Height, info.CapturedAt.Format("2006-01-02T15:04:05Z07:00"), chain, version)
+			info.Height, info.CapturedAt.Format("2006-01-02T15:04:05Z07:00"), chain, snapshotVersion)
 	}
 	return nil
 }
