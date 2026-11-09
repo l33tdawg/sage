@@ -990,7 +990,7 @@ footer a:hover { text-decoration: underline; }
       </div>
       <div class="brand-release">
         <div class="cta-meta">
-          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.4</strong> &middot; signed assets</span>
+          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.5</strong> &middot; signed assets</span>
           <span class="cta-count" id="minds-freed"><strong id="download-count" data-count="17844" data-updated-at="2026-11-10T00:37:45.003Z">17,844</strong><span>package downloads</span></span>
         </div>
         <div class="download-badges">
@@ -1153,14 +1153,14 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <!-- What's New -->
-      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.4">
-        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.4</span></summary>
+      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.5">
+        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.5</span></summary>
         <div class="release-notes-body">
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.4 fixes snapshot retention across chain redeploys, bounds version anchors and restart recovery binaries, and makes release-page refreshes fail closed when their editorial copy is stale. No chain migration is required. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.4" style="color:var(--accent);">Read the v11.25.4 release notes &rarr;</a></p>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.5 makes SAGE's MCP inbox limits explicit and tells agents exactly how to page when a requested batch exceeds the supported bound. No chain migration is required. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.5" style="color:var(--accent);">Read the v11.25.5 release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Snapshots survive chain redeploys</h4><p>Snapshots now record chain identity and order by capture time, so a new chain starting again at height 1 keeps its newest recovery points. <a href="https://github.com/l33tdawg/sage/blob/v11.25.4/docs/ARCHITECTURE.md">Read the snapshot contract</a>.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Recovery storage stays bounded</h4><p>Recent version anchors are capped, and restart recovery executables retain only the current binary plus one prior copy. Stale temporary copies are cleaned without touching an in-flight copy.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Release pages fail closed</h4><p>A successful release can no longer leave What’s New, FAQ, or version-pinned documentation describing an older version while the page advertises the new one.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Inbox bounds are explicit</h4><p>The <code>sage_inbox</code> tool now advertises its 1–20 limits for messages, task notices, and passive replies even when schema metadata is flattened. <a href="https://github.com/l33tdawg/sage/blob/v11.25.5/docs/reference/mcp-tools.md">Read the MCP reference</a>.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Failures point to the next page</h4><p>An invalid inbox limit now reports the submitted value and names the exact message and task-notice cursor fields an agent should use to continue.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Inbox behavior stays passive</h4><p>Inspection still claims nothing, and explicit message claims and task-notice acknowledgements remain unchanged.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>No chain migration</h4><p>Existing chains keep their history. App29 remains the default and app30 still requires an explicit upgrade.</p></div></div>
         </div>
         </div>
@@ -1238,7 +1238,7 @@ footer a:hover { text-decoration: underline; }
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-tag"></use></svg><span>What changed in v11?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p data-release-notes-version="v11.25.4">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.4 fixes snapshot retention across chain redeploys and bounds recovery artifacts. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.4">Read the v11.25.4 release notes</a> for details.</p></div>
+          <div class="faq-a"><p data-release-notes-version="v11.25.5">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.5 makes MCP inbox limits explicit and returns cursor guidance when a batch request exceeds them. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.5">Read the v11.25.5 release notes</a> for details.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-federation"></use></svg><span>What does federation mean?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
