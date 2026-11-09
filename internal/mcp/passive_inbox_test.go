@@ -85,6 +85,39 @@ func TestPassiveInboxRejectsAnUnconfirmedContractWithoutClaimFallback(t *testing
 	require.False(t, mutated)
 }
 
+func TestSageInboxAdvertisesAndExplainsPageLimits(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	s := NewServer("http://127.0.0.1:1", priv)
+
+	tool := s.tools["sage_inbox"]
+	require.Contains(t, tool.Description, "limit and reply_limit parameters are each capped at 20")
+	require.Contains(t, tool.Description, "use the returned cursors")
+
+	properties := tool.InputSchema["properties"].(map[string]any)
+	limit := properties["limit"].(map[string]any)
+	require.Equal(t, 5, limit["default"])
+	require.Equal(t, 1, limit["minimum"])
+	require.Equal(t, 20, limit["maximum"])
+	require.Contains(t, limit["description"], "1-20")
+	require.Contains(t, limit["description"], "use its next cursor")
+
+	replyLimit := properties["reply_limit"].(map[string]any)
+	require.Equal(t, 5, replyLimit["default"])
+	require.Equal(t, 1, replyLimit["minimum"])
+	require.Equal(t, 20, replyLimit["maximum"])
+	require.Contains(t, replyLimit["description"], "1-20")
+	require.Contains(t, replyLimit["description"], "reply_next_page_arguments")
+
+	for _, invalid := range []int{0, 21} {
+		_, err := s.toolInbox(context.Background(), map[string]any{"limit": invalid})
+		require.ErrorContains(t, err, "'limit'=")
+		require.ErrorContains(t, err, "must be between 1 and 20")
+		require.ErrorContains(t, err, "message_next_cursor")
+		require.ErrorContains(t, err, "task_notice_cursor")
+	}
+}
+
 func TestExplicitFederatedClaimSignsOnlyTheSelectedReceipt(t *testing.T) {
 	_, priv, err := ed25519.GenerateKey(nil)
 	require.NoError(t, err)
