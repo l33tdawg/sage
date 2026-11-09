@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.4`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.5`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,21 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.4 and earlier)</summary>
+<summary>Recent release notes (v11.25.5 and earlier)</summary>
+
+## What's New in v11.25.5
+
+**MCP inbox limits now explain themselves.** `sage_inbox` keeps its bounded
+`1-20` limit for messages and task notices and for its passive reply page, but
+both caps are now explicit in the model-facing tool descriptions even when
+schema validation keywords are flattened. An out-of-range `limit` reports the
+submitted value and names the exact `message_next_cursor` and
+`task_notice_next_cursor` fields to use for continuation, so callers can page
+instead of repeatedly guessing a larger limit.
+
+No consensus version change, app-version change, chain reset, or data migration.
+`latest` and automatic upgrade voting remain app29; app30 remains explicit.
+Container: `ghcr.io/l33tdawg/sage:11.25.5`. SDK 11.25.5.
 
 ## What's New in v11.25.4
 
