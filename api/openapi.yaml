@@ -1204,6 +1204,125 @@ components:
         reason:
           type: string
 
+    DirectGrantTargetIdentity:
+      type: object
+      required:
+        - active
+        - profile
+        - role
+        - clearance
+        - capabilities
+        - root_generation
+        - enrollment_revision
+        - role_revision
+      properties:
+        active:
+          type: boolean
+          const: true
+        profile:
+          type: string
+        role:
+          type: string
+        clearance:
+          type: integer
+          minimum: 0
+          maximum: 4
+        capabilities:
+          type: integer
+          format: int64
+        root_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        enrollment_revision:
+          type: integer
+          format: int64
+        role_revision:
+          type: integer
+          format: int64
+
+    DirectGrantObservation:
+      type: object
+      required:
+        - domain
+        - grantee_id
+        - granter_id
+        - access_level
+        - expires_at
+      properties:
+        domain:
+          type: string
+        grantee_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        granter_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        access_level:
+          type: integer
+          minimum: 1
+          maximum: 3
+        expires_at:
+          type: integer
+          format: int64
+          description: Unix timestamp; 0 means no expiry.
+
+    DirectGrantsSnapshot:
+      type: object
+      required:
+        - schema
+        - caller_id
+        - target_agent_id
+        - height
+        - app_hash
+        - root_principal_id
+        - root_generation
+        - evaluated_at
+        - coverage
+        - complete
+        - target
+        - grants
+      properties:
+        schema:
+          type: string
+          const: sage.direct-grants-snapshot.v1
+        caller_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        target_agent_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        height:
+          type: integer
+          format: int64
+          minimum: 1
+        app_hash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        root_principal_id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        root_generation:
+          type: integer
+          format: int64
+          minimum: 1
+        evaluated_at:
+          type: integer
+          format: int64
+          minimum: 1
+        coverage:
+          type: string
+          const: active-direct-grants-for-target
+        complete:
+          type: boolean
+          const: true
+        target:
+          $ref: "#/components/schemas/DirectGrantTargetIdentity"
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/DirectGrantObservation"
+
     # -- Domains ---------------------------------------------------------------
     DomainRegisterRequest:
       type: object
@@ -4469,6 +4588,46 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /v1/access/grants-snapshot/{agent_id}:
+    get:
+      operationId: inspectDirectGrantsSnapshot
+      summary: Return a committed exact-target direct-grant snapshot.
+      description: >-
+        App-v23 or later only. The target's active exact-domain grant rows,
+        caller and target authorization state, current Root generation, and
+        stored committed height/AppHash are read from one Badger transaction.
+        The caller may inspect itself; a current local Admin may inspect another
+        active ordinary agent. This is not effective access or a global atomic
+        directory snapshot. Oversized, malformed, cancelled, or incomplete reads
+        fail closed rather than returning a partial success.
+      tags:
+        - Access
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^[0-9a-f]{64}$"
+          description: Canonical lowercase 64-hex agent ID.
+      responses:
+        "200":
+          description: Complete active direct-grant snapshot for one target.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DirectGrantsSnapshot"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   # -- Domains ---------------------------------------------------------------
   /v1/domain/register:
