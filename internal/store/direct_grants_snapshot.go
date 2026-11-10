@@ -259,14 +259,14 @@ func (s *BadgerStore) inspectDirectGrants(
 			return fmt.Errorf("committed height unavailable: %w", err)
 		}
 		var height uint64
-		if err := heightValue.Value(func(value []byte) error {
+		if decodeErr := heightValue.Value(func(value []byte) error {
 			if len(value) != 8 {
 				return errors.New("invalid committed height")
 			}
 			height = binary.BigEndian.Uint64(value)
 			return nil
-		}); err != nil {
-			return err
+		}); decodeErr != nil {
+			return decodeErr
 		}
 		if height == 0 || height > math.MaxInt64 {
 			return errors.New("committed height unavailable")
@@ -276,14 +276,14 @@ func (s *BadgerStore) inspectDirectGrants(
 			return fmt.Errorf("committed AppHash unavailable: %w", err)
 		}
 		var appHash []byte
-		if err := hashValue.Value(func(value []byte) error {
+		if decodeErr := hashValue.Value(func(value []byte) error {
 			if len(value) != 32 {
 				return errors.New("invalid committed AppHash")
 			}
 			appHash = append([]byte(nil), value...)
 			return nil
-		}); err != nil {
-			return err
+		}); decodeErr != nil {
+			return decodeErr
 		}
 
 		prefix := []byte("grant:")
