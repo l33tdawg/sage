@@ -1409,9 +1409,83 @@ Revoke domain access. Broadcasts `TxTypeAccessRevoke`.
 
 ### `GET /v1/access/grants/{agent_id}`
 
-List active grants for an agent. Cross-checks BadgerDB (chain truth) against the off-chain mirror and drops stale rows (`access_handler.go:264-276`).
+List active direct grants for an agent. After app-v23, canonical Badger grant
+rows are the sole source for `domain`, `grantee_id`, `granter_id`,
+`access_level`, and `expires_at`. A canonical revoke therefore disappears
+immediately even if the SQL serving projection is stale, and a canonical grant
+is returned even when that projection is empty. Matching projection rows may
+still supply the descriptive `created_height`/`created_at` fields; they cannot
+add, omit, or override an authorization value.
 
 **Response** (HTTP 200): Array of grant objects.
+
+For an exact-target read that also binds the caller/target authorization,
+current Root generation, committed height, and AppHash to one Badger snapshot,
+use `GET /v1/access/grants-snapshot/{agent_id}`.
+
+---
+
+### `GET /v1/access/grants-snapshot/{agent_id}`
+
+Return one complete bounded observation of the target's active exact-domain
+direct grants from one committed Badger read transaction. App-v23 or later is
+required. The caller may inspect itself; a current local Admin may inspect
+another active ordinary agent. Root, inactive/stale identities, cross-agent
+Member/Manager calls, and remote Admin calls fail closed.
+
+This is **not** effective access and **not** an atomic snapshot of every agent
+in the directory. Ownership, Access Groups, organization policy, and federation
+remain separate authorization paths. Each response covers exactly one target;
+different targets require separate requests.
+
+The reader fails closed on malformed state, cancellation, an incomplete
+authorization handshake, or any of these bounds: 16,384 scanned grant keys,
+1,024 returned grants, 1 MiB of decoded/raw grant data, and a 2-second read
+deadline; non-empty error bodies stay below 1 MiB and a successful encoded
+response above 1 MiB is refused. It never returns `complete:true` with a
+partial grant list.
+
+**Response** (HTTP 200):
+
+```json
+{
+  "schema": "sage.direct-grants-snapshot.v1",
+  "caller_id": "<64-hex agent id>",
+  "target_agent_id": "<64-hex agent id>",
+  "height": 123,
+  "app_hash": "<64-hex app hash>",
+  "root_principal_id": "<64-hex root principal>",
+  "root_generation": 2,
+  "evaluated_at": 1780000000,
+  "coverage": "active-direct-grants-for-target",
+  "complete": true,
+  "target": {
+    "active": true,
+    "profile": "standard",
+    "role": "member",
+    "clearance": 2,
+    "capabilities": 0,
+    "root_generation": 2,
+    "enrollment_revision": 3,
+    "role_revision": 3
+  },
+  "grants": [
+    {
+      "domain": "team.research",
+      "grantee_id": "<64-hex target>",
+      "granter_id": "<64-hex granter>",
+      "access_level": 1,
+      "expires_at": 0
+    }
+  ]
+}
+```
+
+`expires_at:0` means no expiry. Expired rows are not included. An empty
+`grants` array with `complete:true` is a checked observation. HTTP 403 means
+authorization or identity validity was not established; HTTP 503 means a
+complete committed observation could not be produced and must not be treated
+as an empty directory.
 
 ---
 

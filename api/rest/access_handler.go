@@ -1,12 +1,17 @@
 package rest
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/l33tdawg/sage/api/rest/middleware"
+	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tx"
 )
@@ -209,16 +214,16 @@ func (s *Server) handleAccessRevoke(w http.ResponseWriter, r *http.Request) {
 
 // handleListGrants handles GET /v1/access/grants/{agent_id}.
 //
-// Reconciles the off-chain accessStore mirror against Badger (chain truth)
-// — a row that survives in the mirror after a chain reset / Badger wipe
-// can't actually be exercised, and surfacing it would mislead callers into
-// believing they hold access the chain doesn't honour.
+// Post-app-v23, Badger is the sole source of authorization values. The SQL
+// accessStore is consulted only for legacy descriptive metadata after the
+// canonical rows have been read; it can never add, omit, or override a grant.
 func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agent_id")
 	if agentID == "" {
 		agentID = middleware.ContextAgentID(r.Context())
 	}
-	if s.isPostV23ForNextTx() {
+	postV23 := s.isPostV23ForNextTx()
+	if postV23 {
 		callerID := middleware.ContextAgentID(r.Context())
 		if callerID == "" {
 			writeProblem(w, http.StatusForbidden, "Agent identity required",
@@ -255,32 +260,173 @@ func (s *Server) handleListGrants(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if postV23 {
+		if s.badgerStore == nil {
+			writeProblem(w, http.StatusServiceUnavailable, "Access control unavailable",
+				"Committed grant state is unavailable.")
+			return
+		}
+		rows, err := s.badgerStore.ListAccessGrantsForAgent(agentID)
+		if err != nil {
+			s.logger.Error().Err(err).Str("agent_id", agentID).
+				Msg("failed to read canonical direct grants")
+			writeProblem(w, http.StatusServiceUnavailable, "Query unavailable",
+				"Committed access grants could not be read.")
+			return
+		}
+		now := time.Now().Unix()
+		grants := make([]store.DirectGrantObservation, 0, len(rows))
+		for _, row := range rows {
+			if row.ExpiresAt != 0 && row.ExpiresAt <= now {
+				continue
+			}
+			grants = append(grants, store.DirectGrantObservation{
+				Domain:      row.Domain,
+				GranteeID:   row.AgentID,
+				GranterID:   row.GranterID,
+				AccessLevel: row.Level,
+				ExpiresAt:   row.ExpiresAt,
+			})
+		}
+		writeJSON(w, http.StatusOK, s.directGrantEntries(r.Context(), agentID, grants))
+		return
+	}
+
 	if s.accessStore == nil {
 		writeProblem(w, http.StatusServiceUnavailable, "Access store unavailable",
 			"Access control storage is not configured.")
 		return
 	}
-
 	grants, err := s.accessStore.GetActiveGrants(r.Context(), agentID)
 	if err != nil {
 		s.logger.Error().Err(err).Str("agent_id", agentID).Msg("failed to get grants")
 		writeProblem(w, http.StatusInternalServerError, "Query error", "Failed to query access grants.")
 		return
 	}
-
 	if s.badgerStore != nil {
 		live := grants[:0]
-		for _, g := range grants {
-			if _, _, _, gErr := s.badgerStore.GetAccessGrant(g.Domain, g.GranteeID); gErr == nil {
-				live = append(live, g)
-			} else {
-				s.logger.Warn().Str("domain", g.Domain).Str("grantee", g.GranteeID).Msg("dropping stale mirror grant absent from chain")
+		for _, grant := range grants {
+			if grant == nil {
+				continue
 			}
+			level, expiresAt, granterID, grantErr := s.badgerStore.GetAccessGrant(grant.Domain, grant.GranteeID)
+			if grantErr != nil {
+				s.logger.Warn().Str("domain", grant.Domain).Str("grantee", grant.GranteeID).
+					Msg("dropping stale mirror grant absent from chain")
+				continue
+			}
+			grant.Level = level
+			grant.GranterID = granterID
+			grant.ExpiresAt = nil
+			if expiresAt > 0 {
+				expires := time.Unix(expiresAt, 0).UTC()
+				grant.ExpiresAt = &expires
+			}
+			live = append(live, grant)
 		}
 		grants = live
 	}
-
 	writeJSON(w, http.StatusOK, grants)
+}
+
+// handleDirectGrantsSnapshot returns one bounded, complete active direct-grant
+// observation for one target. Every returned authorization-relevant value comes
+// from the same committed Badger read transaction.
+func (s *Server) handleDirectGrantsSnapshot(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "private, no-store")
+	if r.URL.RawQuery != "" {
+		writeProblem(w, http.StatusBadRequest, "Invalid snapshot request",
+			"Direct-grant snapshots do not accept query parameters.")
+		return
+	}
+	if !s.isPostV23ForNextTx() {
+		writeProblem(w, http.StatusConflict, "App-v23 required",
+			"Direct-grant snapshots require the app-v23 authorization state.")
+		return
+	}
+	callerID := middleware.ContextAgentID(r.Context())
+	if callerID == "" {
+		writeProblem(w, http.StatusForbidden, "Agent identity required",
+			"An authenticated local identity is required to inspect direct grants.")
+		return
+	}
+	target := chi.URLParam(r, "agent_id")
+	pub, err := auth.AgentIDToPublicKey(target)
+	if err != nil || auth.PublicKeyToAgentID(pub) != target {
+		writeProblem(w, http.StatusBadRequest, "Invalid target",
+			"A canonical local agent ID is required.")
+		return
+	}
+	if s.badgerStore == nil {
+		writeProblem(w, http.StatusServiceUnavailable, "Inspection unavailable",
+			"Committed grant state is unavailable.")
+		return
+	}
+	snapshot, err := s.badgerStore.InspectDirectGrants(r.Context(), callerID, target, time.Now().Unix())
+	if err != nil {
+		s.writeDirectGrantsSnapshotError(w, err)
+		return
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil || len(raw) > 1<<20 {
+		s.logger.Error().Err(err).Int("response_bytes", len(raw)).
+			Msg("committed direct-grant snapshot exceeded its response budget")
+		writeProblem(w, http.StatusServiceUnavailable, "Inspection unavailable",
+			"The complete committed grant snapshot exceeds the response budget.")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(raw)
+}
+
+func (s *Server) directGrantEntries(
+	ctx context.Context, target string, grants []store.DirectGrantObservation,
+) []store.AccessGrantEntry {
+	metadata := make(map[string]*store.AccessGrantEntry)
+	if s.accessStore != nil {
+		if mirrored, err := s.accessStore.GetActiveGrants(ctx, target); err == nil {
+			for _, grant := range mirrored {
+				if grant != nil {
+					metadata[grant.Domain] = grant
+				}
+			}
+		} else {
+			s.logger.Warn().Err(err).Str("agent_id", target).
+				Msg("grant metadata mirror unavailable; returning canonical rows only")
+		}
+	}
+
+	out := make([]store.AccessGrantEntry, 0, len(grants))
+	for _, grant := range grants {
+		entry := store.AccessGrantEntry{
+			Domain:    grant.Domain,
+			GranteeID: grant.GranteeID,
+			GranterID: grant.GranterID,
+			Level:     grant.AccessLevel,
+		}
+		if grant.ExpiresAt > 0 {
+			expiresAt := time.Unix(grant.ExpiresAt, 0).UTC()
+			entry.ExpiresAt = &expiresAt
+		}
+		if mirrored := metadata[grant.Domain]; mirrored != nil {
+			entry.CreatedHeight = mirrored.CreatedHeight
+			entry.CreatedAt = mirrored.CreatedAt
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func (s *Server) writeDirectGrantsSnapshotError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrDirectGrantsInspectionDenied) {
+		writeProblem(w, http.StatusForbidden, "Inspection denied",
+			"Inspection requires an active ordinary caller and an active ordinary target, with a current local Admin for cross-agent reads.")
+		return
+	}
+	s.logger.Error().Err(err).Msg("failed to read committed direct-grant snapshot")
+	writeProblem(w, http.StatusServiceUnavailable, "Inspection unavailable",
+		"A complete committed grant snapshot could not be read.")
 }
 
 // handleDomainRegister handles POST /v1/domain/register.
