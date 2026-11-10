@@ -122,8 +122,8 @@ func (s *BadgerStore) readGrantInspectionSnapshot(ctx context.Context, target st
 		out.ChainDomain = hex.EncodeToString(domain)
 		// Preflight canonical metadata size before the typed readers decode it.
 		for _, key := range [][]byte{appV23RootKey(), appV23EnrollmentKey(target), appV23RoleKey(target)} {
-			if _, err := take(key, false); err != nil {
-				return err
+			if _, readErr := take(key, false); readErr != nil {
+				return readErr
 			}
 		}
 		out.Root, err = reader.GetAppV23Root()
@@ -276,9 +276,9 @@ func (s *BadgerStore) InspectDirectGrants(ctx context.Context, caller, target st
 			return errors.New("current Root metadata unavailable")
 		}
 		for _, id := range []string{caller, target} {
-			historical, err := reader.IsAppV23RootCredential(id)
-			if err != nil {
-				return err
+			historical, historicalErr := reader.IsAppV23RootCredential(id)
+			if historicalErr != nil {
+				return historicalErr
 			}
 			if historical || id == root.PrincipalID || id == root.CredentialID {
 				return ErrGrantInspectionDenied
