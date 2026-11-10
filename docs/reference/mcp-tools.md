@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.25.5, with the unified agent lookup contract verified against current source.
+Reconciled against internal/mcp for SAGE v11.25.6, with the unified agent lookup contract verified against current source.
 
 # SAGE MCP Tools Reference
 

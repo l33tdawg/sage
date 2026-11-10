@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.5`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.6`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,26 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.5 and earlier)</summary>
+<summary>Recent release notes (v11.25.6 and earlier)</summary>
+
+## What's New in v11.25.6
+
+**Direct-grant inspection now follows canonical chain state.** After app-v23,
+the ordinary grant-list endpoint takes `domain`, `grantee_id`, `granter_id`,
+`access_level`, and `expires_at` from Badger rather than the SQL serving mirror.
+A canonical grant is visible even when that projection is empty, and a canonical
+revoke disappears immediately instead of surviving as stale mirror data.
+
+`GET /v1/access/grants-snapshot/{agent_id}` adds a bounded exact-target snapshot
+for reconciliation. One committed Badger read supplies the caller/target
+authorization records, current Root generation, height, AppHash, and active
+direct grants. The endpoint allows self-inspection or a current local Admin,
+fails closed on incomplete or oversized reads, and is deliberately not effective
+access, a global atomic directory, or a new protocol capability.
+
+No consensus version change, app-version change, chain reset, or data migration.
+`latest` and automatic upgrade voting remain app29; app30 remains explicit.
+Container: `ghcr.io/l33tdawg/sage:11.25.6`. SDK 11.25.6.
 
 ## What's New in v11.25.5
 
