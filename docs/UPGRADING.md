@@ -247,6 +247,7 @@ Use this to work out how far your chain has to climb.
 | v11.25.3 | Memory submit reports unsupported top-level request fields in `ignored_fields` while preserving compatibility; PostgreSQL moves to pgx 5.12.0 for two high-severity fixes and SQLite moves to 1.61.1. App-v29 remains active; no consensus change, chain reset, or data migration. |
 | v11.25.4 | Snapshot retention orders by capture time and chain identity, bounds version anchors and recovery executables, and makes release-page refreshes fail closed on stale editorial copy. Existing v1 snapshots remain readable; new snapshots use schema v2. App-v29 remains active; no consensus change, chain reset, or data migration. |
 | v11.25.5 | `sage_inbox` exposes its `1-20` message, task-notice, and passive-reply page limits in model-facing tool descriptions and returns the exact continuation cursor fields when a caller exceeds them. App-v29 remains active; no consensus change, chain reset, or data migration. |
+| v11.25.6 | Post-app-v23 direct grant lists read authorization values from canonical Badger state; matching SQL mirror timestamps and heights remain descriptive only. A new bounded exact-target grant snapshot binds caller/target policy, Root, height, AppHash, and active grants to one committed read. App-v29 remains active; no consensus change, chain reset, or data migration. |
 
 ### v11.18.3 — the signer fence, and what it does *not* cover
 
