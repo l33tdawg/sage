@@ -297,7 +297,7 @@ func (m *Manager) localConsensusControlSigner(
 		role.Role != store.AppV23RoleAdmin ||
 		enrollment.RootGeneration != root.Generation ||
 		!m.localAdminSignerActive(effectiveActorID) ||
-		store.ValidateAppV23Policy(
+		m.badger.ValidateCurrentAgentPolicy(
 			role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 		) != nil {
 		return nil, nil, "", nil, nil,

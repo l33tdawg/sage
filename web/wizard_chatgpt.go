@@ -1146,7 +1146,7 @@ func (h *DashboardHandler) handleWizardMintToken(w http.ResponseWriter, r *http.
 		role, roleErr := h.BadgerStore.GetAppV23Role(targetID)
 		root, rootErr := h.BadgerStore.GetAppV23Root()
 		validPolicy := enrollment != nil && role != nil &&
-			store.ValidateAppV23Policy(
+			h.BadgerStore.ValidateCurrentAgentPolicy(
 				role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 			) == nil
 		currentAdmin := role != nil && enrollment != nil && root != nil &&

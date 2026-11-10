@@ -28,7 +28,7 @@ const (
 	// ceiling, which remain app-v29. An exact-version join authorization asks
 	// only whether this binary can execute the restored version; the receiver
 	// still verifies the served bundle at that exact version.
-	LatestSupportedAppVersion uint64 = 30
+	LatestSupportedAppVersion uint64 = 31
 	cometNodeIDBytes                 = 20
 	maxJoinAuthorizationBytes        = 64 << 10
 )
@@ -42,7 +42,7 @@ var stateSyncChainIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 // authorization's exact version.
 func SupportsAppVersion(version uint64) bool {
 	switch version {
-	case RequiredAppVersion, 21, 22, 23, 24, 25, 26, 27, 28, 29, LatestSupportedAppVersion:
+	case RequiredAppVersion, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, LatestSupportedAppVersion:
 		return true
 	default:
 		return false

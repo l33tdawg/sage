@@ -753,7 +753,7 @@ func checkAppV23EffectiveWriteAccess(
 	}
 	role, err := badgerStore.GetAppV23Role(policyID)
 	if err != nil || role == nil ||
-		store.ValidateAppV23Policy(
+		badgerStore.ValidateCurrentAgentPolicy(
 			role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 		) != nil {
 		return fmt.Errorf("%w: app-v23 access-control state is invalid", errAccessControlOperational)
@@ -924,7 +924,7 @@ func (s *Server) resolveVisibleAgents(agentID string) ([]string, bool) {
 		}
 		role, err := s.badgerStore.GetAppV23Role(policyID)
 		if err != nil || role == nil ||
-			store.ValidateAppV23Policy(
+			s.badgerStore.ValidateCurrentAgentPolicy(
 				role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 			) != nil ||
 			(policyID != root.PrincipalID && role.Role == store.AppV23RoleAdmin &&
@@ -2753,7 +2753,7 @@ func (s *Server) federationReaderScopesV23(callerID, remoteScope string) ([]stri
 		return nil, 0, false
 	}
 	role, err := s.badgerStore.GetAppV23Role(policyID)
-	if err != nil || role == nil || store.ValidateAppV23Policy(
+	if err != nil || role == nil || s.badgerStore.ValidateCurrentAgentPolicy(
 		role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 	) != nil {
 		return nil, 0, false

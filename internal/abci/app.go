@@ -718,6 +718,7 @@ type SageApp struct {
 	// appV30AppliedHeight gates authenticated lineage and taint consensus state.
 	// The activation block remains under app-v29 rules; v30 semantics begin H+1.
 	appV30AppliedHeight int64 // 0 => fork dormant
+	appV31AppliedHeight int64 // explicit direct-grant inspection, dormant until activation
 	// appV30WorkTxCount is process-local for one FinalizeBlock execution. It
 	// enforces the four-expand-or-cleanup transaction policy limit.
 	appV30WorkTxCount uint8
@@ -909,6 +910,7 @@ const appV27UpgradeName = "app-v27"
 const appV28UpgradeName = "app-v28"
 const appV29UpgradeName = "app-v29"
 const appV30UpgradeName = "app-v30"
+const appV31UpgradeName = "app-v31"
 
 // governanceDelegationDomainStateKey holds the stable, consensus-derived
 // domain that post-app-v20 governance authorizations must sign. It is approved
@@ -2531,7 +2533,17 @@ func NewSageApp(badgerPath string, postgresURL string, logger zerolog.Logger) (*
 		_ = bs.CloseBadger()
 		return nil, invariantErr
 	}
+	if invariantErr := app.refreshAppV31Fork(); invariantErr != nil {
+		_ = ps.Close()
+		_ = bs.CloseBadger()
+		return nil, invariantErr
+	}
 	if invariantErr := app.validateAppV30Prerequisite(); invariantErr != nil {
+		_ = ps.Close()
+		_ = bs.CloseBadger()
+		return nil, invariantErr
+	}
+	if invariantErr := app.validateAppV31Prerequisite(); invariantErr != nil {
 		_ = ps.Close()
 		_ = bs.CloseBadger()
 		return nil, invariantErr
@@ -2668,7 +2680,13 @@ func NewSageAppWithStores(bs *store.BadgerStore, offchain store.OffchainStore, l
 	if invariantErr := app.refreshAppV30Fork(); invariantErr != nil {
 		return nil, invariantErr
 	}
+	if invariantErr := app.refreshAppV31Fork(); invariantErr != nil {
+		return nil, invariantErr
+	}
 	if invariantErr := app.validateAppV30Prerequisite(); invariantErr != nil {
+		return nil, invariantErr
+	}
+	if invariantErr := app.validateAppV31Prerequisite(); invariantErr != nil {
 		return nil, invariantErr
 	}
 	if invariantErr := app.validateAppV30RecoveryState(); invariantErr != nil {
@@ -2753,6 +2771,8 @@ func restoredValidatorInfo(id string, power int64) *validator.ValidatorInfo {
 // 6 <= 7, so the watchdog stops without re-proposing.
 func (app *SageApp) currentAppVersion() uint64 {
 	switch {
+	case app.appV31AppliedHeight > 0 || app.freshGenesisAppVersion >= 31:
+		return 31
 	case app.appV30AppliedHeight > 0 || app.freshGenesisAppVersion >= 30:
 		return 30 // app-v30 (authenticated lineage and taint) — highest gate
 	case app.appV29AppliedHeight > 0 || app.freshGenesisAppVersion >= 29:
@@ -2832,9 +2852,9 @@ func (app *SageApp) currentAppVersion() uint64 {
 const maxSupportedAppVersion uint64 = 29
 
 // maxCompiledAppVersion is the highest app version this binary has a compiled
-// fork gate for. app-v30 stays outside the auto-vote ceiling until its real-code
-// activation evidence is complete.
-const maxCompiledAppVersion uint64 = 30
+// fork gate for. app-v30 and app-v31 remain outside the auto-vote ceiling;
+// explicit quorum-approved activation is separate from compiled support.
+const maxCompiledAppVersion uint64 = 31
 
 // MaxSupportedAppVersion returns the auto-vote readiness ceiling, which is the
 // highest app version this binary is prepared to activate unattended. Operator
@@ -3212,6 +3232,19 @@ func (app *SageApp) ActiveUpgradeVote() (proposalID string, targetVersion uint64
 		} else if _, predecessorErr := app.validateAppV30Predecessor(); predecessorErr != nil {
 			app.logger.Warn().Err(predecessorErr).Str("proposal_id", prop.ProposalID).
 				Msg("app-v30 predecessor is invalid; skipping auto-vote")
+			supported = false
+		}
+	}
+	if payload.Name == appV31UpgradeName && payload.TargetAppVersion == 31 {
+		if app.currentAppVersion() != 30 {
+			app.logger.Warn().
+				Str("proposal_id", prop.ProposalID).
+				Uint64("current_app_version", app.currentAppVersion()).
+				Msg("app-v31 upgrade requires app-v30 as its immediate predecessor; skipping auto-vote")
+			supported = false
+		} else if _, predecessorErr := app.validateAppV31Predecessor(); predecessorErr != nil {
+			app.logger.Warn().Err(predecessorErr).Str("proposal_id", prop.ProposalID).
+				Msg("app-v31 predecessor is invalid; skipping auto-vote")
 			supported = false
 		}
 	}
@@ -3953,6 +3986,7 @@ func (app *SageApp) cloneForAppV20Finalize(scopedStore *store.BadgerStore) *Sage
 		appV28AppliedHeight:      app.appV28AppliedHeight,
 		appV29AppliedHeight:      app.appV29AppliedHeight,
 		appV30AppliedHeight:      app.appV30AppliedHeight,
+		appV31AppliedHeight:      app.appV31AppliedHeight,
 		appV23GenesisActive:      app.appV23GenesisActive,
 		freshGenesisAppVersion:   app.freshGenesisAppVersion,
 		retainBlocks:             app.retainBlocks,
@@ -4006,6 +4040,7 @@ func (app *SageApp) publishAppV20FinalizeLocked(clone *SageApp) {
 	app.appV28AppliedHeight = clone.appV28AppliedHeight
 	app.appV29AppliedHeight = clone.appV29AppliedHeight
 	app.appV30AppliedHeight = clone.appV30AppliedHeight
+	app.appV31AppliedHeight = clone.appV31AppliedHeight
 	app.appV23GenesisActive = clone.appV23GenesisActive
 	app.freshGenesisAppVersion = clone.freshGenesisAppVersion
 	app.govEngine.SetMemoryTaintGenesisActive(app.freshGenesisAppVersion >= 30)
@@ -4844,6 +4879,26 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 				)
 			}
 		}
+		if plan.Name == appV31UpgradeName {
+			if plan.TargetAppVersion != 31 {
+				return nil, fmt.Errorf(
+					"sage: refuse malformed app-v31 activation at height %d: target_app_version=%d",
+					req.Height, plan.TargetAppVersion,
+				)
+			}
+			if current := app.currentAppVersion(); current != 30 {
+				return nil, fmt.Errorf(
+					"sage: refuse app-v31 activation at height %d: current committed app version is %d, want 30",
+					req.Height, current,
+				)
+			}
+			if _, predecessorErr := app.validateAppV31Predecessor(); predecessorErr != nil {
+				return nil, fmt.Errorf(
+					"sage: refuse app-v31 activation at height %d: invalid predecessor: %w",
+					req.Height, predecessorErr,
+				)
+			}
+		}
 		// Version-non-regression floor (deterministic on every replica): never
 		// commit a consensus version.app lower than the chain's current app
 		// version. app-v7 (content-validation) is an INDEPENDENT gate that can be
@@ -4987,6 +5042,9 @@ func (app *SageApp) finalizeBlockUncommitted(_ context.Context, req *abcitypes.R
 		}
 		if plan.Name == appV30UpgradeName {
 			app.appV30AppliedHeight = req.Height
+		}
+		if plan.Name == appV31UpgradeName {
+			app.appV31AppliedHeight = req.Height
 		}
 		if plan.Name == appV12UpgradeName {
 			app.appV12AppliedHeight = req.Height
@@ -12233,6 +12291,17 @@ func (app *SageApp) applyUpgradeProposal(proposal *governance.ProposalState, hei
 			return fmt.Errorf("app-v30 upgrade has invalid predecessor: %w", predecessorErr)
 		}
 	}
+	if p.Name == appV31UpgradeName {
+		if p.TargetAppVersion != 31 {
+			return fmt.Errorf("app-v31 upgrade has target version %d, want 31", p.TargetAppVersion)
+		}
+		if current := app.currentAppVersion(); current != 30 {
+			return fmt.Errorf("app-v31 upgrade requires current app version 30, got %d", current)
+		}
+		if _, predecessorErr := app.validateAppV31Predecessor(); predecessorErr != nil {
+			return fmt.Errorf("app-v31 upgrade has invalid predecessor: %w", predecessorErr)
+		}
+	}
 
 	// Execution-height regression re-guard: the chain's committed app version
 	// may have advanced (another upgrade activated) between propose and quorum.
@@ -12486,6 +12555,20 @@ func (app *SageApp) processUpgradePropose(parsedTx *tx.ParsedTx, height int64, b
 		if _, predecessorErr := app.validateAppV30Predecessor(); predecessorErr != nil {
 			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
 				"upgrade propose: app-v30 predecessor is invalid: %v", predecessorErr)}
+		}
+	}
+	if prop.Name == appV31UpgradeName {
+		if prop.TargetAppVersion != 31 {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: app-v31 requires target_app_version 31 (got %d)", prop.TargetAppVersion)}
+		}
+		if current := app.currentAppVersion(); current != 30 {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: app-v31 requires current committed app version 30 (got %d)", current)}
+		}
+		if _, predecessorErr := app.validateAppV31Predecessor(); predecessorErr != nil {
+			return &abcitypes.ExecTxResult{Code: 47, Log: fmt.Sprintf(
+				"upgrade propose: app-v31 predecessor is invalid: %v", predecessorErr)}
 		}
 	}
 

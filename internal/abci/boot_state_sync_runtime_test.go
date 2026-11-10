@@ -259,7 +259,7 @@ func TestBootStateSyncRuntimeSupportsV20ThroughV30WithExactSessionVersion(t *tes
 	// The allowlist follows the highest COMPILED fork gate, app-v30. Default
 	// latest and auto-vote readiness remain app-v29; a state-sync session still
 	// pins the exact authorized version for the replacement application.
-	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30} {
+	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31} {
 		t.Run(fmt.Sprintf("app-v%d", version), func(t *testing.T) {
 			oldHash := sha256.Sum256([]byte("old-versioned-state"))
 			newHash := sha256.Sum256([]byte(fmt.Sprintf("new-versioned-state-%d", version)))
@@ -303,7 +303,7 @@ func TestBootStateSyncRuntimeSupportsV20ThroughV30WithExactSessionVersion(t *tes
 		})
 	}
 
-	for _, version := range []uint64{19, 31} {
+	for _, version := range []uint64{19, 32} {
 		t.Run(fmt.Sprintf("unsupported-app-v%d", version), func(t *testing.T) {
 			oldHash := sha256.Sum256([]byte("old-unsupported-version-state"))
 			newHash := sha256.Sum256([]byte("new-unsupported-version-state"))
@@ -318,7 +318,7 @@ func TestBootStateSyncRuntimeSupportsV20ThroughV30WithExactSessionVersion(t *tes
 				called = true
 				return nil, nil
 			})
-			assert.ErrorContains(t, err, "supported app version 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, or 30")
+			assert.ErrorContains(t, err, "supported app version 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, or 31")
 			assert.False(t, called)
 			assert.Equal(t, BootStateSyncFailed, runtime.Phase())
 		})

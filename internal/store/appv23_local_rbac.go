@@ -451,7 +451,7 @@ func appV23MigrationActiveTxn(txn *badger.Txn) (bool, error) {
 // the scoped transaction, so an uncommitted/partial stage is never visible.
 func (s *BadgerStore) appV23ReadStageValue(txn *badger.Txn, target []byte) ([]byte, error) {
 	stageKey := consensuskeys.AppV23MigrationStageKey(target)
-	if s.txn == nil {
+	if s.txn == nil || (s.taintServingCommittedRead && s.taintServingReadOnly) {
 		item, err := txn.Get(stageKey)
 		if err != nil {
 			return nil, err
@@ -2325,7 +2325,7 @@ func (s *BadgerStore) EnsureAppV23Root(scope string, height int64) error {
 			Capabilities: next.Capabilities, Active: active, Revision: 1,
 			UpdatedHeight: height,
 		}
-		if policyErr := ValidateAppV23EnrollmentPolicy(
+		if policyErr := s.validateCurrentEnrollmentPolicy(
 			next.Role, profile, next.Capabilities, next.Clearance, active,
 		); policyErr != nil {
 			return fmt.Errorf("legacy agent %s has incompatible migration policy: %w", legacy.AgentID, policyErr)
@@ -3018,7 +3018,7 @@ func (s *BadgerStore) ensureAppV23LegacyRootStaged(
 			Capabilities: next.Capabilities, Active: active, Revision: 1,
 			UpdatedHeight: height,
 		}
-		if err := ValidateAppV23EnrollmentPolicy(
+		if err := s.validateCurrentEnrollmentPolicy(
 			next.Role, profile, next.Capabilities, next.Clearance, active,
 		); err != nil {
 			return fmt.Errorf("legacy agent %s has incompatible migration policy: %w", legacy.AgentID, err)
@@ -3164,7 +3164,7 @@ func (s *BadgerStore) ensureAppV23BootstrapRosterStaged(
 		}
 		if existingEnrollment != nil || existingRole != nil {
 			if existingEnrollment == nil || existingRole == nil ||
-				ValidateAppV23EnrollmentPolicy(
+				s.validateCurrentEnrollmentPolicy(
 					existingRole.Role, existingEnrollment.Profile,
 					existingEnrollment.Capabilities, existingEnrollment.Clearance,
 					existingEnrollment.Active,
@@ -3225,7 +3225,7 @@ func (s *BadgerStore) ensureAppV23BootstrapRosterStaged(
 			Clearance: next.Clearance, Capabilities: next.Capabilities,
 			Active: active, Revision: 1, UpdatedHeight: height,
 		}
-		if err := ValidateAppV23EnrollmentPolicy(
+		if err := s.validateCurrentEnrollmentPolicy(
 			next.Role, profile, next.Capabilities, next.Clearance, active,
 		); err != nil {
 			return fmt.Errorf("bootstrap roster agent %s has incompatible migration policy: %w", legacy.AgentID, err)
@@ -3681,7 +3681,7 @@ func (s *BadgerStore) reconcileAppV23BootstrapRoster(root *AppV23RootState, heig
 		}
 		if existingEnrollment != nil || existingRole != nil {
 			if existingEnrollment == nil || existingRole == nil ||
-				ValidateAppV23EnrollmentPolicy(
+				s.validateCurrentEnrollmentPolicy(
 					existingRole.Role, existingEnrollment.Profile,
 					existingEnrollment.Capabilities, existingEnrollment.Clearance,
 					existingEnrollment.Active,
@@ -3734,7 +3734,7 @@ func (s *BadgerStore) reconcileAppV23BootstrapRoster(root *AppV23RootState, heig
 			Clearance: next.Clearance, Capabilities: next.Capabilities,
 			Active: active, Revision: 1, UpdatedHeight: height,
 		}
-		if err := ValidateAppV23EnrollmentPolicy(
+		if err := s.validateCurrentEnrollmentPolicy(
 			next.Role, profile, next.Capabilities, next.Clearance, active,
 		); err != nil {
 			return fmt.Errorf("bootstrap roster agent %s has incompatible migration policy: %w", legacy.AgentID, err)
@@ -3831,6 +3831,38 @@ func (s *BadgerStore) ApproveAppV23LocalAgent(
 	expectedRevision, expectedRoleRevision uint64,
 	elevation ...*AppV23ElevationUse,
 ) error {
+	checkedRole := role
+	if !input.Active {
+		checkedRole = AppV23RoleMember
+	}
+	if err := ValidateAppV23EnrollmentPolicy(checkedRole, input.Profile, input.Capabilities, input.Clearance, input.Active); err != nil {
+		return err
+	}
+	return s.approveCurrentLocalAgent(input, role, expectedRevision, expectedRoleRevision, elevation...)
+}
+
+func (s *BadgerStore) ApproveAppV31LocalAgent(
+	input AppV23LocalEnrollment,
+	role string,
+	expectedRevision, expectedRoleRevision uint64,
+	elevation ...*AppV23ElevationUse,
+) error {
+	active, err := s.IsAppV31Active()
+	if err != nil {
+		return err
+	}
+	if !active {
+		return errors.New("app-v31 grant inspection is not active")
+	}
+	return s.approveCurrentLocalAgent(input, role, expectedRevision, expectedRoleRevision, elevation...)
+}
+
+func (s *BadgerStore) approveCurrentLocalAgent(
+	input AppV23LocalEnrollment,
+	role string,
+	expectedRevision, expectedRoleRevision uint64,
+	elevation ...*AppV23ElevationUse,
+) error {
 	if err := validateCanonicalAgentID("agent_id", input.AgentID); err != nil {
 		return err
 	}
@@ -3843,7 +3875,7 @@ func (s *BadgerStore) ApproveAppV23LocalAgent(
 	if !input.Active {
 		role = AppV23RoleMember
 	}
-	if err := ValidateAppV23EnrollmentPolicy(
+	if err := s.validateCurrentEnrollmentPolicy(
 		role, input.Profile, input.Capabilities, input.Clearance, input.Active,
 	); err != nil {
 		return err
@@ -3873,6 +3905,12 @@ func (s *BadgerStore) ApproveAppV23LocalAgent(
 			var root AppV23RootState
 			if err := appV23ReadJSON(txn, appV23RootKey(), &root); err != nil {
 				return err
+			}
+			if input.Capabilities.Has(AgentCapabilityInspectDirectGrants) {
+				if err := s.requireInspectionPolicyActorTxn(txn, root, input.ApprovedBy); err != nil {
+					return err
+				}
+				input.RootGeneration = root.Generation
 			}
 			if input.AgentID == root.PrincipalID {
 				return errors.New("CEREBRUM root enrollment is immutable")
@@ -4060,10 +4098,42 @@ func (s *BadgerStore) SetAppV23Policy(
 	height int64,
 	elevation ...*AppV23ElevationUse,
 ) error {
+	if err := ValidateAppV23Policy(role, profile, capabilities, clearance); err != nil {
+		return err
+	}
+	return s.setCurrentAgentPolicy(actorID, targetID, role, expectedProfile, profile, clearance, capabilities, expectedRoleRevision, enrollmentRevision, height, elevation...)
+}
+
+func (s *BadgerStore) SetAppV31Policy(
+	actorID, targetID, role, expectedProfile, profile string,
+	clearance uint8,
+	capabilities AgentCapabilities,
+	expectedRoleRevision, enrollmentRevision uint64,
+	height int64,
+	elevation ...*AppV23ElevationUse,
+) error {
+	active, err := s.IsAppV31Active()
+	if err != nil {
+		return err
+	}
+	if !active {
+		return errors.New("app-v31 grant inspection is not active")
+	}
+	return s.setCurrentAgentPolicy(actorID, targetID, role, expectedProfile, profile, clearance, capabilities, expectedRoleRevision, enrollmentRevision, height, elevation...)
+}
+
+func (s *BadgerStore) setCurrentAgentPolicy(
+	actorID, targetID, role, expectedProfile, profile string,
+	clearance uint8,
+	capabilities AgentCapabilities,
+	expectedRoleRevision, enrollmentRevision uint64,
+	height int64,
+	elevation ...*AppV23ElevationUse,
+) error {
 	if profile == AppV23ProfileLegacyRestricted {
 		return errors.New("legacy-restricted profile is migration-only; select a named app-v23 profile")
 	}
-	if err := ValidateAppV23Policy(role, profile, capabilities, clearance); err != nil {
+	if err := s.ValidateCurrentAgentPolicy(role, profile, capabilities, clearance); err != nil {
 		return err
 	}
 	if profile == AppV23ProfileRoot {
@@ -4086,6 +4156,11 @@ func (s *BadgerStore) SetAppV23Policy(
 			var root AppV23RootState
 			if err := appV23ReadJSON(txn, appV23RootKey(), &root); err != nil {
 				return err
+			}
+			if capabilities.Has(AgentCapabilityInspectDirectGrants) {
+				if err := s.requireInspectionPolicyActorTxn(txn, root, actorID); err != nil {
+					return err
+				}
 			}
 			if targetID == root.PrincipalID {
 				return errors.New("CEREBRUM root role is immutable")
@@ -4166,7 +4241,7 @@ func (s *BadgerStore) SetAppV23Policy(
 			}
 			enrollment.Revision++
 			enrollment.ApprovedBy = actorID
-			if actorID == root.CredentialID {
+			if actorID == root.CredentialID || capabilities.Has(AgentCapabilityInspectDirectGrants) {
 				enrollment.RootGeneration = root.Generation
 			}
 			enrollment.UpdatedHeight = height
@@ -4617,7 +4692,7 @@ func (s *BadgerStore) authorizeAppV23LocalDomainPolicy(policyID, domain string, 
 	if role == nil || role.Role != agent.Role ||
 		agent.Clearance != enrollment.Clearance ||
 		agent.Capabilities != enrollment.Capabilities ||
-		ValidateAppV23Policy(role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance) != nil {
+		s.ValidateCurrentAgentPolicy(role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance) != nil {
 		return AppV23Authorization{ExplicitDeny: true, Reason: "incompatible app-v23 role/profile state"}, nil
 	}
 	if verb >= AppV23VerbWrite && enrollment.Profile == AppV23ProfileReadOnly {
@@ -5500,7 +5575,7 @@ func (s *BadgerStore) validateAppV23StateTxn(
 				)
 			}
 			role, ok := roles[agentID]
-			if !ok || ValidateAppV23EnrollmentPolicy(
+			if !ok || s.validateCurrentEnrollmentPolicy(
 				role.Role, enrollment.Profile, enrollment.Capabilities,
 				enrollment.Clearance, enrollment.Active,
 			) != nil {

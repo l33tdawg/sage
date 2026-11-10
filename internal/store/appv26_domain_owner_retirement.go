@@ -134,7 +134,7 @@ func (s *BadgerStore) validateAppV26DomainOwnerTargetTxn(
 		return err
 	}
 	if role.AgentID != targetID ||
-		ValidateAppV23Policy(
+		s.ValidateCurrentAgentPolicy(
 			role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 		) != nil ||
 		(role.Role == AppV23RoleAdmin && enrollment.RootGeneration != root.Generation) {

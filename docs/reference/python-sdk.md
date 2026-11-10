@@ -1344,6 +1344,27 @@ Defaults to the calling agent's own ID when `agent_id` is omitted.
 
 ---
 
+#### `inspect_direct_grants()`
+
+```python
+inspect_direct_grants(agent_id: str) -> DirectGrantsSnapshot
+```
+
+Available on `SageClient` and `AsyncSageClient` (await the latter). Calls
+`GET /v1/access/grants-snapshot/{agent_id}` using the caller's signed identity.
+Requires committed app-v31 activation and an explicitly assigned direct-grant
+inspection capability; it never falls back to `list_grants` or an Admin key.
+
+The typed result validates the closed response schema, exact caller and target,
+commit height/hash and chain binding formats, complete status, row bounds,
+unique domains, and expiry against `evaluated_at`. The response is limited to
+1 MiB. Denied/unavailable responses remain errors; they never become an empty
+list. `grants=[]` is a complete per-target direct-grant observation, not a claim
+about effective access or other identities. Responses for multiple targets are
+separate observations. See the REST contract for authorization and coverage.
+
+---
+
 ### Domains
 
 #### `register_domain()`

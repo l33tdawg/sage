@@ -1,3 +1,4 @@
+import { appV31PolicyDraft, appV31PolicyChanged, appV31CapabilityIndicators, appV31InspectionDefaults, appV31InspectionNeedsRenewal } from './appv31-policy.js';
 import { FederationConnectome } from './federation-connectome.js';
 // CEREBRUM — Your SAGE Brain
 import { SSEClient } from './sse.js';
@@ -31,11 +32,8 @@ import { buildBrainDomainInventory } from './domain-inventory.js';
 import { enqueueGovernedTransfer, runWithGovernanceCooldown } from './governance-retry.js';
 import { fetchAppUpgradeStatus, submitAppUpgradePropose } from './api.js';
 import {
-    appV23PolicyDraft,
     appV23NormalizeAccessState,
-    appV23CapabilityIndicators,
     appV23NeedsHomeReapproval,
-    appV23PolicyChanged,
     appV23FederatedInboxDefaults,
     appV23FederatedInboxEnabled,
     appV23ProfileDefaults,
@@ -9051,6 +9049,7 @@ function AppV23AccessControl() {
     const requestedRemoteChainID = initialRoute.remoteChain;
     const requestedRemoteAgentID = initialRoute.remoteAgent;
     const [state, setState] = useState(null);
+    const grantInspectionSupported = state?.grant_inspection_active === true;
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [selectedID, setSelectedID] = useState(requestedLocalAgentID);
@@ -9394,17 +9393,18 @@ function AppV23AccessControl() {
         ).join('|'),
     ]);
     useEffect(() => {
-        if (selected) setDraft(appV23PolicyDraft(selected));
+        if (selected) setDraft(appV31PolicyDraft(selected, grantInspectionSupported));
     }, [
         selected?.agent_id,
         selected?.enrollment_revision,
         selected?.role_revision,
+        grantInspectionSupported,
     ]);
     useEffect(() => {
         setDisplayNameDraft(selected?.name || '');
     }, [selected?.agent_id, selected?.name]);
 
-    const policyDirty = !!selected && !!draft && appV23PolicyChanged(selected, draft);
+    const policyDirty = !!selected && !!draft && appV31PolicyChanged(selected, draft, grantInspectionSupported);
     const displayNameDirty = !!selected &&
         accessControlDisplayNameDirty(selected.name, displayNameDraft);
     const accessEditorDirty = policyDirty || displayNameDirty;
@@ -9416,7 +9416,7 @@ function AppV23AccessControl() {
         : !!activeAccessItem;
     const discardAccessEditorChanges = () => {
         const reset = discardedAccessControlDraft(
-            selected ? appV23PolicyDraft(selected) : null,
+            selected ? appV31PolicyDraft(selected, grantInspectionSupported) : null,
             selected?.name || '',
         );
         setDraft(reset.draft);
@@ -10131,10 +10131,11 @@ function AppV23AccessControl() {
     const legacyHomeReapproval = legacyProfileNeedsReview && homeReapproval;
     const targetConsentReady = (!selected?.needs_approval && !homeReapproval) || selected?.local_key_available;
     const adminLocalReady = draft?.role !== 'admin' || selected?.local_key_available;
-    const policyCommitNeeded = !!selected?.needs_approval || homeReapproval || policyDirty;
+    const inspectionRenewalNeeded = appV31InspectionNeedsRenewal(selected, draft, grantInspectionSupported);
+    const policyCommitNeeded = !!selected?.needs_approval || homeReapproval || policyDirty || inspectionRenewalNeeded;
     const saveDisabled = saving || !mutationReady || !targetConsentReady ||
         !adminLocalReady || !draft || !draftProfileSelectable || !policyCommitNeeded;
-    const capabilityIndicators = appV23CapabilityIndicators(draft || {});
+    const capabilityIndicators = appV31CapabilityIndicators(draft || {}, grantInspectionSupported);
     const federatedInboxEnabled = appV23FederatedInboxEnabled(draft?.capabilities);
     const selectLocalAgent = async (agentID, trigger = null) => {
         if (saving || renameBusy || agentID === selectedID) return;
@@ -10466,6 +10467,17 @@ function AppV23AccessControl() {
                             </div>
                         </div>
 
+                        ${draftProfileSelectable && grantInspectionSupported && html`<div class="v23-control-block">
+                            <label class="v23-federated-inbox-toggle">
+                                <span><strong>Inspect direct grants</strong>
+                                    <small>Read local grant metadata for other agents. This permission does not allow memory reads, grants, or other writes. Changing the role or operating mode clears this selection.</small>
+                                    ${inspectionRenewalNeeded && html`<small>Inspection is suspended after a Root change. Renew this permission to use it again; ordinary agent access is unchanged.</small>`}</span>
+                                <input type="checkbox" role="switch" aria-label="Inspect direct grants"
+                                    checked=${(draft.capabilities & 32) !== 0} disabled=${saving}
+                                    onChange=${event => mutateDraft(appV31InspectionDefaults(event.target.checked, draft.capabilities, grantInspectionSupported))} />
+                            </label>
+                        </div>`}
+
                         ${draftProfileSelectable && html`<div class="v23-control-block">
                             <div class="v23-control-label" id="v23-federated-inbox-label">Federated inbox <span>Independent emergency block</span></div>
                             <label class="v23-federated-inbox-toggle" aria-labelledby="v23-federated-inbox-label">
@@ -10536,7 +10548,9 @@ function AppV23AccessControl() {
                                         ? 'Admin promotion requires this machine’s exact agent key'
                                         : !policyCommitNeeded
                                             ? 'No unsaved policy changes'
-                                            : 'Unsaved changes · applied only after consensus commit'}</span>
+                                            : inspectionRenewalNeeded && !policyDirty
+                                                ? 'Inspection renewal required · applied only after consensus commit'
+                                                : 'Unsaved changes · applied only after consensus commit'}</span>
                             <button class="btn btn-primary" disabled=${saveDisabled} onClick=${savePolicy}>
                                 ${saving
                                     ? 'Committing…'
@@ -10548,7 +10562,7 @@ function AppV23AccessControl() {
                                         ? 'Approve & activate'
                                         : homeReapproval
                                             ? 'Consent & activate'
-                                            : 'Save policy'}
+                                            : inspectionRenewalNeeded ? 'Renew inspection' : 'Save policy'}
                             </button>
                             ${selected.needs_approval && !selected.enrollment_active && html`
                                 <button class="btn btn-danger" disabled=${rejectBusy || saving || !mutationReady}

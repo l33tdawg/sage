@@ -137,7 +137,11 @@ func (app *SageApp) agentCapabilitiesAt(agentID string, height int64) (store.Age
 	if agent == nil {
 		return 0, fmt.Errorf("app-v22 capability lookup for agent %s returned no record", agentID)
 	}
-	if !agent.Capabilities.Valid() {
+	checkedCapabilities := agent.Capabilities
+	if app.postAppV31Fork(height) {
+		checkedCapabilities &^= store.AgentCapabilityInspectDirectGrants
+	}
+	if !checkedCapabilities.Valid() {
 		return 0, fmt.Errorf(
 			"app-v22 capability lookup for agent %s contains unknown bits 0x%x",
 			agentID,

@@ -1415,6 +1415,45 @@ List active grants for an agent. Cross-checks BadgerDB (chain truth) against the
 
 ---
 
+### `GET /v1/access/grants-snapshot/{agent_id}`
+
+The app-v31 direct-grant inspection surface returns a complete bounded observation
+for one canonical local agent ID. It requires an authenticated active ordinary
+agent with **explicitly assigned** `AgentCapabilityInspectDirectGrants` (bit 5),
+a valid current policy, and approval in the current Root generation. Admin or
+read-all status does not imply this capability. Current and historical Root
+credentials cannot act as callers or targets. No permission is assigned by this
+read; existing grant-list and mutation routes keep their separate authorization.
+
+Authorization, target metadata, grants, and the persisted commit tuple are read
+from one Badger snapshot. Speculative transaction handles and activation markers
+beyond the published height are refused. Grant rows come directly from canonical
+state, including canonical level, grantor, and expiry, without consulting the
+SQL mirror (`internal/store/grant_inspection_snapshot.go`).
+
+HTTP 200 contains `schema: "sage.direct-grants-snapshot.v1"`, `caller_id`,
+`target_agent_id`, `chain_domain`, `height`, `app_hash`, `root_principal_id`,
+`root_generation`, `evaluated_at`, `coverage: "direct-grants-for-target"`,
+`complete: true`, and `grants`. Each grant contains `domain`, `grantee_id`,
+`granter_id`, `access_level`, and `expires_at` (Unix seconds; zero is unbounded).
+Expired rows are excluded at the stated server evaluation time. `chain_domain`
+is the canonical app-v20 chain binding, not a CometBFT chain-name string.
+
+An empty `grants` array establishes absence of unexpired **direct grants** for
+that target at this observation. It does not establish effective access: domain
+ownership, role, groups, and inherited permissions are outside this response.
+Different targets produce separate snapshots, not an atomic directory or a
+complete list of orphan grants. The height/hash identify the source commit;
+this response is not a signed proof of inclusion or a mutation receipt.
+
+Query parameters are rejected. The reader limits scanned grant keys to 16,384,
+matching rows to 1,024, source bytes and response bytes to 1 MiB, and the read to
+two seconds. Invalid input returns 400, absent authority or inactive app-v31
+returns 403, and unavailable, malformed, oversized, or incomplete state returns
+503 rather than an empty success. Responses use `Cache-Control: private, no-store`.
+
+---
+
 ## 4. Domains
 
 ### `POST /v1/domain/register`

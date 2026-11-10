@@ -75,8 +75,8 @@ func TestStateSyncAuthorizationRejectsIncompleteJoinBindings(t *testing.T) {
 		{name: "chain", mutate: func(c *JoinAuthorizationConfig) { c.ChainID = "../escape" }, want: "chain ID"},
 		{name: "joiner", mutate: func(c *JoinAuthorizationConfig) { c.JoiningNodeID = "short" }, want: "joining node ID"},
 		{name: "validator key", mutate: func(c *JoinAuthorizationConfig) { c.ValidatorPublicKey = []byte("short") }, want: "Ed25519"},
-		{name: "version below supported set", mutate: func(c *JoinAuthorizationConfig) { c.AppVersion = 19 }, want: "version (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, or 30)"},
-		{name: "version above supported set", mutate: func(c *JoinAuthorizationConfig) { c.AppVersion = 31 }, want: "version (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, or 30)"},
+		{name: "version below supported set", mutate: func(c *JoinAuthorizationConfig) { c.AppVersion = 19 }, want: "version (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, or 31)"},
+		{name: "version above supported set", mutate: func(c *JoinAuthorizationConfig) { c.AppVersion = 32 }, want: "version (20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, or 31)"},
 		{name: "expiry", mutate: func(c *JoinAuthorizationConfig) { c.ExpiresAt = now }, want: "expired"},
 		{name: "floor", mutate: func(c *JoinAuthorizationConfig) { c.SnapshotHeightFloor = 0 }, want: "height floor"},
 		{name: "provider not validator", mutate: func(c *JoinAuthorizationConfig) {
@@ -105,9 +105,9 @@ func TestStateSyncAuthorizationRejectsIncompleteJoinBindings(t *testing.T) {
 	}
 }
 
-func TestStateSyncAuthorizationSupportsV20ThroughV30Exactly(t *testing.T) {
+func TestStateSyncAuthorizationSupportsV20ThroughV31Exactly(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
-	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30} {
+	for _, version := range []uint64{20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31} {
 		t.Run(fmt.Sprintf("app-v%d", version), func(t *testing.T) {
 			join, servingProfile, receivingProfile := authorizationTestConfig(now)
 			join.AppVersion = version
@@ -116,7 +116,7 @@ func TestStateSyncAuthorizationSupportsV20ThroughV30Exactly(t *testing.T) {
 			require.NoError(t, err)
 			receiving, err := NewReceivingAuthorization(join, receivingProfile, now)
 			require.NoError(t, err)
-			join.AppVersion = 31
+			join.AppVersion = 32
 			assert.Equal(t, version, serving.AppVersion())
 			assert.Equal(t, version, receiving.AppVersion())
 			assert.ErrorContains(t, serving.ValidateAt(join.ExpiresAt), "expired")
@@ -135,8 +135,9 @@ func TestStateSyncAuthorizationSupportsV20ThroughV30Exactly(t *testing.T) {
 	assert.True(t, SupportsAppVersion(28))
 	assert.True(t, SupportsAppVersion(29))
 	assert.True(t, SupportsAppVersion(30))
-	assert.False(t, SupportsAppVersion(31))
-	assert.Equal(t, "20, 21, 22, 23, 24, 25, 26, 27, 28, 29, or 30", SupportedAppVersionList())
+	assert.True(t, SupportsAppVersion(31))
+	assert.False(t, SupportsAppVersion(32))
+	assert.Equal(t, "20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, or 31", SupportedAppVersionList())
 }
 
 func TestStateSyncAuthorizationV30PreservesJoinGuards(t *testing.T) {

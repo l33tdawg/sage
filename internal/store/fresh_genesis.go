@@ -17,7 +17,7 @@ import (
 const (
 	FreshGenesisVersion       uint8  = 1
 	FreshGenesisMinAppVersion uint64 = 24
-	FreshGenesisMaxAppVersion uint64 = 30
+	FreshGenesisMaxAppVersion uint64 = 31
 	FreshGenesisMaxValidators        = 256
 )
 
@@ -85,13 +85,19 @@ func ValidateFreshGenesisActivation(input FreshGenesisActivation) error {
 		if agent.AgentID == input.RootID || !ValidAppV23Profile(agent.Profile) || agent.Profile == AppV23ProfileRoot || agent.Profile == AppV23ProfileLegacyRestricted {
 			return errors.New("fresh genesis agent requires a distinct ordinary profile")
 		}
-		if agent.Clearance > 4 || !AgentCapabilities(agent.Capabilities).Valid() {
+		baseCapabilities := AgentCapabilities(agent.Capabilities)
+		validatePolicy := ValidateAppV23Policy
+		if input.AppVersion >= 31 {
+			baseCapabilities &^= AgentCapabilityInspectDirectGrants
+			validatePolicy = ValidateAppV31Policy
+		}
+		if agent.Clearance > 4 || !baseCapabilities.Valid() {
 			return errors.New("invalid fresh genesis agent clearance or capabilities")
 		}
-		if agent.Profile == AppV23ProfileCompanion && agent.Capabilities != 15 {
+		if agent.Profile == AppV23ProfileCompanion && baseCapabilities != 15 {
 			return errors.New("fresh genesis Companion must use capability mask 15")
 		}
-		if err := ValidateAppV23EnrollmentPolicy(AppV23RoleMember, agent.Profile, AgentCapabilities(agent.Capabilities), agent.Clearance, true); err != nil {
+		if err := validatePolicy(AppV23RoleMember, agent.Profile, AgentCapabilities(agent.Capabilities), agent.Clearance); err != nil {
 			return err
 		}
 		if agent.Profile == AppV23ProfileReadOnly {

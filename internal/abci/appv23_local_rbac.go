@@ -396,7 +396,7 @@ func (app *SageApp) appV23Actor(agentID string) (*store.AppV23RootState, *store.
 		return nil, nil, nil, err
 	}
 	if role == nil ||
-		store.ValidateAppV23Policy(role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance) != nil {
+		app.badgerStore.ValidateCurrentAgentPolicy(role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance) != nil {
 		return root, enrollment, nil, errors.New("incompatible app-v23 role/profile state")
 	}
 	if policyID != root.PrincipalID && role.Role == store.AppV23RoleAdmin &&
@@ -764,7 +764,7 @@ func (app *SageApp) processLocalAgentApprove(parsedTx *tx.ParsedTx, height int64
 	capabilities := store.AgentCapabilities(approval.Capabilities)
 	if approval.Profile == store.AppV23ProfileRoot ||
 		approval.Profile == store.AppV23ProfileLegacyRestricted ||
-		store.ValidateAppV23Policy(approval.Role, approval.Profile, capabilities, approval.Clearance) != nil {
+		app.validateAgentPolicyAt(height, approval.Role, approval.Profile, capabilities, approval.Clearance) != nil {
 		return appV23ControlDenied()
 	}
 	if (!approval.Active || approval.Profile == store.AppV23ProfileReadOnly) &&
@@ -801,7 +801,11 @@ func (app *SageApp) processLocalAgentApprove(parsedTx *tx.ParsedTx, height int64
 	if err != nil {
 		return appV23ControlDenied()
 	}
-	if err := app.badgerStore.ApproveAppV23LocalAgent(
+	approve := app.badgerStore.ApproveAppV23LocalAgent
+	if app.postAppV31Fork(height) {
+		approve = app.badgerStore.ApproveAppV31LocalAgent
+	}
+	if err := approve(
 		enrollment, approval.Role, approval.ExpectedRevision, approval.ExpectedRoleRevision,
 		elevation,
 	); err != nil {
@@ -818,7 +822,7 @@ func (app *SageApp) processAgentRoleChangeV23(parsedTx *tx.ParsedTx, height int6
 	if change == nil ||
 		change.Profile == store.AppV23ProfileRoot ||
 		change.Profile == store.AppV23ProfileLegacyRestricted ||
-		store.ValidateAppV23Policy(
+		app.validateAgentPolicyAt(height,
 			change.Role, change.Profile, store.AgentCapabilities(change.Capabilities), change.Clearance,
 		) != nil {
 		return &abcitypes.ExecTxResult{Code: 111, Log: "invalid app-v23 role change payload"}
@@ -853,7 +857,11 @@ func (app *SageApp) processAgentRoleChangeV23(parsedTx *tx.ParsedTx, height int6
 	if err != nil {
 		return appV23ControlDenied()
 	}
-	if err := app.badgerStore.SetAppV23Policy(
+	setPolicy := app.badgerStore.SetAppV23Policy
+	if app.postAppV31Fork(height) {
+		setPolicy = app.badgerStore.SetAppV31Policy
+	}
+	if err := setPolicy(
 		actorID, change.AgentID, change.Role, change.ExpectedProfile, change.Profile,
 		change.Clearance, store.AgentCapabilities(change.Capabilities),
 		change.ExpectedRevision, change.EnrollmentRevision, height,

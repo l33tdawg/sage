@@ -54,11 +54,11 @@ func TestDashboardUpgradeStatusReportsCeilingsAndExplicitVoteRequirement(t *test
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 	require.Equal(t, float64(29), body["next_target_app_version"], "next rung is current+1")
 	require.Equal(t, float64(29), body["auto_vote_ceiling"])
-	require.Equal(t, float64(30), body["compiled_app_version"])
+	require.Equal(t, float64(31), body["compiled_app_version"])
 	require.Equal(t, false, body["explicit_vote_required_now"],
 		"app-v29 is within the auto-vote ceiling")
 	require.Equal(t, true, body["dormant_below_ceiling_gap"])
-	require.Contains(t, body["dormant_note"], "app-v30 is compiled but dormant")
+	require.Contains(t, body["dormant_note"], "app-v31 is compiled but dormant")
 	require.Contains(t, body["dormant_note"], "readiness ceiling (app-v29)")
 
 	aboveCeiling := uint64(30)

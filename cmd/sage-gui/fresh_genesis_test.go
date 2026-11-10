@@ -69,7 +69,7 @@ func TestFreshPersonalProductionGenesisStartsAtLatest(t *testing.T) {
 }
 
 func TestInitGenesisProducesSignedMultiValidatorArtifact(t *testing.T) {
-	for _, target := range []string{"latest", "28", "29", "30"} {
+	for _, target := range []string{"latest", "28", "29", "30", "31"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
 			rootPath := filepath.Join(dir, "root.key")
@@ -111,6 +111,7 @@ func TestInitGenesisProducesSignedMultiValidatorArtifact(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, appV23AgentIDForKey(root), manifest.RootID)
 			require.Equal(t, appV23AgentIDForKey(agent), manifest.Agent.AgentID)
+			require.Zero(t, manifest.Agent.Capabilities&uint32(store.AgentCapabilityInspectDirectGrants), "fresh artifact generation never automatically assigns inspection")
 			require.True(t, sort.SliceIsSorted(manifest.Validators, func(i, j int) bool { return manifest.Validators[i].ValidatorID < manifest.Validators[j].ValidatorID }))
 			before, err := os.ReadFile(output)
 			require.NoError(t, err)
@@ -123,7 +124,7 @@ func TestInitGenesisProducesSignedMultiValidatorArtifact(t *testing.T) {
 }
 
 func TestFreshGenesisVersionAndInputsFailClosed(t *testing.T) {
-	for _, invalid := range []string{"", "023", "23", "031", "31", "latest ", "-1"} {
+	for _, invalid := range []string{"", "023", "23", "031", "32", "latest ", "-1"} {
 		_, err := freshGenesisVersion(invalid)
 		require.Error(t, err, invalid)
 	}

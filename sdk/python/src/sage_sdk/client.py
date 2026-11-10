@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 import httpx
 
+from sage_sdk.grant_inspection import DirectGrantsSnapshot, inspection_agent_id, inspection_response, bounded_inspection_get
 from sage_sdk.auth import AgentIdentity
 from sage_sdk.exceptions import SageAPIError, SageAuthError, SageNotFoundError
 from sage_sdk.models import (
@@ -1174,6 +1175,17 @@ class SageClient:
         body = {"grantee_id": grantee_id, "domain": domain, "reason": reason}
         resp = self._request("POST", "/v1/access/revoke", json=body)
         return resp.json()
+
+    def inspect_direct_grants(self, agent_id: str) -> DirectGrantsSnapshot:
+        """Read one committed target snapshot using an explicitly assigned inspection capability.
+
+        App-v31 is required. Responses for different targets are separate
+        observations, not a global or atomic directory snapshot.
+        """
+        target = inspection_agent_id(agent_id)
+        response = bounded_inspection_get(self._client, self._identity, target)
+        self._handle_response(response)
+        return inspection_response(response, self._identity.agent_id, target)
 
     def list_grants(self, agent_id: str | None = None) -> list[dict]:
         """List active access grants for an agent."""

@@ -6689,11 +6689,8 @@ func (s *BadgerStore) GetRegisteredAgentCapabilities(agentID string) (AgentCapab
 	if agent == nil {
 		return 0, false, nil
 	}
-	if !agent.Capabilities.Valid() {
-		return 0, true, fmt.Errorf(
-			"unknown agent capability bits: 0x%x",
-			uint32(agent.Capabilities&^KnownAgentCapabilities),
-		)
+	if err := s.validateCurrentCapabilities(agent.Capabilities); err != nil {
+		return 0, true, err
 	}
 	return agent.Capabilities, true, nil
 }

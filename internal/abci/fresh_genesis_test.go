@@ -63,7 +63,7 @@ func freshGenesisRequest(t *testing.T, chain string, manifest FreshGenesisManife
 }
 
 func TestFreshGenesisRulesHashAndRecovery(t *testing.T) {
-	for _, version := range []uint64{24, 25, 26, 27, 28, 29, 30} {
+	for _, version := range []uint64{24, 25, 26, 27, 28, 29, 30, 31} {
 		for _, profile := range []struct {
 			count     int
 			companion bool
@@ -83,6 +83,7 @@ func TestFreshGenesisRulesHashAndRecovery(t *testing.T) {
 				require.Equal(t, version >= 28, app.postAppV28Fork(1))
 				require.Equal(t, version >= 29, app.postAppV29Fork(1))
 				require.Equal(t, version >= 30, app.IsAppV30ActiveForNextTx())
+				require.Equal(t, version >= 31, app.IsAppV31ActiveForNextTx())
 				for v := uint64(2); v <= version; v++ {
 					record, err := app.badgerStore.GetAppliedUpgrade(fmt.Sprintf("app-v%d", v))
 					require.NoError(t, err)
@@ -435,7 +436,7 @@ func TestFreshGenesisSignaturesBindAllInitialAuthority(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
-	for _, version := range []uint64{0, 23, 31} {
+	for _, version := range []uint64{0, 23, 32} {
 		m := manifest
 		m.AppVersion = version
 		app := setupTestApp(t)

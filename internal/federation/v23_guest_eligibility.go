@@ -58,7 +58,7 @@ func (m *Manager) localFederatedGuestAgentEligible(agentID string) (bool, error)
 		return false, errors.New("app-v23 agent identity projection is inconsistent")
 	}
 	if enrollment.Profile == store.AppV23ProfileRoot ||
-		store.ValidateAppV23Policy(
+		m.badger.ValidateCurrentAgentPolicy(
 			role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 		) != nil {
 		return false, nil

@@ -43,7 +43,7 @@ treated as frozen thereafter (`internal/contentvalidator/registry.go`):
   A nil receiver or empty registry is pass-through. (`registry.go:109`)
 
 The routing key is read from the submission body by `parseOutcomeClass`
-(`internal/abci/app.go:5343-5358`), which decodes ONLY the `outcome_class` field and
+(`internal/abci/app.go:5401-5416`), which decodes ONLY the `outcome_class` field and
 ignores every sibling.
 
 ### When enforcement is actually live
@@ -59,7 +59,7 @@ toggle. Current code makes this a bounded consensus window: the gate is live aft
 app-v7 activation and turns off again after app-v14 activation
 (`internal/abci/app.go:704-729`). A node in the live window with NO registry stays
 bootable (a generic-only fleet is valid) but emits an advisory — see
-`ContentValidationEnforcementWarning` (`app.go:2151-2178`). A MIXED fleet
+`ContentValidationEnforcementWarning` (`app.go:2153-2180`). A MIXED fleet
 (some nodes with a registry, some without) during the live window is the
 real hazard: it forks `AppHash`. Every validator in a fleet must run the SAME
 registry.

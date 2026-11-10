@@ -336,6 +336,6 @@ func (m *Manager) localAdminSignerActive(agentID string) bool {
 		agent.Role == role.Role &&
 		agent.Clearance == enrollment.Clearance &&
 		agent.Capabilities == enrollment.Capabilities &&
-		store.ValidateAppV23Policy(role.Role, enrollment.Profile,
+		m.badger.ValidateCurrentAgentPolicy(role.Role, enrollment.Profile,
 			enrollment.Capabilities, enrollment.Clearance) == nil
 }

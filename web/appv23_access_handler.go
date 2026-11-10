@@ -30,23 +30,24 @@ const (
 )
 
 type appV23AgentAccessView struct {
-	AgentID              string `json:"agent_id"`
-	Name                 string `json:"name,omitempty"`
-	RegisteredName       string `json:"registered_name,omitempty"`
-	Avatar               string `json:"avatar,omitempty"`
-	Status               string `json:"status,omitempty"`
-	Provider             string `json:"provider,omitempty"`
-	Role                 string `json:"role"`
-	Profile              string `json:"profile,omitempty"`
-	HomeDomain           string `json:"home_domain,omitempty"`
-	Clearance            uint8  `json:"clearance"`
-	Capabilities         uint32 `json:"capabilities"`
-	EnrollmentActive     bool   `json:"enrollment_active"`
-	EnrollmentRevision   uint64 `json:"enrollment_revision"`
-	RoleRevision         uint64 `json:"role_revision"`
-	NeedsApproval        bool   `json:"needs_approval"`
-	NeedsReauthorization bool   `json:"needs_reauthorization"`
-	LocalKeyAvailable    bool   `json:"local_key_available"`
+	AgentID                        string `json:"agent_id"`
+	Name                           string `json:"name,omitempty"`
+	RegisteredName                 string `json:"registered_name,omitempty"`
+	Avatar                         string `json:"avatar,omitempty"`
+	Status                         string `json:"status,omitempty"`
+	Provider                       string `json:"provider,omitempty"`
+	Role                           string `json:"role"`
+	Profile                        string `json:"profile,omitempty"`
+	HomeDomain                     string `json:"home_domain,omitempty"`
+	Clearance                      uint8  `json:"clearance"`
+	Capabilities                   uint32 `json:"capabilities"`
+	EnrollmentActive               bool   `json:"enrollment_active"`
+	EnrollmentRevision             uint64 `json:"enrollment_revision"`
+	RoleRevision                   uint64 `json:"role_revision"`
+	NeedsApproval                  bool   `json:"needs_approval"`
+	NeedsReauthorization           bool   `json:"needs_reauthorization"`
+	InspectionNeedsReauthorization bool   `json:"inspection_needs_reauthorization,omitempty"`
+	LocalKeyAvailable              bool   `json:"local_key_available"`
 }
 
 type appV23BrokerView struct {
@@ -594,7 +595,7 @@ func (h *DashboardHandler) appV23ResolveControlActor(r *http.Request) (*appV23Co
 	if enrollment == nil || role == nil || !enrollment.Active ||
 		role.Role != store.AppV23RoleAdmin ||
 		enrollment.RootGeneration != root.Generation ||
-		store.ValidateAppV23Policy(
+		h.BadgerStore.ValidateCurrentAgentPolicy(
 			role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 		) != nil {
 		return nil, "current_local_admin_required",
@@ -968,6 +969,9 @@ func (h *DashboardHandler) handleAppV23AccessState(agentStore store.AgentStore) 
 				view.Role = role.Role
 				view.RoleRevision = role.Revision
 			}
+			view.InspectionNeedsReauthorization = enrollment != nil && enrollment.Active &&
+				enrollment.Capabilities.Has(store.AgentCapabilityInspectDirectGrants) &&
+				root != nil && enrollment.RootGeneration != root.Generation
 			view.NeedsReauthorization = enrollment != nil && enrollment.Active &&
 				role != nil && role.Role == store.AppV23RoleAdmin &&
 				root != nil && enrollment.RootGeneration != root.Generation
@@ -1034,14 +1038,21 @@ func (h *DashboardHandler) handleAppV23AccessState(agentStore store.AgentStore) 
 				}
 			}
 		}
+		inspectionActive, inspectionErr := h.BadgerStore.IsAppV31Active()
+		if inspectionErr != nil {
+			writeAppV23AccessError(w, http.StatusServiceUnavailable, "inspection_state_unavailable",
+				"Could not verify the grant-inspection protocol state.")
+			return
+		}
 		writeJSONResp(w, http.StatusOK, map[string]any{
-			"ok":                     true,
-			"active":                 h.appV23IsActive(),
-			"group_authority_active": h.appV26IsActive(),
-			"root":                   root,
-			"broker":                 broker,
-			"agents":                 views,
-			"groups":                 groupViews,
+			"grant_inspection_active": inspectionActive,
+			"ok":                      true,
+			"active":                  h.appV23IsActive(),
+			"group_authority_active":  h.appV26IsActive(),
+			"root":                    root,
+			"broker":                  broker,
+			"agents":                  views,
+			"groups":                  groupViews,
 			"profiles": []string{
 				store.AppV23ProfileStandard,
 				store.AppV23ProfileCompanion,
@@ -1090,7 +1101,7 @@ func (h *DashboardHandler) handleAppV23AgentPolicy() http.HandlerFunc {
 			return
 		}
 		capabilities := store.AgentCapabilities(req.Capabilities)
-		if err := store.ValidateAppV23Policy(req.Role, req.Profile, capabilities, req.Clearance); err != nil {
+		if err := h.BadgerStore.ValidateCurrentAgentPolicy(req.Role, req.Profile, capabilities, req.Clearance); err != nil {
 			code := "invalid_policy"
 			if req.Role == store.AppV23RoleAdmin {
 				code = "invalid_admin_policy"

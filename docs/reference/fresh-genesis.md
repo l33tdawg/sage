@@ -1,6 +1,6 @@
 # Fresh chains at the latest supported app version
 
-This is the fresh-genesis implementation in the app-v30 stack. A new, empty
+This is the fresh-genesis implementation with compiled support through app-v31. A new, empty
 SAGE chain starts with the selected app rules from block 1. It does not create
 an older chain and walk through historical upgrade proposals. Personal
 initialization selects the supported ceiling through
@@ -24,13 +24,15 @@ keys and history and use normal startup or recovery.
 |-----------|---------------------------|---------|
 | Omitted or `--app-version latest` | 29 | The supported, unattended ceiling. |
 | `--app-version 30` | 30 | Explicit use of the compiled app-v30 rules. App-v30 remains dormant for automatic upgrades. |
-| Another explicit integer | 24–30 | A compiled fresh-genesis version; values outside this range are rejected. |
+| `--app-version 31` | 31 | Explicit use of the compiled direct-grant inspection rules; activation assigns no inspection permission. |
+| Another explicit integer | 24–31 | A compiled fresh-genesis version; values outside this range are rejected. |
 
 `freshGenesisVersion` (`cmd/sage-gui/fresh_genesis.go:27`) resolves `latest`
-through `MaxSupportedAppVersion` (`internal/abci/app.go:2849`). The separate
-`MaxCompiledAppVersion` (`internal/abci/app.go:2856`) is 30. Creating an explicit
-app-v30 genesis does not raise the automatic upgrade ceiling or activate
-app-v30 on any existing chain.
+through `MaxSupportedAppVersion` (`internal/abci/app.go:2869`). The separate
+`MaxCompiledAppVersion` (`internal/abci/app.go:2876`) is 31. Creating an explicit
+app-v30 or app-v31 genesis does not raise the automatic upgrade ceiling or activate
+either version on an existing chain. [App-v31 grant inspection](concepts/app-v31-grant-inspection.md)
+requires an explicitly assigned capability; selecting the version does not grant it.
 
 ## Create one artifact for the complete validator set
 
@@ -134,8 +136,8 @@ the platform's sync semantics. Windows initialization is explicitly unsupported;
 a receipt copied there is refused rather than validated with weaker checks.
 
 `latest` continues to select the release-supported app version (currently 29).
-An explicit compiled target 30 is a separate input; this initialization route
-does not establish app-30 shipping or activation acceptance.
+An explicit compiled target 30 or 31 is a separate input; this initialization route
+does not establish shipping or activation acceptance for either version.
 
 ## What consensus verifies
 
@@ -147,11 +149,11 @@ in `VerifyFreshGenesisManifest` (`internal/abci/fresh_genesis.go:76`). At
 version, initial height and actual CometBFT validator keys/powers against that
 manifest.
 
-`BootstrapFreshGenesis` (`internal/store/fresh_genesis.go:132`) atomically
+`BootstrapFreshGenesis` (`internal/store/fresh_genesis.go:138`) atomically
 creates the origin's authority and index prerequisites. An exact uncommitted
 genesis replay is permitted; a different manifest or a contaminated store is
 rejected. `ValidateFreshGenesisLineage`
-(`internal/store/fresh_genesis.go:299`) rejects synthetic historical upgrade
+(`internal/store/fresh_genesis.go:305`) rejects synthetic historical upgrade
 records through the origin version. The origin is preserved across restart
 and recovery; it is not a substitute upgrade ledger.
 

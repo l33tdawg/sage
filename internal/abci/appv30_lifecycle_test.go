@@ -14,7 +14,7 @@ import (
 
 func TestAppV30StrictBoundaryAndDormantAutoVote(t *testing.T) {
 	require.Equal(t, tx.CanonicalUpgradeName(30), appV30UpgradeName)
-	require.Equal(t, uint64(30), MaxCompiledAppVersion())
+	require.Equal(t, uint64(31), MaxCompiledAppVersion())
 	require.Equal(t, uint64(29), MaxSupportedAppVersion())
 
 	app := setupTestApp(t)

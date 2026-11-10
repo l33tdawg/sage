@@ -428,7 +428,7 @@ func (h *DashboardHandler) resolveAgentRBAC(r *http.Request) ([]string, bool) {
 		}
 		role, err := h.BadgerStore.GetAppV23Role(policyID)
 		if err != nil || role == nil ||
-			store.ValidateAppV23Policy(
+			h.BadgerStore.ValidateCurrentAgentPolicy(
 				role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 			) != nil ||
 			(policyID != root.PrincipalID && role.Role == store.AppV23RoleAdmin &&
@@ -959,7 +959,7 @@ func (h *DashboardHandler) isActiveRegisteredDashboardAgent(ctx context.Context,
 	default:
 		return false
 	}
-	if store.ValidateAppV23Policy(
+	if h.BadgerStore.ValidateCurrentAgentPolicy(
 		role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 	) != nil {
 		return false

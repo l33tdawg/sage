@@ -721,7 +721,7 @@ func (s *Server) callerIsOperatorOrAdmin(ctx context.Context, callerID string) b
 		role, err := s.badgerStore.GetAppV23Role(callerID)
 		return err == nil && role != nil &&
 			role.Role == store.AppV23RoleAdmin &&
-			store.ValidateAppV23Policy(
+			s.badgerStore.ValidateCurrentAgentPolicy(
 				role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 			) == nil
 	}

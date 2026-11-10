@@ -426,7 +426,7 @@ func (s *Server) appV23ActiveOrdinaryAgent(agentID string) (bool, error) {
 	if enrollment == nil || role == nil || !enrollment.Active ||
 		enrollment.AgentID != agentID || role.AgentID != agentID ||
 		enrollment.Profile == store.AppV23ProfileRoot ||
-		store.ValidateAppV23Policy(
+		s.badgerStore.ValidateCurrentAgentPolicy(
 			role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 		) != nil {
 		return false, nil
@@ -568,7 +568,7 @@ func (s *Server) embedAppV23LocalElevation(parsed *tx.ParsedTx) error {
 		return nil
 	}
 	if enrollment.RootGeneration != root.Generation ||
-		store.ValidateAppV23Policy(
+		s.badgerStore.ValidateCurrentAgentPolicy(
 			role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 		) != nil {
 		return fmt.Errorf("app-v23 elevation: Admin enrollment is stale or invalid")
@@ -873,6 +873,7 @@ func (s *Server) setupRouter() chi.Router {
 		r.Post("/v1/access/grant", s.handleAccessGrant)
 		r.Post("/v1/access/revoke", s.handleAccessRevoke)
 		r.Get("/v1/access/grants/{agent_id}", s.handleListGrants)
+		r.Get("/v1/access/grants-snapshot/{agent_id}", s.handleDirectGrantsSnapshot)
 		r.Post("/v1/domain/register", s.handleDomainRegister)
 		r.Post("/v1/domain/reassign", s.handleDomainReassign)
 		r.Get("/v1/domain/{name}", s.handleGetDomain)
@@ -1033,7 +1034,7 @@ func (s *Server) appV23LocalAdminBoundary(next http.Handler) http.Handler {
 			return
 		}
 		if enrollment.RootGeneration != root.Generation ||
-			store.ValidateAppV23Policy(
+			s.badgerStore.ValidateCurrentAgentPolicy(
 				role.Role, enrollment.Profile, enrollment.Capabilities, enrollment.Clearance,
 			) != nil {
 			writeProblem(w, http.StatusForbidden, "Current local Admin required",

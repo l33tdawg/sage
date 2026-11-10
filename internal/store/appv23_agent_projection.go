@@ -197,7 +197,7 @@ func reconcileAppV23AgentProjections(
 			}
 			continue
 		}
-		if err := ValidateAppV23EnrollmentPolicy(
+		if err := badgerStore.validateCurrentEnrollmentPolicy(
 			role.Role,
 			enrollment.Profile,
 			enrollment.Capabilities,

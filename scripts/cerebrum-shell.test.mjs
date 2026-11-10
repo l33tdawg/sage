@@ -454,8 +454,11 @@ test('app-v23 access UI uses named policy choices and visibly separates local gr
         appSource.indexOf('function AppV23AccessControl()'),
         appSource.indexOf('function NetworkPage('),
     );
-    assert.equal((access.match(/type="checkbox"/g) || []).length, 1,
-        'only the independent federated-inbox kill switch may be editable; raw capability bits must not return as a checkbox wall');
+    assert.equal((access.match(/type="checkbox"/g) || []).length, 2,
+        'only the federated-inbox and gated grant-inspection controls may be editable; raw capability bits must not return as a checkbox wall');
+    assert.match(access, /draftProfileSelectable && grantInspectionSupported && html`[\s\S]*aria-label="Inspect direct grants"[\s\S]*appV31InspectionDefaults/);
+    assert.match(access, /grantInspectionSupported = state\?\.grant_inspection_active === true/,
+        'inspection assignment must remain unavailable before the server confirms activation');
     assert.match(access, /type="checkbox" role="switch"[\s\S]*appV23FederatedInboxDefaults/);
     assert.match(access, /role="group" aria-labelledby="v23-role-label"/);
     assert.match(access, /role="group" aria-labelledby="v23-profile-label"/);
