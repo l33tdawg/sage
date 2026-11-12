@@ -890,6 +890,8 @@ func (s *Server) setupRouter() chi.Router {
 		r.Delete("/v1/org/{org_id}/enroll-tokens/{id}", s.handleOrgEnrollTokenRevoke)
 		r.Post("/v1/org/{org_id}/policy", s.handleOrgPolicyUpdate)
 		r.Get("/v1/org/{org_id}/policy", s.handleOrgPolicyStatus)
+		r.Post("/v1/org/{org_id}/roster", s.handleOrgRosterUpdate)
+		r.Get("/v1/org/{org_id}/roster", s.handleOrgRosterStatus)
 		r.Delete("/v1/org/{org_id}/member/{agent_id}", s.handleOrgRemoveMember)
 		r.Post("/v1/org/{org_id}/clearance", s.handleOrgSetClearance)
 

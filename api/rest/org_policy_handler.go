@@ -24,6 +24,7 @@ package rest
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -87,6 +88,69 @@ func (s *Server) writeOrgPolicyHold(w http.ResponseWriter, orgID string, op orgp
 	return false
 }
 
+// orgSignerAuthority is the org signing authority resolved from the node's
+// accepted policy: its trust root, the complete rotation chain, and the signers
+// currently authorized under it.
+type orgSignerAuthority struct {
+	rootKeyID    string
+	rootKeyEpoch string
+	chain        []orgpolicy.RotationAttestation
+	signers      []orgpolicy.AuthorizedSigner
+}
+
+// resolveOrgSigners resolves the currently authorized org signers from the
+// accepted policy's trust root (pinned at enrollment) plus any presented
+// rotation attestations. It writes the HTTP error and returns false on failure.
+// Shared by policy and roster delivery so both are authorized identically.
+func resolveOrgSigners(w http.ResponseWriter, prev orgpolicy.AcceptedState, orgID string, extra []orgpolicy.RotationAttestation) (orgSignerAuthority, bool) {
+	rootKeyID := prev.RootKeyID
+	rootKeyEpoch := prev.RootKeyEpoch
+	if rootKeyID == "" {
+		rootKeyID = prev.IssuerKeyID
+		rootKeyEpoch = prev.KeyEpoch
+	}
+	if rootKeyID == prev.IssuerKeyID && (prev.RotationChainJSON == "" || prev.RotationChainJSON == "null") {
+		rootKeyEpoch = prev.KeyEpoch
+	}
+	root, err := auth.AgentIDToPublicKey(rootKeyID)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "accepted policy has an invalid issuer key")
+		return orgSignerAuthority{}, false
+	}
+	history, err := prev.RotationHistory()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "accepted policy has invalid rotation history")
+		return orgSignerAuthority{}, false
+	}
+	chain := append(append([]orgpolicy.RotationAttestation(nil), history...), extra...)
+	authorized, err := orgpolicy.AuthorizedSigners(root, orgID, rootKeyEpoch, chain, orgPolicyNow())
+	if err != nil {
+		writeJSONError(w, http.StatusForbidden, "rotation chain is not rooted at the accepted policy signer")
+		return orgSignerAuthority{}, false
+	}
+	return orgSignerAuthority{rootKeyID: rootKeyID, rootKeyEpoch: rootKeyEpoch, chain: chain, signers: authorized}, true
+}
+
+// decodeCappedJSON decodes a request body under a byte cap enforced BEFORE and
+// DURING decode (http.MaxBytesReader). An over-cap body is answered 413, any
+// other decode failure 400. It returns false after writing the error.
+func decodeCappedJSON(w http.ResponseWriter, r *http.Request, limit int64, dst any) bool {
+	if r.ContentLength > limit {
+		writeJSONError(w, http.StatusRequestEntityTooLarge, "request body exceeds the size limit")
+		return false
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(dst); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body exceeds the size limit")
+			return false
+		}
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return false
+	}
+	return true
+}
+
 // handleOrgPolicyUpdate admits a delivered policy against the accepted state.
 func (s *Server) handleOrgPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	ps := s.orgPolicyStore(r.Context())
@@ -100,8 +164,7 @@ func (s *Server) handleOrgPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req OrgPolicyUpdateRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&req); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+	if !decodeCappedJSON(w, r, orgpolicy.MaxPolicyRequestBytes, &req) {
 		return
 	}
 	if req.Policy == nil {
@@ -130,32 +193,11 @@ func (s *Server) handleOrgPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rootKeyID := prev.RootKeyID
-	rootKeyEpoch := prev.RootKeyEpoch
-	if rootKeyID == "" {
-		rootKeyID = prev.IssuerKeyID
-		rootKeyEpoch = prev.KeyEpoch
-	}
-	if rootKeyID == prev.IssuerKeyID && (prev.RotationChainJSON == "" || prev.RotationChainJSON == "null") {
-		rootKeyEpoch = prev.KeyEpoch
-	}
-	root, err := auth.AgentIDToPublicKey(rootKeyID)
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "accepted policy has an invalid issuer key")
+	authority, ok := resolveOrgSigners(w, prev, orgID, req.Attestations)
+	if !ok {
 		return
 	}
-	history, err := prev.RotationHistory()
-	if err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "accepted policy has invalid rotation history")
-		return
-	}
-	chain := append(append([]orgpolicy.RotationAttestation(nil), history...), req.Attestations...)
-	now := orgPolicyNow()
-	authorized, err := orgpolicy.AuthorizedSigners(root, orgID, rootKeyEpoch, chain, now)
-	if err != nil {
-		writeJSONError(w, http.StatusForbidden, "rotation chain is not rooted at the accepted policy signer")
-		return
-	}
+	rootKeyID, rootKeyEpoch, chain, authorized := authority.rootKeyID, authority.rootKeyEpoch, authority.chain, authority.signers
 	signer, err := orgpolicy.AuthorizedSignerForPolicy(req.Policy, authorized)
 	if err != nil {
 		writeJSONError(w, http.StatusForbidden, "policy is not signed by the org's currently authorized key/epoch")

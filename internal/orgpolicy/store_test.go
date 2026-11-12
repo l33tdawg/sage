@@ -97,10 +97,10 @@ func TestCommitFirstEnrollmentIsOneAtomicWrite(t *testing.T) {
 		t.Fatalf("expected exactly 1 atomic write, got %d", len(kv.writes))
 	}
 	keys := kv.batchKeys(0)
-	if !keys[enrollKey(out.TokenID)] || !keys[acceptedKey(out.OrgID)] {
-		t.Fatalf("single batch missing enroll+accepted keys: %v", keys)
+	if !keys[enrollKey(out.TokenID)] || !keys[acceptedKey(out.OrgID)] || !keys[bodyKey(out.OrgID)] {
+		t.Fatalf("single batch missing enroll+accepted+body keys: %v", keys)
 	}
-	if len(keys) != 2 {
+	if len(keys) != 3 {
 		t.Fatalf("batch wrote unexpected extra keys: %v", keys)
 	}
 }

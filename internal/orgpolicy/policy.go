@@ -1,6 +1,11 @@
 // Package orgpolicy implements the signed, versioned org-policy object
-// (schema "sage.org-policy.v1") that an organization's management plane
-// distributes to its enrolled SAGE nodes.
+// (schemas "sage.org-policy.v1" and "sage.org-policy.v2") that an
+// organization's management plane distributes to its enrolled SAGE nodes.
+//
+// v2 (RFC #443) fixes the meaning of PeerAllowList: every entry is an enrollee
+// agent public key as 64 lowercase hex characters, never a chain id. A v1
+// policy still verifies byte-for-byte, but its allow-list grants no peering
+// eligibility (see AllowsPeer).
 //
 // INVARIANT (control plane != data plane). A policy signs ADMISSION, RETENTION
 // and TOPOLOGY configuration only — which judge model+checks everyone pins, who
@@ -34,8 +39,12 @@ import (
 )
 
 const (
-	// SchemaID is the wire/semantic schema identifier bound into every signature.
+	// SchemaID is the v1 wire/semantic schema identifier bound into every
+	// signature. v1 PeerAllowList entries are free-form strings.
 	SchemaID = "sage.org-policy.v1"
+
+	// SchemaIDV2 binds PeerAllowList to enrollee agent keys (64 lowercase hex).
+	SchemaIDV2 = "sage.org-policy.v2"
 
 	// domainSep domain-separates org-policy signatures from every other ed25519
 	// signature in the system (journal entries, federation requests, origin sigs,
@@ -44,7 +53,14 @@ const (
 
 	// maxCanonicalBytes bounds one policy's canonical form, enforced fail-closed at
 	// Sign and Verify so an over-size object can neither be authored nor admitted.
-	maxCanonicalBytes = 16 * 1024
+	// 96 KiB holds a full v2 allow-list (1024 x 64 hex = 70,016 B canonical with
+	// the rest of a typical policy) with headroom (RFC #443).
+	maxCanonicalBytes = 96 * 1024
+
+	// MaxPolicyRequestBytes caps a policy delivery request body before decode:
+	// the canonical cap plus JSON framing, the hex signature and rotation
+	// attestations.
+	MaxPolicyRequestBytes = 256 * 1024
 
 	// maxPeerAllowList bounds the eligibility set so a single policy cannot be used
 	// to blow the canonical-size budget via an unbounded list.
@@ -159,8 +175,8 @@ func (p *Policy) Digest() string {
 // ill-formed object is rejected before (and after) any crypto. It does NOT check
 // Sig.
 func (p *Policy) validate() error {
-	if p.Schema != SchemaID {
-		return fmt.Errorf("org policy: schema %q != %q", p.Schema, SchemaID)
+	if p.Schema != SchemaID && p.Schema != SchemaIDV2 {
+		return fmt.Errorf("org policy: schema %q is not %q or %q", p.Schema, SchemaID, SchemaIDV2)
 	}
 	for name, s := range map[string]string{
 		"org_id": p.OrgID, "scope": p.Scope, "issuer_key_id": p.IssuerKeyID,
@@ -200,12 +216,56 @@ func (p *Policy) validate() error {
 		if pr == "" || !utf8.ValidString(pr) {
 			return fmt.Errorf("org policy: peer_allow_list entries must be non-empty UTF-8")
 		}
+		if p.Schema == SchemaIDV2 && !isAgentPubHex(pr) {
+			return fmt.Errorf("org policy: v2 peer_allow_list entries must be 64 lowercase hex agent keys")
+		}
 		if _, dup := seen[pr]; dup {
 			return fmt.Errorf("org policy: peer_allow_list contains duplicate %q", pr)
 		}
 		seen[pr] = struct{}{}
 	}
 	return nil
+}
+
+// isAgentPubHex reports whether s is exactly 64 lowercase hex characters (an
+// ed25519 public key). Upper case is rejected so one key has one spelling.
+func isAgentPubHex(s string) bool {
+	if len(s) != 2*ed25519.PublicKeySize {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// AllowsPeer reports whether this policy's allow-list names agentPubHex as
+// eligible to peer. Only a v2 policy can grant eligibility: a v1 allow-list
+// carries no agent identities (its entries were never defined), so it grants
+// none and the reason says why. This is structural only; freshness is checked
+// by PeerEligible.
+func (p *Policy) AllowsPeer(agentPubHex string) (bool, string) {
+	if p == nil {
+		return false, "no org policy"
+	}
+	if p.Schema != SchemaIDV2 {
+		if len(p.Payload.PeerAllowList) > 0 {
+			return false, "v1 org policy allow-list carries no agent identities; deliver a " + SchemaIDV2 + " policy"
+		}
+		return false, "org policy has no peer allow-list"
+	}
+	if !isAgentPubHex(agentPubHex) {
+		return false, "peer agent key is not 64 lowercase hex"
+	}
+	for _, pr := range p.Payload.PeerAllowList {
+		if pr == agentPubHex {
+			return true, ""
+		}
+	}
+	return false, "peer agent key is not in the org policy allow-list"
 }
 
 func validateSHA256Hex(name, s string) error {
@@ -219,7 +279,8 @@ func validateSHA256Hex(name, s string) error {
 	return nil
 }
 
-// Sign sets Schema/IssuerKeyID from the signing key, validates, and signs the
+// Sign sets IssuerKeyID from the signing key (and Schema to v1 when the caller
+// left it empty, preserving the historical default), validates, and signs the
 // canonical bytes. KeyEpoch must already be set by the caller (it is bound into
 // the signature and orders rotations). Returns an error rather than producing an
 // unverifiable object.
@@ -228,7 +289,9 @@ func (p *Policy) Sign(key ed25519.PrivateKey) error {
 	if !ok || len(pub) != ed25519.PublicKeySize {
 		return fmt.Errorf("org policy: invalid signing key")
 	}
-	p.Schema = SchemaID
+	if p.Schema == "" {
+		p.Schema = SchemaID
+	}
 	p.IssuerKeyID = hex.EncodeToString(pub)
 	if err := p.validate(); err != nil {
 		return err

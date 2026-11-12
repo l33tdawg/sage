@@ -103,7 +103,26 @@ func authenticatedBodyLimit(r *http.Request) int64 {
 			return 2 << 20
 		}
 	}
+	if r.Method == http.MethodPost && r.URL.RawQuery == "" && r.URL.EscapedPath() == r.URL.Path && isOrgRosterPath(r.URL.Path) {
+		// Org roster delivery (RFC #443): 1 MiB canonical roster plus JSON
+		// framing, hex signatures and rotation attestations. Must equal
+		// orgpolicy.MaxRosterRequestBytes; the handler re-applies it.
+		return orgRosterBodyLimit
+	}
 	return defaultAuthenticatedBodyLimit
+}
+
+const orgRosterBodyLimit = 2 << 20
+
+// isOrgRosterPath matches exactly /v1/org/{org_id}/roster with a non-empty,
+// single-segment org id.
+func isOrgRosterPath(path string) bool {
+	const prefix, suffix = "/v1/org/", "/roster"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	org := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	return org != "" && !strings.Contains(org, "/")
 }
 
 // Ed25519AuthMiddleware validates Ed25519 signature authentication via headers:

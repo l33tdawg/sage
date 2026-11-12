@@ -1663,7 +1663,7 @@ HTTP 201 is a first redemption. Re-presenting the same token with the same enrol
 
 ### `POST /v1/org/{org_id}/policy`
 
-Deliver a newer signed org policy to an enrolled node. Any authenticated caller may relay it; authority comes from the policy signature. Without rotation, the issuer key and `key_epoch` must match the accepted policy. Rotation requires an attestation chain rooted at the accepted signer, bound to this org, ordered by time, and valid at the request's current time.
+Deliver a newer signed org policy to an enrolled node. Any authenticated caller may relay it; authority comes from the policy signature. The request body is capped at 256 KiB before decode (HTTP 413 when over). `sage.org-policy.v2` requires every `peer_allow_list` entry to be a 64-char lowercase hex agent key; a `sage.org-policy.v1` allow-list still verifies but grants no peering eligibility. The accepted policy body is stored with its high-water mark. Without rotation, the issuer key and `key_epoch` must match the accepted policy. Rotation requires an attestation chain rooted at the accepted signer, bound to this org, ordered by time, and valid at the request's current time.
 
 The policy scope is immutable after enrollment. The accepted state persists the pinned root and complete signed rotation history, so predecessor policies remain verifiable during their overlap window and after restart. Strictly newer revisions are accepted unless another request changed the high-water mark concurrently; identical redelivery is a no-op; lower revisions are rollback errors; the same revision with a different valid signature is persisted as an owner-visible equivocation without overwriting the accepted policy.
 
@@ -1672,6 +1672,20 @@ The policy scope is immutable after enrollment. The accepted state persists the 
 ### `GET /v1/org/{org_id}/policy`
 
 Return the accepted high-water mark, whether it is currently valid, the per-operation gate verdicts, and any durable equivocation notice. This state is node-local and never enters the consensus AppHash.
+
+---
+
+### `POST /v1/org/{org_id}/roster`
+
+Deliver a newer signed org roster (`sage.org-roster.v1`) to an enrolled node. Like policy delivery, authority comes from the signature. The roster signer must be currently authorized under the accepted policy's trust root and rotation chain (optional `attestations` extend it), and the roster `scope` must equal the accepted policy scope. The request body is capped at 2 MiB before decode (HTTP 413 when over).
+
+Each embedded link card (`sage.org-link-card.v1`) must verify under its own `agent_pub`, and `agent_pub` and `chain_id` must each be unique. One bad card rejects the whole roster. A roster that carries a card at a lower `card_rev` than one already accepted for that agent is rejected whole. The same `card_rev` with different content is card equivocation: the roster is refused and a durable `card` notice is kept. Revision ordering matches policy delivery: newer is applied, identical redelivery is a no-op, lower is a rollback, and the same revision with different content is a `roster` equivocation. A roster never activates a federation link.
+
+---
+
+### `GET /v1/org/{org_id}/roster`
+
+Return the accepted roster high-water mark, whether it is inside its validity window, the accepted roster body, and any durable roster/card notice. Node-local; never in the consensus AppHash.
 
 ---
 
