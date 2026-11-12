@@ -1,11 +1,10 @@
 # SAGE Roadmap
 
-**Status (2026-11):** **v11.25.6 is the current release.** Post-app-v23 direct
-grant inspection now takes authorization values from canonical Badger state,
-so an empty or stale SQL projection cannot hide a grant or preserve a revoked
-one. A bounded exact-target snapshot binds caller/target policy, Root
-generation, committed height/AppHash, and active grants to one read transaction.
-Automatic upgrades stay at app29, app30 remains explicit, and the separate
+**Status (2026-11):** **v11.25.7 is the current release.** Go 1.26.11 closes
+the reachable GO-2026-6859 `net/http` vulnerability, and every Go source-build
+container now uses that patched toolchain. The Go dependency group and pinned
+CI action set are refreshed without changing consensus behavior. Automatic
+upgrades stay at app29, app30 remains explicit, and the separate
 evidence-operator/client parity work remains tracked in
 [#460](https://github.com/l33tdawg/sage/issues/460).
 
@@ -167,6 +166,13 @@ ceiling is app-v27.
 upgrade in place across all future releases. Routine personal-node upgrades
 remain automatic; the exceptional legacy-lineage repair is deliberately an
 explicit, reviewed operator ceremony rather than a silent mutation.
+
+## v11.25.7 release
+
+- Move both Go modules and every shipped source-build container to Go 1.26.11 for reachable GO-2026-6859 in `net/http`.
+- Move `compress` to 1.20.4, `x/sync` to 0.25.0, `x/sys` to 0.50.0, `modernc.org/sqlite` to 1.62.0, and `modernc.org/libc` to 1.80.1.
+- Move Playwright to 1.65 and refresh the pinned CodeQL and Docker login actions.
+- Keep app29 as the automatic ceiling and app30 explicit; no consensus change, chain reset, or data migration.
 
 ## v11.25.6 release
 

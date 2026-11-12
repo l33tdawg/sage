@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.6`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.7`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,23 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.6 and earlier)</summary>
+<summary>Recent release notes (v11.25.7 and earlier)</summary>
+
+## What's New in v11.25.7
+
+**Go 1.26.11 closes a reachable HTTP vulnerability.** GO-2026-6859 affects the
+`net/http` body reader and is reachable through SAGE's HTTP surface. Source
+builds now require Go 1.26.11, and every shipped Go source-build container uses
+that toolchain.
+
+The Go dependency group also moves `compress` to 1.20.4, `x/sync` to 0.25.0,
+`x/sys` to 0.50.0, `modernc.org/sqlite` to 1.62.0, and its pinned
+`modernc.org/libc` to 1.80.1. Browser fixtures move to Playwright 1.65, and the
+pinned CodeQL and Docker login actions are refreshed.
+
+No consensus version change, app-version change, chain reset, or data migration.
+`latest` and automatic upgrade voting remain app29; app30 remains explicit.
+Container: `ghcr.io/l33tdawg/sage:11.25.7`. SDK 11.25.7.
 
 ## What's New in v11.25.6
 
