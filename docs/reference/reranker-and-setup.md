@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.25.6. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.25.7. Cite file:line when behavior is non-obvious. -->
 
 # SAGE Local Engines and First-Run Setup Reference (v11)
 
