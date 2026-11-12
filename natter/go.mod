@@ -1,6 +1,6 @@
 module github.com/l33tdawg/sage/natter
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/libp2p/go-libp2p v0.51.0
