@@ -990,7 +990,7 @@ footer a:hover { text-decoration: underline; }
       </div>
       <div class="brand-release">
         <div class="cta-meta">
-          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.6</strong> &middot; signed assets</span>
+          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.7</strong> &middot; signed assets</span>
           <span class="cta-count" id="minds-freed"><strong id="download-count" data-count="17982" data-updated-at="2026-11-12T12:40:04.396Z">17,982</strong><span>package downloads</span></span>
         </div>
         <div class="download-badges">
@@ -1153,14 +1153,14 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <!-- What's New -->
-      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.6">
-        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.6</span></summary>
+      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.7">
+        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.7</span></summary>
         <div class="release-notes-body">
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.6 makes direct-grant inspection follow canonical chain state and adds a bounded exact-target grant snapshot for reconciliation. No consensus change, chain migration, or data reset is required. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.6" style="color:var(--accent);">Read the v11.25.6 release notes &rarr;</a></p>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.7 moves source builds and every shipped Go source-build image to Go 1.26.11 to close a reachable <code>net/http</code> vulnerability, and refreshes build and test dependencies. No consensus change, chain migration, or data reset is required. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.7" style="color:var(--accent);">Read the v11.25.7 release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Grants follow canonical state</h4><p>Direct-grant list values now come from canonical Badger state, so a committed grant is visible even when the SQL projection is empty and a revoke cannot survive as stale mirror data. <a href="https://github.com/l33tdawg/sage/blob/main/docs/reference/rest-api.md">Read the REST reference</a>.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Exact-target reconciliation</h4><p><code>GET /v1/access/grants-snapshot/{agent_id}</code> binds caller and target authorization, Root generation, height, AppHash and active grants to one committed read. Access is limited to self-inspection or a current local Admin.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Mirror drift stays descriptive</h4><p>Matching SQL mirror timestamps and heights remain useful metadata, but never override canonical authorization or make a stale projection authoritative.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Reachable HTTP issue closed</h4><p>Go 1.26.11 fixes GO-2026-6859 in <code>net/http</code>, which is reachable through SAGE's HTTP surface. Source builds now require the patched toolchain.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Every Go image rebuilt</h4><p>All shipped Go source-build containers now use Go 1.26.11, including the main server, deployment images, federation acceptance images and testnet builder.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Dependencies refreshed</h4><p>The release moves <code>compress</code>, <code>x/sync</code>, <code>x/sys</code>, <code>modernc.org/sqlite</code>, <code>modernc.org/libc</code>, Playwright and pinned CI actions.</p></div></div>
           <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>No chain migration</h4><p>There is no consensus, app-version, chain-reset, or data-migration change. App29 remains the default and app30 still requires an explicit upgrade.</p></div></div>
         </div>
         </div>
@@ -1238,7 +1238,7 @@ footer a:hover { text-decoration: underline; }
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-tag"></use></svg><span>What changed in v11?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p data-release-notes-version="v11.25.6">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.6 makes direct-grant inspection read canonical chain state and adds a bounded exact-target grant snapshot for reconciliation. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.6">Read the v11.25.6 release notes</a> for details.</p></div>
+          <div class="faq-a"><p data-release-notes-version="v11.25.7">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.7 moves source builds and every shipped Go source-build image to Go 1.26.11 to close reachable GO-2026-6859, and refreshes build and test dependencies. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.7">Read the v11.25.7 release notes</a> for details.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-federation"></use></svg><span>What does federation mean?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
