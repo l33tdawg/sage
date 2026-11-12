@@ -12,7 +12,7 @@ require (
 	github.com/go-chi/httprate v0.16.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.12.0
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.4
 	github.com/libp2p/go-libp2p v0.51.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/pashagolub/pgxmock/v6 v6.0.0-beta2
@@ -22,12 +22,12 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/crypto v0.58.0
-	golang.org/x/sync v0.24.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/sync v0.25.0
+	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.43.0
 	golang.org/x/tools v0.52.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.61.1
+	modernc.org/sqlite v1.62.0
 )
 
 require (
@@ -163,7 +163,7 @@ require (
 	google.golang.org/grpc v1.83.2 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
-	modernc.org/libc v1.79.0 // indirect
+	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
