@@ -3,6 +3,8 @@ package orgpolicy
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -236,13 +238,14 @@ func TestAdmitRosterOrdering(t *testing.T) {
 func TestApplyRosterPersistsAndSurvivesRestart(t *testing.T) {
 	kv := newFakeKV()
 	org := fixedKey(t, 50)
+	acc := seedRosterPolicy(t, kv, org)
 	a, b := sampleCard(1, 1, nil), sampleCard(2, 1, nil)
 	st := NewStore(kv)
-	if _, d, _, err := st.ApplyRoster(sampleRoster(org, 1, a, b), pub(org), "fleet"); err != nil || d != DecisionApplied {
+	if _, d, _, err := st.ApplyRoster(sampleRoster(org, 1, a, b), pub(org), acc); err != nil || d != DecisionApplied {
 		t.Fatalf("apply: d=%q err=%v", d, err)
 	}
-	if len(kv.writes) != 1 {
-		t.Fatalf("apply wrote %d batches, want 1", len(kv.writes))
+	if len(kv.writes) != 2 { // policy seed + one roster admission
+		t.Fatalf("roster apply wrote %d batches, want 1", len(kv.writes)-1)
 	}
 
 	restarted := NewStore(kv)
@@ -259,10 +262,10 @@ func TestApplyRosterPersistsAndSurvivesRestart(t *testing.T) {
 
 	// Card a leaves the roster at rev 2; its floor stays.
 	a2 := sampleCard(1, 2, func(c *LinkCard) { c.Endpoint = "https://10.0.0.7:8443" })
-	if _, d, _, err := restarted.ApplyRoster(sampleRoster(org, 2, b, a2), pub(org), "fleet"); err != nil || d != DecisionApplied {
+	if _, d, _, err := restarted.ApplyRoster(sampleRoster(org, 2, b, a2), pub(org), acc); err != nil || d != DecisionApplied {
 		t.Fatalf("rev2: d=%q err=%v", d, err)
 	}
-	if _, d, _, err := restarted.ApplyRoster(sampleRoster(org, 3, b), pub(org), "fleet"); err != nil || d != DecisionApplied {
+	if _, d, _, err := restarted.ApplyRoster(sampleRoster(org, 3, b), pub(org), acc); err != nil || d != DecisionApplied {
 		t.Fatalf("rev3 without a: d=%q err=%v", d, err)
 	}
 	if rec, _, _ := restarted.LoadCard("org-acme", a.AgentPub); rec.CardRev != 2 {
@@ -272,7 +275,7 @@ func TestApplyRosterPersistsAndSurvivesRestart(t *testing.T) {
 	// A later roster that brings back a's OLD card regresses it: whole roster
 	// rejected, nothing written.
 	before := len(kv.writes)
-	_, _, _, err = restarted.ApplyRoster(sampleRoster(org, 4, b, a), pub(org), "fleet")
+	_, _, _, err = restarted.ApplyRoster(sampleRoster(org, 4, b, a), pub(org), acc)
 	if err != ErrRosterCardRegression {
 		t.Fatalf("regression: err=%v", err)
 	}
@@ -287,16 +290,17 @@ func TestApplyRosterPersistsAndSurvivesRestart(t *testing.T) {
 func TestApplyRosterNoOpRollbackWriteNothing(t *testing.T) {
 	kv := newFakeKV()
 	org := fixedKey(t, 50)
+	acc := seedRosterPolicy(t, kv, org)
 	st := NewStore(kv)
 	r := sampleRoster(org, 5, sampleCard(1, 1, nil))
-	if _, _, _, err := st.ApplyRoster(r, pub(org), "fleet"); err != nil {
+	if _, _, _, err := st.ApplyRoster(r, pub(org), acc); err != nil {
 		t.Fatal(err)
 	}
 	n := len(kv.writes)
-	if _, d, _, _ := st.ApplyRoster(r, pub(org), "fleet"); d != DecisionNoOpSameDigest {
+	if _, d, _, _ := st.ApplyRoster(r, pub(org), acc); d != DecisionNoOpSameDigest {
 		t.Fatalf("noop: %q", d)
 	}
-	if _, d, _, _ := st.ApplyRoster(sampleRoster(org, 4), pub(org), "fleet"); d != DecisionRejectedRollback {
+	if _, d, _, _ := st.ApplyRoster(sampleRoster(org, 4), pub(org), acc); d != DecisionRejectedRollback {
 		t.Fatalf("rollback: %q", d)
 	}
 	if len(kv.writes) != n {
@@ -307,19 +311,20 @@ func TestApplyRosterNoOpRollbackWriteNothing(t *testing.T) {
 func TestApplyRosterEquivocationNotices(t *testing.T) {
 	kv := newFakeKV()
 	org := fixedKey(t, 50)
+	acc := seedRosterPolicy(t, kv, org)
 	st := NewStore(kv)
 	a := sampleCard(1, 1, nil)
-	if _, _, _, err := st.ApplyRoster(sampleRoster(org, 1, a), pub(org), "fleet"); err != nil {
+	if _, _, _, err := st.ApplyRoster(sampleRoster(org, 1, a), pub(org), acc); err != nil {
 		t.Fatal(err)
 	}
 	// Roster equivocation.
-	_, d, notice, err := st.ApplyRoster(sampleRoster(org, 1), pub(org), "fleet")
+	_, d, notice, err := st.ApplyRoster(sampleRoster(org, 1), pub(org), acc)
 	if err != nil || d != DecisionRejectedEquivocation || notice == nil || notice.Kind != "roster" {
 		t.Fatalf("roster equivocation: d=%q notice=%+v err=%v", d, notice, err)
 	}
 	// Card equivocation: same card_rev, different content, in a newer roster.
 	aConflict := sampleCard(1, 1, func(c *LinkCard) { c.Endpoint = "https://10.0.0.9:8443" })
-	_, d, notice, err = st.ApplyRoster(sampleRoster(org, 2, aConflict), pub(org), "fleet")
+	_, d, notice, err = st.ApplyRoster(sampleRoster(org, 2, aConflict), pub(org), acc)
 	if err != nil || d != DecisionRejectedEquivocation || notice == nil || notice.Kind != "card" || notice.AgentPub != a.AgentPub {
 		t.Fatalf("card equivocation: d=%q notice=%+v err=%v", d, notice, err)
 	}
@@ -330,4 +335,108 @@ func TestApplyRosterEquivocationNotices(t *testing.T) {
 	if !ok || got.Kind != "card" {
 		t.Fatalf("notice not durable: %+v", got)
 	}
+}
+
+// seedRosterPolicy accepts an org policy signed by org (same org/scope as
+// sampleRoster) and returns its accepted state: the generation a roster
+// signer is authorized under.
+func seedRosterPolicy(t *testing.T, kv *fakeKV, org ed25519.PrivateKey) AcceptedState {
+	t.Helper()
+	p := signed(t, org, func(p *Policy) { p.Revision = 3 })
+	acc, d, _, err := NewStore(kv).ApplyPolicy(p, pub(org))
+	if err != nil || d != DecisionApplied {
+		t.Fatalf("seed policy: d=%q err=%v", d, err)
+	}
+	return acc
+}
+
+// A roster authorized under one accepted-policy generation must not apply once
+// that generation is gone (e.g. a rotation retired its signer).
+func TestApplyRosterRejectsChangedPolicyGeneration(t *testing.T) {
+	kv := newFakeKV()
+	org := fixedKey(t, 50)
+	acc := seedRosterPolicy(t, kv, org)
+
+	// A newer policy is accepted after the caller resolved the signer from acc.
+	if _, d, _, err := NewStore(kv).ApplyPolicy(signed(t, org, func(p *Policy) { p.Revision = 4 }), pub(org)); err != nil || d != DecisionApplied {
+		t.Fatalf("advance policy: d=%q err=%v", d, err)
+	}
+	before := len(kv.writes)
+	_, _, _, err := NewStore(kv).ApplyRoster(sampleRoster(org, 1, sampleCard(1, 1, nil)), pub(org), acc)
+	if err != ErrRosterPolicyChanged {
+		t.Fatalf("stale generation: err=%v, want ErrRosterPolicyChanged", err)
+	}
+	if len(kv.writes) != before {
+		t.Fatal("stale-generation roster wrote state")
+	}
+	if rs, _, _ := NewStore(kv).LoadRoster("org-acme"); rs.Revision != 0 {
+		t.Fatal("stale-generation roster applied")
+	}
+}
+
+// The same holds when the rotation lands AFTER ApplyRoster checked the
+// generation but BEFORE its compare-and-set: the CAS is conditioned on the
+// exact accepted-policy bytes, so it refuses.
+func TestApplyRosterConcurrentRotationFailsCAS(t *testing.T) {
+	kv := newFakeKV()
+	org := fixedKey(t, 50)
+	acc := seedRosterPolicy(t, kv, org)
+	// An existing roster, so the roster key is present and read after the
+	// generation check (the fake KV fires afterGet only for present keys).
+	if _, d, _, err := NewStore(kv).ApplyRoster(sampleRoster(org, 1), pub(org), acc); err != nil || d != DecisionApplied {
+		t.Fatalf("seed roster: d=%q err=%v", d, err)
+	}
+	rotated := signed(t, fixedKey(t, 60), func(p *Policy) { p.Revision = 4 })
+	rotatedState, _ := json.Marshal(stateFrom(rotated))
+	fired := false
+	kv.afterGet = func(key string) {
+		if key == rosterKey("org-acme") && !fired {
+			fired = true
+			kv.m[acceptedKey("org-acme")] = rotatedState // policy rotated to another key
+		}
+	}
+	// Both write paths are bound: a newer roster (apply) and a same-revision
+	// conflicting roster (equivocation notice).
+	for name, r := range map[string]*Roster{
+		"apply":        sampleRoster(org, 2, sampleCard(1, 1, nil)),
+		"equivocation": sampleRoster(org, 1, sampleCard(2, 1, nil)),
+	} {
+		fired = false
+		kv.m[acceptedKey("org-acme")] = mustJSON(t, acc)
+		before := len(kv.writes)
+		_, _, _, err := NewStore(kv).ApplyRoster(r, pub(org), acc)
+		if !fired {
+			t.Fatalf("%s: rotation hook never fired", name)
+		}
+		if err != ErrRosterPolicyChanged {
+			t.Fatalf("%s: concurrent rotation: err=%v, want ErrRosterPolicyChanged", name, err)
+		}
+		if len(kv.writes) != before {
+			t.Fatalf("%s: wrote state across a concurrent policy rotation", name)
+		}
+	}
+}
+
+func TestApplyRosterInvalidIsTyped(t *testing.T) {
+	kv := newFakeKV()
+	org := fixedKey(t, 50)
+	acc := seedRosterPolicy(t, kv, org)
+	_, _, _, err := NewStore(kv).ApplyRoster(sampleRoster(fixedKey(t, 51), 1), pub(org), acc)
+	if !errors.Is(err, ErrRosterInvalid) {
+		t.Fatalf("forged roster: err=%v, want ErrRosterInvalid", err)
+	}
+	other := acc
+	other.Scope = "other"
+	if _, _, _, err = NewStore(kv).ApplyRoster(sampleRoster(org, 1), pub(org), other); err != ErrRosterPolicyChanged {
+		t.Fatalf("mismatched generation: err=%v", err)
+	}
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }

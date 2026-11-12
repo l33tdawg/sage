@@ -14,6 +14,7 @@ package rest
 // cards the org currently vouches for.
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -83,15 +84,19 @@ func (s *Server) handleOrgRosterUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "roster is not signed by the org's currently authorized key/epoch: "+err.Error())
 		return
 	}
-	accepted, decision, notice, err := ps.ApplyRoster(req.Roster, signer.PublicKey, prev.Scope)
+	accepted, decision, notice, err := ps.ApplyRoster(req.Roster, signer.PublicKey, prev)
 	if err != nil {
-		switch err {
-		case orgpolicy.ErrRosterStateConflict:
+		switch {
+		case errors.Is(err, orgpolicy.ErrRosterPolicyChanged):
+			writeJSONError(w, http.StatusConflict, "accepted org policy changed during delivery; re-resolve the signer and retry")
+		case errors.Is(err, orgpolicy.ErrRosterStateConflict):
 			writeJSONError(w, http.StatusConflict, "accepted roster changed during delivery; reload and retry")
-		case orgpolicy.ErrRosterCardRegression:
+		case errors.Is(err, orgpolicy.ErrRosterCardRegression):
 			writeJSONError(w, http.StatusConflict, err.Error())
-		default:
+		case errors.Is(err, orgpolicy.ErrRosterInvalid):
 			writeJSONError(w, http.StatusBadRequest, "roster rejected: "+err.Error())
+		default:
+			writeJSONError(w, http.StatusInternalServerError, "failed to apply org roster")
 		}
 		return
 	}

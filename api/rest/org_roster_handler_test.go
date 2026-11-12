@@ -2,8 +2,11 @@ package rest
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +20,7 @@ import (
 	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/auth"
 	"github.com/l33tdawg/sage/internal/orgpolicy"
+	"github.com/l33tdawg/sage/internal/store"
 )
 
 func (n *policyNode) rosterRouter() http.Handler {
@@ -207,4 +211,69 @@ func TestOrgRoster_CardRegressionRejectsWholeRoster(t *testing.T) {
 	_, ok, err := ps.LoadCard(policyOrgID, other.AgentPub)
 	require.NoError(t, err)
 	assert.False(t, ok, "no card from a rejected roster may be stored")
+}
+
+// failingOrgState fails every compare-and-set, standing in for a local
+// SQLite/storage failure.
+type failingOrgState struct{ orgPolicyStateStore }
+
+func (failingOrgState) CompareAndSetOrgPolicyStatesAtomic(context.Context, []store.StateCondition, []store.StateWrite) (bool, error) {
+	return false, errors.New("disk I/O error")
+}
+
+func TestOrgRoster_StorageFailureIs5xx(t *testing.T) {
+	n := newPolicyNode(t)
+	n.s.orgPolicyState = failingOrgState{n.sq}
+	rr, _ := n.deliverRoster(t, policyOrgID, testRoster(t, n.orgPriv, "fleet", 1, testLinkCard(t, 1, "node-a")))
+	assert.Equal(t, http.StatusInternalServerError, rr.Code, rr.Body.String())
+}
+
+// opaqueBody hides its length so the request reaches the handler with
+// ContentLength = -1, as a chunked upload would.
+type opaqueBody struct{ io.Reader }
+
+func TestOrgPolicy_CapCoversTrailingBytesWithUnknownLength(t *testing.T) {
+	n := newPolicyNode(t)
+	body, err := json.Marshal(OrgPolicyUpdateRequest{Policy: signedOrgPolicy(t, n.orgPriv, policyOrgID, "epoch-1", 2)})
+	require.NoError(t, err)
+	send := func(tail []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/org/"+policyOrgID+"/policy",
+			opaqueBody{io.MultiReader(bytes.NewReader(body), bytes.NewReader(tail))})
+		req.ContentLength = -1
+		rr := httptest.NewRecorder()
+		n.rosterRouter().ServeHTTP(rr, req)
+		return rr
+	}
+	// A valid policy followed by more than the cap of trailing data: refused
+	// before anything is applied.
+	rr := send(bytes.Repeat([]byte(" "), orgpolicy.MaxPolicyRequestBytes))
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rr.Code, rr.Body.String())
+	rr = send(append(bytes.Repeat([]byte("x"), orgpolicy.MaxPolicyRequestBytes), '}'))
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+	ps := n.s.orgPolicyStore(t.Context())
+	acc, err := ps.LoadAccepted(policyOrgID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), acc.Revision, "over-cap delivery must not apply")
+
+	// Small non-whitespace trailing data is a malformed body.
+	rr = send([]byte(`{"extra":1}`))
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	// Trailing whitespace within the cap is fine.
+	rr = send([]byte("\n  \n"))
+	assert.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
+func TestOrgRoster_CapCoversTrailingBytesWithUnknownLength(t *testing.T) {
+	n := newPolicyNode(t)
+	body, err := json.Marshal(OrgRosterUpdateRequest{Roster: testRoster(t, n.orgPriv, "fleet", 1, testLinkCard(t, 1, "node-a"))})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/v1/org/"+policyOrgID+"/roster",
+		opaqueBody{io.MultiReader(bytes.NewReader(body), bytes.NewReader(bytes.Repeat([]byte(" "), orgpolicy.MaxRosterRequestBytes)))})
+	req.ContentLength = -1
+	rr := httptest.NewRecorder()
+	n.rosterRouter().ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rr.Code)
+	st, _, err := n.s.orgPolicyStore(t.Context()).LoadRoster(policyOrgID)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), st.Revision)
 }

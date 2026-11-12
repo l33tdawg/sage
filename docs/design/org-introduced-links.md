@@ -375,5 +375,6 @@ The JOIN gate items are A2.
   - valid override → completes and the use is recorded;
   - expired or non-Root override → refused;
   - not fleet-managed → unchanged (the existing ceremony tests stay green).
-- `TestRFC443Baseline_*`: tests 7.1 and 7.6 flip to the new behaviour in this
-  PR. The others stay as regression guards.
+- `TestRFC443Baseline_*`: in A1, 7.6 (a v1 allow-list grants no eligibility)
+  and the allow-list size test flip. 7.1 (QR JOIN ignores `PeerAllowList`)
+  flips in A2 with the JOIN gate. The others stay as regression guards.

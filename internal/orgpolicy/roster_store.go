@@ -28,6 +28,17 @@ var ErrRosterCardRegression = errors.New("org roster: card_rev regresses an acce
 // and the compare-and-set write; reload and retry.
 var ErrRosterStateConflict = errors.New("org roster: accepted roster changed concurrently")
 
+// ErrRosterPolicyChanged means the accepted org policy (the generation whose
+// trust root and rotation chain authorized the roster signer) is no longer
+// the one the caller resolved authority from. Nothing is written; the caller
+// must re-resolve the signer against the current policy and retry.
+var ErrRosterPolicyChanged = errors.New("org roster: accepted org policy changed since the roster signer was authorized")
+
+// ErrRosterInvalid wraps a roster that fails verification or admission
+// (signature, structure, scope, org). It is a client error, unlike storage
+// failures, which are returned unwrapped.
+var ErrRosterInvalid = errors.New("org roster: invalid")
+
 func rosterKey(orgID string) string     { return keyPrefix + "roster/" + seg(orgID) }
 func rosterBodyKey(orgID string) string { return keyPrefix + "roster-body/" + seg(orgID) }
 func rosterNoticeKey(orgID string) string {
@@ -158,8 +169,9 @@ func (s *Store) loadCardRaw(orgID, agentPub string) (*CardRecord, []byte, error)
 
 // ApplyRoster admits a delivered roster against the persisted state and
 // persists the consequence. authorized is the org signer the caller resolved
-// from the accepted policy's trust root and rotation chain; scope is the
-// accepted policy scope.
+// from policy, the accepted-policy generation (trust root + rotation chain)
+// it loaded; the roster scope must equal policy.Scope. If the accepted policy
+// is no longer exactly policy, nothing is written (ErrRosterPolicyChanged).
 //
 //   - DecisionApplied: roster state + body + history + raised card floors, in
 //     one compare-and-set write. A card whose card_rev is below an accepted one
@@ -168,19 +180,35 @@ func (s *Store) loadCardRaw(orgID, agentPub string) (*CardRecord, []byte, error)
 //     equivocation (notice persisted, roster rejected).
 //   - DecisionNoOpSameDigest / DecisionRejectedRollback: nothing written.
 //   - DecisionRejectedEquivocation: roster notice persisted, state unchanged.
-func (s *Store) ApplyRoster(r *Roster, authorized ed25519.PublicKey, scope string) (RosterState, Decision, *RosterNotice, error) {
+func (s *Store) ApplyRoster(r *Roster, authorized ed25519.PublicKey, policy AcceptedState) (RosterState, Decision, *RosterNotice, error) {
+	// Bind admission to the accepted-policy generation the caller resolved
+	// the signer from: the current accepted state must equal it now, and every
+	// write below is conditioned on its exact stored bytes, so a policy
+	// rotation that retires the signer between authorization and commit makes
+	// the roster fail instead of applying under a retired key.
+	if policy.Revision == 0 || policy.OrgID != r.OrgID {
+		return RosterState{}, "", nil, fmt.Errorf("%w: no accepted org policy for %q", ErrRosterInvalid, r.OrgID)
+	}
+	current, policyRaw, err := s.loadAcceptedWithRaw(r.OrgID)
+	if err != nil {
+		return RosterState{}, "", nil, err
+	}
+	if current != policy {
+		return RosterState{}, "", nil, ErrRosterPolicyChanged
+	}
 	prev, raw, err := s.loadRosterRaw(r.OrgID)
 	if err != nil {
 		return RosterState{}, "", nil, err
 	}
-	next, decision, err := AdmitRoster(prev, r, authorized, scope)
+	next, decision, err := AdmitRoster(prev, r, authorized, policy.Scope)
 	if err != nil {
-		return prev, "", nil, err
+		return prev, "", nil, fmt.Errorf("%w: %v", ErrRosterInvalid, err)
 	}
+	policyCond := KVCondition{Key: acceptedKey(r.OrgID), Value: policyRaw}
 	rosterCond := KVCondition{Key: rosterKey(r.OrgID), Value: raw}
 	switch decision {
 	case DecisionApplied:
-		conds := []KVCondition{rosterCond}
+		conds := []KVCondition{policyCond, rosterCond}
 		var writes []KVWrite
 		for i := range r.Cards {
 			c := r.Cards[i]
@@ -200,7 +228,7 @@ func (s *Store) ApplyRoster(r *Roster, authorized ed25519.PublicKey, scope strin
 						CardRev: c.CardRev, AcceptedDigest: rec.Digest, ConflictDigest: digest,
 						IssuerKeyID: r.IssuerKeyID,
 					}
-					if pErr := s.persistRosterNotice(rosterCond, notice); pErr != nil {
+					if pErr := s.persistRosterNotice([]KVCondition{policyCond, rosterCond}, notice); pErr != nil {
 						return prev, "", nil, pErr
 					}
 					return prev, DecisionRejectedEquivocation, &notice, nil
@@ -232,7 +260,7 @@ func (s *Store) ApplyRoster(r *Roster, authorized ed25519.PublicKey, scope strin
 			return prev, "", nil, wErr
 		}
 		if !applied {
-			return prev, "", nil, ErrRosterStateConflict
+			return prev, "", nil, s.rosterCASFailure(r.OrgID, policyRaw)
 		}
 		return next, decision, nil, nil
 	case DecisionRejectedEquivocation:
@@ -240,7 +268,7 @@ func (s *Store) ApplyRoster(r *Roster, authorized ed25519.PublicKey, scope strin
 			Kind: "roster", OrgID: prev.OrgID, Revision: prev.Revision,
 			AcceptedDigest: prev.Digest, ConflictDigest: r.Digest(), IssuerKeyID: r.IssuerKeyID,
 		}
-		if pErr := s.persistRosterNotice(rosterCond, notice); pErr != nil {
+		if pErr := s.persistRosterNotice([]KVCondition{policyCond, rosterCond}, notice); pErr != nil {
 			return prev, "", nil, pErr
 		}
 		return prev, decision, &notice, nil
@@ -249,20 +277,30 @@ func (s *Store) ApplyRoster(r *Roster, authorized ed25519.PublicKey, scope strin
 	}
 }
 
-func (s *Store) persistRosterNotice(rosterCond KVCondition, n RosterNotice) error {
+func (s *Store) persistRosterNotice(conds []KVCondition, n RosterNotice) error {
 	b, err := json.Marshal(n)
 	if err != nil {
 		return fmt.Errorf("orgpolicy store: encode roster notice: %w", err)
 	}
 	applied, err := s.kv.CompareAndSetStatesAtomic(
-		[]KVCondition{rosterCond},
+		conds,
 		[]KVWrite{{Key: rosterNoticeKey(n.OrgID), Value: b}},
 	)
 	if err != nil {
 		return err
 	}
 	if !applied {
-		return ErrRosterStateConflict
+		return s.rosterCASFailure(n.OrgID, conds[0].Value)
 	}
 	return nil
+}
+
+// rosterCASFailure names why a roster compare-and-set did not apply: the
+// accepted policy moved (re-authorize) or the roster/card state moved (retry).
+func (s *Store) rosterCASFailure(orgID string, policyRaw []byte) error {
+	_, now, err := s.loadAcceptedWithRaw(orgID)
+	if err == nil && string(now) != string(policyRaw) {
+		return ErrRosterPolicyChanged
+	}
+	return ErrRosterStateConflict
 }

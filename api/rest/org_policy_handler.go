@@ -25,6 +25,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -131,20 +132,28 @@ func resolveOrgSigners(w http.ResponseWriter, prev orgpolicy.AcceptedState, orgI
 	return orgSignerAuthority{rootKeyID: rootKeyID, rootKeyEpoch: rootKeyEpoch, chain: chain, signers: authorized}, true
 }
 
-// decodeCappedJSON decodes a request body under a byte cap enforced BEFORE and
-// DURING decode (http.MaxBytesReader). An over-cap body is answered 413, any
-// other decode failure 400. It returns false after writing the error.
+// decodeCappedJSON decodes a request body under a byte cap that covers the
+// COMPLETE body, not just the first JSON value: the whole body is read through
+// http.MaxBytesReader (so an unknown or lying Content-Length cannot get past
+// it) and then decoded with json.Unmarshal, which rejects anything but
+// whitespace after the value. Over the cap answers 413, any other failure 400.
+// It returns false after writing the error.
 func decodeCappedJSON(w http.ResponseWriter, r *http.Request, limit int64, dst any) bool {
 	if r.ContentLength > limit {
 		writeJSONError(w, http.StatusRequestEntityTooLarge, "request body exceeds the size limit")
 		return false
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(dst); err != nil {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
 			writeJSONError(w, http.StatusRequestEntityTooLarge, "request body exceeds the size limit")
 			return false
 		}
+		writeJSONError(w, http.StatusBadRequest, "invalid request body")
+		return false
+	}
+	if err := json.Unmarshal(body, dst); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")
 		return false
 	}
