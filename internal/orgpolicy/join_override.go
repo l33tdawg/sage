@@ -241,8 +241,8 @@ func (s *Store) ApplyJoinOverride(o JoinOverride, rootPub ed25519.PublicKey) (Jo
 	}
 	if raw != nil {
 		var prev JoinOverride
-		if err := json.Unmarshal(raw, &prev); err != nil {
-			return JoinOverride{}, "", fmt.Errorf("orgpolicy store: decode join override: %w", err)
+		if decodeErr := json.Unmarshal(raw, &prev); decodeErr != nil {
+			return JoinOverride{}, "", fmt.Errorf("orgpolicy store: decode join override: %w", decodeErr)
 		}
 		switch {
 		case o.Revision < prev.Revision:
@@ -273,8 +273,8 @@ func (s *Store) ApplyJoinOverride(o JoinOverride, rootPub ed25519.PublicKey) (Jo
 			return JoinOverride{}, "", ErrJoinOverrideStateChanged
 		}
 		var current JoinOverride
-		if err := json.Unmarshal(currentRaw, &current); err != nil {
-			return JoinOverride{}, "", fmt.Errorf("orgpolicy store: decode join override: %w", err)
+		if decodeErr := json.Unmarshal(currentRaw, &current); decodeErr != nil {
+			return JoinOverride{}, "", fmt.Errorf("orgpolicy store: decode join override: %w", decodeErr)
 		}
 		switch {
 		case o.Revision < current.Revision:

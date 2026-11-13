@@ -77,14 +77,14 @@ func (s *Store) ApplyLocalCard(card LinkCard, expectedAgentPub string, policy Ac
 				Kind: "card", OrgID: card.OrgID, AgentPub: card.AgentPub,
 				CardRev: card.CardRev, AcceptedDigest: prev.Digest, ConflictDigest: digest,
 			}
-			if err := s.persistCardNotice(
+			if noticeErr := s.persistCardNotice(
 				[]KVCondition{
 					{Key: acceptedKey(card.OrgID), Value: policyRaw},
 					{Key: cardKey(card.OrgID, card.AgentPub), Value: cardRaw},
 				},
 				*notice,
-			); err != nil {
-				return *prev, "", nil, err
+			); noticeErr != nil {
+				return *prev, "", nil, noticeErr
 			}
 			return *prev, DecisionRejectedEquivocation, notice, nil
 		}

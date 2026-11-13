@@ -66,7 +66,7 @@ func (s *SQLiteStore) ListOrgPolicyStateKeys(ctx context.Context, prefix string)
 	if err != nil {
 		return nil, fmt.Errorf("list org policy state keys: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var key string

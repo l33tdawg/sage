@@ -80,8 +80,8 @@ func (s *Server) handleOrgJoinOverridePut(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusConflict, "this node has no accepted policy for the org")
 		return
 	}
-	if err := req.Override.Verify(rootPub); err != nil {
-		writeJSONError(w, http.StatusForbidden, err.Error())
+	if verifyErr := req.Override.Verify(rootPub); verifyErr != nil {
+		writeJSONError(w, http.StatusForbidden, verifyErr.Error())
 		return
 	}
 	if req.Override.RootCredentialID != rootID {
