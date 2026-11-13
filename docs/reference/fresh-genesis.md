@@ -159,7 +159,7 @@ and recovery; it is not a substitute upgrade ledger.
 
 Keep an existing chain's genesis and history. Existing initialization returns
 without replacing its genesis in `initCometBFTConfigWithGenesisVersion`
-(`cmd/sage-gui/node.go:3691`). Its later app-version changes use the normal
+(`cmd/sage-gui/node.go:3692`). Its later app-version changes use the normal
 governed upgrade path described in [Upgrading SAGE](../UPGRADING.md).
 
 The older [direct-v23 bootstrap contract](app-v23-access-control-design.md)
