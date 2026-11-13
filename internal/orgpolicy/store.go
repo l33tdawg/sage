@@ -86,6 +86,10 @@ func acceptedKey(orgID string) string { return keyPrefix + "accepted/" + seg(org
 func enrollKey(tokenID string) string { return keyPrefix + "enroll/" + seg(tokenID) }
 func equivKey(orgID string) string    { return keyPrefix + "equiv/" + seg(orgID) }
 
+// bodyKey holds the full accepted policy object, so eligibility decisions
+// (PeerAllowList) read the exact signed body the high-water mark names.
+func bodyKey(orgID string) string { return keyPrefix + "body/" + seg(orgID) }
+
 // EnrollmentOutcome is the durable, replayable result of a first enrollment. It
 // is written exactly once per token (atomically with the accepted state) and
 // returned verbatim on an idempotent retry. The result is fully derivable from
@@ -235,6 +239,10 @@ func (s *Store) CommitFirstEnrollment(outcome EnrollmentOutcome) error {
 	if err != nil {
 		return fmt.Errorf("orgpolicy store: encode accepted state: %w", err)
 	}
+	bodyBytes, err := json.Marshal(outcome.FirstPolicy)
+	if err != nil {
+		return fmt.Errorf("orgpolicy store: encode accepted policy body: %w", err)
+	}
 	// ONE compare-and-set transaction: both keys must still be absent. This is
 	// what actually makes the bearer single-use under concurrent redemption;
 	// an unconditional upsert would let the last of two identities win.
@@ -244,6 +252,7 @@ func (s *Store) CommitFirstEnrollment(outcome EnrollmentOutcome) error {
 	}, []KVWrite{
 		{Key: enrollKey(outcome.TokenID), Value: recBytes},
 		{Key: acceptedKey(outcome.OrgID), Value: accBytes},
+		{Key: bodyKey(outcome.OrgID), Value: bodyBytes},
 	})
 	if err != nil {
 		return err
@@ -334,9 +343,16 @@ func (s *Store) applyPolicy(p *Policy, authority *PolicyAuthority, authorized ed
 		if mErr != nil {
 			return prev, "", nil, fmt.Errorf("orgpolicy store: encode accepted state: %w", mErr)
 		}
+		bodyBytes, mErr := json.Marshal(p)
+		if mErr != nil {
+			return prev, "", nil, fmt.Errorf("orgpolicy store: encode accepted policy body: %w", mErr)
+		}
 		applied, wErr := s.kv.CompareAndSetStatesAtomic(
 			[]KVCondition{{Key: acceptedKey(p.OrgID), Value: raw}},
-			[]KVWrite{{Key: acceptedKey(p.OrgID), Value: accBytes}},
+			[]KVWrite{
+				{Key: acceptedKey(p.OrgID), Value: accBytes},
+				{Key: bodyKey(p.OrgID), Value: bodyBytes},
+			},
 		)
 		if wErr != nil {
 			return prev, "", nil, wErr
@@ -362,7 +378,64 @@ func (s *Store) applyPolicy(p *Policy, authority *PolicyAuthority, authorized ed
 			return prev, "", nil, ErrPolicyStateConflict
 		}
 		return prev, decision, &notice, nil
-	default: // NoOpSameDigest, RejectedRollback — no state change
+	case DecisionNoOpSameDigest:
+		// The high-water mark is unchanged. A node that accepted this revision
+		// before policy bodies were stored has no body to decide eligibility
+		// from; an identical re-delivery backfills it. This writes only the
+		// body, conditioned on the accepted state being unchanged and the body
+		// still absent, so it can never extend expiry or authority.
+		if err := s.backfillBody(p, raw); err != nil {
+			return prev, "", nil, err
+		}
+		return prev, decision, nil, nil
+	default: // RejectedRollback — no state change
 		return prev, decision, nil, nil
 	}
+}
+
+func (s *Store) backfillBody(p *Policy, acceptedRaw []byte) error {
+	existing, err := s.kv.GetState(bodyKey(p.OrgID))
+	if err != nil {
+		return fmt.Errorf("orgpolicy store: load accepted policy body: %w", err)
+	}
+	if existing != nil {
+		return nil
+	}
+	bodyBytes, err := json.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("orgpolicy store: encode accepted policy body: %w", err)
+	}
+	if _, err := s.kv.CompareAndSetStatesAtomic(
+		[]KVCondition{{Key: acceptedKey(p.OrgID), Value: acceptedRaw}, {Key: bodyKey(p.OrgID)}},
+		[]KVWrite{{Key: bodyKey(p.OrgID), Value: bodyBytes}},
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+// LoadAcceptedPolicy returns the accepted high-water mark together with the
+// exact accepted policy body. The body is returned only if its digest, org and
+// revision match the high-water mark; a missing or mismatched body yields a
+// nil policy (callers fail closed). The zero state means no policy accepted.
+func (s *Store) LoadAcceptedPolicy(orgID string) (AcceptedState, *Policy, error) {
+	st, err := s.LoadAccepted(orgID)
+	if err != nil || st.Revision == 0 {
+		return st, nil, err
+	}
+	raw, err := s.kv.GetState(bodyKey(orgID))
+	if err != nil {
+		return st, nil, fmt.Errorf("orgpolicy store: load accepted policy body: %w", err)
+	}
+	if raw == nil {
+		return st, nil, nil
+	}
+	var p Policy
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return st, nil, fmt.Errorf("orgpolicy store: decode accepted policy body: %w", err)
+	}
+	if p.OrgID != st.OrgID || p.Revision != st.Revision || p.Digest() != st.Digest {
+		return st, nil, nil
+	}
+	return st, &p, nil
 }

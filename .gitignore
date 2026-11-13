@@ -143,6 +143,7 @@ docs/design/*
 !docs/design/noesis-outcome-receipt-v1.schema.json
 !docs/design/noesis-outcome-receipts.md
 !docs/design/sage-commons-lantern-v12-support.md
+!docs/design/org-introduced-links.md
 scratchpad/
 # Agent-facing code reference (public)
 !docs/reference/

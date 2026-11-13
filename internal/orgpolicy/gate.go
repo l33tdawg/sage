@@ -117,3 +117,21 @@ func Gate(st AcceptedState, op Operation, now int64, ownerPresent bool) GateResu
 	}
 	return res
 }
+
+// PeerEligible is the single peering-eligibility decision (RFC #443): a new
+// peering with agentPubHex may proceed only if the accepted policy is current
+// for OpNewPeering, the supplied policy body IS the accepted one (digest
+// match, so a stale or substituted body cannot widen eligibility), and that
+// body's v2 allow-list names the peer. Every deny carries a reason.
+func PeerEligible(st AcceptedState, accepted *Policy, agentPubHex string, now int64) (bool, string) {
+	if g := Gate(st, OpNewPeering, now, false); !g.Allowed {
+		return false, g.Reason
+	}
+	if accepted == nil {
+		return false, "accepted org policy body is not available"
+	}
+	if accepted.OrgID != st.OrgID || accepted.Revision != st.Revision || accepted.Digest() != st.Digest {
+		return false, "policy body does not match the accepted org policy"
+	}
+	return accepted.AllowsPeer(agentPubHex)
+}
