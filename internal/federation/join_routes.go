@@ -348,6 +348,7 @@ func (m *Manager) handleJoinRequest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid guest agent id")
 		return
 	}
+	guestAgentID := hex.EncodeToString(guestAgentPub)
 	if valErr := validateJoinEndpoint(req.GuestEndpoint); valErr != nil {
 		httpError(w, http.StatusBadRequest, "invalid guest endpoint")
 		return
@@ -389,6 +390,13 @@ func (m *Manager) handleJoinRequest(w http.ResponseWriter, r *http.Request) {
 	if vErr := verifyChainAgainstCA(rawCerts, caCert, x509.ExtKeyUsageClientAuth); vErr != nil {
 		rollbackCA()
 		httpError(w, http.StatusForbidden, "client certificate does not chain to the guest CA")
+		return
+	}
+	if gateErr := m.requireJoinPeerEligible(
+		r.Context(), guestAgentID, req.GuestChain, req.SessionID, JoinGateHost, JoinGateRequest, now.Unix(),
+	); gateErr != nil {
+		rollbackCA()
+		httpError(w, http.StatusForbidden, gateErr.Error())
 		return
 	}
 
@@ -504,7 +512,9 @@ func (m *Manager) handleJoinConfirm(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid guest ack signature")
 		return
 	}
-	txHash, hostChain, err := m.hostConfirm(req.SessionID, joinCertSPKI(r.Context()), guestSig, guestAckSig, req.GroupInviteProof)
+	txHash, hostChain, err := m.hostConfirmContext(
+		r.Context(), req.SessionID, joinCertSPKI(r.Context()), guestSig, guestAckSig, req.GroupInviteProof,
+	)
 	if err != nil {
 		m.logger.Warn().Err(err).Str("session", shortID(req.SessionID)).Msg("join confirm rejected")
 		httpError(w, http.StatusUnprocessableEntity, err.Error())
@@ -517,6 +527,17 @@ func (m *Manager) handleJoinConfirm(w http.ResponseWriter, r *http.Request) {
 // hostConfirm is the server-side confirm driver: verify frozen E, broadcast the
 // host tx-33, commit CA + seed, activate.
 func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig []byte, groupInviteProof string) (string, string, error) {
+	return m.hostConfirmContext(
+		context.Background(), sessionID, certSPKI, guestSig, guestAckSig, groupInviteProof,
+	)
+}
+
+func (m *Manager) hostConfirmContext(
+	requestCtx context.Context,
+	sessionID string,
+	certSPKI, guestSig, guestAckSig []byte,
+	groupInviteProof string,
+) (string, string, error) {
 	// CheckConfirm verifies the guest's approval-#2 signatures over the frozen E
 	// under the store lock; on success it hands us exclusive ownership of the
 	// staged-CA closures and the session is in CONFIRMING.
@@ -538,13 +559,25 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	// the nested gate explicitly around the consensus generation change.
 	agreementUnlock := m.LockAgreementMutation()
 	defer agreementUnlock()
-	generation := m.BeginSyncPolicyGenerationMutation(ctx.GuestChain)
-	defer generation.Restore()
 	// Every return before MarkActive must terminate CONFIRMING. FailConfirm is
 	// state-conditional, so it becomes a no-op after successful activation and
-	// safely covers preparation, route persistence, and tx-33 failures without
-	// duplicating a fragile rollback call at every branch.
+	// safely covers the eligibility gate, preparation, route persistence, and
+	// tx-33 failures.
 	defer m.joins.FailConfirm(sessionID)
+	if gateErr := m.requireJoinPeerEligible(
+		requestCtx,
+		hex.EncodeToString(ctx.GuestAgentID),
+		ctx.GuestChain,
+		sessionID,
+		JoinGateHost,
+		JoinGateCommit,
+		time.Now().Unix(),
+	); gateErr != nil {
+		ctx.RollbackGuestCA()
+		return "", "", gateErr
+	}
+	generation := m.BeginSyncPolicyGenerationMutation(ctx.GuestChain)
+	defer generation.Restore()
 	epoch := syncPolicyEpoch(ctx.ApprovedE)
 	if ss := m.syncStore(); ss != nil {
 		if prepareErr := ss.PrepareSyncControl(context.Background(), store.SyncControl{
@@ -891,6 +924,23 @@ func (m *Manager) HostApproveAs(
 		m.localConsensusControlSigner(controlActorID)
 	if err != nil {
 		return fmt.Errorf("resolve host JOIN authority: %w", err)
+	}
+	// Re-check immediately before approval. The final check under the agreement
+	// lease before tx-33 remains authoritative; this one prevents a policy swap
+	// between request and the operator's approval from producing a misleading
+	// approved session.
+	agreementUnlock := m.LockAgreementMutation()
+	defer agreementUnlock()
+	if gateErr := m.requireJoinPeerEligible(
+		context.Background(),
+		hex.EncodeToString(js.GuestAgentPub),
+		js.GuestChain,
+		sessionID,
+		JoinGateHost,
+		JoinGateApproval,
+		now.Unix(),
+	); gateErr != nil {
+		return gateErr
 	}
 	// The code compare AND the E freeze happen atomically inside ApproveWithCode
 	// (one locked critical section over the session), so a concurrent re-request
@@ -1333,6 +1383,12 @@ func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint str
 	if err != nil || len(hostAgentPub) != ed25519.PublicKeySize {
 		return rejectBoundResponse(fmt.Errorf("host returned an invalid agent id"))
 	}
+	hostAgentID := hex.EncodeToString(hostAgentPub)
+	if gateErr := m.requireJoinPeerEligible(
+		ctx, hostAgentID, d.hostChain, sessionID, JoinGateGuest, JoinGateRequest, time.Now().Unix(),
+	); gateErr != nil {
+		return rejectBoundResponse(gateErr)
+	}
 	d.guestNonce = guestNonce
 	d.hostNonce = hostNonce
 	d.confirmStep = resp.ConfirmStep
@@ -1476,6 +1532,17 @@ func (m *Manager) GuestConfirmAs(
 	}
 	if guestEndpoint != d.guestEndpoint {
 		return "", fmt.Errorf("guest endpoint changed after the return code was generated; re-scan to use a new endpoint")
+	}
+	if gateErr := m.requireJoinPeerEligible(
+		ctx,
+		hex.EncodeToString(d.hostAgentPub),
+		d.hostChain,
+		sessionID,
+		JoinGateGuest,
+		JoinGateCommit,
+		time.Now().Unix(),
+	); gateErr != nil {
+		return "", gateErr
 	}
 	ownPin, err := m.ownPin()
 	if err != nil {

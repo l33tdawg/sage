@@ -1689,6 +1689,74 @@ Return the accepted roster high-water mark, whether it is inside its validity wi
 
 ---
 
+### `POST /v1/org/{org_id}/card`
+
+Mint or update this enrolled node's own signed link card
+(`sage.org-link-card.v1`). The node requires both a durable
+`EnrollmentOutcome` and an accepted org policy. The request body is capped at
+16 KiB before decode.
+
+The body is deliberately limited to:
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `card_rev` | uint64 | yes | Monotonic per local `agent_pub`; starts at 1 |
+| `endpoint` | string | yes | `https://host:port` naming this node and its effective federation listener port |
+
+All other card fields are derived from local runtime state. `agent_pub` is the
+node's stable federation key, `chain_id` is the local chain id, and
+`ca_spki_pin` is computed from the node CA. When P2P is enabled,
+`p2p_peer_id` and `p2p_routes` come from the live transport bundle. The server
+does not accept client-supplied identity, chain, CA pin, issue/expiry, peer ID,
+or routes.
+
+The write is one compare-and-set transaction bound to the exact accepted-policy
+generation and current card floor. A higher `card_rev` replaces the card; the
+same revision with the same digest is a no-op; a lower revision is refused; the
+same revision with different content is refused and persists a durable `card`
+equivocation notice. Concurrent updates cannot create two accepted floors or
+apply under a policy generation newer than the one used to mint the card.
+Endpoint or live P2P-route changes require a higher `card_rev`; reusing the old
+revision with the new content is equivocation, not an in-place mutation.
+
+---
+
+### `GET /v1/org/{org_id}/card`
+
+Return this node's accepted card floor (`card`, `card_rev`, digest and signed
+body), whether the card is currently inside its validity window, and any
+durable card equivocation notice. Node-local; never in the consensus AppHash.
+
+---
+
+### `PUT /v1/org/{org_id}/join-overrides`
+
+Apply a revisioned `sage.org-join-override.v1` exception for an exact peer
+`(peer_agent_pub, peer_chain_id)` on this fleet-managed node. The record itself
+must be signed by the current CEREBRUM Root credential, and the HTTP caller must
+be that same Root through a loopback request. The request body is capped at
+16 KiB before decode.
+
+The body is `{"override": ...}` with required signed fields:
+`peer_agent_pub`, `peer_chain_id`, `reason`, `issued_at`, `expires_at`,
+`revision`, `root_credential_id`, and `sig`. Validity is at most 30 days.
+Revisions are monotonic per exact peer pair. Lower revisions are refused, an
+identical revision is a no-op, and a conflicting same revision is refused.
+Every JOIN decision that relies on the override re-resolves the current Root;
+expiry or Root handover invalidates the old exception without rewriting it.
+
+---
+
+### `GET /v1/org/{org_id}/join-overrides`
+
+Current Root/local-operator view of every JOIN override for the org, including
+whether each is currently valid and its retained usage history. A use records
+the exact peer, override revision, Root credential, JOIN session, role
+(`host`/`guest`) and phase (`request`, `approval`, or `commit`). Repeated
+decisions for the same session/role/phase/revision are idempotent.
+
+---
+
 ### `POST /v1/org/{org_id}/dept`
 
 Register a department. `dept_id` is deterministic: `hex(SHA256(orgID + name)[:8])`.

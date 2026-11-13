@@ -27,6 +27,8 @@ const (
 
 	// MaxLinkCardBytes bounds one card's canonical form.
 	MaxLinkCardBytes = 4 * 1024
+	// MaxLinkCardRequestBytes preserves the agreed 16 KiB create/update cap.
+	MaxLinkCardRequestBytes = 16 * 1024
 	// MaxLinkCardWindowSeconds bounds expires_at - issued_at (30 days).
 	MaxLinkCardWindowSeconds = 30 * 24 * 60 * 60
 

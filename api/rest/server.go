@@ -151,6 +151,9 @@ type Server struct {
 	// federation surface — handlers 501 and the recall merge is skipped, so
 	// unwired deployments/tests behave exactly pre-v11.
 	federation FederationService
+	// orgCardMinter is implemented by the production federation Manager. The
+	// handler cannot receive identity/transport fields from the request.
+	orgCardMinter orgLinkCardMinter
 }
 
 // AgentMessageNotification is metadata-only best-effort wake-up data for an
@@ -690,6 +693,12 @@ func (s *Server) SetFederation(f FederationService) {
 	if source, ok := f.(interface{ SetMessageWakeNotifier(func(string, uint64)) }); ok {
 		source.SetMessageWakeNotifier(s.publishMessageWake)
 	}
+	if gate, ok := f.(federationJoinPeerGateSetter); ok {
+		gate.SetJoinPeerEvaluator(s.evaluateFederationJoinPeer)
+	}
+	if minter, ok := f.(orgLinkCardMinter); ok {
+		s.orgCardMinter = minter
+	}
 }
 
 // SetNodeOperatorID records the hex-encoded ed25519 public key that
@@ -892,6 +901,10 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/org/{org_id}/policy", s.handleOrgPolicyStatus)
 		r.Post("/v1/org/{org_id}/roster", s.handleOrgRosterUpdate)
 		r.Get("/v1/org/{org_id}/roster", s.handleOrgRosterStatus)
+		r.Post("/v1/org/{org_id}/card", s.handleOrgCardMint)
+		r.Get("/v1/org/{org_id}/card", s.handleOrgCardStatus)
+		r.Put("/v1/org/{org_id}/join-overrides", s.handleOrgJoinOverridePut)
+		r.Get("/v1/org/{org_id}/join-overrides", s.handleOrgJoinOverrideList)
 		r.Delete("/v1/org/{org_id}/member/{agent_id}", s.handleOrgRemoveMember)
 		r.Post("/v1/org/{org_id}/clearance", s.handleOrgSetClearance)
 

@@ -1,8 +1,8 @@
 package federation
 
-// RFC #443 §7 characterization tests: record how main behaves TODAY, before any
-// introduced-link code. Every assertion here describes current behaviour, not
-// the target contract.
+// RFC #443 §7 characterization tests. The §7.1 case now pins the A2 non-fleet
+// compatibility boundary; the remaining assertions retain the pre-Phase-B
+// ceremony behavior as regression guards.
 
 import (
 	"context"
@@ -10,7 +10,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"go/build"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -49,17 +48,10 @@ func rfc443Join(t *testing.T, host, guest *ceremonyNode) (string, error) {
 	return create.SessionID, err
 }
 
-// §7.1 PeerAllowList is not enforced on QR JOIN.
-func TestRFC443Baseline_QRJoinIgnoresPeerAllowList(t *testing.T) {
-	// The federation package (which owns JOIN and ActiveAgreement) does not
-	// depend on orgpolicy at all, so no allow-list can reach the ceremony.
-	pkg, err := build.ImportDir(".", 0)
-	require.NoError(t, err)
-	for _, imp := range pkg.Imports {
-		require.NotEqual(t, "github.com/l33tdawg/sage/internal/orgpolicy", imp,
-			"federation (non-test) now imports orgpolicy: baseline changed")
-	}
-
+// §7.1 A node with no EnrollmentOutcome is not fleet-managed and therefore
+// retains the historical QR JOIN behavior. A separately constructed policy
+// cannot become authority until enrollment records the outcome.
+func TestRFC443Baseline_QRJoinAllowsNonFleetNode(t *testing.T) {
 	host := newCeremonyNode(t, "host-aaaaaa")
 	guest := newCeremonyNode(t, "guest-bbbbbb")
 
@@ -88,8 +80,8 @@ func TestRFC443Baseline_QRJoinIgnoresPeerAllowList(t *testing.T) {
 	require.NotContains(t, pol.Payload.PeerAllowList, guestKey)
 	require.NotContains(t, pol.Payload.PeerAllowList, "guest-bbbbbb")
 
-	_, err = rfc443Join(t, host, guest)
-	require.NoError(t, err, "QR JOIN with a peer outside the allow-list")
+	_, err := rfc443Join(t, host, guest)
+	require.NoError(t, err, "non-fleet QR JOIN remains unchanged")
 	_, err = host.mgr.ActiveAgreement("guest-bbbbbb")
 	require.NoError(t, err, "host agreement active")
 	_, err = guest.mgr.ActiveAgreement("host-aaaaaa")

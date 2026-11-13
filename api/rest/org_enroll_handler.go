@@ -68,6 +68,7 @@ type orgEnrollTokenStore interface {
 // implemented by *store.SQLiteStore (internal/store/org_policy_state.go).
 type orgPolicyStateStore interface {
 	GetOrgPolicyState(ctx context.Context, key string) ([]byte, error)
+	ListOrgPolicyStateKeys(ctx context.Context, prefix string) ([]string, error)
 	SetOrgPolicyStatesAtomic(ctx context.Context, writes []store.StateWrite) error
 	CompareAndSetOrgPolicyStatesAtomic(ctx context.Context, conditions []store.StateCondition, writes []store.StateWrite) (bool, error)
 }
@@ -81,6 +82,10 @@ type orgKV struct {
 }
 
 func (k orgKV) GetState(key string) ([]byte, error) { return k.st.GetOrgPolicyState(k.ctx, key) }
+
+func (k orgKV) ListKeys(prefix string) ([]string, error) {
+	return k.st.ListOrgPolicyStateKeys(k.ctx, prefix)
+}
 
 func (k orgKV) SetStatesAtomic(writes []orgpolicy.KVWrite) error {
 	sw := make([]store.StateWrite, len(writes))

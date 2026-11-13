@@ -199,6 +199,10 @@ type Config struct {
 	// CertsDir is the node's TLS material directory (~/.sage/certs): node
 	// cert/key for both listener and client, remote CAs under federation/.
 	CertsDir string
+	// FederationListenAddr is the effective configured mTLS listener address.
+	// Link-card minting cross-checks a requested endpoint's port and local host
+	// against this runtime value; callers cannot advertise an arbitrary peer.
+	FederationListenAddr string
 	// CometRPC is the local CometBFT RPC base URL for broadcasting attest txs.
 	CometRPC string
 	// AgentKey is the stable node federation transport credential (normally
@@ -263,26 +267,29 @@ type AgentMessageNotification struct {
 // Manager is the off-consensus federation transport: trust resolution,
 // the mTLS listener's handlers, the outbound client, and receipt exchange.
 type Manager struct {
-	localChainID        string
-	certsDir            string
-	cometRPC            string
-	agentKey            ed25519.PrivateKey
-	agentPub            ed25519.PublicKey
-	badger              *store.BadgerStore
-	memStore            store.MemoryStore
-	federatedGuestStore FederatedGuestStore
-	localGroupResolver  LocalGroupDomainResolver
-	queryChallengeStore FederatedQueryChallengeStore
-	rootKeyResolverMu   sync.RWMutex
-	rootKeyResolver     func(string) (ed25519.PrivateKey, bool)
-	postV20ForNextTx    func() bool
-	postV22ForNextTx    func() bool
-	postV23ForNextTx    func() bool
-	postV26ForNextTx    func() bool
-	postV8ForAccess     func() bool
-	messageNotifier     func(string, AgentMessageNotification)
-	messageWakeNotifier func(string, uint64)
-	logger              zerolog.Logger
+	localChainID         string
+	certsDir             string
+	cometRPC             string
+	agentKey             ed25519.PrivateKey
+	agentPub             ed25519.PublicKey
+	federationListenAddr string
+	badger               *store.BadgerStore
+	memStore             store.MemoryStore
+	federatedGuestStore  FederatedGuestStore
+	localGroupResolver   LocalGroupDomainResolver
+	queryChallengeStore  FederatedQueryChallengeStore
+	rootKeyResolverMu    sync.RWMutex
+	rootKeyResolver      func(string) (ed25519.PrivateKey, bool)
+	postV20ForNextTx     func() bool
+	postV22ForNextTx     func() bool
+	postV23ForNextTx     func() bool
+	postV26ForNextTx     func() bool
+	postV8ForAccess      func() bool
+	messageNotifier      func(string, AgentMessageNotification)
+	messageWakeNotifier  func(string, uint64)
+	logger               zerolog.Logger
+	orgJoinGateMu        sync.RWMutex
+	orgJoinGate          JoinPeerEvaluator
 
 	// peerDialFn is the optional v11.6 connectivity seam. It may handle a
 	// remote chain via a libp2p stream; handled=false preserves the original
@@ -743,6 +750,7 @@ func NewManager(cfg Config) *Manager {
 		cometRPC:                    cfg.CometRPC,
 		agentKey:                    cfg.AgentKey,
 		agentPub:                    pub,
+		federationListenAddr:        cfg.FederationListenAddr,
 		badger:                      cfg.Badger,
 		memStore:                    cfg.MemStore,
 		federatedGuestStore:         cfg.FederatedGuestStore,

@@ -11,12 +11,12 @@ package store
 // database (WAL, synchronous=FULL), which no AppHash rule covers.
 //
 // The table is a plain key/value map owned by internal/orgpolicy, which keeps
-// its key layout and encoding; the REST layer adapts these two methods to
-// orgpolicy.KV. SetOrgPolicyStatesAtomic applies all writes in ONE SQLite
-// transaction, which is what makes token consumption and the replayable
-// enrollment result a single durable write. It fires the same crash-fixture
-// hook stages as BadgerStore.SetStatesAtomic so the SIGKILL matrix exercises
-// this path (no-ops outside the v119testfixture build).
+// its key layout and encoding; the REST layer adapts the get/CAS/list methods to
+// orgpolicy.KV and its optional range-listing surface. SetOrgPolicyStatesAtomic
+// applies all writes in ONE SQLite transaction, which is what makes token
+// consumption and the replayable enrollment result a single durable write. It
+// fires the same crash-fixture hook stages as BadgerStore.SetStatesAtomic so the
+// SIGKILL matrix exercises this path (no-ops outside the v119testfixture build).
 
 import (
 	"bytes"
@@ -51,6 +51,34 @@ func (s *SQLiteStore) GetOrgPolicyState(ctx context.Context, key string) ([]byte
 		return nil, fmt.Errorf("get org policy state: %w", err)
 	}
 	return value, nil
+}
+
+// ListOrgPolicyStateKeys returns every key sharing prefix in stable lexical
+// order. The prefix match is evaluated by SQLite with substr() so arbitrary
+// key characters cannot turn into LIKE wildcards.
+func (s *SQLiteStore) ListOrgPolicyStateKeys(ctx context.Context, prefix string) ([]string, error) {
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT key FROM org_policy_state
+		 WHERE substr(key, 1, ?) = ?
+		 ORDER BY key`,
+		len(prefix), prefix,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list org policy state keys: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("scan org policy state key: %w", err)
+		}
+		out = append(out, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate org policy state keys: %w", err)
+	}
+	return out, nil
 }
 
 // SetOrgPolicyStatesAtomic upserts every write in one SQLite transaction: all

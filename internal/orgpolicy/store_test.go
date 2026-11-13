@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -12,6 +15,7 @@ import (
 // assert the "single durable write" property directly (how many transactions,
 // which keys) without badger. It mirrors the store contract: absent key → nil.
 type fakeKV struct {
+	mu       sync.Mutex
 	m        map[string][]byte
 	writes   [][]KVWrite // one entry per SetStatesAtomic call
 	afterGet func(string)
@@ -20,19 +24,30 @@ type fakeKV struct {
 func newFakeKV() *fakeKV { return &fakeKV{m: map[string][]byte{}} }
 
 func (f *fakeKV) GetState(key string) ([]byte, error) {
+	f.mu.Lock()
 	v, ok := f.m[key]
 	if !ok {
+		f.mu.Unlock()
 		return nil, nil
 	}
 	cp := make([]byte, len(v))
 	copy(cp, v)
-	if f.afterGet != nil {
-		f.afterGet(key)
+	afterGet := f.afterGet
+	f.mu.Unlock()
+	if afterGet != nil {
+		afterGet(key)
 	}
 	return cp, nil
 }
 
 func (f *fakeKV) SetStatesAtomic(w []KVWrite) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.setStatesAtomicLocked(w)
+	return nil
+}
+
+func (f *fakeKV) setStatesAtomicLocked(w []KVWrite) {
 	batch := make([]KVWrite, len(w))
 	copy(batch, w)
 	f.writes = append(f.writes, batch)
@@ -41,10 +56,11 @@ func (f *fakeKV) SetStatesAtomic(w []KVWrite) error {
 		copy(cp, e.Value)
 		f.m[e.Key] = cp
 	}
-	return nil
 }
 
 func (f *fakeKV) CompareAndSetStatesAtomic(conditions []KVCondition, writes []KVWrite) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for _, c := range conditions {
 		current, ok := f.m[c.Key]
 		if c.Value == nil {
@@ -57,7 +73,21 @@ func (f *fakeKV) CompareAndSetStatesAtomic(conditions []KVCondition, writes []KV
 			return false, nil
 		}
 	}
-	return true, f.SetStatesAtomic(writes)
+	f.setStatesAtomicLocked(writes)
+	return true, nil
+}
+
+func (f *fakeKV) ListKeys(prefix string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0)
+	for key := range f.m {
+		if strings.HasPrefix(key, prefix) {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 func (f *fakeKV) batchKeys(i int) map[string]bool {

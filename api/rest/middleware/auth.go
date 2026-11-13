@@ -109,15 +109,41 @@ func authenticatedBodyLimit(r *http.Request) int64 {
 		// orgpolicy.MaxRosterRequestBytes; the handler re-applies it.
 		return orgRosterBodyLimit
 	}
+	if r.Method == http.MethodPost && r.URL.RawQuery == "" && r.URL.EscapedPath() == r.URL.Path && isOrgCardPath(r.URL.Path) {
+		return orgCardBodyLimit
+	}
+	if r.Method == http.MethodPut && r.URL.RawQuery == "" && r.URL.EscapedPath() == r.URL.Path && isOrgJoinOverridesPath(r.URL.Path) {
+		return orgJoinOverrideBodyLimit
+	}
 	return defaultAuthenticatedBodyLimit
 }
 
 const orgRosterBodyLimit = 2 << 20
+const orgCardBodyLimit = 16 << 10
+const orgJoinOverrideBodyLimit = 16 << 10
 
 // isOrgRosterPath matches exactly /v1/org/{org_id}/roster with a non-empty,
 // single-segment org id.
 func isOrgRosterPath(path string) bool {
 	const prefix, suffix = "/v1/org/", "/roster"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	org := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	return org != "" && !strings.Contains(org, "/")
+}
+
+func isOrgCardPath(path string) bool {
+	const prefix, suffix = "/v1/org/", "/card"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return false
+	}
+	org := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	return org != "" && !strings.Contains(org, "/")
+}
+
+func isOrgJoinOverridesPath(path string) bool {
+	const prefix, suffix = "/v1/org/", "/join-overrides"
 	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
 		return false
 	}

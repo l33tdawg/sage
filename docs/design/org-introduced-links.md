@@ -1,7 +1,9 @@
 # Org-introduced federation links (RFC #443, Phase A + B)
 
-Status: design for the Phase A PR. Contract agreed on #443 (v2 + the two
-implementation points of 2026-11-12). Line refs are main @ fe0deea7 (v11.25.7).
+Status: Phase A1 landed in #553 (`d9c86210`). A2 implements the node-self-mint
+card and fleet-managed manual JOIN gate below. Contract agreed on #443 (v2 plus
+the two implementation decisions of 2026-11-12); the A2 card model is locked to
+node self-mint.
 Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
 
 ## 0. Scope
@@ -9,7 +11,7 @@ Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
 **Phase A** is data and admission only. Nothing new activates a link. It ships
 in two PRs:
 
-- **A1 (this PR):**
+- **A1 (#553, merged):**
   1. Org policy schema `sage.org-policy.v2`: `PeerAllowList` = enrollee
      `agent_pub` (64 lowercase hex). The canonical cap goes 16 KiB → 96 KiB, and
      the policy request cap 64 KiB → 256 KiB. The accepted policy body is now
@@ -20,8 +22,9 @@ in two PRs:
      and a roster store with `AdmitWithAuthority` semantics plus card checks.
   4. `PeerEligible`: the single eligibility decision for later callers. Nothing
      calls it yet.
-- **A2 (next PR):** the card create/update route (§1.2, open question), and the
-  manual QR JOIN gate with the Root-signed override (§1.5).
+- **A2 (this PR):** the authenticated node-self-mint card create/update/read
+  route (§1.2), and the manual QR JOIN gate with the explicit local Root-signed
+  override (§1.5).
 
 **Phase B (next PR):** owner envelope, offers, intro handshake routes, the
 `introduced_link` record and the intent state machine (§3), and the
@@ -69,23 +72,19 @@ Encoding and signing:
 - Signed by the node's own agent key: `sig` verifies under `agent_pub`.
 - Canonical form ≤ 4 KiB.
 
-**Card route: open question (A2).** v2 put `POST /v1/org/{org}/cards` "on the
-issuer", gated on an `EnrollmentOutcome` for the card's key. On main, though, the
-`EnrollmentOutcome` lives on the **enrolled node itself**: redeem runs on the node
-being enrolled, and `CommitFirstEnrollment` conditions on that node's own
-`accepted/{org}` key. There is no SAGE-side issuer that holds every enrollee's
-outcome. Two shapes fit main:
+**Card route (A2, locked): node self-mint.** `POST /v1/org/{org}/card` builds
+and signs the card on the enrolled node itself. The request supplies only
+`card_rev` and an endpoint; the node derives `agent_pub`, `chain_id`, CA SPKI
+pin, issue time and expiry from its stable federation identity, and derives
+`p2p_peer_id`/`p2p_routes` from the live P2P transport. The endpoint must name a
+local interface and the effective federation listener port; the caller cannot
+choose an arbitrary peer or route bundle. `GET /v1/org/{org}/card` returns the
+accepted floor. Request cap remains 16 KiB, checked before decode.
 
-- (a) **Node mints its own card.** The node builds and signs its card from its own
-  chain id, CA pin and endpoint (never client-supplied), only if it holds an
-  accepted policy for the org. `GET /v1/org/{org}/card` serves it to whatever
-  builds rosters.
-- (b) **A SAGE node acts as the org issuer.** It collects cards (signed by each
-  enrollee) and signs rosters. That needs a new issuer-side enrollee registry,
-  because today's outcomes are not on the issuer.
-
-A1 ships only the card type, so either fits. I lean (a). Request cap 16 KiB,
-checked before decode, either way.
+An accepted policy and a durable `EnrollmentOutcome` are both required. Card
+admission is compare-and-set bound to that exact accepted-policy generation and
+the current card floor. Endpoint or live-route changes require a higher
+`card_rev`. There is no issuer-side enrollee registry.
 
 Store, keyed per `agent_pub`:
 - a higher `card_rev` replaces the old card;
@@ -153,17 +152,25 @@ JOIN is "new peering":
 
 | Side | Check | Where |
 |---|---|---|
-| host | `PeerEligible(guest agent_pub)` | at `/join/request`, then again under `LockAgreementMutation` before `ApproveWithCode` |
-| guest | `PeerEligible(host agent_pub)` | at scan, then again under the lease before its tx-33 |
+| host | `PeerEligible(guest agent_pub)` | at `/join/request`, again under `LockAgreementMutation` before `ApproveWithCode`, and again under the agreement lease immediately before host tx-33 |
+| guest | `PeerEligible(host agent_pub)` | after the authenticated `/join/request` response supplies the host key, then again under the agreement lease before guest tx-33 |
 
 If the check fails, JOIN is refused with a clear reason, unless a current
-**override** exists. An override has these fields:
+**override** exists. The override is a separate
+`sage.org-join-override.v1` record signed by the exact current CEREBRUM Root
+credential; it is created/listed only through the localhost Root control plane:
 - `peer_agent_pub`, `peer_chain_id`, `reason`
-- `expires_at` (≤ 30 d), `revision`
+- `issued_at`, `expires_at` (≤ 30 d), `revision`, `root_credential_id`
 
-It's signed by the current Root credential, persisted and listed, and each use is
-appended to its history. Nodes that aren't fleet-managed see no change.
-`TestRFC443Baseline_QRJoinIgnoresPeerAllowList` flips to a negative test.
+Revisions are monotonic per exact peer pair. The record is persisted locally and
+listed with a bounded usage history. Each successful request/approval/commit
+gate that relies on the override appends an idempotent
+`(session_id, role, phase, revision)` audit row. Every use re-resolves the
+current Root: expiry or Root handover makes the old override unusable without
+rewriting it. Nodes that aren't fleet-managed see no change.
+`TestRFC443Baseline_QRJoinIgnoresPeerAllowList` is replaced by
+`TestRFC443Baseline_QRJoinAllowsNonFleetNode`; fleet-managed negative and
+policy-swap tests live in `rfc443_join_gate_test.go`.
 
 ## 2. Request and response caps
 
@@ -175,7 +182,8 @@ and refuses anything over the cap. None of them reuse `joinBodyCap`.
 |---|---|---|
 | `POST /v1/org/{org}/policy` | 256 KiB | 16 KiB |
 | `POST /v1/org/{org}/roster` | 2 MiB | 16 KiB |
-| `POST /v1/org/{org}/cards` | 16 KiB | 16 KiB |
+| `POST /v1/org/{org}/card` | 16 KiB | 16 KiB |
+| `PUT /v1/org/{org}/join-overrides` | 16 KiB | 16 KiB |
 | `POST /fed/v1/intro/request` (B) | 32 KiB | 32 KiB |
 | `GET /fed/v1/intro/{offer_id}/accept` (B) | — | 8 KiB |
 | `POST /fed/v1/intro/confirm` (B) | 8 KiB | 8 KiB |
@@ -347,7 +355,7 @@ so a concurrent tick or a late live call can't apply a transition twice.
 ## 4. Phase A test plan
 
 A1 implements the policy, card, roster, store, cap and eligibility items below.
-The JOIN gate items are A2.
+A2 implements node-self-mint card persistence and the JOIN gate items.
 
 - Policy v2:
   - golden canonical bytes;
