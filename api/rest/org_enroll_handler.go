@@ -70,6 +70,7 @@ type orgPolicyStateStore interface {
 	GetOrgPolicyState(ctx context.Context, key string) ([]byte, error)
 	SetOrgPolicyStatesAtomic(ctx context.Context, writes []store.StateWrite) error
 	CompareAndSetOrgPolicyStatesAtomic(ctx context.Context, conditions []store.StateCondition, writes []store.StateWrite) (bool, error)
+	ListOrgPolicyStateKeys(ctx context.Context, prefix string, limit int) ([]string, error)
 }
 
 // orgKV adapts orgPolicyStateStore to orgpolicy.KV for one request. orgpolicy
@@ -81,6 +82,11 @@ type orgKV struct {
 }
 
 func (k orgKV) GetState(key string) ([]byte, error) { return k.st.GetOrgPolicyState(k.ctx, key) }
+
+// ListStateKeys implements orgpolicy.KVLister.
+func (k orgKV) ListStateKeys(prefix string, limit int) ([]string, error) {
+	return k.st.ListOrgPolicyStateKeys(k.ctx, prefix, limit)
+}
 
 func (k orgKV) SetStatesAtomic(writes []orgpolicy.KVWrite) error {
 	sw := make([]store.StateWrite, len(writes))

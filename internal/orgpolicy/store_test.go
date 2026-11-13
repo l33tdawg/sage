@@ -5,6 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -58,6 +61,21 @@ func (f *fakeKV) CompareAndSetStatesAtomic(conditions []KVCondition, writes []KV
 		}
 	}
 	return true, f.SetStatesAtomic(writes)
+}
+
+// ListStateKeys implements KVLister.
+func (f *fakeKV) ListStateKeys(prefix string, limit int) ([]string, error) {
+	var keys []string
+	for k := range f.m {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) > limit {
+		return nil, fmt.Errorf("more than %d keys", limit)
+	}
+	sort.Strings(keys)
+	return keys, nil
 }
 
 func (f *fakeKV) batchKeys(i int) map[string]bool {

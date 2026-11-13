@@ -352,6 +352,13 @@ func (m *Manager) handleJoinRequest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "invalid guest endpoint")
 		return
 	}
+	// RFC #443 fleet JOIN gate: on a fleet-managed host the guest's agent key
+	// must be eligible under the org policy (or a current Root override)
+	// before any guest material is staged.
+	if gateErr := m.checkJoinPeer(JoinGateSideHost, JoinGateStageReq, req.SessionID, guestAgentPub, req.GuestChain); gateErr != nil {
+		httpError(w, http.StatusForbidden, gateErr.Error())
+		return
+	}
 	if js.ExpectedGuestPeer != "" {
 		remotePeer, peerErr := joinRemotePeerID(r.RemoteAddr)
 		if peerErr != nil || remotePeer != js.ExpectedGuestPeer {
@@ -545,6 +552,13 @@ func (m *Manager) hostConfirm(sessionID string, certSPKI, guestSig, guestAckSig 
 	// safely covers preparation, route persistence, and tx-33 failures without
 	// duplicating a fragile rollback call at every branch.
 	defer m.joins.FailConfirm(sessionID)
+	// RFC #443 fleet JOIN gate, re-checked under the agreement lease right
+	// before the host's tx-33: a policy rotation since request/approval that
+	// removed the guest refuses activation here.
+	if gateErr := m.checkJoinPeer(JoinGateSideHost, JoinGateStageConfrm, sessionID, ctx.GuestAgentID, ctx.GuestChain); gateErr != nil {
+		ctx.RollbackGuestCA()
+		return "", "", gateErr
+	}
 	epoch := syncPolicyEpoch(ctx.ApprovedE)
 	if ss := m.syncStore(); ss != nil {
 		if prepareErr := ss.PrepareSyncControl(context.Background(), store.SyncControl{
@@ -891,6 +905,11 @@ func (m *Manager) HostApproveAs(
 		m.localConsensusControlSigner(controlActorID)
 	if err != nil {
 		return fmt.Errorf("resolve host JOIN authority: %w", err)
+	}
+	// Re-check the fleet JOIN gate at approval: the org policy may have
+	// changed since the guest's request was accepted.
+	if gateErr := m.checkJoinPeer(JoinGateSideHost, JoinGateStageApprov, sessionID, js.GuestAgentPub, js.GuestChain); gateErr != nil {
+		return gateErr
 	}
 	// The code compare AND the E freeze happen atomically inside ApproveWithCode
 	// (one locked critical section over the session), so a concurrent re-request
@@ -1333,6 +1352,10 @@ func (m *Manager) GuestRequest(ctx context.Context, sessionID, guestEndpoint str
 	if err != nil || len(hostAgentPub) != ed25519.PublicKeySize {
 		return rejectBoundResponse(fmt.Errorf("host returned an invalid agent id"))
 	}
+	// RFC #443 fleet JOIN gate: the host's agent key is first known here.
+	if gateErr := m.checkJoinPeer(JoinGateSideGuest, JoinGateStageReq, sessionID, hostAgentPub, d.hostChain); gateErr != nil {
+		return rejectBoundResponse(gateErr)
+	}
 	d.guestNonce = guestNonce
 	d.hostNonce = hostNonce
 	d.confirmStep = resp.ConfirmStep
@@ -1508,6 +1531,11 @@ func (m *Manager) GuestConfirmAs(
 		// lease between tx-33, CA/seed/control/RBAC persistence, and the bounded
 		// outbound /join/confirm below.
 		txHash, err = func() (string, error) {
+			// RFC #443 fleet JOIN gate, re-checked under the agreement lease
+			// right before the guest's tx-33.
+			if gateErr := m.checkJoinPeer(JoinGateSideGuest, JoinGateStageConfrm, sessionID, d.hostAgentPub, d.hostChain); gateErr != nil {
+				return "", gateErr
+			}
 			generation := m.BeginSyncPolicyGenerationMutation(d.hostChain)
 			defer generation.Restore()
 

@@ -58,3 +58,25 @@ func TestOrgPolicyState_CompareAndSetIsAtomic(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("first"), got, "a failed compare-and-set must write nothing")
 }
+
+func TestOrgPolicyState_ListKeysByPrefix(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+
+	keys, err := s.ListOrgPolicyStateKeys(ctx, "orgpolicy/enroll/", 10)
+	require.NoError(t, err)
+	require.Empty(t, keys)
+
+	require.NoError(t, s.SetOrgPolicyStatesAtomic(ctx, []StateWrite{
+		{Key: "orgpolicy/enroll/b", Value: []byte("x")},
+		{Key: "orgpolicy/enroll/a", Value: []byte("x")},
+		{Key: "orgpolicy/enrollx", Value: []byte("x")},
+		{Key: "orgpolicy/accepted/o", Value: []byte("x")},
+	}))
+	keys, err = s.ListOrgPolicyStateKeys(ctx, "orgpolicy/enroll/", 10)
+	require.NoError(t, err)
+	require.Equal(t, []string{"orgpolicy/enroll/a", "orgpolicy/enroll/b"}, keys)
+
+	_, err = s.ListOrgPolicyStateKeys(ctx, "orgpolicy/enroll/", 1)
+	require.Error(t, err, "an over-limit listing fails instead of truncating")
+}
