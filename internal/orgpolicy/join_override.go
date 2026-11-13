@@ -399,8 +399,8 @@ func (s *Store) RecordJoinOverrideUse(expected JoinOverride, use JoinOverrideUse
 			return ErrJoinOverrideStateChanged
 		}
 		var current JoinOverride
-		if err := json.Unmarshal(currentRaw, &current); err != nil {
-			return fmt.Errorf("orgpolicy store: decode join override: %w", err)
+		if decodeErr := json.Unmarshal(currentRaw, &current); decodeErr != nil {
+			return fmt.Errorf("orgpolicy store: decode join override: %w", decodeErr)
 		}
 		if current.Revision != expected.Revision || current.Digest() != expected.Digest() {
 			return ErrJoinOverrideStateChanged
