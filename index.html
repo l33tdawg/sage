@@ -990,15 +990,15 @@ footer a:hover { text-decoration: underline; }
       </div>
       <div class="brand-release">
         <div class="cta-meta">
-          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.7</strong> &middot; signed assets</span>
-          <span class="cta-count" id="minds-freed"><strong id="download-count" data-count="18066" data-updated-at="2026-11-14T00:37:25.985Z">18,066</strong><span>package downloads</span></span>
+          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.8</strong> &middot; signed assets</span>
+          <span class="cta-count" id="minds-freed"><strong id="download-count" data-count="18129" data-updated-at="2026-11-14T03:29:37.774Z">18,129</strong><span>package downloads</span></span>
         </div>
         <div class="download-badges">
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-macOS-arm64.dmg" class="badge-link">macOS</a>
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-Windows-Setup.exe" class="badge-link">Windows</a>
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
-        <p class="cta-fineprint"><span id="download-status" aria-live="polite">Last known count &middot; Nov 14, 2026, 00:37 UTC</span><span class="cta-fineprint-sep" aria-hidden="true">&middot;</span><span>Includes repeats, prereleases and automated downloads. Not unique installs.</span></p>
+        <p class="cta-fineprint"><span id="download-status" aria-live="polite">Last known count &middot; Nov 14, 2026, 03:29 UTC</span><span class="cta-fineprint-sep" aria-hidden="true">&middot;</span><span>Includes repeats, prereleases and automated downloads. Not unique installs.</span></p>
       </div>
     </div>
   </section>
@@ -1153,15 +1153,15 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <!-- What's New -->
-      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.7">
-        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.7</span></summary>
+      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.8">
+        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.8</span></summary>
         <div class="release-notes-body">
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.7 moves source builds and every shipped Go source-build image to Go 1.26.11 to close a reachable <code>net/http</code> vulnerability, and refreshes build and test dependencies. No consensus change, chain migration, or data reset is required. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.7" style="color:var(--accent);">Read the v11.25.7 release notes &rarr;</a></p>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.8 ships RFC #443 Phase A: policy-v2 agent allow-lists, node-self-minted link cards, signed rosters, and fleet-managed manual JOIN checks on both the host and guest. A current Root can sign bounded, expiring local exceptions. Phase B roster-introduced links remain inactive. No consensus change, chain reset, or data migration. Automatic upgrades remain app29; app30 remains explicit. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.8" style="color:var(--accent);">Read the v11.25.8 release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Reachable HTTP issue closed</h4><p>Go 1.26.11 fixes GO-2026-6859 in <code>net/http</code>, which is reachable through SAGE's HTTP surface. Source builds now require the patched toolchain.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Every Go image rebuilt</h4><p>All shipped Go source-build containers now use Go 1.26.11, including the main server, deployment images, federation acceptance images and testnet builder.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Dependencies refreshed</h4><p>The release moves <code>compress</code>, <code>x/sync</code>, <code>x/sys</code>, <code>modernc.org/sqlite</code>, <code>modernc.org/libc</code>, Playwright and pinned CI actions.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>No chain migration</h4><p>There is no consensus, app-version, chain-reset, or data-migration change. App29 remains the default and app30 still requires an explicit upgrade.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Agent-key allow-lists</h4><p>Org policy v2 binds peer-allow-list entries to enrolled agent keys, with the accepted policy body persisted for exact eligibility checks.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Self-minted link cards</h4><p>Each enrolled node mints its own signed card from local identity and transport state, while signed rosters establish a durable card floor.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Fleet JOIN enforcement</h4><p>Fleet-managed manual JOIN checks the peer against every enrolled org on both host and guest before request, approval, and transaction boundaries.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Bounded Root exceptions</h4><p>A current Root may sign an expiring local JOIN exception through localhost; every use is audited and exceptions are unavailable on non-fleet nodes.</p></div></div>
         </div>
         </div>
       </details>
@@ -1238,7 +1238,7 @@ footer a:hover { text-decoration: underline; }
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-tag"></use></svg><span>What changed in v11?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p data-release-notes-version="v11.25.7">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.7 moves source builds and every shipped Go source-build image to Go 1.26.11 to close reachable GO-2026-6859, and refreshes build and test dependencies. App29 remains the default; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.7">Read the v11.25.7 release notes</a> for details.</p></div>
+          <div class="faq-a"><p data-release-notes-version="v11.25.8">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.8 adds RFC #443 Phase A with policy-v2 agent allow-lists, node-self-minted link cards, signed rosters, fleet-managed manual JOIN checks, and bounded local current-Root exceptions. Phase B roster-introduced links remain inactive. Automatic upgrades remain app29; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.8">Read the v11.25.8 release notes</a> for details.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-federation"></use></svg><span>What does federation mean?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
