@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.7`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.8`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,29 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.7 and earlier)</summary>
+<summary>Recent release notes (v11.25.8 and earlier)</summary>
+
+## What's New in v11.25.8
+
+**RFC #443 Phase A now ships node-self-minted link cards and the fleet QR JOIN
+gate.** Org policy v2 binds `peer_allow_list` entries to enrollee agent keys,
+while signed rosters and cards provide the local transport facts needed for a
+manual JOIN. Each enrolled node mints its own card from runtime identity and
+transport state, and the durable card floor rejects rollback, equivocation and a
+changed policy generation.
+
+A fleet-managed manual QR JOIN now checks the peer against every enrolled org's
+current policy on both host and guest at request, approval and pre-tx
+boundaries. When policy denies the peer, a current Root may sign a bounded,
+expiring local exception; both storing and listing exceptions require that Root
+through localhost, and every use is audited. Nodes without an enrollment keep
+the existing JOIN behavior.
+
+This release does not activate Phase B roster-introduced links, the owner
+envelope or the durable introduction state machine. No consensus version change,
+chain reset, or data migration. `latest` and automatic upgrade voting remain
+app29; app30 remains explicit. Container:
+`ghcr.io/l33tdawg/sage:11.25.8`. SDK 11.25.8.
 
 ## What's New in v11.25.7
 
