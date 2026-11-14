@@ -183,13 +183,16 @@ peer through. `sage.join-override.v1` fields:
 `POST /v1/federation/join-overrides` stores one (16 KiB cap). Authority comes
 from the Root signature, which is checked against the current Root at store
 time and again at every use, so a Root rotation retires every override the old
-Root signed. Same revision and digest is a no-op; a lower revision, or the same
-revision with other content, is refused. Each use (side, stage, session, time)
-is appended to the record under compare-and-set before the JOIN continues; the
-last 256 uses are kept plus a total count. `GET /v1/federation/join-overrides`
-lists them with a `usable` / `expired` / `not_current_root` status. Overrides
-and policy-eligible peers are separate: an eligible peer never consumes an
-override use.
+Root signed. The HTTP caller must also be that current Root through a loopback
+request, and only a node holding at least one `EnrollmentOutcome` may store or
+list overrides. Same revision and digest is a no-op; a lower revision, or the
+same revision with other content, is refused. Each use (side, stage, session,
+time) is appended to the record under compare-and-set before the JOIN
+continues; the last 256 uses are kept plus a total count.
+`GET /v1/federation/join-overrides` uses the same local-Root boundary and lists
+them with a `usable` / `expired` / `not_current_root` status. Overrides and
+policy-eligible peers are separate: an eligible peer never consumes an override
+use.
 
 `TestRFC443Baseline_QRJoinIgnoresPeerAllowList` is flipped to
 `TestRFC443Baseline_QRJoinEnforcesPeerAllowListOnFleetNode`.

@@ -66,6 +66,22 @@ func (f *cardFed) SetJoinPeerGate(g federation.JoinPeerGate) { f.gate = g }
 
 const operatorID = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 
+func localRootRequest(method, target string, body []byte) *http.Request {
+	req := httptest.NewRequest(method, target, bytes.NewReader(body))
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Host = "localhost:8080"
+	return req
+}
+
+func (n *policyNode) currentRootID(t *testing.T) string {
+	t.Helper()
+	src, ok := n.s.federation.(rootCredentialSource)
+	require.True(t, ok)
+	rootID, _, err := src.CurrentRootCredential()
+	require.NoError(t, err)
+	return rootID
+}
+
 func (n *policyNode) cardRouter(caller string) http.Handler {
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
@@ -208,14 +224,16 @@ func (n *policyNode) postOverride(t *testing.T, o *orgpolicy.JoinOverride) *http
 	b, err := json.Marshal(JoinOverrideRequest{Override: o})
 	require.NoError(t, err)
 	rr := httptest.NewRecorder()
-	n.cardRouter(operatorID).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/federation/join-overrides", bytes.NewReader(b)))
+	n.cardRouter(n.currentRootID(t)).ServeHTTP(rr,
+		localRootRequest(http.MethodPost, "/v1/federation/join-overrides", b))
 	return rr
 }
 
 func (n *policyNode) listOverrides(t *testing.T) JoinOverrideListResponse {
 	t.Helper()
 	rr := httptest.NewRecorder()
-	n.cardRouter(operatorID).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/federation/join-overrides", nil))
+	n.cardRouter(n.currentRootID(t)).ServeHTTP(rr,
+		localRootRequest(http.MethodGet, "/v1/federation/join-overrides", nil))
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 	var resp JoinOverrideListResponse
 	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
@@ -251,8 +269,57 @@ func TestJoinOverride_StoreListAndRootRotation(t *testing.T) {
 
 	big := []byte(`{"override":{"reason":"` + strings.Repeat("x", joinOverrideRequestCap) + `"}}`)
 	rr = httptest.NewRecorder()
-	n.cardRouter(operatorID).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/federation/join-overrides", bytes.NewReader(big)))
+	n.cardRouter(n.currentRootID(t)).ServeHTTP(rr,
+		localRootRequest(http.MethodPost, "/v1/federation/join-overrides", big))
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rr.Code, rr.Body.String())
+}
+
+func TestJoinOverride_RequiresLocalCurrentRoot(t *testing.T) {
+	n, f := cardNode(t)
+	rootID := n.currentRootID(t)
+	o := signedJoinOverride(t, f.root, strings.Repeat("9", 64), "peer-chain", 1)
+	body, err := json.Marshal(JoinOverrideRequest{Override: o})
+	require.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	n.cardRouter(strings.Repeat("d", 64)).ServeHTTP(rr,
+		localRootRequest(http.MethodPost, "/v1/federation/join-overrides", body))
+	require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+
+	req := localRootRequest(http.MethodGet, "/v1/federation/join-overrides", nil)
+	req.RemoteAddr = "192.0.2.10:54321"
+	req.Host = "sage.example"
+	rr = httptest.NewRecorder()
+	n.cardRouter(rootID).ServeHTTP(rr, req)
+	require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+
+	rr = httptest.NewRecorder()
+	n.cardRouter(strings.Repeat("d", 64)).ServeHTTP(rr,
+		localRootRequest(http.MethodGet, "/v1/federation/join-overrides", nil))
+	require.Equal(t, http.StatusForbidden, rr.Code, rr.Body.String())
+}
+
+func TestJoinOverride_NonFleetNodeRejected(t *testing.T) {
+	n, f := cardNode(t)
+	n.s.orgPolicyState = nonFleetOrgState{n.sq}
+	o := signedJoinOverride(t, f.root, strings.Repeat("9", 64), "peer-chain", 1)
+
+	rr := n.postOverride(t, o)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+
+	rr = httptest.NewRecorder()
+	n.cardRouter(n.currentRootID(t)).ServeHTTP(rr,
+		localRootRequest(http.MethodGet, "/v1/federation/join-overrides", nil))
+	require.Equal(t, http.StatusNotFound, rr.Code, rr.Body.String())
+}
+
+type nonFleetOrgState struct{ orgPolicyStateStore }
+
+func (s nonFleetOrgState) ListOrgPolicyStateKeys(ctx context.Context, prefix string, limit int) ([]string, error) {
+	if prefix == "orgpolicy/enroll/" {
+		return []string{}, nil
+	}
+	return s.orgPolicyStateStore.ListOrgPolicyStateKeys(ctx, prefix, limit)
 }
 
 func gateCheck(f *cardFed, peer, chain string) federation.JoinGateCheck {

@@ -333,4 +333,10 @@ func TestMintOrgLinkCard_FromLocalRuntimeState(t *testing.T) {
 		_, err := n.mgr.MintOrgLinkCard(OrgLinkCardRequest{OrgID: "org-acme", CardRev: 1, IssuedAt: now, ExpiresAt: now + 86400, Endpoint: ep})
 		require.Error(t, err, name)
 	}
+
+	n.mgr.transportDisabled.Store(true)
+	_, err = n.mgr.MintOrgLinkCard(OrgLinkCardRequest{
+		OrgID: "org-acme", CardRev: 1, IssuedAt: now, ExpiresAt: now + 86400, Endpoint: "https://10.0.0.1:8444",
+	})
+	require.ErrorContains(t, err, "transport is disabled")
 }

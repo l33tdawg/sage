@@ -26,6 +26,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/l33tdawg/sage/api/rest/middleware"
 	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/orgpolicy"
 )
@@ -228,7 +229,32 @@ func (s *Server) currentRoot() (string, ed25519.PublicKey, error) {
 	return src.CurrentRootCredential()
 }
 
+// requireCurrentLocalRoot binds the Root exception surface to the exact
+// authenticated Root credential and a loopback control request. The signed
+// override remains the authority; this check keeps storage and listing of those
+// exceptions local to the sovereign Root.
+func (s *Server) requireCurrentLocalRoot(w http.ResponseWriter, r *http.Request) (string, ed25519.PublicKey, bool) {
+	if !isAppV23LoopbackControlRequest(r) {
+		writeJSONError(w, http.StatusForbidden, "join overrides are available only through localhost on this machine")
+		return "", nil, false
+	}
+	rootID, rootPub, err := s.currentRoot()
+	if err != nil {
+		writeJSONError(w, http.StatusServiceUnavailable, "current Root credential unavailable: "+err.Error())
+		return "", nil, false
+	}
+	if middleware.ContextAgentID(r.Context()) != rootID {
+		writeJSONError(w, http.StatusForbidden, "current local Root is required")
+		return "", nil, false
+	}
+	return rootID, rootPub, true
+}
+
 func (s *Server) handleJoinOverrideApply(w http.ResponseWriter, r *http.Request) {
+	rootID, rootPub, ok := s.requireCurrentLocalRoot(w, r)
+	if !ok {
+		return
+	}
 	ps := s.orgPolicyStore(r.Context())
 	if ps == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "org policy state is not configured on this node")
@@ -242,9 +268,13 @@ func (s *Server) handleJoinOverrideApply(w http.ResponseWriter, r *http.Request)
 		writeJSONError(w, http.StatusBadRequest, "override is required")
 		return
 	}
-	rootID, rootPub, err := s.currentRoot()
+	orgs, err := ps.FleetOrgs()
 	if err != nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "current Root credential unavailable: "+err.Error())
+		writeJSONError(w, http.StatusInternalServerError, "fleet enrollment state unavailable")
+		return
+	}
+	if len(orgs) == 0 {
+		writeJSONError(w, http.StatusConflict, "this node has no fleet enrollment outcome")
 		return
 	}
 	decision, err := ps.ApplyJoinOverride(req.Override, rootID, rootPub, orgPolicyNow())
@@ -276,19 +306,28 @@ func (s *Server) handleJoinOverrideApply(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleJoinOverrideList(w http.ResponseWriter, r *http.Request) {
+	rootID, _, ok := s.requireCurrentLocalRoot(w, r)
+	if !ok {
+		return
+	}
 	ps := s.orgPolicyStore(r.Context())
 	if ps == nil {
 		writeJSONError(w, http.StatusServiceUnavailable, "org policy state is not configured on this node")
+		return
+	}
+	orgs, err := ps.FleetOrgs()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "fleet enrollment state unavailable")
+		return
+	}
+	if len(orgs) == 0 {
+		writeJSONError(w, http.StatusNotFound, "this node has no fleet enrollment outcome")
 		return
 	}
 	recs, err := ps.ListJoinOverrides()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "join override state unavailable")
 		return
-	}
-	rootID, _, rootErr := s.currentRoot()
-	if rootErr != nil {
-		rootID = ""
 	}
 	now := orgPolicyNow()
 	resp := JoinOverrideListResponse{RootCredentialID: rootID, Overrides: make([]JoinOverrideView, 0, len(recs))}

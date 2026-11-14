@@ -141,6 +141,9 @@ type OrgLinkCardRequest struct {
 // chain_id, the CA SPKI pin and the p2p peer id and routes come from local
 // runtime state and are never taken from the caller.
 func (m *Manager) MintOrgLinkCard(req OrgLinkCardRequest) (*orgpolicy.LinkCard, error) {
+	if !m.transportIsEnabled() {
+		return nil, errors.New("federation transport is disabled")
+	}
 	if len(m.agentKey) != ed25519.PrivateKeySize {
 		return nil, errors.New("node transport key is unavailable")
 	}
