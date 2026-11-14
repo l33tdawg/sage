@@ -1,7 +1,7 @@
 # Org-introduced federation links (RFC #443, Phase A + B)
 
-Status: A1 merged (#553); this revision covers A2. Contract agreed on #443 (v2 + the two
-implementation points of 2026-11-12). Line refs are main @ fe0deea7 (v11.25.7).
+Status: Phase A implemented. Contract agreed on #443 (v2 + the two
+implementation points of 2026-11-12). Line refs are main @ 506eb377 (v11.25.8).
 Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
 
 ## 0. Scope

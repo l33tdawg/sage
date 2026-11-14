@@ -1,9 +1,9 @@
 # SAGE Roadmap
 
-**Status (2026-11):** **v11.25.7 is the current release.** Go 1.26.11 closes
-the reachable GO-2026-6859 `net/http` vulnerability, and every Go source-build
-container now uses that patched toolchain. The Go dependency group and pinned
-CI action set are refreshed without changing consensus behavior. Automatic
+**Status (2026-11):** **v11.25.8 is the current release.** RFC #443 Phase A
+ships signed policy-v2 rosters, node-self-minted cards, fleet-managed manual
+QR JOIN enforcement, and bounded current-Root exceptions. State remains
+node-local and does not activate Phase B roster-introduced links. Automatic
 upgrades stay at app29, app30 remains explicit, and the separate
 evidence-operator/client parity work remains tracked in
 [#460](https://github.com/l33tdawg/sage/issues/460).
@@ -166,6 +166,16 @@ ceiling is app-v27.
 upgrade in place across all future releases. Routine personal-node upgrades
 remain automatic; the exceptional legacy-lineage repair is deliberately an
 explicit, reviewed operator ceremony rather than a silent mutation.
+
+## v11.25.8 release
+
+- Add org policy v2 with agent-key `peer_allow_list` entries and the 96 KiB canonical policy bound.
+- Persist the accepted policy body and signed roster/card state in node-local storage with policy-generation compare-and-set.
+- Add node-self-mint card routes, durable card floors, equivocation notices and restart-safe ordering.
+- Enforce fleet policy on manual QR JOIN host and guest at request, approval and pre-tx boundaries.
+- Add current-Root, localhost-only, expiring JOIN exceptions with bounded usage history.
+- Keep Phase B owner envelopes, offers and roster-introduced links inactive.
+- Keep app29 as the automatic ceiling and app30 explicit; no consensus change, chain reset, or data migration.
 
 ## v11.25.7 release
 

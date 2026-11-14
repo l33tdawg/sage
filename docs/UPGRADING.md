@@ -249,6 +249,7 @@ Use this to work out how far your chain has to climb.
 | v11.25.5 | `sage_inbox` exposes its `1-20` message, task-notice, and passive-reply page limits in model-facing tool descriptions and returns the exact continuation cursor fields when a caller exceeds them. App-v29 remains active; no consensus change, chain reset, or data migration. |
 | v11.25.6 | Post-app-v23 direct grant lists read authorization values from canonical Badger state; matching SQL mirror timestamps and heights remain descriptive only. A new bounded exact-target grant snapshot binds caller/target policy, Root, height, AppHash, and active grants to one committed read. App-v29 remains active; no consensus change, chain reset, or data migration. |
 | v11.25.7 | Go 1.26.11 closes reachable GO-2026-6859 in `net/http`; source builds require it and every shipped Go source-build container uses it. The Go dependency group and pinned CI actions are refreshed for this release. App-v29 remains active; no consensus change, chain reset, or data migration. |
+| v11.25.8 | RFC #443 Phase A adds policy-v2 agent allow-lists, node-self-minted link cards, signed rosters, fleet-managed manual JOIN checks, and local current-Root exceptions. The state is node-local and Phase B roster-introduced links remain inactive. App-v29 remains active; no consensus change, chain reset, or data migration. |
 
 ### v11.18.3 — the signer fence, and what it does *not* cover
 
