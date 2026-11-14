@@ -10,17 +10,16 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"go/build"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/orgpolicy"
+	"github.com/l33tdawg/sage/internal/store"
 	"github.com/l33tdawg/sage/internal/tlsca"
 )
 
@@ -49,51 +48,40 @@ func rfc443Join(t *testing.T, host, guest *ceremonyNode) (string, error) {
 	return create.SessionID, err
 }
 
-// §7.1 PeerAllowList is not enforced on QR JOIN.
-func TestRFC443Baseline_QRJoinIgnoresPeerAllowList(t *testing.T) {
-	// The federation package (which owns JOIN and ActiveAgreement) does not
-	// depend on orgpolicy at all, so no allow-list can reach the ceremony.
-	pkg, err := build.ImportDir(".", 0)
-	require.NoError(t, err)
-	for _, imp := range pkg.Imports {
-		require.NotEqual(t, "github.com/l33tdawg/sage/internal/orgpolicy", imp,
-			"federation (non-test) now imports orgpolicy: baseline changed")
-	}
-
+// §7.1 flipped in Phase A2: on a fleet-managed node QR JOIN enforces the v2
+// PeerAllowList (by agent key); a node with no enrollment is unchanged.
+func TestRFC443Baseline_QRJoinEnforcesPeerAllowListOnFleetNode(t *testing.T) {
+	// Fleet host whose current signed v2 policy lists some OTHER agent.
 	host := newCeremonyNode(t, "host-aaaaaa")
 	guest := newCeremonyNode(t, "guest-bbbbbb")
-
-	// A current, signed org policy whose allow-list names some OTHER agent,
-	// never the guest (by agent key) nor its chain id.
 	otherPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	_, orgKey, _ := ed25519.GenerateKey(rand.Reader)
-	now := time.Now().Unix()
-	pol := &orgpolicy.Policy{
-		OrgID: "org-acme", Scope: "fleet", Revision: 1, KeyEpoch: "epoch-1",
-		IssuedAt: now, NotBefore: now - 60, Expiry: now + 3600,
-		Payload: orgpolicy.Payload{
-			Judge: orgpolicy.Judge{
-				ModelTag:   "sage-memory-judge:v16",
-				GGUFSHA256: strings.Repeat("ab", 32),
-				BlobSHA256: strings.Repeat("cd", 32),
-			},
-			ChecksVersion: "sage-lasting/1+supported/1",
-			PeerAllowList: []string{hex.EncodeToString(otherPub)},
-		},
-	}
-	require.NoError(t, pol.Sign(orgKey))
-	require.NoError(t, pol.Verify(orgKey.Public().(ed25519.PublicKey)))
-	require.True(t, pol.CurrentAt(now))
-	guestKey := hex.EncodeToString(guest.mgr.agentPub)
-	require.NotContains(t, pol.Payload.PeerAllowList, guestKey)
-	require.NotContains(t, pol.Payload.PeerAllowList, "guest-bbbbbb")
-
-	_, err = rfc443Join(t, host, guest)
-	require.NoError(t, err, "QR JOIN with a peer outside the allow-list")
+	fleetNode(t, host, hex.EncodeToString(otherPub))
+	err := tryJoin(t, host, guest)
+	require.Error(t, err, "fleet host joined a peer outside the allow-list")
 	_, err = host.mgr.ActiveAgreement("guest-bbbbbb")
-	require.NoError(t, err, "host agreement active")
-	_, err = guest.mgr.ActiveAgreement("host-aaaaaa")
-	require.NoError(t, err, "guest agreement active")
+	require.Error(t, err, "no host agreement")
+
+	// Non-fleet pair: a gate is wired but the org store holds no enrollment.
+	host2 := newCeremonyNode(t, "host-cccccc")
+	guest2 := newCeremonyNode(t, "guest-dddddd")
+	sq, err := store.NewSQLiteStore(context.Background(), filepath.Join(t.TempDir(), "org.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sq.Close() })
+	ps := orgpolicy.NewStore(sqliteOrgKV{sq})
+	host2.mgr.SetJoinPeerGate(func(c JoinGateCheck) error {
+		d, aErr := ps.AuthorizeJoinPeer(orgpolicy.JoinPeerRequest{PeerAgentPub: c.PeerAgentPub, PeerChainID: c.PeerChainID, Now: c.Now.Unix()})
+		if aErr != nil {
+			return aErr
+		}
+		if !d.Allowed {
+			return errors.New(d.Reason)
+		}
+		return nil
+	})
+	_, err = rfc443Join(t, host2, guest2)
+	require.NoError(t, err, "non-fleet QR JOIN unchanged")
+	_, err = host2.mgr.ActiveAgreement("guest-dddddd")
+	require.NoError(t, err)
 }
 
 // §7.2a JOIN writes tx-33 with ExpiresAt = 0 on both sides.

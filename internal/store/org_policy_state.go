@@ -153,3 +153,35 @@ func (s *SQLiteStore) CompareAndSetOrgPolicyStatesAtomic(ctx context.Context, co
 	}
 	return true, nil
 }
+
+// ListOrgPolicyStateKeys returns up to limit keys that start with prefix, in
+// ascending key order. It returns an error rather than a truncated list when
+// more than limit keys match, so a caller deciding "is this node enrolled"
+// never acts on a silently partial view.
+func (s *SQLiteStore) ListOrgPolicyStateKeys(ctx context.Context, prefix string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("list org policy state: limit must be positive")
+	}
+	rows, err := s.conn.QueryContext(ctx,
+		`SELECT key FROM org_policy_state WHERE substr(key, 1, ?) = ? ORDER BY key LIMIT ?`,
+		len(prefix), prefix, limit+1)
+	if err != nil {
+		return nil, fmt.Errorf("list org policy state: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, fmt.Errorf("list org policy state: %w", err)
+		}
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list org policy state: %w", err)
+	}
+	if len(keys) > limit {
+		return nil, fmt.Errorf("list org policy state: more than %d keys under %q", limit, prefix)
+	}
+	return keys, nil
+}

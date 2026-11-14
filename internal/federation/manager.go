@@ -322,6 +322,10 @@ type Manager struct {
 	joinP2PMu sync.RWMutex
 	joinP2P   JoinP2PHooks
 
+	// joinGate is the RFC #443 fleet JOIN gate (nil: JOIN unchanged).
+	joinGateMu sync.RWMutex
+	joinGate   JoinPeerGate
+
 	// replayMu guards seenSigs — the federation listener's replay cache,
 	// SHARDED BY PEER CHAIN so one peer's flood can never evict or lock out
 	// another peer (a shared global cap would let any single authenticated peer

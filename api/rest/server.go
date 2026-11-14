@@ -690,6 +690,11 @@ func (s *Server) SetFederation(f FederationService) {
 	if source, ok := f.(interface{ SetMessageWakeNotifier(func(string, uint64)) }); ok {
 		source.SetMessageWakeNotifier(s.publishMessageWake)
 	}
+	// RFC #443 fleet manual QR JOIN gate, backed by the node-local org policy
+	// store (a node with no enrollment keeps JOIN unchanged).
+	if gated, ok := f.(interface{ SetJoinPeerGate(federation.JoinPeerGate) }); ok {
+		gated.SetJoinPeerGate(s.fleetJoinGate)
+	}
 }
 
 // SetNodeOperatorID records the hex-encoded ed25519 public key that
@@ -892,6 +897,10 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/org/{org_id}/policy", s.handleOrgPolicyStatus)
 		r.Post("/v1/org/{org_id}/roster", s.handleOrgRosterUpdate)
 		r.Get("/v1/org/{org_id}/roster", s.handleOrgRosterStatus)
+		r.Post("/v1/org/{org_id}/card", s.handleOrgCardMint)
+		r.Get("/v1/org/{org_id}/card", s.handleOrgCardStatus)
+		r.Post("/v1/federation/join-overrides", s.handleJoinOverrideApply)
+		r.Get("/v1/federation/join-overrides", s.handleJoinOverrideList)
 		r.Delete("/v1/org/{org_id}/member/{agent_id}", s.handleOrgRemoveMember)
 		r.Post("/v1/org/{org_id}/clearance", s.handleOrgSetClearance)
 

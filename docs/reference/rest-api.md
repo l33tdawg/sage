@@ -1687,6 +1687,26 @@ Each embedded link card (`sage.org-link-card.v1`) must verify under its own `age
 
 Return the accepted roster high-water mark, whether it is inside its validity window, the accepted roster body, and any durable roster/card notice. Node-local; never in the consensus AppHash.
 
+### `POST /v1/org/{org_id}/card`
+
+Mint (or re-mint) this node's own link card (`sage.org-link-card.v1`) for an org whose policy the node has accepted. Node operator only (after app-v23: the current Root or a current local Admin). Body: `card_rev`, `issued_at` (within 300 s of the node clock), `expires_at` (window ≤ 30 days) and `endpoint` (`https://host:port`, the same federation endpoint used for `HostCreate`; may be empty only when a p2p route is ready). `agent_pub`, `chain_id`, `ca_spki_pin` and the p2p peer id and routes are taken from local runtime state, never from the request, and the card is signed with the node's JOIN transport key. The request body is capped at 16 KiB before decode (413 when over).
+
+The card shares the per-`agent_pub` card floor with roster delivery: a higher `card_rev` replaces, an identical retry is a no-op (signing is deterministic), the same `card_rev` with different content is card equivocation (409, durable notice, governance event), and a lower `card_rev` is refused (409). The write is bound to the exact accepted policy generation; a rotation in between returns 409. Returns 409 when the node is not enrolled in the org.
+
+### `GET /v1/org/{org_id}/card`
+
+Return this node's current card for the org (`card`, `card_rev`, `digest`, `current`) and any durable card notice, for roster builders. 404 when the node holds neither.
+
+### `POST /v1/federation/join-overrides`
+
+Store a Root-signed fleet JOIN override (`sage.join-override.v1`): `peer_agent_pub`, `peer_chain_id`, `reason` (≤ 512 B), `revision`, `issued_at`, `expires_at` (window ≤ 30 days), `root_credential_id`, `sig`. Authority comes from the signature, which must verify under this node's current Root credential (after app-v23 the committed CEREBRUM Root, before it the node operator key). The authenticated HTTP caller must be that current Root and the request must arrive through localhost; a node without a fleet `EnrollmentOutcome` receives 409. Per peer, a higher revision replaces (usage history is kept), the same revision and content is a no-op, and a lower revision or the same revision with other content is refused (400). An already-expired override is refused. The request body is capped at 16 KiB before decode.
+
+On a fleet-managed node (one holding an org `EnrollmentOutcome`) a manual QR JOIN requires the peer's agent key to be eligible under every enrolled org's accepted v2 policy. It is checked on the host at the peer's join request, at approval and again under the agreement lease before the host's tx-33, and on the guest when the host's key arrives and again under the lease before the guest's tx-33. When the peer is not eligible, a current override for that exact peer key and chain id lets it through; it is re-verified against the current Root at every use, and each use is recorded. Nodes without an enrollment keep the existing JOIN behaviour.
+
+### `GET /v1/federation/join-overrides`
+
+List stored overrides with their usage history (last 256 uses plus `total_uses`) and a `status` of `usable`, `expired` or `not_current_root`. This operator surface requires the current local Root and a fleet-managed node; non-Root and remote callers receive 403, and a non-fleet node receives 404.
+
 ---
 
 ### `POST /v1/org/{org_id}/dept`

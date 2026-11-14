@@ -1,6 +1,6 @@
 # Org-introduced federation links (RFC #443, Phase A + B)
 
-Status: design for the Phase A PR. Contract agreed on #443 (v2 + the two
+Status: A1 merged (#553); this revision covers A2. Contract agreed on #443 (v2 + the two
 implementation points of 2026-11-12). Line refs are main @ fe0deea7 (v11.25.7).
 Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
 
@@ -9,7 +9,7 @@ Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
 **Phase A** is data and admission only. Nothing new activates a link. It ships
 in two PRs:
 
-- **A1 (this PR):**
+- **A1 (merged, #553):**
   1. Org policy schema `sage.org-policy.v2`: `PeerAllowList` = enrollee
      `agent_pub` (64 lowercase hex). The canonical cap goes 16 KiB → 96 KiB, and
      the policy request cap 64 KiB → 256 KiB. The accepted policy body is now
@@ -20,8 +20,8 @@ in two PRs:
      and a roster store with `AdmitWithAuthority` semantics plus card checks.
   4. `PeerEligible`: the single eligibility decision for later callers. Nothing
      calls it yet.
-- **A2 (next PR):** the card create/update route (§1.2, open question), and the
-  manual QR JOIN gate with the Root-signed override (§1.5).
+- **A2 (this PR):** the node-self-mint card route (§1.2, decided on #443), and
+  the manual QR JOIN gate with the Root-signed override (§1.5).
 
 **Phase B (next PR):** owner envelope, offers, intro handshake routes, the
 `introduced_link` record and the intent state machine (§3), and the
@@ -69,23 +69,25 @@ Encoding and signing:
 - Signed by the node's own agent key: `sig` verifies under `agent_pub`.
 - Canonical form ≤ 4 KiB.
 
-**Card route: open question (A2).** v2 put `POST /v1/org/{org}/cards` "on the
-issuer", gated on an `EnrollmentOutcome` for the card's key. On main, though, the
-`EnrollmentOutcome` lives on the **enrolled node itself**: redeem runs on the node
-being enrolled, and `CommitFirstEnrollment` conditions on that node's own
-`accepted/{org}` key. There is no SAGE-side issuer that holds every enrollee's
-outcome. Two shapes fit main:
+**Card route (A2): node-self-mint.** Decided on #443: each enrolled node mints
+and signs its own card; there is no issuer-side enrollee registry.
 
-- (a) **Node mints its own card.** The node builds and signs its card from its own
-  chain id, CA pin and endpoint (never client-supplied), only if it holds an
-  accepted policy for the org. `GET /v1/org/{org}/card` serves it to whatever
-  builds rosters.
-- (b) **A SAGE node acts as the org issuer.** It collects cards (signed by each
-  enrollee) and signs rosters. That needs a new issuer-side enrollee registry,
-  because today's outcomes are not on the issuer.
-
-A1 ships only the card type, so either fits. I lean (a). Request cap 16 KiB,
-checked before decode, either way.
+- `POST /v1/org/{org}/card` (node operator; after app-v23 the current Root or a
+  current local Admin). The body carries only `card_rev`, `issued_at`,
+  `expires_at` and `endpoint`. `issued_at` must be within 300 s of the node's
+  clock. The request cap is 16 KiB, checked before decode.
+- `agent_pub` (the node's JOIN transport key, the same key peers see as
+  `host_agent_id` / `guest_agent_id`), `chain_id`, `ca_spki_pin`, `p2p_peer_id`
+  and `p2p_routes` all come from local runtime state, never from the request.
+  The endpoint is the one operator-supplied field, the same value the operator
+  gives `HostCreate`; it passes the JOIN endpoint rules and the card rules. An
+  empty endpoint is allowed only when a p2p route is ready (p2p-only card).
+- The node must hold an accepted policy for the org. The write is conditioned
+  on those exact accepted-policy bytes, so a rotation in between refuses it.
+- Signing is deterministic, so an identical retry has the same digest and is a
+  no-op. Changing anything at the same `card_rev` is card equivocation.
+- `GET /v1/org/{org}/card` serves the node's current card and any notice to
+  whatever builds rosters.
 
 Store, keyed per `agent_pub`:
 - a higher `card_rev` replaces the old card;
@@ -94,7 +96,8 @@ Store, keyed per `agent_pub`:
   notice is kept;
 - a lower rev is refused.
 
-The card floor (the highest `card_rev` per `agent_pub`) is kept in the node's
+The card route and roster delivery write the same per-`agent_pub` record
+(`card/{org}/{agent_pub}`). The card floor (the highest `card_rev` per `agent_pub`) is kept in the node's
 roster store (§1.4), so a later roster can never regress a card. The
 `EnrollmentOutcome` schema and replay behaviour don't change.
 
@@ -148,22 +151,51 @@ doesn't match the high-water mark is never returned.
 
 ### 1.5 Manual QR JOIN gate
 
-A node is *fleet-managed* if it has a stored `EnrollmentOutcome`. On such a node,
-JOIN is "new peering":
+A node is *fleet-managed* if it has a stored `EnrollmentOutcome` (found by
+listing `orgpolicy/enroll/` in the node-local store). On such a node, JOIN is
+"new peering". The peer must be eligible under **every** org the node is
+enrolled in: `PeerEligible` = a current policy for `OpNewPeering`, the stored
+body is the accepted policy, and its v2 allow-list names the peer's agent key.
+
+federation stays independent of where policy lives: the REST layer installs a
+`JoinPeerGate` (`Manager.SetJoinPeerGate`) backed by the org policy store.
 
 | Side | Check | Where |
 |---|---|---|
-| host | `PeerEligible(guest agent_pub)` | at `/join/request`, then again under `LockAgreementMutation` before `ApproveWithCode` |
-| guest | `PeerEligible(host agent_pub)` | at scan, then again under the lease before its tx-33 |
+| host | guest `agent_pub` | at `/fed/v1/join/request`, before any guest material is staged |
+| host | guest `agent_pub` | at `HostApprove`, before the transcript is frozen |
+| host | guest `agent_pub` | in `hostConfirm`, under `LockAgreementMutation`, before the host's tx-33 |
+| guest | host `agent_pub` | in `GuestRequest`, as soon as the host's key arrives (the QR does not carry it, so scan can't check) |
+| guest | host `agent_pub` | in `GuestConfirm`, under the lease, before the guest's tx-33 |
 
-If the check fails, JOIN is refused with a clear reason, unless a current
-**override** exists. An override has these fields:
-- `peer_agent_pub`, `peer_chain_id`, `reason`
-- `expires_at` (≤ 30 d), `revision`
+A refusal returns `fleet JOIN refused: <reason>` (403 on the peer route) and
+stops before that side's tx-33. Any storage error refuses. A node with no
+enrollment, or no org policy backend, sees no change.
 
-It's signed by the current Root credential, persisted and listed, and each use is
-appended to its history. Nodes that aren't fleet-managed see no change.
-`TestRFC443Baseline_QRJoinIgnoresPeerAllowList` flips to a negative test.
+**Override.** When the peer is not eligible, a current override can let one
+peer through. `sage.join-override.v1` fields:
+- `peer_agent_pub`, `peer_chain_id`, `reason` (≤ 512 B)
+- `revision` (monotonic per peer), `issued_at`, `expires_at` (window ≤ 30 d)
+- `root_credential_id` and `sig`: signed by the node's current Root
+  credential (after app-v23 the committed CEREBRUM Root; before it the node
+  operator key).
+
+`POST /v1/federation/join-overrides` stores one (16 KiB cap). Authority comes
+from the Root signature, which is checked against the current Root at store
+time and again at every use, so a Root rotation retires every override the old
+Root signed. The HTTP caller must also be that current Root through a loopback
+request, and only a node holding at least one `EnrollmentOutcome` may store or
+list overrides. Same revision and digest is a no-op; a lower revision, or the
+same revision with other content, is refused. Each use (side, stage, session,
+time) is appended to the record under compare-and-set before the JOIN
+continues; the last 256 uses are kept plus a total count.
+`GET /v1/federation/join-overrides` uses the same local-Root boundary and lists
+them with a `usable` / `expired` / `not_current_root` status. Overrides and
+policy-eligible peers are separate: an eligible peer never consumes an override
+use.
+
+`TestRFC443Baseline_QRJoinIgnoresPeerAllowList` is flipped to
+`TestRFC443Baseline_QRJoinEnforcesPeerAllowListOnFleetNode`.
 
 ## 2. Request and response caps
 
@@ -175,7 +207,8 @@ and refuses anything over the cap. None of them reuse `joinBodyCap`.
 |---|---|---|
 | `POST /v1/org/{org}/policy` | 256 KiB | 16 KiB |
 | `POST /v1/org/{org}/roster` | 2 MiB | 16 KiB |
-| `POST /v1/org/{org}/cards` | 16 KiB | 16 KiB |
+| `POST /v1/org/{org}/card` | 16 KiB | 16 KiB |
+| `POST /v1/federation/join-overrides` | 16 KiB | 4 KiB |
 | `POST /fed/v1/intro/request` (B) | 32 KiB | 32 KiB |
 | `GET /fed/v1/intro/{offer_id}/accept` (B) | — | 8 KiB |
 | `POST /fed/v1/intro/confirm` (B) | 8 KiB | 8 KiB |
@@ -346,8 +379,8 @@ so a concurrent tick or a late live call can't apply a transition twice.
 
 ## 4. Phase A test plan
 
-A1 implements the policy, card, roster, store, cap and eligibility items below.
-The JOIN gate items are A2.
+A1 implemented the policy, card type, roster, store, cap and eligibility items
+below. A2 adds the card route and the JOIN gate items.
 
 - Policy v2:
   - golden canonical bytes;
@@ -357,7 +390,7 @@ The JOIN gate items are A2.
 - Policy POST: 256 KiB accepted, 256 KiB + 1 refused before decode (413).
 - Cards:
   - signature under `agent_pub` required;
-  - no `EnrollmentOutcome` → refused;
+  - no accepted policy for the org → refused; fields from runtime state only;
   - higher / same / equivocation / lower rev;
   - restart keeps the highest rev and the notices.
 - Roster:
@@ -376,5 +409,6 @@ The JOIN gate items are A2.
   - expired or non-Root override → refused;
   - not fleet-managed → unchanged (the existing ceremony tests stay green).
 - `TestRFC443Baseline_*`: in A1, 7.6 (a v1 allow-list grants no eligibility)
-  and the allow-list size test flip. 7.1 (QR JOIN ignores `PeerAllowList`)
-  flips in A2 with the JOIN gate. The others stay as regression guards.
+  and the allow-list size test flipped. In A2, 7.1 (QR JOIN ignores
+  `PeerAllowList`) flips to an enforcement test. The others stay as regression
+  guards.
