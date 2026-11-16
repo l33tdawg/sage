@@ -695,6 +695,16 @@ func (s *Server) SetFederation(f FederationService) {
 	if gated, ok := f.(interface{ SetJoinPeerGate(federation.JoinPeerGate) }); ok {
 		gated.SetJoinPeerGate(s.fleetJoinGate)
 	}
+	// RFC #443 Phase B: introduced agreements are usable only while their
+	// newest introduced_link row is active, and their sharing stays inside the
+	// org's owner envelope. Manual agreements have no row and are unchanged.
+	if hooked, ok := f.(interface {
+		SetIntroducedLinkSource(federation.IntroducedLinkSource)
+		SetIntroducedSharingCap(federation.IntroducedSharingCap)
+	}); ok {
+		hooked.SetIntroducedLinkSource(introducedLinkSourceAdapter{s: s})
+		hooked.SetIntroducedSharingCap(s.introducedSharingCap)
+	}
 }
 
 // SetNodeOperatorID records the hex-encoded ed25519 public key that
@@ -901,6 +911,12 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/org/{org_id}/card", s.handleOrgCardStatus)
 		r.Post("/v1/federation/join-overrides", s.handleJoinOverrideApply)
 		r.Get("/v1/federation/join-overrides", s.handleJoinOverrideList)
+		// RFC #443 Phase B1: owner envelope, intro offers, introduced links.
+		r.Post("/v1/org/{org_id}/envelope", s.handleOrgEnvelopeApply)
+		r.Get("/v1/org/{org_id}/envelope", s.handleOrgEnvelopeStatus)
+		r.Get("/v1/org/{org_id}/offers", s.handleOrgOffers)
+		r.Post("/v1/org/{org_id}/offers/{offer_id}/reoffer", s.handleOrgReoffer)
+		r.Get("/v1/federation/introduced-links", s.handleIntroducedLinkList)
 		r.Delete("/v1/org/{org_id}/member/{agent_id}", s.handleOrgRemoveMember)
 		r.Post("/v1/org/{org_id}/clearance", s.handleOrgSetClearance)
 

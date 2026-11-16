@@ -36,6 +36,11 @@ func (s *SQLiteStore) migrateOrgPolicyState(ctx context.Context) error {
 	)`); err != nil {
 		return fmt.Errorf("create org policy state table: %w", err)
 	}
+	// RFC #443 Phase B: the introduced-link records are node-local org-policy
+	// state too (off consensus, never in Badger), so they migrate with it.
+	if err := s.migrateIntroducedLinks(ctx); err != nil {
+		return fmt.Errorf("migrate introduced links: %w", err)
+	}
 	return nil
 }
 

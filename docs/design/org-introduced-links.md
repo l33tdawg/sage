@@ -1,7 +1,8 @@
 # Org-introduced federation links (RFC #443, Phase A + B)
 
-Status: Phase A implemented. Contract agreed on #443 (v2 + the two
-implementation points of 2026-11-12). Line refs are main @ 506eb377 (v11.25.8).
+Status: Phase A implemented (v11.25.8). Phase B1 implemented (§5). Contract
+agreed on #443 (v2 + the two implementation points of 2026-11-12). Line refs
+are main @ 506eb377 (v11.25.8).
 Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
 
 ## 0. Scope
@@ -20,13 +21,22 @@ in two PRs:
      and a roster store with `AdmitWithAuthority` semantics plus card checks.
   4. `PeerEligible`: the single eligibility decision for later callers. Nothing
      calls it yet.
-- **A2 (this PR):** the node-self-mint card route (§1.2, decided on #443), and
-  the manual QR JOIN gate with the Root-signed override (§1.5).
+- **A2 (merged, #556):** the node-self-mint card route (§1.2, decided on
+  #443), and the manual QR JOIN gate with the Root-signed override (§1.5).
 
-**Phase B (next PR):** owner envelope, offers, intro handshake routes, the
+**Phase B** adds the owner envelope, offers, intro handshake routes, the
 `introduced_link` record and the intent state machine (§3), and the
-`ActiveAgreement` hook. Only `ask` mode. §3 and §4 are designed here, as agreed,
-so Phase A's stores and caps already fit them.
+`ActiveAgreement` hook. Only `ask` mode. It ships in two PRs:
+
+- **B1 (this PR, §5):** data and local decisions. The owner envelope, the
+  deterministic offers, the `introduced_link` table with its CAS transitions,
+  the fail-closed `ActiveAgreement` / `ActiveAgreements` hook, and the
+  envelope cap on `UpdateAgreementSharingAs`. Nothing signs, broadcasts or
+  activates a link: no code path writes an `introduced_link` row yet.
+- **B2:** activation. `E_intro` and the acceptance signatures, the
+  `/fed/v1/intro/*` routes, owner accept, the §3.3 write path, the §3.4
+  reconciler, the §3.5 crash and stale tests, and applying the pauses B1
+  only reports.
 
 ## 1. Phase A objects
 
@@ -209,6 +219,8 @@ and refuses anything over the cap. None of them reuse `joinBodyCap`.
 | `POST /v1/org/{org}/roster` | 2 MiB | 16 KiB |
 | `POST /v1/org/{org}/card` | 16 KiB | 16 KiB |
 | `POST /v1/federation/join-overrides` | 16 KiB | 4 KiB |
+| `POST /v1/org/{org}/envelope` | 64 KiB | 4 KiB |
+| `POST /v1/org/{org}/offers/{offer_id}/reoffer` | 1 KiB | 4 KiB |
 | `POST /fed/v1/intro/request` (B) | 32 KiB | 32 KiB |
 | `GET /fed/v1/intro/{offer_id}/accept` (B) | — | 8 KiB |
 | `POST /fed/v1/intro/confirm` (B) | 8 KiB | 8 KiB |
@@ -412,3 +424,97 @@ below. A2 adds the card route and the JOIN gate items.
   and the allow-list size test flipped. In A2, 7.1 (QR JOIN ignores
   `PeerAllowList`) flips to an enforcement test. The others stay as regression
   guards.
+
+## 5. Phase B1: envelope, offers, record and hook
+
+### 5.1 Owner envelope (`internal/orgpolicy/envelope.go`, `envelope_store.go`)
+
+`sage.org-link-envelope.v1`, one per org per node. Fields:
+- `org_id`, `org_root_key_id` (the accepted policy's `root_key_id`), `scope`
+  (the roster scope it covers);
+- `allowed_domains` (the tx-33 sharing rules: ≤ 64 tags of ≤ 512 bytes, no
+  duplicates, `*` only alone; empty = trust-only links) and `max_clearance`
+  (0–4);
+- `mode` (`ask` only), `revision`, `prev_digest` (empty at revision 1,
+  otherwise the stored envelope's digest), `issued_at` / `expires_at`
+  (≤ 365 d), `root_credential_id`, `sig`.
+
+It is signed by the node's current Root credential, stored only through
+localhost by the current local Root (`POST /v1/org/{org}/envelope`), and
+re-verified at every use against the Root current at that moment, so a Root
+rotation retires it. Admission is conditioned on the exact accepted-policy
+bytes:
+- no stored envelope → revision must be 1;
+- higher revision → `prev_digest` must chain to the stored digest;
+- same revision and digest → no-op;
+- same revision, other digest → refused, durable notice, governance event;
+- lower revision → refused.
+
+Every revision is kept in history.
+
+**Covers** (the check offers and the sharing cap use): verifies under the
+current Root, inside its window, an accepted policy exists for the org with the
+same org root, and the accepted roster's scope equals the envelope scope.
+
+**AllowsSharing:** the agreement's clearance ≤ `max_clearance`, and every
+shared domain is covered by an allowed domain with the agreement-scope
+semantics (`*` covers all, `eng` covers `eng` and `eng.public`, a `*` request
+needs a `*` envelope).
+
+### 5.2 Offers (`internal/orgpolicy/offer.go`)
+
+Roles and `offer_id` follow contract v2 §5: host = lower `agent_pub`, and
+`offer_id` = SHA-256 of `"sage/intro-offer/v1"`, org, host key, guest key, both
+`card_rev`s and the kind. Strings are u32-length-prefixed and revisions are
+big-endian u64. Card revisions come from the accepted roster's copies, which
+both sides hold, so both compute the same id. A roster refresh that changes
+neither card gives the same id.
+
+`GET /v1/org/{org}/offers` (node operator) computes, per roster peer:
+
+| Peer state | When |
+|---|---|
+| `offered` (kind `new`) | no active agreement for the peer chain, the peer is eligible (`PeerEligible` under this org) and its card is current |
+| `none` | not eligible / card not current / own chain; `reason` says why |
+| `manual` | an active agreement exists with no introduced row, or whose newest row is terminal |
+| `in_flight` | the newest row is `intent` / `signed` / `committed` / `bound_pending_peer` |
+| `active` | the newest row is active and the peer is still covered |
+| `rekey_required` (kind `rekey`) | active, but the peer card's CA pin differs from the agreement's |
+| `pause_required` | active, but the peer is no longer covered; `reason` says why |
+| `paused` | the newest row is paused |
+| `expired` | the local 72 h offer window passed |
+
+Org-level preconditions come first (else `ready: false` with the reason): an
+accepted policy, a current accepted roster that lists this node's card on its
+own chain, and an envelope that covers. Each node records when it first saw an
+offer, so the 72 h window survives restart. `POST
+/v1/org/{org}/offers/{offer_id}/reoffer` restarts the local window. B1 only
+reports `pause_required`; B2 applies it under the lease.
+
+### 5.3 Record and hook
+
+`introduced_link` and `introduced_link_history` are node-local SQLite tables
+(`internal/store/introduced_link.go`), never Badger. Columns are as in §3.1,
+plus `org_id`, `peer_agent_pub`, `role` and `state_reason`.
+- `InsertIntroducedLinkIntent` checks the fence inside its write transaction,
+  and the partial unique index on `remote_chain_id` (in-flight states) backs it
+  up.
+- `TransitionIntroducedLink` enforces the §3.2 table. Out of `signed` and later
+  states it is a CAS on the expected state and the stored `tx_hash`.
+  `intent → signed` records the exact bytes, with `tx_hash` = SHA-256 of them.
+  Terminal and paused states need a reason. Each transition appends history in
+  the same transaction.
+
+federation gets `SetIntroducedLinkSource` and `SetIntroducedSharingCap`, and the
+REST layer installs both in `SetFederation`:
+- `ActiveAgreement` denies when the chain's newest row isn't `active`
+  (`ErrIntroducedLinkNotActive`). `ActiveAgreements` drops those chains.
+- A storage error denies every agreement. Without the rows, a manual link
+  can't be told apart from a paused introduced one.
+- `UpdateAgreementSharingAs` on a chain with a row calls the cap: the newest
+  row's org envelope must cover and `AllowsSharing` must hold. If no cap is
+  installed, the update is refused.
+- Manual agreements and nodes with no node-local store are unchanged.
+
+`GET /v1/federation/introduced-links` (node operator) lists rows and history. It
+never echoes `e_intro` or `tx_bytes`.

@@ -85,6 +85,11 @@ func (m *Manager) UpdateAgreementSharingAs(
 	if err != nil {
 		return nil, err
 	}
+	// RFC #443 Phase B: an org-introduced agreement's sharing stays inside the
+	// owner envelope of its org. Manual agreements are unchanged.
+	if err := m.checkIntroducedSharing(remoteChainID, canonical, agreement.MaxClearance); err != nil {
+		return nil, err
+	}
 	terms := &tx.CrossFedTerms{
 		RemoteChainID:  agreement.RemoteChainID,
 		Endpoint:       agreement.Endpoint,

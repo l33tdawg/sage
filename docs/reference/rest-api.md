@@ -1707,6 +1707,26 @@ On a fleet-managed node (one holding an org `EnrollmentOutcome`) a manual QR JOI
 
 List stored overrides with their usage history (last 256 uses plus `total_uses`) and a `status` of `usable`, `expired` or `not_current_root`. This operator surface requires the current local Root and a fleet-managed node; non-Root and remote callers receive 403, and a non-fleet node receives 404.
 
+### `POST /v1/org/{org_id}/envelope`
+
+Store this node's Root-signed owner link envelope (`sage.org-link-envelope.v1`) for an org whose policy the node has accepted: `org_id`, `org_root_key_id` (the accepted policy's root key), `scope` (the roster scope it covers), `allowed_domains` (≤ 64 tags of ≤ 512 bytes; `*` only alone; empty means trust-only links), `max_clearance` (0–4), `mode` (`ask` only), `revision`, `prev_digest` (empty at revision 1, else the stored envelope's digest), `issued_at`, `expires_at` (window ≤ 365 days), `root_credential_id`, `sig`. The signature must verify under this node's current Root credential; the authenticated caller must be that current Root and the request must arrive through localhost (403 otherwise). The first envelope for an org must be revision 1; a higher revision must chain `prev_digest`; the same revision and content is a no-op; the same revision with other content is refused with 409, a durable notice and a governance event; a lower revision is refused with 409. The write is bound to the exact accepted policy generation (409 on a rotation in between). The request body is capped at 64 KiB before decode. An envelope never activates a link: Phase B accepts only `ask`.
+
+### `GET /v1/org/{org_id}/envelope`
+
+Return the stored envelope, its `status` (`covering`, or `not_covering` with a `reason`: Root rotated, expired, org root changed, no accepted roster for its scope) and any equivocation notice. Node operator only. 404 when the node holds neither.
+
+### `GET /v1/org/{org_id}/offers`
+
+Compute this node's per-peer introduction offers for the org from the accepted policy, the accepted roster and the owner envelope. Node operator only. Returns `ready` (with a `reason` when an org-level precondition fails), the roster revision and digest, the envelope revision, and one row per roster peer with `role` (`host` = lower agent key), `state` (`offered`, `none`, `manual`, `in_flight`, `active`, `rekey_required`, `pause_required`, `paused`, `expired`), `reason`, and, for an open offer, `kind` (`new` / `rekey`), the deterministic `offer_id`, `offered_at` and `expires_at` (72 h after this node first saw it). Listing records first sight of new offers; it never signs or broadcasts anything.
+
+### `POST /v1/org/{org_id}/offers/{offer_id}/reoffer`
+
+Restart the local 72 h window of an offer this node has already listed. Node operator only. 404 for an unknown offer id.
+
+### `GET /v1/federation/introduced-links`
+
+List this node's introduced-link records (newest first; optional `remote_chain_id`) with each row's state, reason, evidence, terms and transition history. Node operator only. The intro transcript and signed tx bytes are never echoed.
+
 ---
 
 ### `POST /v1/org/{org_id}/dept`
