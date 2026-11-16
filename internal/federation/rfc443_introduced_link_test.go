@@ -60,8 +60,9 @@ func seedAgreements(t *testing.T, node *testChain, chains ...string) {
 }
 
 func activeChains(m *Manager) string {
-	var out []string
-	for _, a := range m.ActiveAgreements() {
+	active := m.ActiveAgreements()
+	out := make([]string, 0, len(active))
+	for _, a := range active {
 		out = append(out, a.RemoteChainID)
 	}
 	return strings.Join(out, ",")

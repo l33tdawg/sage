@@ -364,7 +364,8 @@ func (s *Store) peerOffer(in OfferInputs, st AcceptedState, body *Policy, own, p
 	row.LinkID, row.LinkState = ag.LinkID, ag.LinkState
 
 	// Coverage of this peer right now.
-	covered, why := true, ""
+	var covered bool
+	var why string
 	switch {
 	case peer.ChainID == in.OwnChainID:
 		covered, why = false, "peer card names this node's own chain id"

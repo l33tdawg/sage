@@ -177,7 +177,7 @@ func TestIntroducedLink_TransitionsAreCASAndHashBound(t *testing.T) {
 
 	hist, err := s.ListIntroducedLinkHistory(ctx, l.LinkID)
 	require.NoError(t, err)
-	var path []string
+	path := make([]string, 0, len(hist))
 	for _, h := range hist {
 		path = append(path, h.From+">"+h.To)
 	}
