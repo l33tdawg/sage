@@ -251,7 +251,8 @@ domains. So activation is a durable state machine, not one atomic write.
 - `prior_terms_digest`: chain terms for `remote_chain_id` when the intent was
   written, or `absent`
 - `tx_bytes`, `tx_hash`, `tx_nonce`: NULL until signed
-- `staged_ref`: the staged CA + seed
+- `generation`: the agreement generation `terms` commits (§5.3)
+- `staged_ref`: the staged CA + seed (required, bounded)
 - `created_at`, `deadline`
 - an append-only `introduced_link_history(link_id, at, from, to, reason)`
 
@@ -272,9 +273,10 @@ per remote chain**. That's what rules out a second agreement generation.
 | `aborted(reason)`, `revoked(reason)` | terminal | — |
 
 `ActiveAgreement` (`manager.go:841`) gets one more fail-closed check, after the
-existing ones: if any `introduced_link` row exists for `remote_chain_id` and the
-newest row's state isn't `active`, it denies. `ActiveAgreements` applies the same
-filter. Manual agreements have no row and are unchanged.
+existing ones: if an `introduced_link` row is bound to the agreement's current
+generation (§5.3) and the newest such row's state isn't `active`, it denies.
+`ActiveAgreements` applies the same filter. Manual agreements have no row for
+their generation and are unchanged.
 
 ### 3.3 Write path (both sides, under `LockAgreementMutation`)
 
@@ -476,17 +478,18 @@ neither card gives the same id.
 |---|---|
 | `offered` (kind `new`) | no active agreement for the peer chain, the peer is eligible (`PeerEligible` under this org) and its card is current |
 | `none` | not eligible / card not current / own chain; `reason` says why |
-| `manual` | an active agreement exists with no introduced row, or whose newest row is terminal |
-| `in_flight` | the newest row is `intent` / `signed` / `committed` / `bound_pending_peer` |
-| `active` | the newest row is active and the peer is still covered |
+| `manual` | an active agreement exists with no row bound to its generation, a terminal row, or a row introduced by another org |
+| `in_flight` | the chain has an `intent` / `signed` / `committed` / `bound_pending_peer` row |
+| `active` | the row bound to the agreement's generation is active and the peer is still covered |
 | `rekey_required` (kind `rekey`) | active, but the peer card's CA pin differs from the agreement's |
-| `pause_required` | active, but the peer is no longer covered; `reason` says why |
-| `paused` | the newest row is paused |
+| `pause_required` | active, but the peer is no longer covered, or the agreement's domains or clearance are outside the current envelope; `reason` says why |
+| `paused` | the row bound to the agreement's generation is paused |
 | `expired` | the local 72 h offer window passed |
 
 Org-level preconditions come first (else `ready: false` with the reason): an
 accepted policy, a current accepted roster that lists this node's card on its
-own chain, and an envelope that covers. Each node records when it first saw an
+own chain, and an envelope that covers. A row is read only under the org that
+introduced it. Each node records when it first saw an
 offer, so the 72 h window survives restart. `POST
 /v1/org/{org}/offers/{offer_id}/reoffer` restarts the local window. B1 only
 reports `pause_required`; B2 applies it under the lease.
@@ -496,6 +499,15 @@ reports `pause_required`; B2 applies it under the lease.
 `introduced_link` and `introduced_link_history` are node-local SQLite tables
 (`internal/store/introduced_link.go`), never Badger. Columns are as in §3.1,
 plus `org_id`, `peer_agent_pub`, `role` and `state_reason`.
+- Each row is bound to one agreement generation: `generation` =
+  `CrossFedGeneration` of the terms it commits, a SHA-256 over every chain term
+  except the outbound `AllowedDomains` snapshot and the status. Domains are left
+  out because `UpdateAgreementSharingAs` rewrites them in place, and for an
+  introduced agreement that rewrite is held inside the envelope. Any other change
+  (endpoint, pin, clearance, departments, expiry) is a new generation the row
+  doesn't govern.
+- The intent needs a non-empty `staged_ref` of at most 512 bytes: the CA and
+  seed are staged before it is written.
 - `InsertIntroducedLinkIntent` checks the fence inside its write transaction,
   and the partial unique index on `remote_chain_id` (in-flight states) backs it
   up.
@@ -507,12 +519,16 @@ plus `org_id`, `peer_agent_pub`, `role` and `state_reason`.
 
 federation gets `SetIntroducedLinkSource` and `SetIntroducedSharingCap`, and the
 REST layer installs both in `SetFederation`:
-- `ActiveAgreement` denies when the chain's newest row isn't `active`
-  (`ErrIntroducedLinkNotActive`). `ActiveAgreements` drops those chains.
+- `ActiveAgreement` denies when the newest row bound to the agreement's current
+  generation isn't `active` (`ErrIntroducedLinkNotActive`).
+  `ActiveAgreements` drops those chains.
+- Rows for other generations of the chain are ignored. An older aborted attempt
+  doesn't block a later manual agreement, and an old active row doesn't
+  authorize a later tx-33 it never introduced.
 - A storage error denies every agreement. Without the rows, a manual link
   can't be told apart from a paused introduced one.
-- `UpdateAgreementSharingAs` on a chain with a row calls the cap: the newest
-  row's org envelope must cover and `AllowsSharing` must hold. If no cap is
+- `UpdateAgreementSharingAs` on an agreement whose generation has a row calls
+  the cap: that row's org envelope must cover and `AllowsSharing` must hold. If no cap is
   installed, the update is refused.
 - Manual agreements and nodes with no node-local store are unchanged.
 

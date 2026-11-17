@@ -96,13 +96,21 @@ func OfferID(orgID, hostPub, guestPub string, cardRevHost, cardRevGuest uint64, 
 }
 
 // PeerAgreement is what the caller knows about an existing link to one peer
-// chain: whether a tx-33 agreement exists, its pinned CA SPKI (hex), and the
-// newest introduced_link row for that chain, if any.
+// chain: whether a tx-33 agreement exists, its pinned CA SPKI (hex) and
+// sharing terms, and the introduced_link row that governs it. The row is the
+// in-flight row for the chain if there is one, else the newest row bound to
+// the current agreement's generation; LinkState is empty when neither exists
+// (no agreement, or a manual one).
 type PeerAgreement struct {
-	Exists    bool
-	PinHex    string
-	LinkID    string
-	LinkState string // empty when the chain has no introduced_link row
+	Exists         bool
+	PinHex         string
+	MaxClearance   uint8
+	AllowedDomains []string
+	LinkID         string
+	LinkState      string
+	// LinkOrgID is the org that introduced the row. A row of another org is
+	// never interpreted under this org.
+	LinkOrgID string
 }
 
 // OfferInputs drives RefreshOffers.
@@ -335,7 +343,7 @@ func (s *Store) RefreshOffers(in OfferInputs) (OfferList, error) {
 		if peer.AgentPub == in.OwnAgentPub {
 			continue
 		}
-		row, rErr := s.peerOffer(in, st, body, own, &peer)
+		row, rErr := s.peerOffer(in, st, body, envelope, own, &peer)
 		if rErr != nil {
 			return OfferList{OrgID: in.OrgID, Offers: []PeerOffer{}}, rErr
 		}
@@ -344,7 +352,7 @@ func (s *Store) RefreshOffers(in OfferInputs) (OfferList, error) {
 	return out, nil
 }
 
-func (s *Store) peerOffer(in OfferInputs, st AcceptedState, body *Policy, own, peer *LinkCard) (PeerOffer, error) {
+func (s *Store) peerOffer(in OfferInputs, st AcceptedState, body *Policy, envelope *LinkEnvelope, own, peer *LinkCard) (PeerOffer, error) {
 	host, guest, err := IntroRoles(in.OwnAgentPub, peer.AgentPub)
 	if err != nil {
 		return PeerOffer{}, err
@@ -378,7 +386,18 @@ func (s *Store) peerOffer(in OfferInputs, st AcceptedState, body *Policy, own, p
 	switch {
 	case inFlightLinkStates[ag.LinkState]:
 		row.State = PeerStateInFlight
+		if ag.LinkOrgID != in.OrgID {
+			row.LinkID = ""
+			row.Reason = "a link for this chain is in flight under another org"
+		}
 		return row, nil
+	case ag.LinkState != "" && ag.LinkOrgID != in.OrgID:
+		// Another org's row is never read as this org's link state.
+		row.LinkID, row.LinkState = "", ""
+		if ag.Exists {
+			row.State, row.Reason = PeerStateManual, "the agreement for this chain was introduced by another org"
+			return row, nil
+		}
 	case ag.Exists && ag.LinkState == "":
 		row.State, row.Reason = PeerStateManual, "a manual agreement exists for this chain"
 		return row, nil
@@ -388,6 +407,11 @@ func (s *Store) peerOffer(in OfferInputs, st AcceptedState, body *Policy, own, p
 	case ag.Exists && (ag.LinkState == "active" || ag.LinkState == "rekey_required"):
 		if !covered {
 			row.State, row.Reason = PeerStatePauseRequired, why
+			return row, nil
+		}
+		// The envelope may have narrowed since the link was bound.
+		if ok, narrowWhy := envelope.AllowsSharing(ag.AllowedDomains, ag.MaxClearance); !ok {
+			row.State, row.Reason = PeerStatePauseRequired, narrowWhy
 			return row, nil
 		}
 		if ag.LinkState == "rekey_required" || ag.PinHex != peer.CASPKIPin {

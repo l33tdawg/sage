@@ -197,13 +197,23 @@ func TestRefreshOffersExistingLinks(t *testing.T) {
 		kind  string
 	}{
 		{"manual agreement", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin}, PeerStateManual, ""},
-		{"in flight", PeerAgreement{LinkID: "L", LinkState: "signed"}, PeerStateInFlight, ""},
-		{"active, same pin", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkState: "active"}, PeerStateActive, ""},
-		{"active, pin changed", PeerAgreement{Exists: true, PinHex: strings.Repeat("cd", 32), LinkID: "L", LinkState: "active"}, PeerStateRekeyRequired, OfferKindRekey},
-		{"rekey required", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkState: "rekey_required"}, PeerStateRekeyRequired, OfferKindRekey},
-		{"paused", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkState: "paused"}, PeerStatePaused, ""},
-		{"revoked row, agreement gone", PeerAgreement{LinkID: "L", LinkState: "revoked"}, PeerStateOffered, OfferKindNew},
-		{"aborted row, agreement still on chain", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkState: "aborted"}, PeerStateManual, ""},
+		{"in flight", PeerAgreement{LinkID: "L", LinkOrgID: "org-acme", LinkState: "signed"}, PeerStateInFlight, ""},
+		{"active, same pin", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}, PeerStateActive, ""},
+		{"active, pin changed", PeerAgreement{Exists: true, PinHex: strings.Repeat("cd", 32), LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}, PeerStateRekeyRequired, OfferKindRekey},
+		{"rekey required", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkOrgID: "org-acme", LinkState: "rekey_required"}, PeerStateRekeyRequired, OfferKindRekey},
+		{"paused", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkOrgID: "org-acme", LinkState: "paused"}, PeerStatePaused, ""},
+		{"revoked row, agreement gone", PeerAgreement{LinkID: "L", LinkOrgID: "org-acme", LinkState: "revoked"}, PeerStateOffered, OfferKindNew},
+		{"aborted row, agreement still on chain", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkOrgID: "org-acme", LinkState: "aborted"}, PeerStateManual, ""},
+		// A row introduced by another org is never read under this org.
+		{"other org, active row", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkOrgID: "org-other", LinkState: "active"}, PeerStateManual, ""},
+		{"other org, rekey row", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkOrgID: "org-other", LinkState: "rekey_required"}, PeerStateManual, ""},
+		{"other org, in flight", PeerAgreement{LinkID: "L", LinkOrgID: "org-other", LinkState: "signed"}, PeerStateInFlight, ""},
+		{"other org, revoked row, agreement gone", PeerAgreement{LinkID: "L", LinkOrgID: "org-other", LinkState: "revoked"}, PeerStateOffered, OfferKindNew},
+		// The envelope (eng, ops; clearance 2) narrows past the agreement terms.
+		{"active, domain outside envelope", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, AllowedDomains: []string{"eng", "hr"}, MaxClearance: 2, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}, PeerStatePauseRequired, ""},
+		{"active, clearance above envelope", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, AllowedDomains: []string{"eng"}, MaxClearance: 3, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}, PeerStatePauseRequired, ""},
+		{"rekey required, domain outside envelope", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, AllowedDomains: []string{"*"}, LinkID: "L", LinkOrgID: "org-acme", LinkState: "rekey_required"}, PeerStatePauseRequired, ""},
+		{"active, inside envelope", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, AllowedDomains: []string{"eng.public", "ops"}, MaxClearance: 2, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}, PeerStateActive, ""},
 	}
 	for _, tc := range cases {
 		l, err := f.st.RefreshOffers(f.inputs(1, testNow, agreementTable{chain: tc.ag}))
@@ -214,6 +224,12 @@ func TestRefreshOffersExistingLinks(t *testing.T) {
 		if o.State != tc.state || o.Kind != tc.kind {
 			t.Errorf("%s: state %q kind %q, want %q %q", tc.name, o.State, o.Kind, tc.state, tc.kind)
 		}
+		if tc.ag.LinkOrgID == "org-other" && o.LinkID != "" {
+			t.Errorf("%s: another org's link id %q leaked into this org's offers", tc.name, o.LinkID)
+		}
+		if tc.state == PeerStatePauseRequired && o.Reason == "" {
+			t.Errorf("%s: pause_required without a reason", tc.name)
+		}
 	}
 }
 
@@ -222,7 +238,7 @@ func TestRefreshOffersPauseRequired(t *testing.T) {
 	f := newPhaseBFixture(t, agentHex(1)) // node 2 is not listed
 	f.storeEnvelope(t)
 	peer := sampleCard(2, 1, nil)
-	ag := agreementTable{peer.ChainID: {Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkState: "active"}}
+	ag := agreementTable{peer.ChainID: {Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}}
 	l, err := f.st.RefreshOffers(f.inputs(1, testNow, ag))
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +255,7 @@ func TestRefreshOffersPauseRequired(t *testing.T) {
 		t.Fatalf("roster with a short card: %q %v", d, err)
 	}
 	g.storeEnvelope(t)
-	ag2 := agreementTable{short.ChainID: {Exists: true, PinHex: short.CASPKIPin, LinkID: "L", LinkState: "active"}}
+	ag2 := agreementTable{short.ChainID: {Exists: true, PinHex: short.CASPKIPin, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}}
 	l, err = g.st.RefreshOffers(g.inputs(1, testNow+3600, ag2))
 	if err != nil || !l.Ready {
 		t.Fatalf("refresh: %+v %v", l, err)

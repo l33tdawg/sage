@@ -15,6 +15,7 @@ package rest
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -41,7 +42,8 @@ var offerIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 // introducedLinkStore is the node-local SQLite surface for introduced links.
 type introducedLinkStore interface {
 	LatestIntroducedLinkByChain(ctx context.Context, remoteChainID string) (*store.IntroducedLink, error)
-	LatestIntroducedLinkStates(ctx context.Context) (map[string]string, error)
+	IntroducedLinkForGeneration(ctx context.Context, remoteChainID, generation string) (*store.IntroducedLink, error)
+	IntroducedLinkGenerationStates(ctx context.Context) (map[string]map[string]string, error)
 	ListIntroducedLinks(ctx context.Context, remoteChainID string) ([]store.IntroducedLink, error)
 	ListIntroducedLinkHistory(ctx context.Context, linkID string) ([]store.IntroducedLinkHistory, error)
 }
@@ -50,7 +52,7 @@ type introducedLinkStore interface {
 type orgOfferSource interface {
 	TransportAgentPub() string
 	LocalChainID() string
-	OrgPeerAgreements() (map[string]string, error)
+	OrgPeerAgreements() (map[string]store.CrossFedRecord, error)
 }
 
 func (s *Server) introducedLinks() introducedLinkStore {
@@ -69,20 +71,20 @@ func (s *Server) introducedLinks() introducedLinkStore {
 // first. A node with no node-local store has no introduced links.
 type introducedLinkSourceAdapter struct{ s *Server }
 
-func (a introducedLinkSourceAdapter) LatestIntroducedLinkByChain(ctx context.Context, remoteChainID string) (*store.IntroducedLink, error) {
+func (a introducedLinkSourceAdapter) IntroducedLinkForGeneration(ctx context.Context, remoteChainID, generation string) (*store.IntroducedLink, error) {
 	ils := a.s.introducedLinks()
 	if ils == nil {
 		return nil, nil
 	}
-	return ils.LatestIntroducedLinkByChain(ctx, remoteChainID)
+	return ils.IntroducedLinkForGeneration(ctx, remoteChainID, generation)
 }
 
-func (a introducedLinkSourceAdapter) LatestIntroducedLinkStates(ctx context.Context) (map[string]string, error) {
+func (a introducedLinkSourceAdapter) IntroducedLinkGenerationStates(ctx context.Context) (map[string]map[string]string, error) {
 	ils := a.s.introducedLinks()
 	if ils == nil {
-		return map[string]string{}, nil
+		return map[string]map[string]string{}, nil
 	}
-	return ils.LatestIntroducedLinkStates(ctx)
+	return ils.IntroducedLinkGenerationStates(ctx)
 }
 
 // introducedSharingCap is the federation.IntroducedSharingCap backed by the
@@ -302,7 +304,7 @@ func (s *Server) handleOrgOffers(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "org_id is required")
 		return
 	}
-	pins, err := src.OrgPeerAgreements()
+	agreements, err := src.OrgPeerAgreements()
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "agreement state unavailable")
 		return
@@ -316,16 +318,7 @@ func (s *Server) handleOrgOffers(w http.ResponseWriter, r *http.Request) {
 		OrgID: orgID, OwnAgentPub: src.TransportAgentPub(), OwnChainID: src.LocalChainID(),
 		RootCredentialID: rootID, RootPub: rootPub, Now: orgPolicyNow(),
 		Agreement: func(chainID string) (orgpolicy.PeerAgreement, error) {
-			pin, exists := pins[chainID]
-			ag := orgpolicy.PeerAgreement{Exists: exists, PinHex: pin}
-			row, lErr := ils.LatestIntroducedLinkByChain(ctx, chainID)
-			if lErr != nil {
-				return ag, lErr
-			}
-			if row != nil {
-				ag.LinkID, ag.LinkState = row.LinkID, row.State
-			}
-			return ag, nil
+			return introducedPeerAgreement(ctx, ils, agreements, chainID)
 		},
 	})
 	if err != nil {
@@ -413,4 +406,37 @@ func (s *Server) handleIntroducedLinkList(w http.ResponseWriter, r *http.Request
 		resp.Links = append(resp.Links, IntroducedLinkView{IntroducedLink: row, History: hist})
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// introducedPeerAgreement resolves what the offers path knows about one peer
+// chain. The governing row is the chain's in-flight row if any (the chain is
+// busy whatever its current terms), else the newest row bound to the current
+// agreement's generation. Older rows for other generations are ignored, and
+// the row's org travels with it so it is never read under another org.
+func introducedPeerAgreement(ctx context.Context, ils introducedLinkStore, agreements map[string]store.CrossFedRecord, chainID string) (orgpolicy.PeerAgreement, error) {
+	rec, exists := agreements[chainID]
+	ag := orgpolicy.PeerAgreement{Exists: exists}
+	if exists {
+		ag.PinHex = hex.EncodeToString(rec.PeerPubKey)
+		ag.MaxClearance = rec.MaxClearance
+		ag.AllowedDomains = append([]string(nil), rec.AllowedDomains...)
+	}
+	latest, err := ils.LatestIntroducedLinkByChain(ctx, chainID)
+	if err != nil {
+		return ag, err
+	}
+	row := (*store.IntroducedLink)(nil)
+	switch {
+	case latest != nil && store.IntroducedLinkInFlight(latest.State):
+		row = latest
+	case exists:
+		row, err = ils.IntroducedLinkForGeneration(ctx, chainID, store.CrossFedGeneration(rec))
+		if err != nil {
+			return ag, err
+		}
+	}
+	if row != nil {
+		ag.LinkID, ag.LinkState, ag.LinkOrgID = row.LinkID, row.State, row.OrgID
+	}
+	return ag, nil
 }

@@ -18,6 +18,12 @@ package store
 // committed, bound_pending_peer) per remote chain, which is what rules out a
 // second agreement generation being built concurrently.
 //
+// Each row is bound to the agreement generation it commits (Generation, see
+// CrossFedGeneration). A row only ever governs the tx-33 agreement whose
+// current terms carry that generation: an older failed or revoked attempt
+// does not touch a later manual agreement, and an old active row does not
+// authorize a later tx-33 it never introduced.
+//
 // Like org_policy_state this lives in the node's own SQLite database, never in
 // Badger: it is written outside consensus and must not feed the AppHash.
 
@@ -25,10 +31,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -58,7 +66,43 @@ const (
 	// this; the bound only keeps one bad caller from bloating the table.
 	MaxIntroducedLinkBlobBytes = 1 << 20
 	maxIntroducedLinkList      = 4096
+	// MaxIntroducedLinkStagedRefBytes bounds the staged-artifact reference.
+	MaxIntroducedLinkStagedRefBytes = 512
 )
+
+// CrossFedGeneration is the hex sha256 that identifies one tx-33 agreement
+// generation for introduced-link binding. It covers every chain term except
+// the outbound AllowedDomains snapshot (and status): the domain snapshot is
+// the one field UpdateAgreementSharing rewrites in place, and for an
+// introduced agreement that rewrite is held inside the owner envelope. Any
+// other change (endpoint, pinned key, clearance, departments, expiry) is a new
+// generation that the row does not govern.
+func CrossFedGeneration(rec CrossFedRecord) string {
+	h := sha256.New()
+	lp := func(b []byte) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(b)))
+		h.Write(n[:])
+		h.Write(b)
+	}
+	lp([]byte("sage/introduced-link-generation/v1"))
+	lp([]byte(rec.RemoteChainID))
+	lp([]byte(rec.Endpoint))
+	lp(rec.PeerPubKey)
+	lp([]byte{rec.MaxClearance})
+	var exp [8]byte
+	binary.BigEndian.PutUint64(exp[:], uint64(rec.ExpiresAt)) // #nosec G115 -- bit pattern only
+	lp(exp[:])
+	depts := append([]string(nil), rec.AllowedDepts...)
+	sort.Strings(depts)
+	var cnt [8]byte
+	binary.BigEndian.PutUint64(cnt[:], uint64(len(depts)))
+	lp(cnt[:])
+	for _, d := range depts {
+		lp([]byte(d))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
 
 // introducedLinkTransitions is the complete allowed-transition table.
 var introducedLinkTransitions = map[string]map[string]bool{
@@ -112,6 +156,9 @@ type IntroducedLink struct {
 	Evidence []byte `json:"evidence"`
 	// Terms is the encoded CrossFedTerms this link commits.
 	Terms []byte `json:"terms"`
+	// Generation is CrossFedGeneration of the agreement terms this row
+	// commits. The row governs only an agreement with that generation.
+	Generation string `json:"generation"`
 	// PriorTermsDigest is the hex sha256 of the chain terms for the remote
 	// when the intent was written, or "absent".
 	PriorTermsDigest string `json:"prior_terms_digest"`
@@ -161,6 +208,10 @@ func (l *IntroducedLink) validateIntent() error {
 		return errors.New("e_intro and all three acceptance signatures are required at intent")
 	case len(l.Evidence) == 0 || len(l.Terms) == 0:
 		return errors.New("evidence and terms are required at intent")
+	case !introLinkIDPattern.MatchString(l.Generation):
+		return errors.New("generation must be 64 lowercase hex")
+	case strings.TrimSpace(l.StagedRef) == "" || len(l.StagedRef) > MaxIntroducedLinkStagedRefBytes:
+		return fmt.Errorf("staged_ref is required (the CA and seed are staged before the intent) and at most %d bytes", MaxIntroducedLinkStagedRefBytes)
 	case !introPriorTermsDigest.MatchString(l.PriorTermsDigest):
 		return errors.New("prior_terms_digest must be 64 lowercase hex or absent")
 	case len(l.TxBytes) != 0 || l.TxHash != "" || l.TxNonce != 0:
@@ -196,11 +247,12 @@ func (s *SQLiteStore) migrateIntroducedLinks(ctx context.Context) error {
 		guest_ack_sig      BLOB NOT NULL,
 		evidence           BLOB NOT NULL,
 		terms              BLOB NOT NULL,
+		generation         TEXT NOT NULL,
 		prior_terms_digest TEXT NOT NULL,
 		tx_bytes           BLOB,
 		tx_hash            TEXT,
 		tx_nonce           INTEGER,
-		staged_ref         TEXT NOT NULL DEFAULT '',
+		staged_ref         TEXT NOT NULL,
 		created_at         INTEGER NOT NULL,
 		deadline           INTEGER NOT NULL,
 		updated_at         INTEGER NOT NULL
@@ -209,6 +261,7 @@ func (s *SQLiteStore) migrateIntroducedLinks(ctx context.Context) error {
 		ON introduced_link(remote_chain_id)
 		WHERE state IN ('intent','signed','committed','bound_pending_peer')`,
 		`CREATE INDEX IF NOT EXISTS introduced_link_by_chain ON introduced_link(remote_chain_id, seq)`,
+		`CREATE INDEX IF NOT EXISTS introduced_link_by_generation ON introduced_link(remote_chain_id, generation, seq)`,
 		`CREATE TABLE IF NOT EXISTS introduced_link_history (
 		id        INTEGER PRIMARY KEY AUTOINCREMENT,
 		link_id   TEXT NOT NULL,
@@ -252,11 +305,11 @@ func (s *SQLiteStore) InsertIntroducedLinkIntent(ctx context.Context, l *Introdu
 	if _, err := tx.ExecContext(ctx, `INSERT INTO introduced_link (
 		link_id, org_id, remote_chain_id, peer_agent_pub, offer_id, session_id, kind, role,
 		state, state_reason, e_intro, host_accept_sig, guest_accept_sig, guest_ack_sig,
-		evidence, terms, prior_terms_digest, staged_ref, created_at, deadline, updated_at
-	) VALUES (?,?,?,?,?,?,?,?,?,'',?,?,?,?,?,?,?,?,?,?,?)`,
+		evidence, terms, generation, prior_terms_digest, staged_ref, created_at, deadline, updated_at
+	) VALUES (?,?,?,?,?,?,?,?,?,'',?,?,?,?,?,?,?,?,?,?,?,?)`,
 		l.LinkID, l.OrgID, l.RemoteChainID, l.PeerAgentPub, l.OfferID, l.SessionID, l.Kind, l.Role,
 		IntroducedLinkIntent, l.EIntro, l.HostAcceptSig, l.GuestAccept, l.GuestAckSig,
-		l.Evidence, l.Terms, l.PriorTermsDigest, l.StagedRef, l.CreatedAt, l.Deadline, l.CreatedAt,
+		l.Evidence, l.Terms, l.Generation, l.PriorTermsDigest, l.StagedRef, l.CreatedAt, l.Deadline, l.CreatedAt,
 	); err != nil {
 		_ = tx.Rollback()
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
@@ -382,7 +435,7 @@ func (s *SQLiteStore) TransitionIntroducedLink(ctx context.Context, t Introduced
 
 const introducedLinkColumns = `link_id, org_id, remote_chain_id, peer_agent_pub, offer_id, session_id, kind, role,
 	state, state_reason, e_intro, host_accept_sig, guest_accept_sig, guest_ack_sig, evidence, terms,
-	prior_terms_digest, tx_bytes, tx_hash, tx_nonce, staged_ref, created_at, deadline, updated_at`
+	generation, prior_terms_digest, tx_bytes, tx_hash, tx_nonce, staged_ref, created_at, deadline, updated_at`
 
 type introducedLinkScanner interface{ Scan(dest ...any) error }
 
@@ -392,7 +445,7 @@ func scanIntroducedLink(r introducedLinkScanner) (*IntroducedLink, error) {
 	var txNonce sql.NullInt64
 	if err := r.Scan(&l.LinkID, &l.OrgID, &l.RemoteChainID, &l.PeerAgentPub, &l.OfferID, &l.SessionID,
 		&l.Kind, &l.Role, &l.State, &l.StateReason, &l.EIntro, &l.HostAcceptSig, &l.GuestAccept,
-		&l.GuestAckSig, &l.Evidence, &l.Terms, &l.PriorTermsDigest, &l.TxBytes, &txHash, &txNonce,
+		&l.GuestAckSig, &l.Evidence, &l.Terms, &l.Generation, &l.PriorTermsDigest, &l.TxBytes, &txHash, &txNonce,
 		&l.StagedRef, &l.CreatedAt, &l.Deadline, &l.UpdatedAt); err != nil {
 		return nil, err //nolint:wrapcheck // callers wrap
 	}
@@ -431,23 +484,42 @@ func (s *SQLiteStore) LatestIntroducedLinkByChain(ctx context.Context, remoteCha
 	return l, nil
 }
 
-// LatestIntroducedLinkStates maps every remote chain that has at least one
-// row to the state of its newest row.
-func (s *SQLiteStore) LatestIntroducedLinkStates(ctx context.Context) (map[string]string, error) {
-	rows, err := s.conn.QueryContext(ctx, `SELECT l.remote_chain_id, l.state FROM introduced_link l
-		JOIN (SELECT remote_chain_id, MAX(seq) AS seq FROM introduced_link GROUP BY remote_chain_id) m
+// IntroducedLinkForGeneration returns the newest row for a remote chain that
+// is bound to generation, or (nil, nil) when none is: the agreement with that
+// generation was not introduced by this node.
+func (s *SQLiteStore) IntroducedLinkForGeneration(ctx context.Context, remoteChainID, generation string) (*IntroducedLink, error) {
+	l, err := scanIntroducedLink(s.conn.QueryRowContext(ctx,
+		`SELECT `+introducedLinkColumns+` FROM introduced_link WHERE remote_chain_id = ? AND generation = ?
+		ORDER BY seq DESC LIMIT 1`, remoteChainID, generation))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("introduced link for generation: %w", err)
+	}
+	return l, nil
+}
+
+// IntroducedLinkGenerationStates maps remote chain → generation → the state of
+// the newest row bound to that generation.
+func (s *SQLiteStore) IntroducedLinkGenerationStates(ctx context.Context) (map[string]map[string]string, error) {
+	rows, err := s.conn.QueryContext(ctx, `SELECT l.remote_chain_id, l.generation, l.state FROM introduced_link l
+		JOIN (SELECT MAX(seq) AS seq FROM introduced_link GROUP BY remote_chain_id, generation) m
 		ON l.seq = m.seq`)
 	if err != nil {
 		return nil, fmt.Errorf("list introduced link states: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
-	out := map[string]string{}
+	out := map[string]map[string]string{}
 	for rows.Next() {
-		var chain, state string
-		if err := rows.Scan(&chain, &state); err != nil {
+		var chain, gen, state string
+		if err := rows.Scan(&chain, &gen, &state); err != nil {
 			return nil, fmt.Errorf("scan introduced link state: %w", err)
 		}
-		out[chain] = state
+		if out[chain] == nil {
+			out[chain] = map[string]string{}
+		}
+		out[chain][gen] = state
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list introduced link states: %w", err)

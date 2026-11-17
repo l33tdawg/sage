@@ -20,7 +20,8 @@ func introLinkFixture(id byte, chain string) *IntroducedLink {
 		OfferID: h(0xbb), SessionID: "S-" + h(id)[:8], Kind: IntroducedLinkKindNew, Role: "host",
 		EIntro: []byte("e-intro"), HostAcceptSig: []byte("ha"), GuestAccept: []byte("ga"), GuestAckSig: []byte("gk"),
 		Evidence: []byte(`{"policy_rev":3}`), Terms: []byte("terms"), PriorTermsDigest: "absent",
-		StagedRef: "staged/1", CreatedAt: 1000, Deadline: 2000,
+		Generation: CrossFedGeneration(CrossFedRecord{RemoteChainID: chain, Endpoint: "https://" + chain, PeerPubKey: []byte{id}}),
+		StagedRef:  "staged/1", CreatedAt: 1000, Deadline: 2000,
 	}
 }
 
@@ -104,6 +105,13 @@ func TestIntroducedLink_IntentValidation(t *testing.T) {
 		"tx bytes at intent":  func(l *IntroducedLink) { l.TxBytes = []byte("tx") },
 		"deadline not after":  func(l *IntroducedLink) { l.Deadline = l.CreatedAt },
 		"oversized blob":      func(l *IntroducedLink) { l.EIntro = make([]byte, MaxIntroducedLinkBlobBytes+1) },
+		"missing generation":  func(l *IntroducedLink) { l.Generation = "" },
+		"bad generation":      func(l *IntroducedLink) { l.Generation = strings.Repeat("G", 64) },
+		"missing staged ref":  func(l *IntroducedLink) { l.StagedRef = "" },
+		"blank staged ref":    func(l *IntroducedLink) { l.StagedRef = "  " },
+		"oversized staged ref": func(l *IntroducedLink) {
+			l.StagedRef = strings.Repeat("s", MaxIntroducedLinkStagedRefBytes+1)
+		},
 	} {
 		l := introLinkFixture(1, "chain-b")
 		mut(l)
@@ -207,13 +215,73 @@ func TestIntroducedLink_LatestStatesAndRestart(t *testing.T) {
 	s, err = NewSQLiteStore(ctx, path)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = s.Close() })
-	states, err := s.LatestIntroducedLinkStates(ctx)
+	states, err := s.IntroducedLinkGenerationStates(ctx)
 	require.NoError(t, err)
-	require.Equal(t, map[string]string{"chain-b": IntroducedLinkIntent, "chain-c": IntroducedLinkIntent}, states)
+	require.Equal(t, map[string]map[string]string{
+		"chain-b": {b1.Generation: IntroducedLinkAborted, introLinkFixture(2, "chain-b").Generation: IntroducedLinkIntent},
+		"chain-c": {introLinkFixture(3, "chain-c").Generation: IntroducedLinkIntent},
+	}, states)
 	require.ErrorIs(t, s.InsertIntroducedLinkIntent(ctx, introLinkFixture(4, "chain-c")), ErrIntroducedLinkInFlight)
 	rows, err := s.ListIntroducedLinks(ctx, "chain-b")
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
 	require.Equal(t, IntroducedLinkIntent, rows[0].State, "newest first")
 	require.Equal(t, "crash_before_broadcast", rows[1].StateReason)
+}
+
+// The generation covers every chain term except the outbound domain snapshot
+// and the status.
+func TestCrossFedGeneration(t *testing.T) {
+	base := CrossFedRecord{
+		RemoteChainID: "chain-b", Endpoint: "https://b:8444", PeerPubKey: []byte{1, 2, 3},
+		MaxClearance: 2, ExpiresAt: 5000, AllowedDomains: []string{"eng"}, AllowedDepts: []string{"x", "y"}, Status: "active",
+	}
+	g := CrossFedGeneration(base)
+	require.Len(t, g, 64)
+	same := base
+	same.AllowedDomains, same.Status, same.AllowedDepts = []string{"hr", "ops"}, "revoked", []string{"y", "x"}
+	require.Equal(t, g, CrossFedGeneration(same), "domain snapshot, status and dept order do not change the generation")
+	for name, mut := range map[string]func(*CrossFedRecord){
+		"chain":     func(r *CrossFedRecord) { r.RemoteChainID = "chain-c" },
+		"endpoint":  func(r *CrossFedRecord) { r.Endpoint = "https://b:9444" },
+		"pin":       func(r *CrossFedRecord) { r.PeerPubKey = []byte{1, 2, 4} },
+		"clearance": func(r *CrossFedRecord) { r.MaxClearance = 3 },
+		"expiry":    func(r *CrossFedRecord) { r.ExpiresAt = 5001 },
+		"depts":     func(r *CrossFedRecord) { r.AllowedDepts = []string{"x"} },
+		"concat":    func(r *CrossFedRecord) { r.RemoteChainID, r.Endpoint = "chain-bh", "ttps://b:8444" },
+	} {
+		r := base
+		mut(&r)
+		require.NotEqual(t, g, CrossFedGeneration(r), name)
+	}
+}
+
+// Rows are looked up by the generation they are bound to, newest first.
+func TestIntroducedLink_ForGeneration(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+	old := introLinkFixture(1, "chain-b")
+	require.NoError(t, s.InsertIntroducedLinkIntent(ctx, old))
+	ok, err := s.TransitionIntroducedLink(ctx, IntroducedLinkTransition{LinkID: old.LinkID, From: IntroducedLinkIntent, To: IntroducedLinkAborted, Reason: "stale", At: 1100})
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	got, err := s.IntroducedLinkForGeneration(ctx, "chain-b", old.Generation)
+	require.NoError(t, err)
+	require.Equal(t, old.LinkID, got.LinkID)
+	none, err := s.IntroducedLinkForGeneration(ctx, "chain-b", strings.Repeat("0", 64))
+	require.NoError(t, err)
+	require.Nil(t, none, "another generation of the chain has no row")
+	none, err = s.IntroducedLinkForGeneration(ctx, "chain-c", old.Generation)
+	require.NoError(t, err)
+	require.Nil(t, none, "the generation is per chain")
+
+	// A retry for the same generation is the newest row for it.
+	retry := introLinkFixture(2, "chain-b")
+	retry.Generation = old.Generation
+	require.NoError(t, s.InsertIntroducedLinkIntent(ctx, retry))
+	got, err = s.IntroducedLinkForGeneration(ctx, "chain-b", old.Generation)
+	require.NoError(t, err)
+	require.Equal(t, retry.LinkID, got.LinkID)
+	require.Equal(t, old.Generation, got.Generation)
 }

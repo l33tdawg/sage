@@ -884,9 +884,10 @@ func (m *Manager) ActiveAgreement(remoteChainID string) (*store.CrossFedRecord, 
 	if rec.ExpiresAt != 0 && time.Now().Unix() >= rec.ExpiresAt {
 		return nil, fmt.Errorf("agreement %s: expired", remoteChainID)
 	}
-	// RFC #443 Phase B: an org-introduced agreement is usable only while its
-	// newest introduced_link row is active. Manual agreements have no row.
-	if err := m.introducedLinkDenial(remoteChainID); err != nil {
+	// RFC #443 Phase B: an org-introduced agreement is usable only while the
+	// newest introduced_link row bound to its generation is active. Manual
+	// agreements have no row for their generation.
+	if err := m.introducedLinkDenial(rec); err != nil {
 		return nil, err
 	}
 	return rec, nil
@@ -914,10 +915,8 @@ func (m *Manager) ActiveAgreements() []store.CrossFedRecord {
 	}
 	active := make([]store.CrossFedRecord, 0, len(all))
 	for _, rec := range all {
-		if hooked {
-			if state, ok := introduced[rec.RemoteChainID]; ok && state != store.IntroducedLinkActive {
-				continue
-			}
+		if hooked && !introducedStateAllows(introduced, &rec) {
+			continue
 		}
 		if ValidateChainID(rec.RemoteChainID) != nil || rec.RemoteChainID == m.localChainID {
 			continue

@@ -27,13 +27,15 @@ import (
 // introduced-link hooks SetFederation installs.
 type introFed struct {
 	*cardFed
-	pins      map[string]string
-	src       federation.IntroducedLinkSource
-	sharingFn federation.IntroducedSharingCap
+	agreements map[string]store.CrossFedRecord
+	src        federation.IntroducedLinkSource
+	sharingFn  federation.IntroducedSharingCap
 }
 
-func (f *introFed) LocalChainID() string                          { return f.chain }
-func (f *introFed) OrgPeerAgreements() (map[string]string, error) { return f.pins, nil }
+func (f *introFed) LocalChainID() string { return f.chain }
+func (f *introFed) OrgPeerAgreements() (map[string]store.CrossFedRecord, error) {
+	return f.agreements, nil
+}
 func (f *introFed) SetIntroducedLinkSource(s federation.IntroducedLinkSource) {
 	f.src = s
 }
@@ -42,7 +44,7 @@ func (f *introFed) SetIntroducedSharingCap(c federation.IntroducedSharingCap) { 
 func introNode(t *testing.T) (*policyNode, *introFed) {
 	t.Helper()
 	n := newPolicyNode(t)
-	f := &introFed{cardFed: newCardFed(t), pins: map[string]string{}}
+	f := &introFed{cardFed: newCardFed(t), agreements: map[string]store.CrossFedRecord{}}
 	n.s.SetFederation(f)
 	n.s.nodeOperatorID = operatorID
 	return n, f
@@ -251,7 +253,7 @@ func TestOrgOffers_EndToEnd(t *testing.T) {
 	assert.Equal(t, orgpolicy.PeerStateNone, byChain["node-stranger"].State, "not in the allow-list")
 
 	// A manual agreement to the peer suppresses the offer.
-	f.pins["node-peer"] = peer.CASPKIPin
+	f.agreements["node-peer"] = peerAgreementRecord("node-peer", peer.CASPKIPin)
 	assert.Equal(t, orgpolicy.PeerStateManual, func() string {
 		for _, o := range n.offers(t).Offers {
 			if o.PeerChainID == "node-peer" {
@@ -260,7 +262,7 @@ func TestOrgOffers_EndToEnd(t *testing.T) {
 		}
 		return ""
 	}())
-	delete(f.pins, "node-peer")
+	delete(f.agreements, "node-peer")
 
 	// Re-offer: known id 200, unknown 404, malformed 400, non-operator 403.
 	post := func(caller, id string) int {
@@ -285,7 +287,34 @@ func introRow(chain string) *store.IntroducedLink {
 		OfferID: h(0xbb), SessionID: "S1", Kind: store.IntroducedLinkKindNew, Role: "host",
 		EIntro: []byte("secret transcript"), HostAcceptSig: []byte("ha"), GuestAccept: []byte("ga"), GuestAckSig: []byte("gk"),
 		Evidence: []byte(`{}`), Terms: []byte("terms"), PriorTermsDigest: "absent",
-		CreatedAt: 1000, Deadline: 2000,
+		Generation: store.CrossFedGeneration(peerAgreementRecord(chain, strings.Repeat("12", 32))),
+		StagedRef:  "staged/1", CreatedAt: 1000, Deadline: 2000,
+	}
+}
+
+func peerAgreementRecord(chain, pinHex string) store.CrossFedRecord {
+	pin, _ := hex.DecodeString(pinHex)
+	return store.CrossFedRecord{
+		RemoteChainID: chain, Endpoint: "https://10.0.0.9:8443", PeerPubKey: pin,
+		MaxClearance: 2, AllowedDomains: []string{"eng"}, Status: "active",
+	}
+}
+
+// activateIntroRow walks a row from intent to active.
+func (n *policyNode) activateIntroRow(t *testing.T, l *store.IntroducedLink) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, n.sq.InsertIntroducedLinkIntent(ctx, l))
+	txb := []byte("tx-33 bytes " + l.LinkID)
+	ok, err := n.sq.TransitionIntroducedLink(ctx, store.IntroducedLinkTransition{LinkID: l.LinkID, From: store.IntroducedLinkIntent, To: store.IntroducedLinkSigned, At: 1100, TxBytes: txb, TxNonce: 1})
+	require.NoError(t, err)
+	require.True(t, ok)
+	got, err := n.sq.GetIntroducedLink(ctx, l.LinkID)
+	require.NoError(t, err)
+	for _, step := range [][2]string{{store.IntroducedLinkSigned, store.IntroducedLinkCommitted}, {store.IntroducedLinkCommitted, store.IntroducedLinkActive}} {
+		ok, err = n.sq.TransitionIntroducedLink(ctx, store.IntroducedLinkTransition{LinkID: l.LinkID, From: step[0], To: step[1], At: 1200, ExpectTxHash: got.TxHash})
+		require.NoError(t, err)
+		require.True(t, ok)
 	}
 }
 
@@ -295,16 +324,17 @@ func TestIntroducedLinks_WiredBySetFederation(t *testing.T) {
 	require.NotNil(t, f.sharingFn, "SetFederation installs the envelope sharing cap")
 	ctx := context.Background()
 
-	got, err := f.src.LatestIntroducedLinkByChain(ctx, "node-peer")
+	row := introRow("node-peer")
+	got, err := f.src.IntroducedLinkForGeneration(ctx, "node-peer", row.Generation)
 	require.NoError(t, err)
 	require.Nil(t, got)
-	require.NoError(t, n.sq.InsertIntroducedLinkIntent(ctx, introRow("node-peer")))
-	got, err = f.src.LatestIntroducedLinkByChain(ctx, "node-peer")
+	require.NoError(t, n.sq.InsertIntroducedLinkIntent(ctx, row))
+	got, err = f.src.IntroducedLinkForGeneration(ctx, "node-peer", row.Generation)
 	require.NoError(t, err)
 	require.Equal(t, store.IntroducedLinkIntent, got.State)
-	states, err := f.src.LatestIntroducedLinkStates(ctx)
+	states, err := f.src.IntroducedLinkGenerationStates(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"node-peer": store.IntroducedLinkIntent}, states)
+	assert.Equal(t, map[string]map[string]string{"node-peer": {row.Generation: store.IntroducedLinkIntent}}, states)
 
 	// The sharing cap reads the org's envelope under the current Root.
 	require.Error(t, f.sharingFn(policyOrgID, "node-peer", []string{"eng"}, 1), "no envelope yet")
@@ -342,10 +372,58 @@ func TestIntroducedLinks_NoStoreIsUnchanged(t *testing.T) {
 	s := &Server{}
 	f := &introFed{cardFed: newCardFed(t)}
 	s.SetFederation(f)
-	got, err := f.src.LatestIntroducedLinkByChain(context.Background(), "any")
+	got, err := f.src.IntroducedLinkForGeneration(context.Background(), "any", strings.Repeat("0", 64))
 	require.NoError(t, err)
 	require.Nil(t, got)
-	states, err := f.src.LatestIntroducedLinkStates(context.Background())
+	states, err := f.src.IntroducedLinkGenerationStates(context.Background())
 	require.NoError(t, err)
 	require.Empty(t, states)
+}
+
+// The offers path reads only the row bound to the current agreement
+// generation (or an in-flight row), and carries the row's org.
+func TestOrgOffers_AgreementResolvesGenerationAndOrg(t *testing.T) {
+	n, _ := introNode(t)
+	ctx := context.Background()
+	ils := n.s.introducedLinks()
+	require.NotNil(t, ils)
+	pin := strings.Repeat("12", 32)
+	agreements := map[string]store.CrossFedRecord{"node-peer": peerAgreementRecord("node-peer", pin)}
+
+	ag, err := introducedPeerAgreement(ctx, ils, agreements, "node-peer")
+	require.NoError(t, err)
+	assert.True(t, ag.Exists)
+	assert.Equal(t, pin, ag.PinHex)
+	assert.Equal(t, uint8(2), ag.MaxClearance)
+	assert.Equal(t, []string{"eng"}, ag.AllowedDomains)
+	assert.Empty(t, ag.LinkState, "no row: manual")
+
+	// An active row bound to this generation governs it, with its org.
+	row := introRow("node-peer")
+	row.OrgID = "org-other"
+	n.activateIntroRow(t, row)
+	ag, err = introducedPeerAgreement(ctx, ils, agreements, "node-peer")
+	require.NoError(t, err)
+	assert.Equal(t, store.IntroducedLinkActive, ag.LinkState)
+	assert.Equal(t, "org-other", ag.LinkOrgID)
+
+	// A later tx-33 with another generation is not governed by that row.
+	later := peerAgreementRecord("node-peer", pin)
+	later.ExpiresAt = time.Now().Unix() + 3600
+	agreements["node-peer"] = later
+	ag, err = introducedPeerAgreement(ctx, ils, agreements, "node-peer")
+	require.NoError(t, err)
+	assert.Empty(t, ag.LinkState, "the old row must not govern a later generation")
+
+	// An in-flight row governs the chain whatever its current terms.
+	inflight := introRow("node-peer")
+	inflight.LinkID = strings.Repeat("02", 32)
+	inflight.Generation = store.CrossFedGeneration(later)
+	require.NoError(t, n.sq.InsertIntroducedLinkIntent(ctx, inflight))
+	delete(agreements, "node-peer")
+	ag, err = introducedPeerAgreement(ctx, ils, agreements, "node-peer")
+	require.NoError(t, err)
+	assert.False(t, ag.Exists)
+	assert.Equal(t, store.IntroducedLinkIntent, ag.LinkState)
+	assert.Equal(t, policyOrgID, ag.LinkOrgID)
 }

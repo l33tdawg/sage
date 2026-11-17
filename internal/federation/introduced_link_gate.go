@@ -3,11 +3,15 @@ package federation
 // RFC #443 Phase B: the fail-closed introduced-link hook on ActiveAgreement and
 // the owner-envelope cap on outbound sharing.
 //
-// An org-introduced link has a node-local introduced_link row; a manual (QR
-// JOIN) agreement has none. ActiveAgreement / ActiveAgreements deny any
-// agreement whose remote chain has a row unless the NEWEST row is active, so
-// an introduced link is never usable before it is bound, while it is paused,
-// or after it was revoked or aborted. Manual agreements are unchanged.
+// An org-introduced link has a node-local introduced_link row bound to the
+// exact agreement generation it commits (store.CrossFedGeneration). A manual
+// (QR JOIN) agreement has no row with its generation. ActiveAgreement /
+// ActiveAgreements deny an agreement whose current generation has a row
+// unless the NEWEST row for that generation is active, so an introduced link
+// is never usable before it is bound, while it is paused, or after it was
+// revoked or aborted. Rows for other generations of the same chain (an older
+// failed attempt, an earlier introduced link) neither block nor authorize the
+// current agreement.
 //
 // federation stays independent of where the rows live: the REST layer installs
 // an IntroducedLinkSource backed by the node-local SQLite store. With no source
@@ -15,7 +19,6 @@ package federation
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -24,10 +27,11 @@ import (
 )
 
 // IntroducedLinkSource reads introduced-link rows. Implementations must return
-// (nil, nil) for a chain with no row and an error for any storage failure.
+// (nil, nil) when no row is bound to the generation and an error for any
+// storage failure.
 type IntroducedLinkSource interface {
-	LatestIntroducedLinkByChain(ctx context.Context, remoteChainID string) (*store.IntroducedLink, error)
-	LatestIntroducedLinkStates(ctx context.Context) (map[string]string, error)
+	IntroducedLinkForGeneration(ctx context.Context, remoteChainID, generation string) (*store.IntroducedLink, error)
+	IntroducedLinkGenerationStates(ctx context.Context) (map[string]map[string]string, error)
 }
 
 // IntroducedSharingCap checks an outbound sharing snapshot for an introduced
@@ -36,7 +40,7 @@ type IntroducedLinkSource interface {
 type IntroducedSharingCap func(orgID, remoteChainID string, domains []string, clearance uint8) error
 
 // ErrIntroducedLinkNotActive is returned by ActiveAgreement for an agreement
-// whose newest introduced-link row is not active.
+// whose generation is bound to an introduced-link row that is not active.
 var ErrIntroducedLinkNotActive = errors.New("introduced link is not active")
 
 // ErrSharingOutsideEnvelope refuses a sharing update outside the owner
@@ -69,41 +73,54 @@ func (m *Manager) introducedSharingCapFn() IntroducedSharingCap {
 	return m.introducedSharingCap
 }
 
-// introducedLinkDenial is the extra fail-closed ActiveAgreement check.
-func (m *Manager) introducedLinkDenial(remoteChainID string) error {
+// introducedLinkFor returns the row bound to rec's generation, or nil.
+func (m *Manager) introducedLinkFor(rec *store.CrossFedRecord) (*store.IntroducedLink, error) {
 	src := m.introducedLinkSource()
 	if src == nil {
-		return nil
+		return nil, nil
 	}
-	row, err := src.LatestIntroducedLinkByChain(context.Background(), remoteChainID)
+	return src.IntroducedLinkForGeneration(context.Background(), rec.RemoteChainID, store.CrossFedGeneration(*rec))
+}
+
+// introducedLinkDenial is the extra fail-closed ActiveAgreement check.
+func (m *Manager) introducedLinkDenial(rec *store.CrossFedRecord) error {
+	row, err := m.introducedLinkFor(rec)
 	if err != nil {
-		return fmt.Errorf("agreement %s: introduced-link state unavailable: %w", remoteChainID, err)
+		return fmt.Errorf("agreement %s: introduced-link state unavailable: %w", rec.RemoteChainID, err)
 	}
 	if row == nil || row.State == store.IntroducedLinkActive {
 		return nil
 	}
-	return fmt.Errorf("agreement %s: %w (state %q)", remoteChainID, ErrIntroducedLinkNotActive, row.State)
+	return fmt.Errorf("agreement %s: %w (state %q)", rec.RemoteChainID, ErrIntroducedLinkNotActive, row.State)
 }
 
-// introducedLinkStates returns the newest-row state per chain for the
+// introducedLinkStates returns chain → generation → newest-row state for the
 // ActiveAgreements filter, or (nil, false) when no source is installed.
-func (m *Manager) introducedLinkStates() (map[string]string, bool, error) {
+func (m *Manager) introducedLinkStates() (map[string]map[string]string, bool, error) {
 	src := m.introducedLinkSource()
 	if src == nil {
 		return nil, false, nil
 	}
-	states, err := src.LatestIntroducedLinkStates(context.Background())
+	states, err := src.IntroducedLinkGenerationStates(context.Background())
 	return states, true, err
 }
 
-// checkIntroducedSharing applies the owner envelope to a sharing update of an
-// introduced agreement. A manual agreement (no row) is unchanged.
-func (m *Manager) checkIntroducedSharing(remoteChainID string, domains []string, clearance uint8) error {
-	src := m.introducedLinkSource()
-	if src == nil {
-		return nil
+// introducedStateAllows applies the generation-bound filter to one record.
+func introducedStateAllows(states map[string]map[string]string, rec *store.CrossFedRecord) bool {
+	byGen := states[rec.RemoteChainID]
+	if len(byGen) == 0 {
+		return true
 	}
-	row, err := src.LatestIntroducedLinkByChain(context.Background(), remoteChainID)
+	state, ok := byGen[store.CrossFedGeneration(*rec)]
+	return !ok || state == store.IntroducedLinkActive
+}
+
+// checkIntroducedSharing applies the owner envelope to a sharing update of an
+// introduced agreement. A manual agreement (no row bound to its generation) is
+// unchanged. The update keeps the generation, so the row stays bound to it.
+func (m *Manager) checkIntroducedSharing(agreement *store.CrossFedRecord, domains []string) error {
+	remoteChainID, clearance := agreement.RemoteChainID, agreement.MaxClearance
+	row, err := m.introducedLinkFor(agreement)
 	if err != nil {
 		return fmt.Errorf("%w: introduced-link state unavailable: %v", ErrSharingOutsideEnvelope, err)
 	}
@@ -124,10 +141,10 @@ func (m *Manager) checkIntroducedSharing(remoteChainID string, domains []string,
 }
 
 // OrgPeerAgreements maps every remote chain with an active, unexpired tx-33
-// agreement to its pinned CA SPKI (hex). It reads the consensus records only,
-// ignoring introduced-link state, so offers can tell "no agreement" from
-// "agreement whose introduced link is paused".
-func (m *Manager) OrgPeerAgreements() (map[string]string, error) {
+// agreement to its record. It reads the consensus records only, ignoring
+// introduced-link state, so offers can tell "no agreement" from "agreement
+// whose introduced link is paused".
+func (m *Manager) OrgPeerAgreements() (map[string]store.CrossFedRecord, error) {
 	if m.badger == nil {
 		return nil, errors.New("consensus state store is unavailable")
 	}
@@ -136,12 +153,12 @@ func (m *Manager) OrgPeerAgreements() (map[string]string, error) {
 		return nil, fmt.Errorf("list cross_fed agreements: %w", err)
 	}
 	now := time.Now().Unix()
-	out := make(map[string]string, len(all))
+	out := make(map[string]store.CrossFedRecord, len(all))
 	for _, rec := range all {
 		if rec.Status != "active" || (rec.ExpiresAt != 0 && now >= rec.ExpiresAt) {
 			continue
 		}
-		out[rec.RemoteChainID] = hex.EncodeToString(rec.PeerPubKey)
+		out[rec.RemoteChainID] = rec
 	}
 	return out, nil
 }
