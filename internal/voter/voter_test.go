@@ -180,7 +180,7 @@ func TestVoteOnPendingMemories_OneVotePerMemory(t *testing.T) {
 	cfg := Config{Key: priv, CometRPC: srv.URL}
 	voted := map[string]bool{}
 	inflight := map[string]time.Time{}
-	offset := 0
+	offset := voteScanPosition{}
 
 	voteOnPendingMemories(
 		context.Background(), &fakeApp{}, store, cfg,
@@ -262,7 +262,7 @@ func TestVoteOnPendingMemories_AppV25GhostPrefixCannotStarveCanonicalWork(t *tes
 	cfg := Config{Key: priv, CometRPC: srv.URL}
 	voted := map[string]bool{}
 	inflight := map[string]time.Time{}
-	offset := 0
+	offset := voteScanPosition{}
 
 	cast := voteOnPendingMemories(
 		context.Background(), app, store, cfg,
@@ -290,7 +290,7 @@ func TestVoteOnPendingMemories_AppV25GhostPrefixCannotStarveCanonicalWork(t *tes
 	app.recorded["canonical-new-b"] = true
 	freshVoted := map[string]bool{}
 	freshInflight := map[string]time.Time{}
-	freshOffset := 0
+	freshOffset := voteScanPosition{}
 	cast = voteOnPendingMemories(
 		context.Background(), app, store, cfg,
 		freshVoted, freshInflight, &freshOffset, zerolog.Nop(),
@@ -323,7 +323,7 @@ func TestVoteOnPendingMemories_AdmissionUnavailableStopsBatch(t *testing.T) {
 			ConfidenceScore: 0.9,
 		}
 	}
-	offset := 0
+	offset := voteScanPosition{}
 	cast, unavailable := voteOnPendingMemoriesResult(
 		context.Background(),
 		&fakeApp{},
@@ -340,8 +340,8 @@ func TestVoteOnPendingMemories_AdmissionUnavailableStopsBatch(t *testing.T) {
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("locked vault must stop after one rejected broadcast, got %d", got)
 	}
-	if offset != 0 {
-		t.Fatalf("unavailable batch must restart safely after unlock, offset=%d", offset)
+	if !offset.atStart() {
+		t.Fatalf("unavailable batch must restart safely after unlock, position=%+v", offset)
 	}
 }
 

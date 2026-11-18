@@ -129,7 +129,7 @@ federated read receipt:
 - `GET /v1/pipe/inbox` selects pending rows and compare-and-swap claims only
   the rows returned to the authenticated local agent
   (`api/rest/pipe_handler.go:581-614`;
-  `internal/store/sqlite.go:5537-5550`).
+  `internal/store/sqlite.go:5545-5558`).
 - That signed GET binds the path and limit, not the IDs in the server-selected
   response. A destination operator could therefore attach the existing inbox
   proof to a different claimed row. It is evidence that the recipient asked
@@ -519,7 +519,7 @@ allowed on this surface.
 The present pipeline purge is based on creation time: terminal rows older than
 24 hours are eligible for deletion, and non-terminal rows force-expire after
 48 hours (`cmd/sage-gui/node.go:1793-1800`;
-`internal/store/sqlite.go:5676-5727`). A late read could therefore disappear
+`internal/store/sqlite.go:5684-5735`). A late read could therefore disappear
 almost immediately under the current rule.
 
 Before receipts ship, terminal metadata retention must be measured from the
