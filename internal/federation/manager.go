@@ -326,6 +326,12 @@ type Manager struct {
 	joinGateMu sync.RWMutex
 	joinGate   JoinPeerGate
 
+	// introducedLinks / introducedSharingCap are the RFC #443 Phase B
+	// introduced-link hooks (nil: manual agreements only, unchanged).
+	introducedMu         sync.RWMutex
+	introducedLinks      IntroducedLinkSource
+	introducedSharingCap IntroducedSharingCap
+
 	// replayMu guards seenSigs — the federation listener's replay cache,
 	// SHARDED BY PEER CHAIN so one peer's flood can never evict or lock out
 	// another peer (a shared global cap would let any single authenticated peer
@@ -878,6 +884,12 @@ func (m *Manager) ActiveAgreement(remoteChainID string) (*store.CrossFedRecord, 
 	if rec.ExpiresAt != 0 && time.Now().Unix() >= rec.ExpiresAt {
 		return nil, fmt.Errorf("agreement %s: expired", remoteChainID)
 	}
+	// RFC #443 Phase B: an org-introduced agreement is usable only while the
+	// newest introduced_link row bound to its generation is active. Manual
+	// agreements have no row for their generation.
+	if err := m.introducedLinkDenial(rec); err != nil {
+		return nil, err
+	}
 	return rec, nil
 }
 
@@ -894,8 +906,18 @@ func (m *Manager) ActiveAgreements() []store.CrossFedRecord {
 		m.logger.Warn().Err(err).Msg("list cross_fed agreements failed")
 		return nil
 	}
+	introduced, hooked, err := m.introducedLinkStates()
+	if err != nil {
+		// Fail closed: without the introduced-link states no agreement can be
+		// told apart from a paused or unbound introduced one.
+		m.logger.Warn().Err(err).Msg("list cross_fed agreements refused: introduced-link state unavailable")
+		return nil
+	}
 	active := make([]store.CrossFedRecord, 0, len(all))
 	for _, rec := range all {
+		if hooked && !introducedStateAllows(introduced, &rec) {
+			continue
+		}
 		if ValidateChainID(rec.RemoteChainID) != nil || rec.RemoteChainID == m.localChainID {
 			continue
 		}

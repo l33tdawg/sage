@@ -1150,6 +1150,14 @@ func decodeCoCommitAttest(data []byte) (*CoCommitAttest, error) {
 
 // --- CrossFed (v11 / app-v15, Mode-1 exchange terms) ---
 
+// EncodeCrossFedTerms returns the canonical tx-33 payload encoding of t, the
+// exact bytes a cross_fed set tx carries.
+func EncodeCrossFedTerms(t *CrossFedTerms) []byte { return encodeCrossFedTerms(t) }
+
+// DecodeCrossFedTerms decodes a tx-33 payload. It does not reject trailing
+// bytes; callers that need the exact encoding compare a re-encode.
+func DecodeCrossFedTerms(data []byte) (*CrossFedTerms, error) { return decodeCrossFedTerms(data) }
+
 func encodeCrossFedTerms(t *CrossFedTerms) []byte {
 	var buf []byte
 	buf = appendBytes(buf, []byte(t.RemoteChainID))
