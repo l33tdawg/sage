@@ -97,6 +97,22 @@ func appV25LegacyAdoptionRecoveryParked(run *appV25LegacyAdoptionRun) bool {
 		len(run.plan.Entries) == 0 && run.plan.Unresolved > 0
 }
 
+// appV25LegacyAdoptionSettled reports that the governed scan has reached a
+// terminal state for this process: the adoption queue is fully drained, so the
+// 30-second maintenance cadence has nothing to advance. This covers BOTH the
+// operator-recovery terminal state (Unresolved > 0, see
+// appV25LegacyAdoptionRecoveryParked) and the fully-complete state
+// (Unresolved == 0, remaining == 0). Without parking the latter, a node that
+// has finished adoption re-runs the expensive plan scan and re-publishes the
+// same "complete" progress every 30 s indefinitely, burning steady CPU. As with
+// the recovery terminal state, only a restart or an explicit retry wake
+// re-scans. Callers must gate this on a nil-error pass so a transient error
+// never latches an idle park.
+func appV25LegacyAdoptionSettled(run *appV25LegacyAdoptionRun) bool {
+	return run != nil && run.initialized && run.plan != nil &&
+		len(run.plan.Entries) == 0
+}
+
 func resetAppV25LegacyAdoptionRun(run *appV25LegacyAdoptionRun) {
 	if run == nil {
 		return
@@ -459,7 +475,7 @@ func (h *DashboardHandler) RunAppV25LegacyAdoptionWorker(
 					Msg("app-v25 legacy-memory adoption pass deferred")
 			} else if more {
 				delay = 5 * time.Second
-			} else if err == nil && appV25LegacyAdoptionRecoveryParked(run) {
+			} else if err == nil && appV25LegacyAdoptionSettled(run) {
 				park = true
 			}
 		}
