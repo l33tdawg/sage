@@ -333,7 +333,11 @@ func openSQLiteDB(ctx context.Context, dbPath string) (*sql.DB, error) {
 		"?_pragma=journal_mode(WAL)" +
 		"&_pragma=busy_timeout(15000)" +
 		"&_pragma=synchronous(FULL)" +
-		"&_pragma=foreign_keys(ON)"
+		"&_pragma=foreign_keys(ON)" +
+		// 16 MiB page cache per connection (negative = KiB). The default 2 MiB
+		// is far below a typical node database, so hot scans such as the
+		// voter's 2 s pending poll were re-reading pages from the OS each time.
+		"&_pragma=cache_size(-16384)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
@@ -1058,6 +1062,10 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 	// BadgerDB because every Badger key feeds the consensus AppHash.
 	if err := s.migrateOrgPolicyState(ctx); err != nil {
 		return fmt.Errorf("migrate org policy state: %w", err)
+	}
+	// Migration: index serving the memory auto-voter's pending scan order.
+	if err := s.migrateVoterPendingIndex(ctx); err != nil {
+		return fmt.Errorf("migrate voter pending index: %w", err)
 	}
 
 	// Migration: add mcp_auth_codes table for the OAuth 2.0 + PKCE wrapper
