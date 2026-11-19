@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.25.8. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.25.9. Cite file:line when behavior is non-obvious. -->
 
 # SAGE Local Engines and First-Run Setup Reference (v11)
 
@@ -667,7 +667,7 @@ model/dimension combinations use `provider:model:dimension` (or
 Empty string means no/unknown vector. The dashboard migration selects every row whose
 stamp differs from the target, while `QueryOptions.VectorProvider` makes vector reads
 admit only the exact active stamp (`internal/store/store.go:74-77`,
-`internal/store/sqlite.go:1370-1385`).
+`internal/store/sqlite.go:1378-1393`).
 
 **Why it is stamped at insert (v11 fix):** the off-chain record is stamped at insert
 time via `SupplementaryData.EmbeddingProvider` (`internal/memory/model.go:119-123`).
@@ -689,11 +689,11 @@ would forever count it as "needs re-embed" even though its vector is already sem
   Settings repair count grow again after a successful repair
   (`web/handler.go`, `web/import.go`, `api/rest/pipe_handler.go`).
 - **Where it is persisted:** `SQLiteStore.InsertMemory` writes the
-  `embedding_provider` column (`internal/store/sqlite.go:1007-1049`). The upsert uses
+  `embedding_provider` column (`internal/store/sqlite.go:1011-1053`). The upsert uses
   `COALESCE(NULLIF(excluded.embedding_provider, ''), memories.embedding_provider)`
-  (`sqlite.go:1043`) so a re-insert that omits the stamp never clobbers an existing one.
+  (`sqlite.go:1047`) so a re-insert that omits the stamp never clobbers an existing one.
   The column is added by an idempotent migration with a supporting index
-  (`sqlite.go:688-691`). PostgreSQL uses the same exact-space filter and repair
+  (`sqlite.go:692-695`). PostgreSQL uses the same exact-space filter and repair
   operations. Pre-v11.7.4 pgvector rows remain deliberately unstamped because
   older REST clients could supply an arbitrary vector; amid's lifecycle repair
   regenerates them through the active provider instead of guessing and risking
@@ -701,8 +701,8 @@ would forever count it as "needs re-embed" even though its vector is already sem
 
 The same column carries the re-embed lifecycle states the embeddings-setup flow uses:
 `''` (no vector), `'skipped'` (undecryptable under the current vault, hidden from
-views), and `'error'` (`internal/store/sqlite.go:1205-1221`). The provider-targeted
-backfill (`sqlite.go:1144-1170`, `web/embeddings_handler.go:435-608`) is node-local
+views), and `'error'` (`internal/store/sqlite.go:1213-1229`). The provider-targeted
+backfill (`sqlite.go:1152-1178`, `web/embeddings_handler.go:435-608`) is node-local
 and off-consensus. A lifecycle-owned provider watchdog retries it after late startup
 or transient outages; for the on-chain lifecycle a record
 moves through (submit -> proposed -> committed / deprecated) see

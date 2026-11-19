@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -17,6 +18,10 @@ import (
 // session, so a long-running voter's footprint stays flat. Resetting only causes
 // at most one idempotent re-vote per still-proposed memory.
 const maxVotedTracked = 100_000
+
+// errPendingCursorMismatch guards a keyset store that returns a cursor slice
+// out of step with its rows; the tick stops rather than mis-position.
+var errPendingCursorMismatch = errors.New("voter: pending page cursors do not match rows")
 
 const (
 	memoryVotePageSize            = 128
@@ -86,6 +91,30 @@ type VotablePendingPageSource interface {
 		limit, offset int,
 	) ([]*memory.MemoryRecord, error)
 }
+
+// VotablePendingCursorSource is VotablePendingPageSource with a keyset cursor:
+// rows strictly after (afterCreatedAt, afterID) in (created_at, memory_id)
+// order. cursors[i] is the opaque created_at value of rows[i] to resume after.
+// The built-in SQLite store implements it; other stores keep the offset path.
+type VotablePendingCursorSource interface {
+	GetVotablePendingByDomainAfter(
+		ctx context.Context,
+		domainTag string,
+		limit int,
+		afterCreatedAt, afterID string,
+	) (rows []*memory.MemoryRecord, cursors []string, err error)
+}
+
+// voteScanPosition is where the next pending scan resumes: an offset for
+// offset-paged stores, or a (created_at, memory_id) cursor for keyset stores.
+// The zero value starts from the beginning.
+type voteScanPosition struct {
+	Offset         int
+	AfterCreatedAt string
+	AfterID        string
+}
+
+func (p voteScanPosition) atStart() bool { return p == voteScanPosition{} }
 
 // BacklogSource exposes the proposed-backlog watermark behind the stuck-memory
 // telemetry (sage_proposed_oldest_age_seconds / sage_proposed_pending_count).
@@ -160,9 +189,9 @@ func Run(ctx context.Context, app App, store Store, cfg Config, logger zerolog.L
 	// a durable vote.
 	inflight := make(map[string]time.Time)
 	// The raw SQL backlog can contain legacy rows which app-v25 correctly refuses
-	// to vote. Carry a stable page offset across ticks so a large ghost prefix
+	// to vote. Carry a stable scan position across ticks so a large ghost prefix
 	// cannot starve newer canonical submissions or make one tick unbounded.
-	voteScanOffset := 0
+	var voteScanPos voteScanPosition
 	// Upgrade proposals we've already warned are unsupported, so the tick doesn't
 	// re-log the same warning. (Supported proposals are NOT suppressed here — the
 	// on-chain UpgradeProposalHasVote check self-heals a dropped broadcast.)
@@ -196,7 +225,7 @@ func Run(ctx context.Context, app App, store Store, cfg Config, logger zerolog.L
 				continue
 			}
 			cast, unavailable := voteOnPendingMemoriesResult(
-				ctx, app, store, cfg, voted, inflight, &voteScanOffset, logger,
+				ctx, app, store, cfg, voted, inflight, &voteScanPos, logger,
 			)
 			if cast > 0 {
 				lastVote = time.Now()
@@ -265,11 +294,11 @@ func voteOnPendingMemories(
 	cfg Config,
 	voted map[string]bool,
 	inflight map[string]time.Time,
-	scanOffset *int,
+	scanPos *voteScanPosition,
 	logger zerolog.Logger,
 ) int {
 	cast, _ := voteOnPendingMemoriesResult(
-		ctx, app, store, cfg, voted, inflight, scanOffset, logger,
+		ctx, app, store, cfg, voted, inflight, scanPos, logger,
 	)
 	return cast
 }
@@ -281,20 +310,22 @@ func voteOnPendingMemoriesResult(
 	cfg Config,
 	voted map[string]bool,
 	inflight map[string]time.Time,
-	scanOffset *int,
+	scanPos *voteScanPosition,
 	logger zerolog.Logger,
 ) (int, bool) {
-	if scanOffset == nil {
+	if scanPos == nil {
 		return 0, false
 	}
 	selfID := hex.EncodeToString(cfg.Key.Public().(ed25519.PublicKey))
 	cast := 0
 	scanned := 0
-	offset := *scanOffset
+	pos := *scanPos
 	wrapped := false
 	now := time.Now()
 	pager, paged := store.(PendingPageSource)
 	votablePager, recoveryAware := store.(VotablePendingPageSource)
+	cursorPager, keyset := store.(VotablePendingCursorSource)
+scan:
 	for scanned < memoryVoteScanBudget && cast < memoryVotesPerTick {
 		pageLimit := memoryVotePageSize
 		if remaining := memoryVoteScanBudget - scanned; remaining < pageLimit {
@@ -302,21 +333,32 @@ func voteOnPendingMemoriesResult(
 		}
 		var (
 			pending []*memory.MemoryRecord
+			cursors []string
 			err     error
 		)
-		if recoveryAware {
-			pending, err = votablePager.GetVotablePendingByDomainPage(
-				ctx, "%", pageLimit, offset,
+		switch {
+		case keyset:
+			// Keyset paging: each page reads only its own rows, instead of
+			// re-sorting and re-reading the backlog before the offset.
+			pending, cursors, err = cursorPager.GetVotablePendingByDomainAfter(
+				ctx, "%", pageLimit, pos.AfterCreatedAt, pos.AfterID,
 			)
-		} else if paged {
-			pending, err = pager.GetPendingByDomainPage(ctx, "%", pageLimit, offset)
-		} else {
+			if err == nil && len(cursors) != len(pending) {
+				err = errPendingCursorMismatch
+			}
+		case recoveryAware:
+			pending, err = votablePager.GetVotablePendingByDomainPage(
+				ctx, "%", pageLimit, pos.Offset,
+			)
+		case paged:
+			pending, err = pager.GetPendingByDomainPage(ctx, "%", pageLimit, pos.Offset)
+		default:
 			// Compatibility lane for third-party stores implementing the original
-			// voter interface. Built-in SQLite/Postgres always take the paged
+			// voter interface. Built-in SQLite/Postgres always take a paged
 			// branch, which is required to pass legacy ghost prefixes.
-			if offset > 0 {
-				offset = 0
-				break
+			if !pos.atStart() {
+				pos = voteScanPosition{}
+				break scan
 			}
 			pending, err = store.GetPendingByDomain(ctx, "%", pageLimit)
 		}
@@ -324,15 +366,19 @@ func voteOnPendingMemoriesResult(
 			break
 		}
 		if len(pending) == 0 {
-			if offset > 0 && !wrapped {
-				offset = 0
+			if !pos.atStart() && !wrapped {
+				pos = voteScanPosition{}
 				wrapped = true
 				continue
 			}
 			break
 		}
-		for _, mem := range pending {
-			offset++
+		for i, mem := range pending {
+			if keyset {
+				pos.AfterCreatedAt, pos.AfterID = cursors[i], mem.MemoryID
+			} else {
+				pos.Offset++
+			}
 			scanned++
 			eligible, recorded := app.MemoryVoteTargetState(mem.MemoryID, selfID)
 			if recorded {
@@ -405,13 +451,13 @@ func voteOnPendingMemoriesResult(
 			if err != nil {
 				logger.Debug().Err(err).Msg("failed to build or broadcast vote tx under nonce lease")
 				if ctx.Err() != nil {
-					*scanOffset = 0
+					*scanPos = voteScanPosition{}
 					return cast, true
 				}
 				continue
 			}
 			if result.unavailable {
-				*scanOffset = 0
+				*scanPos = voteScanPosition{}
 				return cast, true
 			}
 			if result.accepted {
@@ -423,11 +469,11 @@ func voteOnPendingMemoriesResult(
 			}
 		}
 		if len(pending) < pageLimit {
-			offset = 0
+			pos = voteScanPosition{}
 			break
 		}
 	}
-	*scanOffset = offset
+	*scanPos = pos
 	return cast, false
 }
 
