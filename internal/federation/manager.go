@@ -514,6 +514,16 @@ type Manager struct {
 	// (txHash, height). Defaults to broadcastTxCommit; overridable in tests so
 	// the join ceremony can be driven without a live CometBFT node.
 	broadcastFn func(txBytes []byte) (string, int64, error)
+	// introResolveFn resolves a stored introduced-link tx-33 (test seam;
+	// default tx.CometTxResolver(cometRPC)). introPeerStatusFn asks the host
+	// for a guest bound_pending_peer row's status (installed with the B2b
+	// wire; nil = wait for the deadline).
+	introResolveFn    tx.TxResolveFunc
+	introPeerStatusFn func(ctx context.Context, row *store.IntroducedLink) (string, error)
+	// introFaultFn is a test-only crash seam for the introduced-link write
+	// path: returning true at a point stops the call there with no cleanup,
+	// as a process kill would.
+	introFaultFn func(point string) bool
 
 	// agreementMutationMu serializes every local tx-33/tx-34 control surface,
 	// including legacy REST through LockAgreementMutation. A sharing update is a
