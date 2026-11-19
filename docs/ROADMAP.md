@@ -1,9 +1,9 @@
 # SAGE Roadmap
 
-**Status (2026-11):** **v11.25.8 is the current release.** RFC #443 Phase A
-ships signed policy-v2 rosters, node-self-minted cards, fleet-managed manual
-QR JOIN enforcement, and bounded current-Root exceptions. State remains
-node-local and does not activate Phase B roster-introduced links. Automatic
+**Status (2026-11):** **v11.25.9 is the current release.** This patch stops a
+completed app-v25 adoption worker from polling forever and replaces the idle
+voter's offset scan with indexed keyset paging. It also refreshes the security
+and reliability dependency set without changing consensus behavior. Automatic
 upgrades stay at app29, app30 remains explicit, and the separate
 evidence-operator/client parity work remains tracked in
 [#460](https://github.com/l33tdawg/sage/issues/460).
@@ -166,6 +166,16 @@ ceiling is app-v27.
 upgrade in place across all future releases. Routine personal-node upgrades
 remain automatic; the exceptional legacy-lineage repair is deliberately an
 explicit, reviewed operator ceremony rather than a silent mutation.
+
+## v11.25.9 release
+
+- Park the app-v25 legacy-memory adoption worker after either the complete or recovery terminal state, while preserving explicit retry wakes.
+- Keyset-page the memory voter's pending scan in `(created_at, memory_id)` order and add the matching SQLite index.
+- Raise the SQLite page cache to 16 MiB per connection, removing the measured idle read churn on a 609-row proposed backlog.
+- Move pgx to 5.13.0, libp2p to 0.52.0, and refresh the x/crypto, x/text and x/tools modules.
+- Move Playwright to 1.65.1 and refresh the pinned rust-cache action.
+- Leave the separate “proposed rows that never drain” investigation in #559 open.
+- Keep app29 as the automatic ceiling and app30 explicit; no consensus change, chain reset, or data migration.
 
 ## v11.25.8 release
 
