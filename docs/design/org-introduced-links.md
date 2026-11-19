@@ -251,7 +251,7 @@ domains. So activation is a durable state machine, not one atomic write.
 - `prior_terms_digest`: chain terms for `remote_chain_id` when the intent was
   written, or `absent`
 - `tx_bytes`, `tx_hash`, `tx_nonce`: NULL until signed
-- `generation`: the agreement generation `terms` commits (§5.3)
+- `generation`: the agreement generation `terms` commits, derived by the store (§5.3)
 - `staged_ref`: the staged CA + seed (required, bounded)
 - `created_at`, `deadline`
 - an append-only `introduced_link_history(link_id, at, from, to, reason)`
@@ -506,6 +506,12 @@ plus `org_id`, `peer_agent_pub`, `role` and `state_reason`.
   introduced agreement that rewrite is held inside the envelope. Any other change
   (endpoint, pin, clearance, departments, expiry) is a new generation the row
   doesn't govern.
+- The store derives `generation` from `terms` at intent, so the two can't
+  disagree. `terms` must be the canonical tx-33 encoding of active terms for
+  `remote_chain_id`; a caller-supplied `generation` that doesn't match is
+  refused.
+- `intent → signed` decodes `tx_bytes` and refuses them unless they are a
+  validly signed cross_fed set tx whose terms are exactly the row's `terms`.
 - The intent needs a non-empty `staged_ref` of at most 512 bytes: the CA and
   seed are staged before it is written.
 - `InsertIntroducedLinkIntent` checks the fence inside its write transaction,

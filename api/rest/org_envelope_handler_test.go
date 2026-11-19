@@ -21,6 +21,7 @@ import (
 	"github.com/l33tdawg/sage/internal/federation"
 	"github.com/l33tdawg/sage/internal/orgpolicy"
 	"github.com/l33tdawg/sage/internal/store"
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 // introFed adds the Phase B federation surface to cardFed and captures the
@@ -281,13 +282,28 @@ func TestOrgOffers_EndToEnd(t *testing.T) {
 }
 
 func introRow(chain string) *store.IntroducedLink {
+	return introRowFor(peerAgreementRecord(chain, strings.Repeat("12", 32)))
+}
+
+// encodedTerms is the exact tx-33 payload for rec.
+func encodedTerms(rec store.CrossFedRecord) []byte {
+	return tx.EncodeCrossFedTerms(&tx.CrossFedTerms{
+		RemoteChainID: rec.RemoteChainID, Endpoint: rec.Endpoint, PeerPubKey: rec.PeerPubKey,
+		MaxClearance: tx.ClearanceLevel(rec.MaxClearance), AllowedDomains: rec.AllowedDomains,
+		AllowedDepts: rec.AllowedDepts, ExpiresAt: rec.ExpiresAt, Status: rec.Status,
+	})
+}
+
+// introRowFor is an intent row committing exactly rec.
+func introRowFor(rec store.CrossFedRecord) *store.IntroducedLink {
 	h := func(b byte) string { return strings.Repeat(fmt.Sprintf("%02x", b), 32) }
+	chain := rec.RemoteChainID
 	return &store.IntroducedLink{
 		LinkID: h(1), OrgID: policyOrgID, RemoteChainID: chain, PeerAgentPub: h(0xaa),
 		OfferID: h(0xbb), SessionID: "S1", Kind: store.IntroducedLinkKindNew, Role: "host",
 		EIntro: []byte("secret transcript"), HostAcceptSig: []byte("ha"), GuestAccept: []byte("ga"), GuestAckSig: []byte("gk"),
-		Evidence: []byte(`{}`), Terms: []byte("terms"), PriorTermsDigest: "absent",
-		Generation: store.CrossFedGeneration(peerAgreementRecord(chain, strings.Repeat("12", 32))),
+		Evidence: []byte(`{}`), Terms: encodedTerms(rec), PriorTermsDigest: "absent",
+		Generation: store.CrossFedGeneration(rec),
 		StagedRef:  "staged/1", CreatedAt: 1000, Deadline: 2000,
 	}
 }
@@ -305,7 +321,14 @@ func (n *policyNode) activateIntroRow(t *testing.T, l *store.IntroducedLink) {
 	t.Helper()
 	ctx := context.Background()
 	require.NoError(t, n.sq.InsertIntroducedLinkIntent(ctx, l))
-	txb := []byte("tx-33 bytes " + l.LinkID)
+	ct, err := tx.DecodeCrossFedTerms(l.Terms)
+	require.NoError(t, err)
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	p := &tx.ParsedTx{Type: tx.TxTypeCrossFedSet, Nonce: 1, Timestamp: time.Unix(1100, 0), CrossFedTerms: ct}
+	require.NoError(t, tx.SignTx(p, key))
+	txb, err := tx.EncodeTx(p)
+	require.NoError(t, err)
 	ok, err := n.sq.TransitionIntroducedLink(ctx, store.IntroducedLinkTransition{LinkID: l.LinkID, From: store.IntroducedLinkIntent, To: store.IntroducedLinkSigned, At: 1100, TxBytes: txb, TxNonce: 1})
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -416,9 +439,8 @@ func TestOrgOffers_AgreementResolvesGenerationAndOrg(t *testing.T) {
 	assert.Empty(t, ag.LinkState, "the old row must not govern a later generation")
 
 	// An in-flight row governs the chain whatever its current terms.
-	inflight := introRow("node-peer")
+	inflight := introRowFor(later)
 	inflight.LinkID = strings.Repeat("02", 32)
-	inflight.Generation = store.CrossFedGeneration(later)
 	require.NoError(t, n.sq.InsertIntroducedLinkIntent(ctx, inflight))
 	delete(agreements, "node-peer")
 	ag, err = introducedPeerAgreement(ctx, ils, agreements, "node-peer")

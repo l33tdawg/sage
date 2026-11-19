@@ -28,6 +28,7 @@ package store
 // Badger: it is written outside consensus and must not feed the AppHash.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -38,6 +39,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	sagetx "github.com/l33tdawg/sage/internal/tx"
 )
 
 // Introduced-link states.
@@ -104,6 +107,49 @@ func CrossFedGeneration(rec CrossFedRecord) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// IntroducedLinkTermsGeneration decodes the exact encoded tx-33 terms a row
+// commits and returns their CrossFedGeneration. The bytes must be the
+// canonical encoding of active terms for chainID, so the generation a row is
+// bound to is always the generation of the terms it will commit.
+func IntroducedLinkTermsGeneration(chainID string, terms []byte) (string, error) {
+	t, err := sagetx.DecodeCrossFedTerms(terms)
+	if err != nil {
+		return "", fmt.Errorf("terms do not decode as tx-33 terms: %w", err)
+	}
+	if !bytes.Equal(sagetx.EncodeCrossFedTerms(t), terms) {
+		return "", errors.New("terms are not the canonical tx-33 encoding")
+	}
+	if t.RemoteChainID != chainID {
+		return "", errors.New("terms name a different remote chain")
+	}
+	if t.Status != "active" {
+		return "", errors.New("terms must set an active agreement")
+	}
+	return CrossFedGeneration(CrossFedRecord{
+		RemoteChainID: t.RemoteChainID, Endpoint: t.Endpoint, PeerPubKey: t.PeerPubKey,
+		MaxClearance: uint8(t.MaxClearance), ExpiresAt: t.ExpiresAt,
+		AllowedDomains: t.AllowedDomains, AllowedDepts: t.AllowedDepts, Status: t.Status,
+	}), nil
+}
+
+// signedIntroducedLinkTerms decodes the exact signed tx bytes recorded at
+// signed and returns the encoded terms they commit. The bytes must be a
+// validly signed cross_fed set tx.
+func signedIntroducedLinkTerms(txBytes []byte) ([]byte, error) {
+	p, err := sagetx.DecodeTx(txBytes)
+	if err != nil {
+		return nil, fmt.Errorf("signed bytes do not decode: %w", err)
+	}
+	if p.Type != sagetx.TxTypeCrossFedSet || p.CrossFedTerms == nil {
+		return nil, errors.New("signed bytes are not a cross_fed set tx")
+	}
+	ok, err := sagetx.VerifyTx(p)
+	if err != nil || !ok {
+		return nil, errors.New("signed bytes do not carry a valid signature")
+	}
+	return sagetx.EncodeCrossFedTerms(p.CrossFedTerms), nil
+}
+
 // introducedLinkTransitions is the complete allowed-transition table.
 var introducedLinkTransitions = map[string]map[string]bool{
 	IntroducedLinkIntent:           {IntroducedLinkSigned: true, IntroducedLinkAborted: true},
@@ -156,8 +202,9 @@ type IntroducedLink struct {
 	Evidence []byte `json:"evidence"`
 	// Terms is the encoded CrossFedTerms this link commits.
 	Terms []byte `json:"terms"`
-	// Generation is CrossFedGeneration of the agreement terms this row
-	// commits. The row governs only an agreement with that generation.
+	// Generation is CrossFedGeneration of Terms. The store derives it at
+	// intent (a caller-supplied value must match), and the row governs only an
+	// agreement with that generation.
 	Generation string `json:"generation"`
 	// PriorTermsDigest is the hex sha256 of the chain terms for the remote
 	// when the intent was written, or "absent".
@@ -186,45 +233,51 @@ var (
 	introPriorTermsDigest = regexp.MustCompile(`^(absent|[0-9a-f]{64})$`)
 )
 
-func (l *IntroducedLink) validateIntent() error {
+// validateIntent checks a new row and returns the generation of its terms.
+func (l *IntroducedLink) validateIntent() (string, error) {
 	switch {
 	case !introLinkIDPattern.MatchString(l.LinkID):
-		return errors.New("link_id must be 64 lowercase hex")
+		return "", errors.New("link_id must be 64 lowercase hex")
 	case strings.TrimSpace(l.OrgID) == "":
-		return errors.New("org_id is required")
+		return "", errors.New("org_id is required")
 	case !introChainIDPattern.MatchString(l.RemoteChainID):
-		return errors.New("remote_chain_id is not a valid chain id")
+		return "", errors.New("remote_chain_id is not a valid chain id")
 	case !introLinkIDPattern.MatchString(l.PeerAgentPub):
-		return errors.New("peer_agent_pub must be 64 lowercase hex")
+		return "", errors.New("peer_agent_pub must be 64 lowercase hex")
 	case !introLinkIDPattern.MatchString(l.OfferID):
-		return errors.New("offer_id must be 64 lowercase hex")
+		return "", errors.New("offer_id must be 64 lowercase hex")
 	case strings.TrimSpace(l.SessionID) == "":
-		return errors.New("session_id is required")
+		return "", errors.New("session_id is required")
 	case l.Kind != IntroducedLinkKindNew && l.Kind != IntroducedLinkKindRekey:
-		return errors.New("kind must be new or rekey")
+		return "", errors.New("kind must be new or rekey")
 	case l.Role != "host" && l.Role != "guest":
-		return errors.New("role must be host or guest")
+		return "", errors.New("role must be host or guest")
 	case len(l.EIntro) == 0, len(l.HostAcceptSig) == 0, len(l.GuestAccept) == 0, len(l.GuestAckSig) == 0:
-		return errors.New("e_intro and all three acceptance signatures are required at intent")
+		return "", errors.New("e_intro and all three acceptance signatures are required at intent")
 	case len(l.Evidence) == 0 || len(l.Terms) == 0:
-		return errors.New("evidence and terms are required at intent")
-	case !introLinkIDPattern.MatchString(l.Generation):
-		return errors.New("generation must be 64 lowercase hex")
+		return "", errors.New("evidence and terms are required at intent")
 	case strings.TrimSpace(l.StagedRef) == "" || len(l.StagedRef) > MaxIntroducedLinkStagedRefBytes:
-		return fmt.Errorf("staged_ref is required (the CA and seed are staged before the intent) and at most %d bytes", MaxIntroducedLinkStagedRefBytes)
+		return "", fmt.Errorf("staged_ref is required (the CA and seed are staged before the intent) and at most %d bytes", MaxIntroducedLinkStagedRefBytes)
 	case !introPriorTermsDigest.MatchString(l.PriorTermsDigest):
-		return errors.New("prior_terms_digest must be 64 lowercase hex or absent")
+		return "", errors.New("prior_terms_digest must be 64 lowercase hex or absent")
 	case len(l.TxBytes) != 0 || l.TxHash != "" || l.TxNonce != 0:
-		return errors.New("tx bytes are only recorded at signed")
+		return "", errors.New("tx bytes are only recorded at signed")
 	case l.CreatedAt <= 0 || l.Deadline <= l.CreatedAt:
-		return errors.New("deadline must follow a positive created_at")
+		return "", errors.New("deadline must follow a positive created_at")
 	}
 	for _, b := range [][]byte{l.EIntro, l.HostAcceptSig, l.GuestAccept, l.GuestAckSig, l.Evidence, l.Terms} {
 		if len(b) > MaxIntroducedLinkBlobBytes {
-			return fmt.Errorf("a stored blob exceeds %d bytes", MaxIntroducedLinkBlobBytes)
+			return "", fmt.Errorf("a stored blob exceeds %d bytes", MaxIntroducedLinkBlobBytes)
 		}
 	}
-	return nil
+	gen, err := IntroducedLinkTermsGeneration(l.RemoteChainID, l.Terms)
+	if err != nil {
+		return "", err
+	}
+	if l.Generation != "" && l.Generation != gen {
+		return "", errors.New("generation does not match the encoded terms")
+	}
+	return gen, nil
 }
 
 func (s *SQLiteStore) migrateIntroducedLinks(ctx context.Context) error {
@@ -282,11 +335,14 @@ func (s *SQLiteStore) migrateIntroducedLinks(ctx context.Context) error {
 
 // InsertIntroducedLinkIntent writes a new row in state intent and its first
 // history entry in one transaction. It refuses (ErrIntroducedLinkInFlight)
-// when the remote chain already has an in-flight row.
+// when the remote chain already has an in-flight row. The generation is
+// derived from l.Terms and written back to l.Generation.
 func (s *SQLiteStore) InsertIntroducedLinkIntent(ctx context.Context, l *IntroducedLink) error {
-	if err := l.validateIntent(); err != nil {
+	gen, err := l.validateIntent()
+	if err != nil {
 		return fmt.Errorf("%w: %v", ErrIntroducedLinkInvalid, err)
 	}
+	l.Generation = gen
 	tx, unlock, err := s.beginTxLocked(ctx)
 	if err != nil {
 		return fmt.Errorf("begin introduced link insert: %w", err)
@@ -349,8 +405,9 @@ type IntroducedLinkTransition struct {
 	// signed or a later state; it keeps a late caller from moving a row whose
 	// bytes it did not sign.
 	ExpectTxHash string
-	// TxBytes / TxNonce are recorded on intent → signed only. The stored
-	// tx_hash is the hex sha256 of TxBytes.
+	// TxBytes / TxNonce are recorded on intent → signed only. TxBytes must be
+	// a validly signed cross_fed set tx whose terms are exactly the row's
+	// Terms. The stored tx_hash is the hex sha256 of TxBytes.
 	TxBytes []byte
 	TxNonce uint64
 }
@@ -376,9 +433,14 @@ func (s *SQLiteStore) TransitionIntroducedLink(ctx context.Context, t Introduced
 		return false, fmt.Errorf("%w: transition time is required", ErrIntroducedLinkInvalid)
 	}
 	signing := t.From == IntroducedLinkIntent && t.To == IntroducedLinkSigned
+	var signedTerms []byte
 	if signing {
 		if len(t.TxBytes) == 0 || len(t.TxBytes) > MaxIntroducedLinkBlobBytes {
 			return false, fmt.Errorf("%w: signed needs the exact tx bytes", ErrIntroducedLinkInvalid)
+		}
+		var err error
+		if signedTerms, err = signedIntroducedLinkTerms(t.TxBytes); err != nil {
+			return false, fmt.Errorf("%w: %v", ErrIntroducedLinkInvalid, err)
 		}
 	} else if len(t.TxBytes) != 0 || t.TxNonce != 0 {
 		return false, fmt.Errorf("%w: tx bytes are only recorded on intent → signed", ErrIntroducedLinkInvalid)
@@ -393,6 +455,23 @@ func (s *SQLiteStore) TransitionIntroducedLink(ctx context.Context, t Introduced
 	}
 	defer unlock()
 	var res sql.Result
+	if signing {
+		var stored []byte
+		err = tx.QueryRowContext(ctx, `SELECT terms FROM introduced_link WHERE link_id = ? AND state = ? AND tx_hash IS NULL`,
+			t.LinkID, t.From).Scan(&stored)
+		if errors.Is(err, sql.ErrNoRows) {
+			_ = tx.Rollback()
+			return false, nil
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			return false, fmt.Errorf("read introduced link terms: %w", err)
+		}
+		if !bytes.Equal(stored, signedTerms) {
+			_ = tx.Rollback()
+			return false, fmt.Errorf("%w: the signed tx commits different terms than the row", ErrIntroducedLinkInvalid)
+		}
+	}
 	switch {
 	case signing:
 		sum := sha256.Sum256(t.TxBytes)

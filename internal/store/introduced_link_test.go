@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -9,9 +10,33 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+
+	sagetx "github.com/l33tdawg/sage/internal/tx"
 )
+
+// introTerms is the exact tx-33 payload a fixture row commits.
+func introTerms(id byte, chain string) []byte {
+	return sagetx.EncodeCrossFedTerms(&sagetx.CrossFedTerms{
+		RemoteChainID: chain, Endpoint: "https://" + chain, PeerPubKey: []byte{id}, Status: "active",
+	})
+}
+
+var introSigner = ed25519.NewKeyFromSeed(make([]byte, ed25519.SeedSize))
+
+// signedTermsTx is a signed cross_fed set tx carrying exactly terms.
+func signedTermsTx(t *testing.T, terms []byte, nonce uint64) []byte {
+	t.Helper()
+	ct, err := sagetx.DecodeCrossFedTerms(terms)
+	require.NoError(t, err)
+	p := &sagetx.ParsedTx{Type: sagetx.TxTypeCrossFedSet, Nonce: nonce, Timestamp: time.Unix(1100, 0), CrossFedTerms: ct}
+	require.NoError(t, sagetx.SignTx(p, introSigner))
+	b, err := sagetx.EncodeTx(p)
+	require.NoError(t, err)
+	return b
+}
 
 func introLinkFixture(id byte, chain string) *IntroducedLink {
 	h := func(b byte) string { return strings.Repeat(fmt.Sprintf("%02x", b), 32) }
@@ -19,7 +44,7 @@ func introLinkFixture(id byte, chain string) *IntroducedLink {
 		LinkID: h(id), OrgID: "org-acme", RemoteChainID: chain, PeerAgentPub: h(0xaa),
 		OfferID: h(0xbb), SessionID: "S-" + h(id)[:8], Kind: IntroducedLinkKindNew, Role: "host",
 		EIntro: []byte("e-intro"), HostAcceptSig: []byte("ha"), GuestAccept: []byte("ga"), GuestAckSig: []byte("gk"),
-		Evidence: []byte(`{"policy_rev":3}`), Terms: []byte("terms"), PriorTermsDigest: "absent",
+		Evidence: []byte(`{"policy_rev":3}`), Terms: introTerms(id, chain), PriorTermsDigest: "absent",
 		Generation: CrossFedGeneration(CrossFedRecord{RemoteChainID: chain, Endpoint: "https://" + chain, PeerPubKey: []byte{id}}),
 		StagedRef:  "staged/1", CreatedAt: 1000, Deadline: 2000,
 	}
@@ -105,10 +130,16 @@ func TestIntroducedLink_IntentValidation(t *testing.T) {
 		"tx bytes at intent":  func(l *IntroducedLink) { l.TxBytes = []byte("tx") },
 		"deadline not after":  func(l *IntroducedLink) { l.Deadline = l.CreatedAt },
 		"oversized blob":      func(l *IntroducedLink) { l.EIntro = make([]byte, MaxIntroducedLinkBlobBytes+1) },
-		"missing generation":  func(l *IntroducedLink) { l.Generation = "" },
+		"generation mismatch": func(l *IntroducedLink) { l.Generation = introLinkFixture(2, "chain-b").Generation },
 		"bad generation":      func(l *IntroducedLink) { l.Generation = strings.Repeat("G", 64) },
-		"missing staged ref":  func(l *IntroducedLink) { l.StagedRef = "" },
-		"blank staged ref":    func(l *IntroducedLink) { l.StagedRef = "  " },
+		"terms not tx-33":     func(l *IntroducedLink) { l.Terms = []byte("terms") },
+		"terms trailing byte": func(l *IntroducedLink) { l.Terms = append(introTerms(1, "chain-b"), 0) },
+		"terms other chain":   func(l *IntroducedLink) { l.Terms = introTerms(1, "chain-z") },
+		"terms not active": func(l *IntroducedLink) {
+			l.Terms = sagetx.EncodeCrossFedTerms(&sagetx.CrossFedTerms{RemoteChainID: "chain-b", Endpoint: "https://chain-b", PeerPubKey: []byte{1}, Status: "revoked"})
+		},
+		"missing staged ref": func(l *IntroducedLink) { l.StagedRef = "" },
+		"blank staged ref":   func(l *IntroducedLink) { l.StagedRef = "  " },
 		"oversized staged ref": func(l *IntroducedLink) {
 			l.StagedRef = strings.Repeat("s", MaxIntroducedLinkStagedRefBytes+1)
 		},
@@ -120,6 +151,57 @@ func TestIntroducedLink_IntentValidation(t *testing.T) {
 	rows, err := s.ListIntroducedLinks(ctx, "")
 	require.NoError(t, err)
 	require.Empty(t, rows, "nothing written for an invalid intent")
+}
+
+// The store derives the generation from the exact terms a row commits.
+func TestIntroducedLink_GenerationIsDerivedFromTerms(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+	l := introLinkFixture(1, "chain-b")
+	want := l.Generation
+	l.Generation = ""
+	require.NoError(t, s.InsertIntroducedLinkIntent(ctx, l))
+	require.Equal(t, want, l.Generation, "derived and written back")
+	got, err := s.GetIntroducedLink(ctx, l.LinkID)
+	require.NoError(t, err)
+	require.Equal(t, want, got.Generation)
+	gen, err := IntroducedLinkTermsGeneration("chain-b", got.Terms)
+	require.NoError(t, err)
+	require.Equal(t, got.Generation, gen, "a stored row's generation is its terms' generation")
+}
+
+// Signed bytes must be a validly signed tx-33 committing exactly the row's
+// terms; anything else is refused and leaves the row at intent.
+func TestIntroducedLink_SignedBytesMustCommitTheRowTerms(t *testing.T) {
+	ctx := context.Background()
+	s := newTokenStore(t)
+	l := introLinkFixture(1, "chain-b")
+	require.NoError(t, s.InsertIntroducedLinkIntent(ctx, l))
+	sign := func(txb []byte) (bool, error) {
+		return s.TransitionIntroducedLink(ctx, IntroducedLinkTransition{
+			LinkID: l.LinkID, From: IntroducedLinkIntent, To: IntroducedLinkSigned, At: 1100, TxBytes: txb, TxNonce: 1,
+		})
+	}
+
+	other := signedTermsTx(t, introTerms(2, "chain-b"), 1)
+	tampered := signedTermsTx(t, l.Terms, 1)
+	tampered[len(tampered)/2] ^= 0xff
+	for name, txb := range map[string][]byte{
+		"different terms": other,
+		"not a tx":        []byte("exact tx-33 bytes"),
+		"bad signature":   tampered,
+	} {
+		_, err := sign(txb)
+		require.ErrorIs(t, err, ErrIntroducedLinkInvalid, name)
+	}
+	got, err := s.GetIntroducedLink(ctx, l.LinkID)
+	require.NoError(t, err)
+	require.Equal(t, IntroducedLinkIntent, got.State)
+	require.Empty(t, got.TxHash)
+
+	ok, err := sign(signedTermsTx(t, l.Terms, 1))
+	require.NoError(t, err)
+	require.True(t, ok)
 }
 
 func TestIntroducedLink_TransitionsAreCASAndHashBound(t *testing.T) {
@@ -146,7 +228,7 @@ func TestIntroducedLink_TransitionsAreCASAndHashBound(t *testing.T) {
 	_, err = tr(IntroducedLinkIntent, IntroducedLinkSigned, "", "", 1100, nil)
 	require.ErrorIs(t, err, ErrIntroducedLinkInvalid, "signed needs the exact bytes")
 
-	txb := []byte("exact tx-33 bytes")
+	txb := signedTermsTx(t, l.Terms, 7)
 	ok, err := tr(IntroducedLinkIntent, IntroducedLinkSigned, "", "", 1100, txb)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -278,7 +360,7 @@ func TestIntroducedLink_ForGeneration(t *testing.T) {
 
 	// A retry for the same generation is the newest row for it.
 	retry := introLinkFixture(2, "chain-b")
-	retry.Generation = old.Generation
+	retry.Terms, retry.Generation = old.Terms, old.Generation
 	require.NoError(t, s.InsertIntroducedLinkIntent(ctx, retry))
 	got, err = s.IntroducedLinkForGeneration(ctx, "chain-b", old.Generation)
 	require.NoError(t, err)
