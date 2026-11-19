@@ -990,7 +990,7 @@ footer a:hover { text-decoration: underline; }
       </div>
       <div class="brand-release">
         <div class="cta-meta">
-          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.8</strong> &middot; signed assets</span>
+          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.9</strong> &middot; signed assets</span>
           <span class="cta-count" id="minds-freed"><strong id="download-count" data-count="18446" data-updated-at="2026-11-19T06:29:43.568Z">18,446</strong><span>package downloads</span></span>
         </div>
         <div class="download-badges">
@@ -1153,15 +1153,15 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <!-- What's New -->
-      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.8">
-        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.8</span></summary>
+      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.9">
+        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.9</span></summary>
         <div class="release-notes-body">
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.8 ships RFC #443 Phase A: policy-v2 agent allow-lists, node-self-minted link cards, signed rosters, and fleet-managed manual JOIN checks on both the host and guest. A current Root can sign bounded, expiring local exceptions. Phase B roster-introduced links remain inactive. No consensus change, chain reset, or data migration. Automatic upgrades remain app29; app30 remains explicit. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.8" style="color:var(--accent);">Read the v11.25.8 release notes &rarr;</a></p>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.9 is a maintenance release focused on operational stability. It parks the completed app-v25 adoption worker instead of letting it keep scanning, makes pending-voter scans cursor-based with a matching SQLite index and a larger page cache, and refreshes pgx, libp2p, x/*, Playwright, and release-cache dependencies. No consensus change, app-version change, chain reset, or data migration. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.9" style="color:var(--accent);">Read the v11.25.9 release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Agent-key allow-lists</h4><p>Org policy v2 binds peer-allow-list entries to enrolled agent keys, with the accepted policy body persisted for exact eligibility checks.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Self-minted link cards</h4><p>Each enrolled node mints its own signed card from local identity and transport state, while signed rosters establish a durable card floor.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Fleet JOIN enforcement</h4><p>Fleet-managed manual JOIN checks the peer against every enrolled org on both host and guest before request, approval, and transaction boundaries.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Bounded Root exceptions</h4><p>A current Root may sign an expiring local JOIN exception through localhost; every use is audited and exceptions are unavailable on non-fleet nodes.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Completed adoption parks</h4><p>Once the app-v25 legacy-adoption worker has no remaining work, it now stays parked instead of repeatedly resuming its scan.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Bounded voter scans</h4><p>Pending-voter pagination now uses an indexed keyset order and a 16 MiB SQLite page cache, reducing large-scan cost and memory pressure.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Updated network stack</h4><p>pgx, libp2p, and the Go x/* modules move to their current patched releases across the main and natter modules.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Release pipeline refresh</h4><p>Playwright moves to 1.65.1 and the native build cache action is pinned to its reviewed release.</p></div></div>
         </div>
         </div>
       </details>
@@ -1238,7 +1238,7 @@ footer a:hover { text-decoration: underline; }
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-tag"></use></svg><span>What changed in v11?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p data-release-notes-version="v11.25.8">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.8 adds RFC #443 Phase A with policy-v2 agent allow-lists, node-self-minted link cards, signed rosters, fleet-managed manual JOIN checks, and bounded local current-Root exceptions. Phase B roster-introduced links remain inactive. Automatic upgrades remain app29; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.8">Read the v11.25.8 release notes</a> for details.</p></div>
+          <div class="faq-a"><p data-release-notes-version="v11.25.9">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.9 is a maintenance release: the completed app-v25 adoption worker parks, pending-voter scans use indexed keyset pagination and a larger SQLite page cache, and pgx, libp2p, x/*, Playwright, and release-cache dependencies are refreshed. No consensus change, app-version change, chain reset, or data migration. Automatic upgrades remain app29; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.9">Read the v11.25.9 release notes</a> for details.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-federation"></use></svg><span>What does federation mean?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
