@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.9`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.10`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,32 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.9 and earlier)</summary>
+<summary>Recent release notes (v11.25.10 and earlier)</summary>
+
+## What's New in v11.25.10
+
+**Strict MCP hosts can connect directly to `sage-gui mcp` without a protocol
+shim.** The server answers `ping`, returns empty lists for resource, resource
+template and prompt discovery, and silently accepts standard cancellation,
+roots-change and progress notifications. The same behavior is shared by stdio,
+SSE and Streamable HTTP, while SAGE continues to advertise only the tool
+capability it implements.
+
+This release also includes RFC #443 Phase B2a, the restart-safe introduced-link
+activation engine. It adds canonical bounded introduction transcripts with
+domain-separated signatures, durable CA and pair-seed staging, a write path that
+persists its signed transaction before broadcast, and reconciliation across
+restarts. The B2b wire routes and owner-offer workflow are not exposed yet, so
+this release cannot activate a roster-introduced link on its own.
+
+The transitive OpenTelemetry modules move to v1.47.0, fixing
+GHSA-q7gw-24fr-5p69's attribute-value length-limit bypass. SAGE's current
+reachability analysis reports that path as disabled, but the release ships the
+patched dependency rather than leaving the alert open.
+
+No consensus version change, chain reset, app-version change or data migration.
+`latest` and automatic upgrade voting remain app29; app30 remains explicit.
+Container: `ghcr.io/l33tdawg/sage:11.25.10`. SDK 11.25.10.
 
 ## What's New in v11.25.9
 

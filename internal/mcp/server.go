@@ -807,8 +807,35 @@ func (s *Server) handleRequest(ctx context.Context, req *jsonRPCRequest) *jsonRP
 	switch req.Method {
 	case "initialize":
 		return s.handleInitialize(ctx, req)
-	case "notifications/initialized":
-		return nil // Notification, no response
+	case "ping":
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  map[string]any{},
+		}
+	case "resources/list":
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  map[string]any{"resources": []any{}},
+		}
+	case "resources/templates/list":
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  map[string]any{"resourceTemplates": []any{}},
+		}
+	case "prompts/list":
+		return &jsonRPCResponse{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  map[string]any{"prompts": []any{}},
+		}
+	case "notifications/initialized",
+		"notifications/cancelled",
+		"notifications/roots/list_changed",
+		"notifications/progress":
+		return nil // Standard client notifications never receive a response.
 	case "tools/list":
 		return s.handleToolsList(req)
 	case "tools/call":

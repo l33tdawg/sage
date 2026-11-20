@@ -92,6 +92,57 @@ func receiveStdioResponse(t *testing.T, responses <-chan map[string]any) map[str
 	}
 }
 
+func TestStdioRequestsAcceptUtilityProbesAndStandardNotifications(t *testing.T) {
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"items":[],"total":0}`)
+	}))
+	defer node.Close()
+	stdin, responses, cmd := runStdioRequestProcess(t, node.URL)
+
+	writeStdioRequest(t, stdin, 1, "initialize", `{}`)
+	for _, notification := range []string{
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","method":"notifications/roots/list_changed"}`,
+		`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"probe","progress":1,"total":1}}`,
+		`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":999}}`,
+	} {
+		_, err := fmt.Fprintln(stdin, notification)
+		require.NoError(t, err)
+	}
+	writeStdioRequest(t, stdin, 2, "ping", `{}`)
+	writeStdioRequest(t, stdin, 3, "resources/list", `{}`)
+	writeStdioRequest(t, stdin, 4, "resources/templates/list", `{}`)
+	writeStdioRequest(t, stdin, 5, "prompts/list", `{}`)
+	writeStdioRequest(t, stdin, 6, "tools/list", `{}`)
+
+	expectedResults := map[float64]map[string]any{
+		2: {},
+		3: {"resources": []any{}},
+		4: {"resourceTemplates": []any{}},
+		5: {"prompts": []any{}},
+	}
+	for range 6 {
+		response := receiveStdioResponse(t, responses)
+		require.Nil(t, response["error"])
+		id := response["id"].(float64)
+		if id == 1 {
+			require.Equal(t, "2024-11-05", response["result"].(map[string]any)["protocolVersion"])
+			continue
+		}
+		if id == 6 {
+			require.NotEmpty(t, response["result"].(map[string]any)["tools"])
+			continue
+		}
+		require.Equal(t, expectedResults[id], response["result"])
+	}
+
+	require.NoError(t, stdin.Close())
+	require.NoError(t, cmd.Wait())
+	for response := range responses {
+		t.Errorf("unexpected reply for standard client notification: %#v", response)
+	}
+}
+
 func TestStdioRequestsSlowHTTPDoesNotBlockToolsOrCancellation(t *testing.T) {
 	entered, cancelled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

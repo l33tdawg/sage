@@ -1,4 +1,4 @@
-Reconciled against internal/mcp for SAGE v11.25.9, with the unified agent lookup contract verified against current source.
+Reconciled against internal/mcp for SAGE v11.25.10, with the unified agent lookup contract verified against current source.
 
 # SAGE MCP Tools Reference
 
@@ -22,6 +22,18 @@ the authenticated bearer identity. An `agent_id`, `to`, `message_id`,
 `pipe_id`, or `memory_id` parameter always names a target or resource, never a
 missing self-authentication field. Use `sage_status` to inspect the calling
 identity and `sage_domains` to page its owned domains.
+
+## Transport discovery and liveness
+
+The shared JSON-RPC dispatcher used by stdio, SSE and Streamable HTTP answers
+standard `ping` requests with an empty success result. It returns empty
+`resources`, `resourceTemplates` and `prompts` arrays when a strict client
+probes discovery even though SAGE advertises only its tool capability.
+
+`notifications/initialized`, `notifications/cancelled`,
+`notifications/roots/list_changed` and `notifications/progress` are accepted
+without a response. Stdio still applies `notifications/cancelled` to an
+in-flight tool request; the other standard notifications carry no SAGE action.
 
 ### App-v25 recovery is automatic; agents do not repair history themselves
 
