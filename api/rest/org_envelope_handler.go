@@ -46,6 +46,22 @@ type introducedLinkStore interface {
 	IntroducedLinkGenerationStates(ctx context.Context) (map[string]map[string]string, error)
 	ListIntroducedLinks(ctx context.Context, remoteChainID string) ([]store.IntroducedLink, error)
 	ListIntroducedLinkHistory(ctx context.Context, linkID string) ([]store.IntroducedLinkHistory, error)
+	ListIntroducedLinkRefusals(ctx context.Context, remoteChainID string) ([]store.IntroducedLinkRefusal, error)
+}
+
+// introducedLinkPolicyNudger is the federation surface that applies
+// introduced-link pauses, rekey_required and card rotation (RFC #443 B2c).
+type introducedLinkPolicyNudger interface {
+	NudgeIntroducedLinkPolicy()
+}
+
+// nudgeIntroducedLinkPolicy asks federation for a policy pass after an org
+// admission changed what covers the node's introduced links. The
+// maintenance tick runs the same pass anyway; this only shortens the window.
+func (s *Server) nudgeIntroducedLinkPolicy() {
+	if n, ok := s.federation.(introducedLinkPolicyNudger); ok && s.federation != nil {
+		n.NudgeIntroducedLinkPolicy()
+	}
 }
 
 // orgOfferSource is the federation surface the offers route needs.
@@ -201,6 +217,7 @@ func (s *Server) handleOrgEnvelopeApply(w http.ResponseWriter, r *http.Request) 
 	}
 	if decision == orgpolicy.DecisionApplied {
 		s.emitEnvelopeEvent("fleet_envelope_stored", "Owner envelope stored for org "+orgID, req.Envelope, nil)
+		s.nudgeIntroducedLinkPolicy()
 	}
 	writeJSON(w, http.StatusOK, OrgEnvelopeResponse{Decision: decision, Digest: req.Envelope.Digest()})
 }
@@ -368,9 +385,11 @@ type IntroducedLinkView struct {
 	History []store.IntroducedLinkHistory `json:"history"`
 }
 
-// IntroducedLinkListResponse lists introduced links.
+// IntroducedLinkListResponse lists introduced links and the stale-gate
+// refusals that left no row (B2c).
 type IntroducedLinkListResponse struct {
-	Links []IntroducedLinkView `json:"links"`
+	Links    []IntroducedLinkView          `json:"links"`
+	Refusals []store.IntroducedLinkRefusal `json:"refusals"`
 }
 
 func (s *Server) handleIntroducedLinkList(w http.ResponseWriter, r *http.Request) {
@@ -405,6 +424,12 @@ func (s *Server) handleIntroducedLinkList(w http.ResponseWriter, r *http.Request
 		row.TxBytes, row.EIntro = nil, nil
 		resp.Links = append(resp.Links, IntroducedLinkView{IntroducedLink: row, History: hist})
 	}
+	refusals, err := ils.ListIntroducedLinkRefusals(r.Context(), chain)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "introduced-link state unavailable")
+		return
+	}
+	resp.Refusals = refusals
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -437,6 +462,15 @@ func introducedPeerAgreement(ctx context.Context, ils introducedLinkStore, agree
 	}
 	if row != nil {
 		ag.LinkID, ag.LinkState, ag.LinkOrgID = row.LinkID, row.State, row.OrgID
+		// The pin this node presented when the row was bound: a rekey is due
+		// when this node's own card pin moved (B2c). An undecodable
+		// transcript leaves it empty (no own-side signal).
+		if tr, dErr := federation.DecodeIntroTranscript(row.EIntro); dErr == nil {
+			ag.OwnPinHex = tr.Host.Pin
+			if row.Role == "guest" {
+				ag.OwnPinHex = tr.Guest.Pin
+			}
+		}
 	}
 	return ag, nil
 }

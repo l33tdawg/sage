@@ -209,6 +209,7 @@ type introPair struct {
 	host, guest *introNode
 	seed        []byte
 	nonce       byte
+	kind        string // "" = new
 }
 
 func newIntroPair(t *testing.T) *introPair {
@@ -240,8 +241,12 @@ func (p *introPair) side(n *introNode, cardRev uint64) IntroSide {
 // fresh nonce is a new session (a new link id).
 func (p *introPair) activation(t *testing.T, role string) *IntroActivation {
 	t.Helper()
+	kind := p.kind
+	if kind == "" {
+		kind = "new"
+	}
 	tr := &IntroTranscript{
-		V: IntroTranscriptVersion, Kind: "new", OfferID: strings.Repeat("0f", 32),
+		V: IntroTranscriptVersion, Kind: kind, OfferID: strings.Repeat("0f", 32),
 		OrgID: "org-acme", OrgRootKeyID: strings.Repeat("ab", 32),
 		PolicyRevision: 3, PolicyDigest: strings.Repeat("11", 32), RosterRevision: 2, RosterDigest: strings.Repeat("22", 32),
 		Host: p.side(p.host, 1), Guest: p.side(p.guest, 1), SeedCommit: SeedCommitHex(p.seed),
@@ -691,15 +696,13 @@ func TestIntroActivate_PlanRefusals(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, rows)
 
-	// Rekey is not activated in this phase.
-	act := p.activation(t, "host")
-	tr, err := DecodeIntroTranscript(act.Transcript)
-	require.NoError(t, err)
-	tr.Kind = "rekey"
-	act.Transcript, err = tr.Encode()
-	require.NoError(t, err)
-	_, err = h.mgr.ActivateIntroducedLink(context.Background(), act)
-	require.ErrorContains(t, err, "only kind new")
+	// A rekey with no agreement to rekey is a stale refusal (B2c).
+	p.kind, p.nonce = "rekey", 9
+	_, err = h.mgr.ActivateIntroducedLink(context.Background(), p.activation(t, "host"))
+	var stale *IntroStaleError
+	require.ErrorAs(t, err, &stale)
+	require.Contains(t, stale.Which, "no active agreement to rekey")
+	p.kind = ""
 
 	// No introduced-link source: fail closed.
 	h.mgr.SetIntroducedLinkSource(nil)

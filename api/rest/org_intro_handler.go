@@ -109,11 +109,8 @@ func (s *Server) handleOrgOfferAccept(w http.ResponseWriter, r *http.Request) {
 	case offer == nil:
 		writeJSONError(w, http.StatusNotFound, "no such open offer on this node; list offers first")
 		return
-	case offer.State != orgpolicy.PeerStateOffered:
+	case offer.State != openOfferState(offer.Kind):
 		writeJSONError(w, http.StatusConflict, "the offer is "+offer.State+"; only an open offer can be accepted")
-		return
-	case offer.Kind != orgpolicy.OfferKindNew:
-		writeJSONError(w, http.StatusNotImplemented, "accepting a rekey offer is not supported yet")
 		return
 	}
 	env, hasEnv, err := ps.LoadEnvelope(orgID)
@@ -148,6 +145,15 @@ func (s *Server) handleOrgOfferAccept(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// openOfferState is the per-peer state of an open offer of kind: offered for
+// a new link, rekey_required for a rekey (B2c).
+func openOfferState(kind string) string {
+	if kind == orgpolicy.OfferKindRekey {
+		return orgpolicy.PeerStateRekeyRequired
+	}
+	return orgpolicy.PeerStateOffered
 }
 
 // introOrgSourceAdapter is the federation.IntroOrgSource backed by the
@@ -261,6 +267,46 @@ func (a introOrgSourceAdapter) IntroPeerPinKnown(pin string) bool {
 		}
 	}
 	return false
+}
+
+// IntroOrgPeers reports every roster peer of one org with its current card,
+// for the B2c policy pass.
+func (a introOrgSourceAdapter) IntroOrgPeers(ctx context.Context, orgID string) (*federation.IntroOrgPeers, error) {
+	s := a.s
+	ps := s.orgPolicyStore(ctx)
+	if ps == nil {
+		return nil, errors.New("org policy state is not configured on this node")
+	}
+	list, err := s.refreshIntroOffers(ctx, ps, orgID)
+	if err != nil {
+		return nil, err
+	}
+	out := &federation.IntroOrgPeers{Ready: list.Ready, Reason: list.Reason}
+	if !list.Ready {
+		return out, nil
+	}
+	rst, roster, err := ps.LoadRoster(orgID)
+	if err != nil {
+		return nil, fmt.Errorf("org roster state unavailable: %w", err)
+	}
+	if roster == nil || rst.Revision != list.RosterRevision || rst.Digest != list.RosterDigest {
+		return nil, errors.New("the accepted roster changed while reading the peers; retry")
+	}
+	cards := make(map[string]*orgpolicy.LinkCard, len(roster.Cards))
+	for i := range roster.Cards {
+		cards[roster.Cards[i].AgentPub] = &roster.Cards[i]
+	}
+	for _, o := range list.Offers {
+		c := cards[o.PeerAgentPub]
+		if c == nil {
+			continue
+		}
+		out.Peers = append(out.Peers, federation.IntroPeerState{
+			State: o.State, Reason: o.Reason, Kind: o.Kind, OfferID: o.OfferID,
+			Resumable: o.Resumable, Card: introCardOf(c),
+		})
+	}
+	return out, nil
 }
 
 func (a introOrgSourceAdapter) AcceptedIntroOffers(ctx context.Context) ([]federation.IntroOfferRef, error) {

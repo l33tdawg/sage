@@ -35,8 +35,8 @@ const (
 
 	// OfferKindNew offers a first link to a peer with no agreement.
 	OfferKindNew = "new"
-	// OfferKindRekey offers a rekey of an active introduced link whose peer
-	// card changed its CA SPKI pin.
+	// OfferKindRekey offers a rekey of an active introduced link where
+	// either side's card changed its CA SPKI pin.
 	OfferKindRekey = "rekey"
 
 	// OfferWindowSeconds is the offer expiry (72 h).
@@ -54,7 +54,7 @@ const (
 	PeerStateExpired       = "expired"        // the local offer window passed; re-offer to reopen
 	PeerStateInFlight      = "in_flight"      // an introduced_link row is between intent and active
 	PeerStateActive        = "active"         // the introduced link is active and still covered
-	PeerStateRekeyRequired = "rekey_required" // the peer card changed its CA pin
+	PeerStateRekeyRequired = "rekey_required" // a card of the link changed its CA pin
 	PeerStatePauseRequired = "pause_required" // the link is active but no longer covered; Reason says why
 	PeerStatePaused        = "paused"         // the link is paused
 	PeerStateManual        = "manual"         // a manual (QR JOIN) agreement exists; no offer
@@ -111,6 +111,11 @@ type PeerAgreement struct {
 	// LinkOrgID is the org that introduced the row. A row of another org is
 	// never interpreted under this org.
 	LinkOrgID string
+	// OwnPinHex is the CA SPKI pin this node presented in the governing row's
+	// E_intro (empty when unknown). A rekey is due when either side's card
+	// pin moved: the peer's against PinHex, this node's against OwnPinHex
+	// (B2c; the peer then sees the change against its own agreement).
+	OwnPinHex string
 }
 
 // OfferInputs drives RefreshOffers.
@@ -142,6 +147,12 @@ type PeerOffer struct {
 	GuestCardRev uint64 `json:"guest_card_rev"`
 	LinkID       string `json:"link_id,omitempty"`
 	LinkState    string `json:"link_state,omitempty"`
+	// Resumable is set on a paused link that may go back to active without a
+	// tap (B2c): the peer is covered again, the envelope still allows the
+	// agreement's sharing and neither CA pin moved. The caller also requires
+	// the peer card digest to be the one the link last followed. Reason says
+	// why a paused link is not resumable.
+	Resumable bool `json:"resumable,omitempty"`
 }
 
 // OfferList is the result for one org. When Ready is false the org-level
@@ -403,6 +414,18 @@ func (s *Store) peerOffer(in OfferInputs, st AcceptedState, body *Policy, envelo
 		return row, nil
 	case ag.Exists && ag.LinkState == "paused":
 		row.State = PeerStatePaused
+		switch {
+		case !covered:
+			row.Reason = why
+		case ag.PinHex != peer.CASPKIPin || (ag.OwnPinHex != "" && ag.OwnPinHex != own.CASPKIPin):
+			row.Reason = "a CA pin changed while paused; a new ask is required"
+		default:
+			if ok, narrowWhy := envelope.AllowsSharing(ag.AllowedDomains, ag.MaxClearance); !ok {
+				row.Reason = narrowWhy
+			} else {
+				row.Resumable = true
+			}
+		}
 		return row, nil
 	case ag.Exists && (ag.LinkState == "active" || ag.LinkState == "rekey_required"):
 		if !covered {
@@ -414,7 +437,8 @@ func (s *Store) peerOffer(in OfferInputs, st AcceptedState, body *Policy, envelo
 			row.State, row.Reason = PeerStatePauseRequired, narrowWhy
 			return row, nil
 		}
-		if ag.LinkState == "rekey_required" || ag.PinHex != peer.CASPKIPin {
+		if ag.LinkState == "rekey_required" || ag.PinHex != peer.CASPKIPin ||
+			(ag.OwnPinHex != "" && ag.OwnPinHex != own.CASPKIPin) {
 			return s.openOffer(in, row, host, guest, OfferKindRekey, PeerStateRekeyRequired)
 		}
 		row.State = PeerStateActive

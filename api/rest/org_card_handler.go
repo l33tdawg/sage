@@ -137,6 +137,9 @@ func (s *Server) handleOrgCardMint(w http.ResponseWriter, r *http.Request) {
 	}
 	switch decision {
 	case orgpolicy.DecisionApplied, orgpolicy.DecisionNoOpSameDigest:
+		if decision == orgpolicy.DecisionApplied {
+			s.nudgeIntroducedLinkPolicy()
+		}
 		writeJSON(w, http.StatusOK, OrgCardMintResponse{Decision: decision, Card: card})
 	default: // DecisionRejectedEquivocation
 		if s.OnEvent != nil && notice != nil {

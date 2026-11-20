@@ -49,7 +49,6 @@ import (
 
 	"github.com/l33tdawg/sage/internal/netguard"
 	"github.com/l33tdawg/sage/internal/store"
-	"github.com/l33tdawg/sage/internal/tx"
 )
 
 // Per-route caps (design §2).
@@ -727,16 +726,18 @@ func (m *Manager) handleIntroConfirm(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusConflict, "intro session is stale: "+staleErr.Error())
 		return
 	}
-	pin, _ := hex.DecodeString(tr.Guest.Pin)
+	terms, err := m.introTermsFor(tr.Kind, tr.Guest)
+	if err != nil {
+		m.dropIntroHostSession(sess)
+		httpError(w, http.StatusConflict, err.Error())
+		return
+	}
 	act := &IntroActivation{
 		Role: "host", OrgID: sess.orgID, SessionID: sess.sessionID, Transcript: sess.transcript,
 		HostAcceptSig: hostSig, GuestAcceptSig: guestSig, GuestAckSig: ackSig,
 		Evidence: introEvidenceOf(tr), RemoteCAPEM: sess.guestCAPEM,
-		Seed: append([]byte(nil), seed...),
-		Terms: &tx.CrossFedTerms{
-			RemoteChainID: tr.Guest.ChainID, Endpoint: tr.Guest.Endpoint, PeerPubKey: pin,
-			MaxClearance: tx.ClearanceLevel(trustOnlyJoinScope.MaxClearance), Status: "active",
-		},
+		Seed:             append([]byte(nil), seed...),
+		Terms:            terms,
 		PriorTermsDigest: sess.priorTerms,
 		Deadline:         time.Now().Add(m.introWindow()).Unix(),
 		StaleCheck:       m.introStaleCheck(sess.orgID, sess.offerID, "host", tr),

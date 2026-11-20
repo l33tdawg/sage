@@ -75,10 +75,15 @@ const (
 
 // CrossFedGeneration is the hex sha256 that identifies one tx-33 agreement
 // generation for introduced-link binding. It covers every chain term except
-// the outbound AllowedDomains snapshot (and status): the domain snapshot is
-// the one field UpdateAgreementSharing rewrites in place, and for an
-// introduced agreement that rewrite is held inside the owner envelope. Any
-// other change (endpoint, pinned key, clearance, departments, expiry) is a new
+// the outbound AllowedDomains snapshot, the endpoint and the status:
+//   - the domain snapshot is the one field UpdateAgreementSharing rewrites in
+//     place, and for an introduced agreement that rewrite is held inside the
+//     owner envelope;
+//   - the endpoint is only where to dial. Trust is the pinned key, and an
+//     introduced link follows an endpoint-only card change with a tx-33
+//     upsert that must stay governed by the same row (RFC #443 B2c).
+//
+// Any other change (pinned key, clearance, departments, expiry) is a new
 // generation that the row does not govern.
 func CrossFedGeneration(rec CrossFedRecord) string {
 	h := sha256.New()
@@ -88,9 +93,8 @@ func CrossFedGeneration(rec CrossFedRecord) string {
 		h.Write(n[:])
 		h.Write(b)
 	}
-	lp([]byte("sage/introduced-link-generation/v1"))
+	lp([]byte("sage/introduced-link-generation/v2"))
 	lp([]byte(rec.RemoteChainID))
-	lp([]byte(rec.Endpoint))
 	lp(rec.PeerPubKey)
 	lp([]byte{rec.MaxClearance})
 	var exp [8]byte
@@ -324,6 +328,24 @@ func (s *SQLiteStore) migrateIntroducedLinks(ctx context.Context) error {
 		reason    TEXT NOT NULL DEFAULT ''
 	)`,
 		`CREATE INDEX IF NOT EXISTS introduced_link_history_by_link ON introduced_link_history(link_id, id)`,
+		// B2c: the peer card a link last followed (endpoint/route rotation and
+		// the auto-resume rule), and stale-gate refusals.
+		`CREATE TABLE IF NOT EXISTS introduced_link_card (
+		link_id     TEXT PRIMARY KEY,
+		card_rev    INTEGER NOT NULL,
+		card_digest TEXT NOT NULL,
+		updated_at  INTEGER NOT NULL
+	)`,
+		`CREATE TABLE IF NOT EXISTS introduced_link_refusal (
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		at              INTEGER NOT NULL,
+		org_id          TEXT NOT NULL,
+		offer_id        TEXT NOT NULL,
+		remote_chain_id TEXT NOT NULL,
+		kind            TEXT NOT NULL,
+		role            TEXT NOT NULL,
+		reason          TEXT NOT NULL
+	)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.writeExecContext(ctx, q); err != nil {
@@ -563,13 +585,21 @@ func (s *SQLiteStore) LatestIntroducedLinkByChain(ctx context.Context, remoteCha
 	return l, nil
 }
 
-// IntroducedLinkForGeneration returns the newest row for a remote chain that
-// is bound to generation, or (nil, nil) when none is: the agreement with that
-// generation was not introduced by this node.
+// introducedLinkGoverns excludes an aborted rekey from governance. A rekey
+// can share the generation of the link it rekeys (the side whose own CA
+// changed commits the same peer pin), and an aborted row never put its bytes
+// on chain, so it must not take over from the link it failed to replace.
+// Every other row, an aborted kind-new attempt included, keeps governing
+// its generation as before.
+const introducedLinkGoverns = `NOT (kind = 'rekey' AND state = 'aborted')`
+
+// IntroducedLinkForGeneration returns the newest governing row for a remote
+// chain that is bound to generation, or (nil, nil) when none is: the agreement
+// with that generation was not introduced by this node.
 func (s *SQLiteStore) IntroducedLinkForGeneration(ctx context.Context, remoteChainID, generation string) (*IntroducedLink, error) {
 	l, err := scanIntroducedLink(s.conn.QueryRowContext(ctx,
 		`SELECT `+introducedLinkColumns+` FROM introduced_link WHERE remote_chain_id = ? AND generation = ?
-		ORDER BY seq DESC LIMIT 1`, remoteChainID, generation))
+		AND `+introducedLinkGoverns+` ORDER BY seq DESC LIMIT 1`, remoteChainID, generation))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -583,8 +613,8 @@ func (s *SQLiteStore) IntroducedLinkForGeneration(ctx context.Context, remoteCha
 // the newest row bound to that generation.
 func (s *SQLiteStore) IntroducedLinkGenerationStates(ctx context.Context) (map[string]map[string]string, error) {
 	rows, err := s.conn.QueryContext(ctx, `SELECT l.remote_chain_id, l.generation, l.state FROM introduced_link l
-		JOIN (SELECT MAX(seq) AS seq FROM introduced_link GROUP BY remote_chain_id, generation) m
-		ON l.seq = m.seq`)
+		JOIN (SELECT MAX(seq) AS seq FROM introduced_link WHERE `+introducedLinkGoverns+`
+		GROUP BY remote_chain_id, generation) m ON l.seq = m.seq`)
 	if err != nil {
 		return nil, fmt.Errorf("list introduced link states: %w", err)
 	}

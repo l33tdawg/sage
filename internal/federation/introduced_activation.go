@@ -163,11 +163,6 @@ func (m *Manager) planIntroActivation(act *IntroActivation) (*introPlan, error) 
 	if err != nil {
 		return nil, err
 	}
-	if tr.Kind != introKindNew {
-		// Rekey replaces an active sync-control binding and lands with the
-		// wire in B2b.
-		return nil, errors.New("introduced link: only kind new is activated in this phase")
-	}
 	e := IntroAttestation(act.Transcript)
 	if !VerifyIntro(tr.Host.AgentPub, IntroHostAccept, e, act.HostAcceptSig) ||
 		!VerifyIntro(tr.Guest.AgentPub, IntroGuestAccept, e, act.GuestAcceptSig) ||
@@ -201,6 +196,7 @@ func (m *Manager) planIntroActivation(act *IntroActivation) (*introPlan, error) 
 	}
 	t := act.Terms
 	scope := ScopeDigest(uint8(t.MaxClearance), t.AllowedDomains, "exchange", "both")
+	rekey := tr.Kind == introKindRekey
 	switch {
 	case t.RemoteChainID != p.remote.ChainID:
 		return nil, errors.New("introduced link: terms name a different remote chain")
@@ -210,11 +206,12 @@ func (m *Manager) planIntroActivation(act *IntroActivation) (*introPlan, error) 
 		return nil, errors.New("introduced link: terms pin is not the transcript pin")
 	case t.Status != "active":
 		return nil, errors.New("introduced link: terms must be active")
-	case len(t.AllowedDomains) != 0 || len(t.AllowedDepts) != 0:
+	case !rekey && (len(t.AllowedDomains) != 0 || len(t.AllowedDepts) != 0):
 		// Introduced JOIN stays trust-only; data scope comes only through the
-		// envelope-capped UpdateAgreementSharingAs.
+		// envelope-capped UpdateAgreementSharingAs. A rekey carries the
+		// current agreement's terms over instead (checked under the lease).
 		return nil, errors.New("introduced link: terms must be trust-only")
-	case hex.EncodeToString(scope[:]) != p.local.Scope:
+	case !rekey && hex.EncodeToString(scope[:]) != p.local.Scope:
 		return nil, errors.New("introduced link: terms do not match this side's scope in E_intro")
 	case SeedCommitHex(act.Seed) != tr.SeedCommit:
 		return nil, errors.New("introduced link: seed does not match the transcript commitment")
@@ -235,7 +232,7 @@ func (m *Manager) planIntroActivation(act *IntroActivation) (*introPlan, error) 
 // *IntroStaleError means nothing happened; ErrIntroPending means the row is
 // signed and the reconciler owns it; any other error after the intent was
 // written leaves the row aborted or revoked with the reason recorded.
-func (m *Manager) ActivateIntroducedLink(ctx context.Context, act *IntroActivation) (*IntroActivationResult, error) {
+func (m *Manager) ActivateIntroducedLink(ctx context.Context, act *IntroActivation) (_ *IntroActivationResult, retErr error) {
 	if act != nil {
 		defer zeroize(act.Seed)
 	}
@@ -252,6 +249,13 @@ func (m *Manager) ActivateIntroducedLink(ctx context.Context, act *IntroActivati
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		// B2c: a stale-gate refusal leaves no row, so it is logged here.
+		var stale *IntroStaleError
+		if errors.As(retErr, &stale) {
+			m.recordIntroRefusal(ctx, act, p, stale.Which)
+		}
+	}()
 	remote := p.remote.ChainID
 	if len(p.remote.P2PAddrs) > 0 {
 		if h := m.joinP2PHooks(); h.Persist == nil && h.PersistSnapshot == nil {
@@ -280,6 +284,11 @@ func (m *Manager) ActivateIntroducedLink(ctx context.Context, act *IntroActivati
 	} else if latest != nil && store.IntroducedLinkInFlight(latest.State) {
 		return nil, &IntroStaleError{Which: "another link for this chain is in flight"}
 	}
+	if p.tr.Kind == introKindRekey {
+		if gateErr := m.introRekeyGate(ctx, act, p); gateErr != nil {
+			return nil, &IntroStaleError{Which: gateErr.Error()}
+		}
+	}
 
 	// 2. Stage the CA and seed under the link's directory.
 	now := time.Now().Unix()
@@ -307,8 +316,11 @@ func (m *Manager) ActivateIntroducedLink(ctx context.Context, act *IntroActivati
 		}
 		return nil, fmt.Errorf("introduced link: write intent: %w", insErr)
 	}
-	if prepErr := ss.PrepareSyncControl(ctx, m.introSyncControl(p)); prepErr != nil {
-		return nil, m.abortIntroLocked(ctx, row, "prepare_failed", fmt.Errorf("prepare sync control: %w", prepErr))
+	if p.tr.Kind != introKindRekey {
+		// A rekey keeps the active binding; bind moves its pin.
+		if prepErr := ss.PrepareSyncControl(ctx, m.introSyncControl(p)); prepErr != nil {
+			return nil, m.abortIntroLocked(ctx, row, "prepare_failed", fmt.Errorf("prepare sync control: %w", prepErr))
+		}
 	}
 	if m.introFault("after_intent") {
 		return nil, errIntroSimulatedCrash
@@ -511,17 +523,27 @@ func (m *Manager) bindIntroLocked(ctx context.Context, row *store.IntroducedLink
 	if err := m.commitIntroArtifacts(row.RemoteChainID, row.LinkID, row.StagedRef, rec.PeerPubKey, pp[:]); err != nil {
 		return fail("staged artifacts", err)
 	}
-	epoch := introEpochOf(row)
-	if err := ss.ActivateSyncControl(ctx, row.RemoteChainID, epoch); err != nil {
-		return fail("sync control", err)
-	}
-	if len(routes) > 0 {
-		if err := m.persistBootstrapRoute(row.RemoteChainID, peerID, epoch, routes); err != nil {
-			return fail("peer route", err)
+	rekey := row.Kind == store.IntroducedLinkKindRekey
+	if rekey {
+		// B2c: keep the active binding (its epoch and delivered policy) and
+		// the peer RBAC snapshot; only the pinned remote CA moves. Routes are
+		// re-exchanged by the route refresher under the new pin.
+		if err := ss.RekeySyncControlPin(ctx, row.RemoteChainID, hex.EncodeToString(rec.PeerPubKey)); err != nil {
+			return fail("sync control", err)
 		}
-	}
-	if err := m.initializePeerRBACPolicyFor(ctx, rec); err != nil {
-		return fail("peer RBAC", err)
+	} else {
+		epoch := introEpochOf(row)
+		if err := ss.ActivateSyncControl(ctx, row.RemoteChainID, epoch); err != nil {
+			return fail("sync control", err)
+		}
+		if len(routes) > 0 {
+			if err := m.persistBootstrapRoute(row.RemoteChainID, peerID, epoch, routes); err != nil {
+				return fail("peer route", err)
+			}
+		}
+		if err := m.initializePeerRBACPolicyFor(ctx, rec); err != nil {
+			return fail("peer RBAC", err)
+		}
 	}
 	to := store.IntroducedLinkActive
 	if row.Role == "guest" {
@@ -529,6 +551,12 @@ func (m *Manager) bindIntroLocked(ctx context.Context, row *store.IntroducedLink
 	}
 	if err := m.casIntro(ctx, row, to, ""); err != nil {
 		return "", err
+	}
+	if rekey {
+		m.closeSupersededIntroRows(ctx, row)
+		// Detached: the refresh outlives a request-scoped ctx, and it must not
+		// take the sync-policy read lease under this lock.
+		go m.triggerRouteRefreshWithContext(context.WithoutCancel(ctx), row.RemoteChainID, nil)
 	}
 	return to, nil
 }
