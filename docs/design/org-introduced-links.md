@@ -1,6 +1,7 @@
 # Org-introduced federation links (RFC #443, Phase A + B)
 
-Status: Phase A implemented (v11.25.8). Phase B1 implemented (§5). Contract
+Status: Phase A implemented (v11.25.8). Phase B1 implemented (§5). Phase B2a
+implemented (§6). Contract
 agreed on #443 (v2 + the two implementation points of 2026-11-12). Line refs
 are main @ 506eb377 (v11.25.8).
 Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
@@ -540,3 +541,121 @@ REST layer installs both in `SetFederation`:
 
 `GET /v1/federation/introduced-links` (node operator) lists rows and history. It
 never echoes `e_intro` or `tx_bytes`.
+
+## 6. Phase B2a: activation engine
+
+B2a is the §3.3 write path, the §3.4 reconciler and the §3.5 tests. Nothing on
+the wire calls it yet: the `/fed/v1/intro/*` routes, owner accept and the
+host-status poll are B2b, so no link can activate from B2a alone.
+
+### 6.1 Transcript and signatures (`internal/federation/handclasp_intro.go`)
+
+- `IntroTranscript` is E_intro: each side's chain id, card `agent_pub`, CA
+  pin, endpoint, nonce, scope digest, P2P peer id and routes, card and
+  envelope revision + digest; plus org id, org root key id, policy and roster
+  revision + digest (one value each), `offer_id`, kind, and the seed
+  commitment. The seed itself is never in it.
+- It's stored as canonical JSON (the `e_intro` column). Decoding refuses
+  unknown fields, non-canonical order or whitespace, unsorted routes and
+  trailing bytes, and the whole transcript is capped at 16 KiB.
+- `Validate` enforces the §6 caps (8 routes, 255-byte endpoint, 50-byte chain
+  id) and host = the lower `agent_pub`.
+- The attestation is `SHA256("sage/handclasp-intro/E/v1" \0 canonical)`.
+  `host-accept`, `guest-accept` and `guest-ack` are Ed25519 over
+  `tag \0 E`, verified against the card `agent_pub`. None of them verifies
+  as another, or as a manual-JOIN signature over the same bytes.
+
+### 6.2 Write path (`internal/federation/introduced_activation.go`)
+
+`ActivateIntroducedLink(ctx, IntroActivation)` takes one accepted session (the
+transcript, all three signatures, the peer CA, the seed, the exact tx-33 terms,
+the prior-terms digest, a deadline and a `StaleCheck`). Before anything else:
+
+- all three signatures must verify over E_intro;
+- this node's side must name the local chain, agent key and CA pin;
+- the terms must name the peer's chain, endpoint and pin from the transcript,
+  be `active` and trust-only, and match this side's scope digest;
+- the seed must match the commitment;
+- an introduced-link source must be installed, otherwise `ActiveAgreement`
+  couldn't see the row (fail closed).
+
+Then, under `LockAgreementMutation` and one generation mutation for the peer:
+
+1. **Stale gate.** `StaleCheck` (the org-level checks: offer expiry,
+   revisions, `PeerEligible`, envelope coverage), the chain terms against
+   `prior_terms_digest`, and no in-flight row. A refusal is an
+   `*IntroStaleError`; nothing is staged, written or signed, so no row is
+   kept for it.
+2. **Stage** the CA and seed (§6.3).
+3. **Intent** row, then `PrepareSyncControl` (pending).
+4. **Sign** inside the nonce lease. The `intent → signed` CAS stores the exact
+   bytes and nonce from a hook between `EncodeTx` and `broadcastContext`, so
+   the bytes never leave the process before they are durable.
+5. **Broadcast result:**
+   - success → `committed`;
+   - `ErrSubmitIndeterminate` → stays `signed`, and `ErrIntroPending` hands it
+     to the reconciler;
+   - any other error → `aborted(rejected: …)`, staging rolled back and the
+     pending sync control dropped.
+6. **Bind.** The chain must hold exactly the row's terms. Then commit the
+   staged CA and seed, `ActivateSyncControl`, persist the peer route, and
+   install the deny-all peer RBAC snapshot. The host goes to `active`, the
+   guest to `bound_pending_peer`.
+   - The RBAC step resolves the peer operator from the agreement record
+     (`initializePeerRBACPolicyFor`), because `ActiveAgreement` still denies
+     the row here.
+   - Any bind failure sends tx-34 and leaves `revoked(bind_failed: …)`.
+
+Only kind `new` is activated. A rekey replaces an active sync-control binding
+(`PrepareSyncControl` refuses that today) and lands with B2b.
+
+### 6.3 Staging (`internal/federation/introduced_staging.go`)
+
+- The CA and the seed envelope go under
+  `<certs>/federation/<chain>/intro/<link_id>/`.
+- `staged_ref` is `intro/<chain>/<link_id>`. It is compared against the row's
+  own chain and link id, never used as a path.
+- Commit moves both to the live files exactly as JOIN does. The seed epoch
+  follows whatever is live at commit time, and a vault-locked node caches the
+  seed at unlock.
+- Commit is idempotent: with the staged files gone, it accepts a live CA and
+  seed that already match the expected pin and pin-pair, so the reconciler can
+  resume a bind interrupted half-way.
+
+### 6.4 Reconciler (`internal/federation/introduced_reconcile.go`)
+
+`ReconcileIntroducedLinks` runs once when `StartMaintenance` starts and then on
+every tick, per row under the same locks, and follows §3.4:
+
+- `intent` → `aborted(crash_before_broadcast)`.
+- `signed` → the resolver (default `tx.CometTxResolver`) re-submits only the
+  stored bytes, then:
+  - committed with the chain holding the row's terms → bind; with other
+    terms → `aborted(superseded_on_chain)`, chain untouched;
+  - rejected, superseded or abandoned → `aborted(<verdict>)`;
+  - spent with matching terms → `paused(reconcile_spent)`, never
+    auto-activated; otherwise `aborted(spent)`;
+  - unresolved → stays `signed`.
+- `committed` → resume bind.
+- `bound_pending_peer` → `active` once the host reports active (hook installed
+  by B2b, or `GuestIntroConfirmed`). If the host reports aborted or revoked, or
+  the deadline passes → tx-34 → `revoked(peer_not_confirmed)`.
+
+### 6.5 Tests (`introduced_activation_test.go`, `handclasp_intro_test.go`)
+
+- Two real nodes with Badger and SQLite. `restart()` closes and reopens both
+  stores under a fresh Manager.
+- A test-only fault seam (`introFaultFn`) stops the write path with no cleanup
+  at `after_intent`, `after_signed` and `after_commit`.
+- They cover every §3.5 case:
+  - crash before broadcast, both variants;
+  - ambiguous commit: committed, rejected, spent with and without terms,
+    superseded, and unresolved after three passes, each asserting exactly one
+    tx-33 and the stored hash;
+  - crash before bind: resume, and a missing seed → tx-34;
+  - the stale cases;
+  - the guest window: the host refuses, the deadline passes, the host
+    confirms.
+- The org-level stale reasons (offer expiry, roster or policy revision, card
+  removal, allow-list, envelope) reach the engine through `StaleCheck`. Their
+  concrete checks are wired with the routes in B2b.
