@@ -1,9 +1,9 @@
 # SAGE Roadmap
 
-**Status (2026-11):** **v11.25.9 is the current release.** This patch stops a
-completed app-v25 adoption worker from polling forever and replaces the idle
-voter's offset scan with indexed keyset paging. It also refreshes the security
-and reliability dependency set without changing consensus behavior. Automatic
+**Status (2026-11):** **v11.25.10 is the current release.** This patch lets
+strict MCP hosts use the server without a utility-method shim and adds RFC #443
+Phase B2a's restart-safe introduced-link activation engine. The B2b wire routes
+remain absent, so roster-introduced links cannot activate yet. Automatic
 upgrades stay at app29, app30 remains explicit, and the separate
 evidence-operator/client parity work remains tracked in
 [#460](https://github.com/l33tdawg/sage/issues/460).
@@ -166,6 +166,16 @@ ceiling is app-v27.
 upgrade in place across all future releases. Routine personal-node upgrades
 remain automatic; the exceptional legacy-lineage repair is deliberately an
 explicit, reviewed operator ceremony rather than a silent mutation.
+
+## v11.25.10 release
+
+- Answer standard MCP `ping` requests and empty resource, resource-template and prompt discovery probes.
+- Silently accept cancellation, roots-change and progress notifications without disrupting the stdio loop.
+- Add RFC #443 Phase B2a's canonical introduction transcript and domain-separated acceptance signatures.
+- Persist introduced-link CA and pair-seed staging, signed-transaction CAS state and crash recovery.
+- Reconcile pending introduced-link bind operations after restart and on the maintenance tick.
+- Keep the owner-offer and introduction wire routes unreachable until B2b; no roster-introduced link activates from this release alone.
+- Keep app29 as the automatic ceiling and app30 explicit; no consensus change, chain reset, or data migration.
 
 ## v11.25.9 release
 
