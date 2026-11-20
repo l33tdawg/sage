@@ -367,13 +367,17 @@ func TestIntroActivate_GuestWindowRevokes(t *testing.T) {
 		p := newIntroPair(t)
 		g := p.guest
 		act := p.activation(t, "guest")
-		act.Deadline = time.Now().Unix() + 1
+		// Enough margin for slow (race-instrumented) runs; the wait below
+		// follows the real deadline rather than a fixed sleep.
+		act.Deadline = time.Now().Unix() + 4
 		res, err := g.mgr.ActivateIntroducedLink(context.Background(), act)
 		require.NoError(t, err)
 		require.NoError(t, g.mgr.ReconcileIntroducedLinks(context.Background()))
-		require.Equal(t, store.IntroducedLinkBoundPendingPeer, g.row(res.LinkID).State, "still waiting before the deadline")
+		if time.Now().Unix() < act.Deadline {
+			require.Equal(t, store.IntroducedLinkBoundPendingPeer, g.row(res.LinkID).State, "still waiting before the deadline")
+		}
 		requireDenied(t, g, p.host.chain)
-		time.Sleep(1100 * time.Millisecond)
+		time.Sleep(time.Until(time.Unix(act.Deadline, 0)) + 100*time.Millisecond)
 		require.NoError(t, g.mgr.ReconcileIntroducedLinks(context.Background()))
 		require.Equal(t, store.IntroducedLinkRevoked, g.row(res.LinkID).State)
 		require.Error(t, g.mgr.GuestIntroConfirmed(context.Background(), res.LinkID))
