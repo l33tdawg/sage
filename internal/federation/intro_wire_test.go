@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/l33tdawg/sage/internal/store"
@@ -80,6 +81,11 @@ type wireNode struct {
 
 	faultMu sync.Mutex
 	faults  map[string]bool
+	// serveMu makes a restart atomic for the listener: a request either
+	// finishes on the old Manager before close or runs on the new one. A
+	// real restart takes the old process's in-flight handlers with it; the
+	// shared test listener would otherwise let a closing Manager answer.
+	serveMu sync.RWMutex
 	// hits counts requests that reached the HTTP handler (past TLS).
 	hits atomic.Int64
 }
@@ -113,6 +119,8 @@ func newWireNode(t *testing.T, n *introNode) *wireNode {
 	)
 	w.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		w.hits.Add(1)
+		w.serveMu.RLock()
+		defer w.serveMu.RUnlock()
 		cur := n.currentMgr()
 		mu.Lock()
 		if owner != cur {
@@ -128,6 +136,14 @@ func newWireNode(t *testing.T, n *introNode) *wireNode {
 	w.srv.StartTLS()
 	t.Cleanup(w.srv.Close)
 	return w
+}
+
+// restart closes and reopens the node with no request in flight on either
+// Manager.
+func (w *wireNode) restart() {
+	w.serveMu.Lock()
+	defer w.serveMu.Unlock()
+	w.introNode.restart()
 }
 
 func (w *wireNode) card() IntroCard {
@@ -183,9 +199,20 @@ func (n *wireNode) state(remote string) string {
 
 func waitStates(t *testing.T, p *wirePair, host, guest string) {
 	t.Helper()
-	require.Eventually(t, func() bool {
-		return p.host.state(p.guest.chain) == host && p.guest.state(p.host.chain) == guest
-	}, 20*time.Second, 20*time.Millisecond, "host=%q guest=%q", p.host.state(p.guest.chain), p.guest.state(p.host.chain))
+	var (
+		mu                sync.Mutex
+		gotHost, gotGuest string
+	)
+	ok := assert.Eventually(t, func() bool {
+		h, g := p.host.state(p.guest.chain), p.guest.state(p.host.chain)
+		mu.Lock()
+		gotHost, gotGuest = h, g
+		mu.Unlock()
+		return h == host && g == guest
+	}, 20*time.Second, 20*time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	require.True(t, ok, "last seen host=%q guest=%q, want host=%q guest=%q", gotHost, gotGuest, host, guest)
 }
 
 func requireActiveBoth(t *testing.T, p *wirePair) {
