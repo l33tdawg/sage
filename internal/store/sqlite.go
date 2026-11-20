@@ -982,6 +982,11 @@ func (s *SQLiteStore) initSchema(ctx context.Context) error {
 		}
 	}
 
+	// Node-local recall outcome feedback (never consensus state).
+	if err := s.migrateMemoryOutcomes(ctx); err != nil {
+		return err
+	}
+
 	// Migration: add pipeline_messages table.
 	s.migratePipeline(ctx)
 	if err := s.migratePipelineTerminalRetention(ctx); err != nil {
