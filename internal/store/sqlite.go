@@ -2229,6 +2229,15 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 		query += " AND memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
 			strings.Join(placeholders, ",") + "))"
 	}
+	if len(opts.NotTags) > 0 {
+		placeholders := make([]string, len(opts.NotTags))
+		for i, t := range opts.NotTags {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		query += " AND memory_id NOT IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
+			strings.Join(placeholders, ",") + "))"
+	}
 	if opts.ExcludeTainted {
 		query += " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = memories.memory_id)"
 	}
@@ -2423,6 +2432,15 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 			args = append(args, t)
 		}
 		sqlStr += " AND m.memory_id IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
+			strings.Join(placeholders, ",") + "))"
+	}
+	if len(opts.NotTags) > 0 {
+		placeholders := make([]string, len(opts.NotTags))
+		for i, t := range opts.NotTags {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		sqlStr += " AND m.memory_id NOT IN (SELECT memory_id FROM memory_tags WHERE tag IN (" +
 			strings.Join(placeholders, ",") + "))"
 	}
 	if opts.ExcludeTainted {

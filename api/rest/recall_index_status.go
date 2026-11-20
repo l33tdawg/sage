@@ -96,6 +96,7 @@ func recallIndexStatusHasExactQueryUniverse(req QueryMemoryRequest) bool {
 		req.Provider == "" &&
 		req.MinConfidence <= 0 &&
 		len(req.Tags) == 0 &&
+		len(req.NotTags) == 0 &&
 		req.Cursor == "" &&
 		!req.Federated &&
 		len(req.FederateChains) == 0

@@ -151,6 +151,7 @@ type QueryOptions struct {
 	CandidateBatchFilter func([]*memory.MemoryRecord) ([]*memory.MemoryRecord, error) `json:"-"`
 	SubmittingAgents     []string                                                     `json:"submitting_agents,omitempty"` // RBAC: restrict to these agent IDs
 	Tags                 []string                                                     `json:"tags,omitempty"`              // any-match filter on user-defined tags
+	NotTags              []string                                                     `json:"not_tags,omitempty"`          // exclude memories carrying any of these tags
 	CreatedFrom          string                                                       `json:"created_from,omitempty"`      // ISO-8601 lower bound on created_at (inclusive)
 	CreatedTo            string                                                       `json:"created_to,omitempty"`        // ISO-8601 upper bound on created_at (inclusive)
 }

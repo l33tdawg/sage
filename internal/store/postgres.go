@@ -991,6 +991,15 @@ func (s *PostgresStore) QuerySimilar(ctx context.Context, embedding []float32, o
 		}
 		query += " AND EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.memory_id AND mt.tag IN (" + strings.Join(placeholders, ",") + "))"
 	}
+	if len(opts.NotTags) > 0 {
+		placeholders := make([]string, len(opts.NotTags))
+		for i, tag := range opts.NotTags {
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
+			args = append(args, tag)
+			argIdx++
+		}
+		query += " AND NOT EXISTS (SELECT 1 FROM memory_tags mt WHERE mt.memory_id = memories.memory_id AND mt.tag IN (" + strings.Join(placeholders, ",") + "))"
+	}
 	if opts.ExcludeTainted {
 		query += " AND NOT EXISTS (SELECT 1 FROM memory_taint_mirror tm WHERE tm.memory_id = memories.memory_id)"
 	}

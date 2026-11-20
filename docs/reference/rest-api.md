@@ -303,6 +303,7 @@ Vector similarity search. Requires a precomputed embedding.
 | `top_k` | int | no | Max results; default 10 |
 | `cursor` | string | no | Opaque pagination cursor from previous response |
 | `tags` | []string | no | OR-filter by tag on both SQLite and Postgres |
+| `not_tags` | []string | no | Exclude any memory carrying ANY listed tag (SQLite and Postgres). Applied together with `tags`, so `tags:["a"]`, `not_tags:["b"]` means "a and not b". Same limits as `tags`; sorted and de-duplicated. Local recall only: combined with `federated` or `federate_chains` it is refused with 400, never silently dropped. |
 
 **Response** (HTTP 200):
 
@@ -338,7 +339,7 @@ Vector similarity search. Requires a precomputed embedding.
 
 `confidence_score` in the response is the **decayed** value (time decay + corroboration boost applied server-side), not the raw submitted value. `initial_confidence` is the **stored** (undecayed) value — the on-chain confidence set at submission (corroboration never rewrites it) — so a client can see the authoritative floor alongside the decayed score without re-deriving it. It is present for local memories and omitted for federated results (where only the serving peer's already-decayed value is available).
 
-`index_status` is present on an **EMPTY, domain-scoped semantic recall**. `"complete"` and `"incomplete"` are restricted to the exact unnarrowed local `status_filter: "committed"` contract: no provider, tags, minimum confidence, cursor, text arm, or federation request. `"complete"` means every committed/challenged row in that local domain is reachable in the active vector space, so the empty result is genuine local absence. `"incomplete"` means a committed/challenged row has no vector or belongs to a foreign vector space; empty is **not** proof of absence (re-embed the domain, or query the matching space). `"unavailable"` is still emitted for other empty domain-scoped semantic recalls and makes no completeness claim—for example when the query is narrowed or federated, the caller is not proven to see every record, the complete canonical SQL-to-ledger projection audit is not exact, there is no exact active vector space, or the live domain exceeds the bounded scan. The enum is never a count or list and is absent whenever any result is returned. Search/hybrid endpoints normally omit it; the taint-coverage exception below can emit `"unavailable"` on any empty recall.
+`index_status` is present on an **EMPTY, domain-scoped semantic recall**. `"complete"` and `"incomplete"` are restricted to the exact unnarrowed local `status_filter: "committed"` contract: no provider, tags, not_tags, minimum confidence, cursor, text arm, or federation request. `"complete"` means every committed/challenged row in that local domain is reachable in the active vector space, so the empty result is genuine local absence. `"incomplete"` means a committed/challenged row has no vector or belongs to a foreign vector space; empty is **not** proof of absence (re-embed the domain, or query the matching space). `"unavailable"` is still emitted for other empty domain-scoped semantic recalls and makes no completeness claim—for example when the query is narrowed or federated, the caller is not proven to see every record, the complete canonical SQL-to-ledger projection audit is not exact, there is no exact active vector space, or the live domain exceeds the bounded scan. The enum is never a count or list and is absent whenever any result is returned. Search/hybrid endpoints normally omit it; the taint-coverage exception below can emit `"unavailable"` on any empty recall.
 
 If an authorized candidate reaches the bounded taint ancestor-walk limit,
 query/search/hybrid withhold that candidate, return other readable results, and
@@ -418,6 +419,7 @@ Full-text search (FTS5/BM25). Same access control as `/v1/memory/query`.
 | `status_filter` | string | no | |
 | `top_k` | int | no | |
 | `tags` | []string | no | OR-filter; SQLite only |
+| `not_tags` | []string | no | Exclude any memory carrying ANY listed tag; see `/v1/memory/query` |
 
 **Response:** Same shape as `/v1/memory/query`. Not available when vault (content encryption) is active — `GET /v1/embed/info` reports `semantic: true` in that case; use `/v1/memory/query` instead.
 
@@ -441,6 +443,7 @@ Fused FTS5 + vector search via Reciprocal Rank Fusion. Requires at least one of
 | `status_filter` | string | no | |
 | `top_k` | int | no | Applied after RRF fusion across variants |
 | `tags` | []string | no | |
+| `not_tags` | []string | no | Exclude any memory carrying ANY listed tag, in every arm and expansion; see `/v1/memory/query` |
 
 **Response:** Same shape as `/v1/memory/query`.
 

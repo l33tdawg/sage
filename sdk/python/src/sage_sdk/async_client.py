@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import time
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -10,6 +12,12 @@ import httpx
 
 from sage_sdk.auth import AgentIdentity
 from sage_sdk.client import (
+    _REPLACE_COMMIT_WAIT,
+    _REPLACE_MAX_CHECKS,
+    _REPLACE_SETTLED,
+    _replace_result,
+    _replacement_plan,
+    _status_value,
     _encode_gov_payload,
     _httpx_verify,
     _looks_like_org_id,
@@ -241,11 +249,16 @@ class AsyncSageClient:
         status_filter: str | None = None,
         cursor: str | None = None,
         tags: list[str] | None = None,
+        not_tags: list[str] | None = None,
     ) -> MemoryQueryResponse:
         """Query memories by vector similarity.
 
         tags: when non-empty, restricts results to memories tagged with ANY
         of the listed values (OR semantics).
+
+        not_tags: when non-empty, drops memories tagged with ANY of the
+        listed values. Combine with ``tags`` for "a and not b". Local recall
+        only (needs a node with not_tags support; older nodes ignore it).
         """
         body: dict[str, Any] = {"embedding": embedding, "top_k": top_k}
         if domain_tag is not None:
@@ -258,6 +271,8 @@ class AsyncSageClient:
             body["cursor"] = cursor
         if tags:
             body["tags"] = tags
+        if not_tags:
+            body["not_tags"] = not_tags
 
         resp = await self._request("POST", "/v1/memory/query", json=body)
         return MemoryQueryResponse.model_validate(resp.json())
@@ -272,6 +287,7 @@ class AsyncSageClient:
         min_confidence: float | None = None,
         provider: str | None = None,
         tags: list[str] | None = None,
+        not_tags: list[str] | None = None,
         expansions: list[dict[str, Any]] | None = None,
     ) -> MemoryQueryResponse:
         """Hybrid recall: fuse BM25/FTS5 keyword and vector cosine results via
@@ -294,6 +310,8 @@ class AsyncSageClient:
             body["provider"] = provider
         if tags:
             body["tags"] = tags
+        if not_tags:
+            body["not_tags"] = not_tags
         if expansions:
             body["expansions"] = expansions
 
@@ -482,6 +500,91 @@ class AsyncSageClient:
             json=req.model_dump(exclude_none=True),
         )
         return resp.json()
+
+    async def replace(
+        self,
+        replaces_memory_id: str,
+        content: str,
+        confidence: float,
+        *,
+        memory_type: MemoryType | str | None = None,
+        domain_tag: str | None = None,
+        embedding: list[float] | None = None,
+        tags: list[str] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace a live memory with corrected content in one call.
+
+        Same contract as MCP ``sage_remember(replaces_memory_id=...)``: the
+        replacement is submitted in the original memory's domain (with its
+        classification and ``parent_hash`` set to the old content hash), read
+        back until committed, and only then is the old memory challenged. An
+        interruption can leave both records, never neither.
+
+        ``correction_status`` in the result is one of ``completed``,
+        ``replacement_pending`` (old memory left unchanged; verify the
+        replacement before retrying) or ``replacement_committed_old_retained``
+        (the challenge was refused; the old memory is still live) or
+        ``replacement_committed_old_unknown`` (the challenge request broke off;
+        re-read the old memory).
+        """
+        old = await self.get_memory(replaces_memory_id)
+        domain, mtype = _replacement_plan(old, domain_tag, memory_type)
+        submit = await self.propose(
+            content=content,
+            memory_type=mtype,
+            domain_tag=domain,
+            confidence=confidence,
+            embedding=embedding,
+            parent_hash=old.content_hash,
+            tags=tags,
+            classification=old.classification,
+        )
+        if not submit.memory_id:
+            return _replace_result(
+                replaces_memory_id, submit, "replacement_pending", submit.status, "unchanged",
+                "Replacement outcome is not known yet; the original memory was left unchanged.",
+            )
+        status = await self._wait_replacement_commit(submit.memory_id)
+        if status != "committed":
+            return _replace_result(
+                replaces_memory_id, submit, "replacement_pending", status, "unchanged",
+                "Replacement is not committed yet; the original memory was left unchanged.",
+            )
+        why = reason or f"replaced by corrected memory {submit.memory_id}"
+        try:
+            challenged = await self.challenge(replaces_memory_id, why)
+        except SageAPIError as exc:
+            return _replace_result(
+                replaces_memory_id, submit, "replacement_committed_old_retained", "committed", "unchanged",
+                f"Replacement committed, but the original memory could not be challenged and remains live: {exc}",
+            )
+        except httpx.HTTPError as exc:
+            # The challenge may or may not have reached the node: re-read the
+            # original memory before acting on it again.
+            return _replace_result(
+                replaces_memory_id, submit, "replacement_committed_old_unknown", "committed", "unknown",
+                f"Replacement committed; the challenge of the original memory did not complete ({exc}). Re-read it.",
+            )
+        return _replace_result(
+            replaces_memory_id, submit, "completed", "committed", challenged.get("status") or "challenged",
+        )
+
+    async def _wait_replacement_commit(self, memory_id: str) -> str:
+        deadline = time.monotonic() + _REPLACE_COMMIT_WAIT
+        status, delay = "proposed", 0.2
+        for attempt in range(_REPLACE_MAX_CHECKS):
+            try:
+                status = _status_value((await self.get_memory(memory_id)).status) or status
+            except SageAPIError:
+                pass
+            if status in _REPLACE_SETTLED or attempt == _REPLACE_MAX_CHECKS - 1:
+                return status
+            if time.monotonic() + delay > deadline:
+                return status
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 3.2)
+        return status
 
     # --- Embeddings ------------------------------------------------------------
 

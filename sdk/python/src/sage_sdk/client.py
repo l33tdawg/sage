@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json as json_mod
 import ssl
+import time
 from typing import Any, Literal
 from urllib.parse import quote
 
@@ -306,6 +307,53 @@ def _encode_gov_payload(payload: dict | bytes | None) -> str | None:
     return base64.b64encode(raw).decode("ascii")
 
 
+# replace() mirrors the MCP sage_remember(replaces_memory_id=...) correction:
+# the replacement is committed and read back BEFORE the old memory is
+# challenged, so an interruption can leave both records but never neither.
+_REPLACE_COMMIT_WAIT = 30.0
+_REPLACE_MAX_CHECKS = 10
+_REPLACE_SETTLED = ("committed", "challenged", "deprecated")
+
+
+def _status_value(status: Any) -> str:
+    return getattr(status, "value", status) or ""
+
+
+def _replacement_plan(
+    old: MemoryRecord,
+    domain_tag: str | None,
+    memory_type: MemoryType | str | None,
+) -> tuple[str, str]:
+    """Validate the memory being replaced and resolve domain and type."""
+    status = _status_value(old.status)
+    if status not in ("committed", "challenged"):
+        raise ValueError(
+            f"memory being replaced must still be live (status committed or challenged, got {status!r})"
+        )
+    if not old.content_hash:
+        raise ValueError("memory being replaced did not expose its content hash")
+    if domain_tag and domain_tag != old.domain_tag:
+        raise ValueError(f"a replacement must remain in the original domain {old.domain_tag!r}")
+    resolved_type = _status_value(memory_type) if memory_type else _status_value(old.memory_type)
+    return old.domain_tag, resolved_type
+
+
+def _replace_result(
+    old_id: str, submit: MemorySubmitResponse, correction: str, replacement: str, old_status: str, message: str | None = None
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "memory_id": submit.memory_id,
+        "tx_hash": submit.tx_hash,
+        "replaces_memory_id": old_id,
+        "correction_status": correction,
+        "replacement_status": replacement,
+        "old_memory_status": old_status,
+    }
+    if message:
+        out["message"] = message
+    return out
+
+
 class SageClient:
     """Synchronous SAGE API client."""
 
@@ -458,11 +506,16 @@ class SageClient:
         status_filter: str | None = None,
         cursor: str | None = None,
         tags: list[str] | None = None,
+        not_tags: list[str] | None = None,
     ) -> MemoryQueryResponse:
         """Query memories by vector similarity.
 
         tags: when non-empty, restricts results to memories tagged with ANY
         of the listed values (OR semantics).
+
+        not_tags: when non-empty, drops memories tagged with ANY of the
+        listed values. Combine with ``tags`` for "a and not b". Local recall
+        only (needs a node with not_tags support; older nodes ignore it).
         """
         body: dict[str, Any] = {"embedding": embedding, "top_k": top_k}
         if domain_tag is not None:
@@ -475,6 +528,8 @@ class SageClient:
             body["cursor"] = cursor
         if tags:
             body["tags"] = tags
+        if not_tags:
+            body["not_tags"] = not_tags
 
         resp = self._request("POST", "/v1/memory/query", json=body)
         return MemoryQueryResponse.model_validate(resp.json())
@@ -489,6 +544,7 @@ class SageClient:
         min_confidence: float | None = None,
         provider: str | None = None,
         tags: list[str] | None = None,
+        not_tags: list[str] | None = None,
         expansions: list[dict[str, Any]] | None = None,
     ) -> MemoryQueryResponse:
         """Hybrid recall: fuse BM25/FTS5 keyword and vector cosine results via
@@ -523,6 +579,8 @@ class SageClient:
             body["provider"] = provider
         if tags:
             body["tags"] = tags
+        if not_tags:
+            body["not_tags"] = not_tags
         if expansions:
             body["expansions"] = expansions
 
@@ -717,6 +775,91 @@ class SageClient:
             json=req.model_dump(exclude_none=True),
         )
         return resp.json()
+
+    def replace(
+        self,
+        replaces_memory_id: str,
+        content: str,
+        confidence: float,
+        *,
+        memory_type: MemoryType | str | None = None,
+        domain_tag: str | None = None,
+        embedding: list[float] | None = None,
+        tags: list[str] | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Replace a live memory with corrected content in one call.
+
+        Same contract as MCP ``sage_remember(replaces_memory_id=...)``: the
+        replacement is submitted in the original memory's domain (with its
+        classification and ``parent_hash`` set to the old content hash), read
+        back until committed, and only then is the old memory challenged. An
+        interruption can leave both records, never neither.
+
+        ``correction_status`` in the result is one of ``completed``,
+        ``replacement_pending`` (old memory left unchanged; verify the
+        replacement before retrying) or ``replacement_committed_old_retained``
+        (the challenge was refused; the old memory is still live) or
+        ``replacement_committed_old_unknown`` (the challenge request broke off;
+        re-read the old memory).
+        """
+        old = self.get_memory(replaces_memory_id)
+        domain, mtype = _replacement_plan(old, domain_tag, memory_type)
+        submit = self.propose(
+            content=content,
+            memory_type=mtype,
+            domain_tag=domain,
+            confidence=confidence,
+            embedding=embedding,
+            parent_hash=old.content_hash,
+            tags=tags,
+            classification=old.classification,
+        )
+        if not submit.memory_id:
+            return _replace_result(
+                replaces_memory_id, submit, "replacement_pending", submit.status, "unchanged",
+                "Replacement outcome is not known yet; the original memory was left unchanged.",
+            )
+        status = self._wait_replacement_commit(submit.memory_id)
+        if status != "committed":
+            return _replace_result(
+                replaces_memory_id, submit, "replacement_pending", status, "unchanged",
+                "Replacement is not committed yet; the original memory was left unchanged.",
+            )
+        why = reason or f"replaced by corrected memory {submit.memory_id}"
+        try:
+            challenged = self.challenge(replaces_memory_id, why)
+        except SageAPIError as exc:
+            return _replace_result(
+                replaces_memory_id, submit, "replacement_committed_old_retained", "committed", "unchanged",
+                f"Replacement committed, but the original memory could not be challenged and remains live: {exc}",
+            )
+        except httpx.HTTPError as exc:
+            # The challenge may or may not have reached the node: re-read the
+            # original memory before acting on it again.
+            return _replace_result(
+                replaces_memory_id, submit, "replacement_committed_old_unknown", "committed", "unknown",
+                f"Replacement committed; the challenge of the original memory did not complete ({exc}). Re-read it.",
+            )
+        return _replace_result(
+            replaces_memory_id, submit, "completed", "committed", challenged.get("status") or "challenged",
+        )
+
+    def _wait_replacement_commit(self, memory_id: str) -> str:
+        deadline = time.monotonic() + _REPLACE_COMMIT_WAIT
+        status, delay = "proposed", 0.2
+        for attempt in range(_REPLACE_MAX_CHECKS):
+            try:
+                status = _status_value(self.get_memory(memory_id).status) or status
+            except SageAPIError:
+                pass
+            if status in _REPLACE_SETTLED or attempt == _REPLACE_MAX_CHECKS - 1:
+                return status
+            if time.monotonic() + delay > deadline:
+                return status
+            time.sleep(delay)
+            delay = min(delay * 2, 3.2)
+        return status
 
     # --- Embeddings ------------------------------------------------------------
 

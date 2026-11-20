@@ -149,6 +149,10 @@ type QueryMemoryRequest struct {
 	// Tags, when non-empty, restricts results to memories tagged with ANY
 	// of the listed values (OR semantics) on both supported SQL backends.
 	Tags []string `json:"tags,omitempty"`
+	// NotTags, when non-empty, drops every memory tagged with ANY of the listed
+	// values. It applies after Tags, so tags=[a] not_tags=[b] means "a and not
+	// b". Local recall only: a federated request carrying it is refused.
+	NotTags []string `json:"not_tags,omitempty"`
 	// Federated opts this recall into the v11 cross-network proxy: results
 	// from every active cross_fed peer are merged in (read-only, stamped with
 	// source_chain_id). FederateChains narrows the fan-out to named chains
@@ -2078,6 +2082,11 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
 		return
 	}
+	notTags, notTagsErr := recallNotTags(req.NotTags, req.Federated, req.FederateChains)
+	if notTagsErr != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid not_tags", notTagsErr.Error())
+		return
+	}
 
 	if len(req.Embedding) == 0 {
 		writeProblem(w, http.StatusBadRequest, "Missing embedding", "embedding is required for similarity search.")
@@ -2178,6 +2187,7 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		TopK:           s.disclosureRecallTopK(req.TopK),
 		Cursor:         req.Cursor,
 		Tags:           req.Tags,
+		NotTags:        notTags,
 		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
 		// at serialize). A no-op unless the caller's filter is "committed".
 		IncludeDisputed: true,
@@ -2908,6 +2918,7 @@ type SearchMemoryRequest struct {
 	StatusFilter  string   `json:"status_filter,omitempty"`
 	TopK          int      `json:"top_k,omitempty"`
 	Tags          []string `json:"tags,omitempty"`
+	NotTags       []string `json:"not_tags,omitempty"` // see QueryMemoryRequest.NotTags
 	// v11 federated recall opt-in — see QueryMemoryRequest.
 	Federated         bool                         `json:"federated,omitempty"`
 	FederateChains    []string                     `json:"federate_chains,omitempty"`
@@ -2921,6 +2932,11 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	var req SearchMemoryRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	notTags, notTagsErr := recallNotTags(req.NotTags, req.Federated, req.FederateChains)
+	if notTagsErr != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid not_tags", notTagsErr.Error())
 		return
 	}
 	if req.Query == "" {
@@ -2999,6 +3015,7 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		StatusFilter:  req.StatusFilter,
 		TopK:          s.disclosureRecallTopK(req.TopK),
 		Tags:          req.Tags,
+		NotTags:       notTags,
 		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
 		// at serialize). A no-op unless the caller's filter is "committed".
 		IncludeDisputed: true,
@@ -3217,6 +3234,7 @@ type HybridSearchMemoryRequest struct {
 	StatusFilter      string            `json:"status_filter,omitempty"`
 	TopK              int               `json:"top_k,omitempty"`
 	Tags              []string          `json:"tags,omitempty"`
+	NotTags           []string          `json:"not_tags,omitempty"` // see QueryMemoryRequest.NotTags
 	// v11 federated recall opt-in — see QueryMemoryRequest.
 	Federated         bool                         `json:"federated,omitempty"`
 	FederateChains    []string                     `json:"federate_chains,omitempty"`
@@ -3247,6 +3265,11 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	var req HybridSearchMemoryRequest
 	if err := decodeJSON(r, &req); err != nil {
 		writeProblem(w, http.StatusBadRequest, "Invalid request body", err.Error())
+		return
+	}
+	notTags, notTagsErr := recallNotTags(req.NotTags, req.Federated, req.FederateChains)
+	if notTagsErr != nil {
+		writeProblem(w, http.StatusBadRequest, "Invalid not_tags", notTagsErr.Error())
 		return
 	}
 	if req.Query == "" && len(req.Embedding) == 0 {
@@ -3335,6 +3358,7 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		StatusFilter:   req.StatusFilter,
 		TopK:           s.disclosureRecallTopK(req.TopK),
 		Tags:           req.Tags,
+		NotTags:        notTags,
 		// app-v17: keep disputed-but-live memories recallable (flagged + hair-cut
 		// at serialize). A no-op unless the caller's filter is "committed".
 		IncludeDisputed: true,
