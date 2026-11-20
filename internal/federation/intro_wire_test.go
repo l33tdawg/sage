@@ -8,6 +8,8 @@ package federation
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -17,6 +19,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,6 +80,8 @@ type wireNode struct {
 
 	faultMu sync.Mutex
 	faults  map[string]bool
+	// hits counts requests that reached the HTTP handler (past TLS).
+	hits atomic.Int64
 }
 
 func (w *wireNode) setFault(point string, on bool) {
@@ -107,6 +112,7 @@ func newWireNode(t *testing.T, n *introNode) *wireNode {
 		owner  *Manager
 	)
 	w.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		w.hits.Add(1)
 		cur := n.currentMgr()
 		mu.Lock()
 		if owner != cur {
@@ -225,7 +231,7 @@ func TestIntroWire_EndToEndActiveOnBoth(t *testing.T) {
 	require.Equal(t, make([]byte, 32), sess.seed)
 
 	// A replayed confirm reports the row and changes nothing.
-	cfg, err := p.guest.mgr.introClientTLS(mustCA(t, p.host), nil)
+	cfg, err := p.guest.mgr.introClientTLS(mustCA(t, p.host), nil, nil)
 	require.NoError(t, err)
 	cr, err := p.guest.mgr.introConfirm(context.Background(), p.host.card(), cfg, wireOffer, gr.SessionID, gr.GuestAccept, gr.GuestAckSig)
 	require.NoError(t, err)
@@ -289,7 +295,7 @@ func TestIntroWire_GuestNeedsCurrentAcceptance(t *testing.T) {
 // rawIntro sends one raw request from n's intro client identity to peer.
 func rawIntro(t *testing.T, n, peer *wireNode, method, path string, body []byte) (int, []byte) {
 	t.Helper()
-	cfg, err := n.mgr.introClientTLS(mustCA(t, peer), nil)
+	cfg, err := n.mgr.introClientTLS(mustCA(t, peer), nil, nil)
 	require.NoError(t, err)
 	req, err := http.NewRequest(method, peer.srv.URL+path, bytes.NewReader(body))
 	require.NoError(t, err)
@@ -381,7 +387,7 @@ func TestIntroWire_Refusals(t *testing.T) {
 		p.host.src.mu.Lock()
 		delete(p.host.src.pins, p.guest.pinHex())
 		p.host.src.mu.Unlock()
-		cfg, err := p.guest.mgr.introClientTLS(mustCA(t, p.host), nil)
+		cfg, err := p.guest.mgr.introClientTLS(mustCA(t, p.host), nil, nil)
 		require.NoError(t, err)
 		client := &http.Client{Transport: &http.Transport{TLSClientConfig: cfg}}
 		defer client.CloseIdleConnections()
@@ -420,13 +426,69 @@ func TestIntroWire_GuestRejectsWrongHostPin(t *testing.T) {
 	accept(p.host)
 	accept(p.guest)
 	// The guest's roster card for the host pins another CA: the host's TLS
-	// chain and CA do not verify, so the guest never uses the response.
+	// chain carries no CA with that pin, so the first request fails at the
+	// handshake and never reaches the host's routes.
 	p.guest.src.edit(func(v *IntroOfferView) { v.Peer.Pin = strings.Repeat("66", 32) })
 	err := p.guest.mgr.introGuestAttempt(context.Background(), wireOrg, wireOffer)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "pinned CA")
+	require.Contains(t, err.Error(), "no CA in the peer chain carries the card pin")
+	require.Nil(t, p.host.mgr.introHostSessionFor(wireOffer), "the host never opened a session")
 	require.Nil(t, p.guest.latest(p.host.chain))
 	require.Nil(t, p.host.latest(p.guest.chain))
+}
+
+func TestIntroWire_FirstRequestFailsAtHandshakeOnAnotherCA(t *testing.T) {
+	p := newWirePair(t)
+	accept(p.host)
+	accept(p.guest)
+	// Another node answers at the host card's endpoint. It presents its
+	// own CA, not the card-pinned one, so the guest's first request fails
+	// during the TLS handshake: no request body is ever sent to it.
+	_, k, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	impostor := newWireNode(t, newIntroNode(t, p.host.chain, k))
+	impostor.src.pins[p.guest.pinHex()] = true // it would even admit the guest
+	p.guest.src.edit(func(v *IntroOfferView) { v.Peer.Endpoint = impostor.srv.URL })
+
+	var seen []byte
+	host := p.guest.src.view.Peer
+	cfg, err := p.guest.mgr.introClientTLS(nil, &host, &seen)
+	require.NoError(t, err)
+	_, _, err = p.guest.mgr.introCall(context.Background(), host, cfg, http.MethodPost, "/fed/v1/intro/request",
+		json.RawMessage(guestRequestBody(t, p, nil)), IntroRequestRespCap, 10*time.Second)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no CA in the peer chain carries the card pin")
+	require.Empty(t, seen)
+	require.Zero(t, impostor.hits.Load(), "the impostor's handler never ran")
+
+	// The full driver stops on it too, and nothing is written anywhere.
+	err = p.guest.mgr.introGuestAttempt(context.Background(), wireOrg, wireOffer)
+	require.Error(t, err)
+	require.Nil(t, p.guest.latest(p.host.chain))
+	require.Nil(t, p.host.mgr.introHostSessionFor(wireOffer))
+	require.Zero(t, impostor.hits.Load())
+}
+
+func TestIntroCardCAFromChain(t *testing.T) {
+	p := newWirePair(t)
+	host := p.host
+	leaf, err := host.mgr.loadNodeKeyPair()
+	require.NoError(t, err)
+	ca := mustCA(t, host)
+	chain := [][]byte{leaf.Certificate[0], ca.Raw}
+	got, err := introCardCAFromChain(chain, host.pinHex(), host.chain, x509.ExtKeyUsageServerAuth)
+	require.NoError(t, err)
+	require.Equal(t, ca.Raw, got.Raw)
+	_, err = introCardCAFromChain(chain[:1], host.pinHex(), host.chain, x509.ExtKeyUsageServerAuth)
+	require.Error(t, err, "a leaf-only chain carries no CA")
+	_, err = introCardCAFromChain(chain, strings.Repeat("66", 32), host.chain, x509.ExtKeyUsageServerAuth)
+	require.Error(t, err, "wrong pin")
+	_, err = introCardCAFromChain(chain, host.pinHex(), "some-other-chain", x509.ExtKeyUsageServerAuth)
+	require.Error(t, err, "the CA must name the card's chain")
+	gLeaf, err := p.guest.mgr.loadNodeKeyPair()
+	require.NoError(t, err)
+	_, err = introCardCAFromChain([][]byte{gLeaf.Certificate[0], ca.Raw}, host.pinHex(), host.chain, x509.ExtKeyUsageServerAuth)
+	require.Error(t, err, "a leaf from another CA does not verify")
 }
 
 func TestIntroWire_StaleSessionRefusedAtConfirm(t *testing.T) {

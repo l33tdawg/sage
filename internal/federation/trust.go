@@ -269,6 +269,16 @@ func (m *Manager) ServerTLSConfig() (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load node certificate for federation listener: %w", err)
 	}
+	// Present our own CA after the leaf (RFC #443 B2b). An org-introduced
+	// guest knows only the CA SPKI pin from our roster card, so it can pin
+	// the server at handshake time only if the CA is in the chain. The CA is
+	// public (JOIN serves it at /fed/v1/join/ca), and verifiers that already
+	// hold it treat the extra certificate as a redundant intermediate.
+	if caPEM, caErr := os.ReadFile(filepath.Join(m.certsDir, tlsca.CACertFile)); caErr == nil { // #nosec G304 -- fixed file in the node's certs dir
+		if blk, _ := pem.Decode(caPEM); blk != nil && blk.Type == "CERTIFICATE" {
+			cert.Certificate = append(cert.Certificate, blk.Bytes)
+		}
+	}
 	return &tls.Config{
 		Certificates:           []tls.Certificate{cert},
 		MinVersion:             tls.VersionTLS13,

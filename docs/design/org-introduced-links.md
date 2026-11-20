@@ -700,11 +700,14 @@ also starts the handshake driver; the host waits for the guest.
   (`introWindowAccepts`, next to the JOIN window in
   `verifyFederationClientCert`). Every route then requires that pin to be the
   pin of the offer's peer card, and the CA's CN to be the card's chain id.
-- **Guest side.** The first call does not know the host CA yet, so the guest
-  records the server chain. Before it uses anything in the response it
-  requires the returned CA to carry the host card's pin and chain id and the
-  recorded chain to verify against it. Later calls pin that CA at handshake
-  time. After bind the window probe uses the committed host CA.
+- **Guest side.** The federation listener presents its own CA after its leaf
+  (the CA is public; JOIN already serves it). On the first call the guest
+  pins the server at handshake time from the host card alone: the chain must
+  carry a CA whose SPKI is the card's pin and whose CN is the card's chain
+  id, and the leaf must verify against it, else the handshake fails and no
+  request is sent. As defence in depth the response's host CA must be that
+  same CA. Later calls pin it as the root, and after bind the window probe
+  uses the committed host CA.
 - The guest rebuilds E_intro from its own view (its roster cards, policy,
   roster, envelope, both nonces, the host's envelope evidence and the seed
   commitment) and refuses the host's bytes unless they are identical.
@@ -761,7 +764,9 @@ envelope.
   roster mismatch; oversized bodies refused before decode; unknown fields and
   trailing data; expired and closed offers; a caller that is not the offer's
   peer card; a stranger CA failing the handshake; bad guest signatures; a
-  wrong host pin on the guest; a stale session at confirm; a lost confirm
+  host card pin that is not the server's CA, and another node answering at
+  the host's endpoint, both failing the guest's first request at the
+  handshake; a stale session at confirm; a lost confirm
   finished by the window's status probe; the window revoking when the host
   lost its session; restart of either side mid-handshake.
 - `org_intro_handler_test.go`: owner accept (Root over loopback only, open

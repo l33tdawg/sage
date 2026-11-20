@@ -30,7 +30,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
@@ -719,47 +718,92 @@ func (m *Manager) introWindow() time.Duration {
 // ---------------------------------------------------------------------------
 
 // introClientTLS presents this node's certificate chained to its own CA (the
-// host admits the chain by the CA's card pin). With hostCA set the server
-// chain must verify against it at handshake time; with capture set (the first
-// request, before the host CA is known) the server chain is recorded and the
-// caller verifies it against the pinned host CA before using the response.
-func (m *Manager) introClientTLS(hostCA *x509.Certificate, capture *[][]byte) (*tls.Config, error) {
-	cert, err := m.loadNodeKeyPair()
+// host admits the chain by the CA's card pin) and pins the server at
+// handshake time:
+//
+//   - hostCA set: the server chain must verify against that CA (calls after
+//     the first, and the window probe with the committed host CA);
+//   - card set (the first request, before the host CA PEM is known): the
+//     server chain must carry a CA whose SPKI is the host card's pin and
+//     whose CN is the card's chain id, and the leaf must verify against it.
+//     Anything else fails the handshake. The verified CA is stored in *seen
+//     so the caller can require the response's CA to be the same one.
+func (m *Manager) introClientTLS(hostCA *x509.Certificate, card *IntroCard, seen *[]byte) (*tls.Config, error) {
+	var cfg *tls.Config
+	var err error
+	switch {
+	case hostCA != nil:
+		// The JOIN client config: the server chain must verify against the
+		// pinned host CA.
+		hostPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: hostCA.Raw})
+		cfg, err = m.joinClientTLS(hostPEM, SPKIFingerprint(hostCA))
+	case card != nil && seen != nil:
+		// The JOIN bootstrap config with the card check as its verifier.
+		cfg, err = m.joinBootstrapTLS()
+		if err == nil {
+			// VerifyConnection runs on every handshake, resumed ones included.
+			pin, chain := card.Pin, card.ChainID
+			cfg.SessionTicketsDisabled = true
+			cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+				rawCerts := make([][]byte, 0, len(cs.PeerCertificates))
+				for _, c := range cs.PeerCertificates {
+					rawCerts = append(rawCerts, c.Raw)
+				}
+				ca, vErr := introCardCAFromChain(rawCerts, pin, chain, x509.ExtKeyUsageServerAuth)
+				if vErr != nil {
+					return vErr
+				}
+				*seen = append([]byte(nil), ca.Raw...)
+				return nil
+			}
+		}
+	default:
+		return nil, errors.New("intro client TLS needs a host CA or a host card")
+	}
 	if err != nil {
 		return nil, err
 	}
+	// Present the node certificate chained to this node's own CA.
 	caPEM, err := m.ownCAPEM()
 	if err != nil {
 		return nil, err
 	}
 	blk, _ := pem.Decode(caPEM)
-	if blk == nil {
-		return nil, errors.New("own CA is not PEM")
+	if blk == nil || len(cfg.Certificates) != 1 {
+		return nil, errors.New("own CA or node certificate unavailable")
 	}
-	cert.Certificate = append(cert.Certificate, blk.Bytes)
-	cfg := &tls.Config{
-		Certificates:           []tls.Certificate{cert},
-		MinVersion:             tls.VersionTLS13,
-		SessionTicketsDisabled: true,
-		InsecureSkipVerify:     true, // #nosec G402 -- verification is the pinned-CA check below
-	}
-	switch {
-	case hostCA != nil:
-		cfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			return verifyChainAgainstCA(rawCerts, hostCA, x509.ExtKeyUsageServerAuth)
-		}
-	case capture != nil:
-		cfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			*capture = make([][]byte, len(rawCerts))
-			for i := range rawCerts {
-				(*capture)[i] = append([]byte(nil), rawCerts[i]...)
-			}
-			return nil
-		}
-	default:
-		return nil, errors.New("intro client TLS needs a host CA or a capture")
-	}
+	cert := cfg.Certificates[0]
+	cert.Certificate = append(append([][]byte(nil), cert.Certificate...), blk.Bytes)
+	cfg.Certificates = []tls.Certificate{cert}
+	cfg.SessionTicketsDisabled = true
 	return cfg, nil
+}
+
+// introCardCAFromChain finds, in a presented chain, the CA whose SPKI is pin
+// (64 lowercase hex) and whose CN is chainID, and verifies the leaf against
+// it.
+func introCardCAFromChain(rawCerts [][]byte, pin, chainID string, usage x509.ExtKeyUsage) (*x509.Certificate, error) {
+	if len(rawCerts) < 2 {
+		return nil, errors.New("intro: the peer chain carries no CA")
+	}
+	n := len(rawCerts)
+	if n > 1+introMaxChainCerts {
+		n = 1 + introMaxChainCerts
+	}
+	for _, raw := range rawCerts[1:n] {
+		ca, err := x509.ParseCertificate(raw)
+		if err != nil || !ca.IsCA || hex.EncodeToString(SPKIFingerprint(ca)) != pin {
+			continue
+		}
+		if err := requireChainCN(ca, chainID); err != nil {
+			return nil, fmt.Errorf("intro: the card-pinned CA does not name the card's chain: %w", err)
+		}
+		if err := verifyChainAgainstCA([][]byte{rawCerts[0]}, ca, usage); err != nil {
+			return nil, fmt.Errorf("intro: the peer leaf does not verify against its card-pinned CA: %w", err)
+		}
+		return ca, nil
+	}
+	return nil, errors.New("intro: no CA in the peer chain carries the card pin")
 }
 
 // introCall makes one intro call to a peer card's endpoint (or its p2p
@@ -850,22 +894,22 @@ func introPeerError(status int, raw []byte) error {
 	return fmt.Errorf("peer returned %d: %s", status, msg)
 }
 
-// introVerifyHostCA checks the host CA from a request response against the
-// host card pin and chain, and the captured server chain against it.
-func introVerifyHostCA(caPEM []byte, host IntroCard, captured [][]byte) (*x509.Certificate, error) {
+// introVerifyHostCA is defence in depth after the pinned handshake: the
+// response's host CA must be the CA the handshake verified, carry the host
+// card's pin and name the card's chain.
+func introVerifyHostCA(caPEM []byte, host IntroCard, seenCA []byte) (*x509.Certificate, error) {
 	ca, err := parseCACertPEM(caPEM)
 	if err != nil {
 		return nil, err
 	}
-	pin := sha256.Sum256(ca.RawSubjectPublicKeyInfo)
-	if hex.EncodeToString(pin[:]) != host.Pin {
+	if len(seenCA) == 0 || subtle.ConstantTimeCompare(ca.Raw, seenCA) != 1 {
+		return nil, errors.New("host CA in the response is not the CA its TLS chain presented")
+	}
+	if hex.EncodeToString(SPKIFingerprint(ca)) != host.Pin {
 		return nil, errors.New("host CA is not the host card's pinned CA")
 	}
 	if err := requireChainCN(ca, host.ChainID); err != nil {
 		return nil, err
-	}
-	if err := verifyChainAgainstCA(captured, ca, x509.ExtKeyUsageServerAuth); err != nil {
-		return nil, fmt.Errorf("host TLS chain does not verify against its card CA: %w", err)
 	}
 	return ca, nil
 }

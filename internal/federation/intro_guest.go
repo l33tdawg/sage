@@ -168,10 +168,9 @@ func (m *Manager) introGuestAttempt(ctx context.Context, orgID, offerID string) 
 		return err
 	}
 
-	// 1. Request. The host CA is not known yet: record the server chain and
-	// verify it against the card-pinned CA before using anything returned.
-	var captured [][]byte
-	cfg, err := m.introClientTLS(nil, &captured)
+	// 1. Request. The handshake pins the server to the host card's CA.
+	var seenCA []byte
+	cfg, err := m.introClientTLS(nil, &host, &seenCA)
 	if err != nil {
 		return err
 	}
@@ -194,7 +193,7 @@ func (m *Manager) introGuestAttempt(ctx context.Context, orgID, offerID string) 
 	if uErr := json.Unmarshal(raw, &resp); uErr != nil {
 		return fmt.Errorf("intro request: bad response: %w", uErr)
 	}
-	hostCA, err := introVerifyHostCA([]byte(resp.HostCAPEM), host, captured)
+	hostCA, err := introVerifyHostCA([]byte(resp.HostCAPEM), host, seenCA)
 	if err != nil {
 		// Not an availability problem: the endpoint is not the card's node.
 		return introStop(err)
@@ -228,7 +227,7 @@ func (m *Manager) introGuestAttempt(ctx context.Context, orgID, offerID string) 
 	stale := m.introStaleCheck(orgID, offerID, "guest", tr)
 
 	// 2. Wait for the host owner.
-	pinned, err := m.introClientTLS(hostCA, nil)
+	pinned, err := m.introClientTLS(hostCA, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -360,7 +359,7 @@ func (m *Manager) introProbeHost(ctx context.Context, row *store.IntroducedLink)
 	if err != nil {
 		return "", fmt.Errorf("host CA: %w", err)
 	}
-	cfg, err := m.introClientTLS(hostCA, nil)
+	cfg, err := m.introClientTLS(hostCA, nil, nil)
 	if err != nil {
 		return "", err
 	}
