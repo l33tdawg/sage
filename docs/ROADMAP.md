@@ -174,6 +174,7 @@ explicit, reviewed operator ceremony rather than a silent mutation.
 - Add RFC #443 Phase B2a's canonical introduction transcript and domain-separated acceptance signatures.
 - Persist introduced-link CA and pair-seed staging, signed-transaction CAS state and crash recovery.
 - Reconcile pending introduced-link bind operations after restart and on the maintenance tick.
+- Move transitive OpenTelemetry modules to v1.47.0 for GHSA-q7gw-24fr-5p69.
 - Keep the owner-offer and introduction wire routes unreachable until B2b; no roster-introduced link activates from this release alone.
 - Keep app29 as the automatic ceiling and app30 explicit; no consensus change, chain reset, or data migration.
 

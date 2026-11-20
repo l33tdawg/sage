@@ -335,6 +335,11 @@ persists its signed transaction before broadcast, and reconciliation across
 restarts. The B2b wire routes and owner-offer workflow are not exposed yet, so
 this release cannot activate a roster-introduced link on its own.
 
+The transitive OpenTelemetry modules move to v1.47.0, fixing
+GHSA-q7gw-24fr-5p69's attribute-value length-limit bypass. SAGE's current
+reachability analysis reports that path as disabled, but the release ships the
+patched dependency rather than leaving the alert open.
+
 No consensus version change, chain reset, app-version change or data migration.
 `latest` and automatic upgrade voting remain app29; app30 remains explicit.
 Container: `ghcr.io/l33tdawg/sage:11.25.10`. SDK 11.25.10.
