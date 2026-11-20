@@ -772,6 +772,15 @@ Report whether a memory you recalled helped, hurt, or went unused.
 Corroboration counts agents that agree with a memory; this counts whether
 using it worked.
 
+> **SQLite-only for now.** On PostgreSQL this route returns `501` and recall
+> ranking there is unchanged. Postgres parity is a planned follow-up.
+
+> **Compatibility / rollout.** Outcome ranking is **on by default**, so recall
+> order can change for every caller once any agent reports outcomes. The effect
+> is bounded: only memories with feedback move, at most 3 places, and only
+> within the page already returned. Set `SAGE_RECALL_OUTCOME_RANKING=off` to
+> keep the store's order (counts are still recorded and returned).
+
 **Request body:**
 
 | Field | Type | Required |
@@ -800,7 +809,8 @@ using it worked.
   "Unused" reports dilute strength back toward zero. Set
   `SAGE_RECALL_OUTCOME_RANKING=off` to keep the store's order; counts are still
   recorded and reported.
-- **Backends.** SQLite only; other backends return `501`.
+- **Backends.** SQLite only for now; other backends return `501` and rank
+  unchanged.
 
 ---
 
