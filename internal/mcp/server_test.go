@@ -848,14 +848,50 @@ func TestHandleRequest_UnknownMethod(t *testing.T) {
 	assert.Contains(t, resp.Error.Message, "Method not found")
 }
 
+func TestHandleRequest_StandardUtilityMethods(t *testing.T) {
+	s, _ := testServer(t)
+	tests := []struct {
+		method string
+		result map[string]any
+	}{
+		{method: "ping", result: map[string]any{}},
+		{method: "resources/list", result: map[string]any{"resources": []any{}}},
+		{method: "resources/templates/list", result: map[string]any{"resourceTemplates": []any{}}},
+		{method: "prompts/list", result: map[string]any{"prompts": []any{}}},
+	}
+	for index, test := range tests {
+		t.Run(test.method, func(t *testing.T) {
+			response := s.handleRequest(context.Background(), &jsonRPCRequest{
+				JSONRPC: "2.0",
+				ID:      float64(index + 1),
+				Method:  test.method,
+			})
+			require.NotNil(t, response)
+			require.Nil(t, response.Error)
+			require.Equal(t, test.result, response.Result)
+			payload, err := json.Marshal(response)
+			require.NoError(t, err)
+			require.Contains(t, string(payload), `"result":`)
+		})
+	}
+}
+
 func TestHandleRequest_Notification(t *testing.T) {
 	s, _ := testServer(t)
-	req := &jsonRPCRequest{
-		JSONRPC: "2.0",
-		Method:  "notifications/initialized",
+	for _, method := range []string{
+		"notifications/initialized",
+		"notifications/cancelled",
+		"notifications/roots/list_changed",
+		"notifications/progress",
+	} {
+		t.Run(method, func(t *testing.T) {
+			response := s.handleRequest(context.Background(), &jsonRPCRequest{
+				JSONRPC: "2.0",
+				Method:  method,
+			})
+			require.Nil(t, response)
+		})
 	}
-	resp := s.handleRequest(context.Background(), req)
-	assert.Nil(t, resp)
 }
 
 func TestSignedRequest(t *testing.T) {
