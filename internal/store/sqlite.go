@@ -1641,25 +1641,6 @@ func formatTimePtr(t *time.Time) *string {
 	return &s
 }
 
-func encodeEmbedding(emb []float32) []byte {
-	if len(emb) == 0 {
-		return nil
-	}
-	data, _ := json.Marshal(emb)
-	return data
-}
-
-func decodeEmbedding(data []byte) []float32 {
-	if len(data) == 0 {
-		return nil
-	}
-	var emb []float32
-	if err := json.Unmarshal(data, &emb); err != nil {
-		return nil
-	}
-	return emb
-}
-
 func encodeStringSlice(ss []string) string {
 	if ss == nil {
 		return "[]"
