@@ -775,11 +775,12 @@ using it worked.
 > **SQLite-only for now.** On PostgreSQL this route returns `501` and recall
 > ranking there is unchanged. Postgres parity is a planned follow-up.
 
-> **Compatibility / rollout.** Outcome ranking is **on by default**, so recall
-> order can change for every caller once any agent reports outcomes. The effect
-> is bounded: only memories with feedback move, at most 3 places, and only
-> within the page already returned. Set `SAGE_RECALL_OUTCOME_RANKING=off` to
-> keep the store's order (counts are still recorded and returned).
+> **Compatibility / rollout.** Outcome ranking is **off by default**: recall
+> order is exactly the store's order unless the operator sets
+> `SAGE_RECALL_OUTCOME_RANKING=on` (or `true`, `1`, `yes`; case-insensitive).
+> Recording outcomes and returning `outcomes` counts are always on. When
+> enabled, the effect is bounded: only memories with feedback move, at most 3
+> places, and only within the page already returned.
 
 **Request body:**
 
@@ -800,15 +801,14 @@ using it worked.
 - **Limits.** One report per agent per memory every 10 seconds (`429` with
   `Retry-After`). Each agent counts at most 5 per outcome kind when counts are
   aggregated.
-- **Effect on recall.** `/v1/memory/query`, `/search` and `/hybrid` return the
-  counts as `outcomes` on results that have any, and move such a result within
-  the page they already return. Strength is
+- **Effect on recall.** `/v1/memory/query`, `/search` and `/hybrid` always
+  return the counts as `outcomes` on results that have any. Only with
+  `SAGE_RECALL_OUTCOME_RANKING=on` do they also move such a result within the
+  page they already return. Strength is
   `(helped - hurt) / (helped + hurt + 0.5 * unused + 2)`, in (-1, 1); the shift
   is `round(3 * strength)` places, so feedback alone moves a memory at most 3
   places, and never pulls one in from outside the page or buries one beyond it.
-  "Unused" reports dilute strength back toward zero. Set
-  `SAGE_RECALL_OUTCOME_RANKING=off` to keep the store's order; counts are still
-  recorded and reported.
+  "Unused" reports dilute strength back toward zero.
 - **Backends.** SQLite only for now; other backends return `501` and rank
   unchanged.
 

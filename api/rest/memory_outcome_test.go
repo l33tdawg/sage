@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -200,6 +201,7 @@ func TestMemoryOutcome_UnsupportedStoreIs501(t *testing.T) {
 }
 
 func TestMemoryOutcome_RecallRankingMovesWithFeedback(t *testing.T) {
+	t.Setenv("SAGE_RECALL_OUTCOME_RANKING", "on")
 	srv, ts := newOutcomeTestServer(t, 8)
 	a := newOutcomeAgent(t)
 	t0 := time.Now().Add(-time.Hour)
@@ -236,15 +238,79 @@ func TestMemoryOutcome_RecallRankingMovesWithFeedback(t *testing.T) {
 	}
 	ids, _ = queryOrder(t, srv, a)
 	require.Equal(t, []string{"m1", "m2", "m6", "m3", "m0", "m4", "m5", "m7"}, ids)
-
-	// Ranking can be switched off; counts are still reported.
-	t.Setenv("SAGE_RECALL_OUTCOME_RANKING", "off")
-	ids, results = queryOrder(t, srv, a)
-	require.Equal(t, []string{"m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7"}, ids)
-	require.NotNil(t, results[6].Outcomes)
 }
 
+// TestMemoryOutcome_RankingIsOptIn pins the default: with the switch unset,
+// blank, off or unrecognised, recall keeps the store's order exactly, while
+// counts are still recorded and returned. Only an explicit on/true/1/yes
+// (any case, trimmed) enables the bounded shift.
+func TestMemoryOutcome_RankingIsOptIn(t *testing.T) {
+	storeOrder := []string{"m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7"}
+	shifted := []string{"m0", "m1", "m2", "m6", "m3", "m4", "m5", "m7"}
+	cases := []struct {
+		name  string
+		value *string
+		want  []string
+	}{
+		{"unset", nil, storeOrder},
+		{"blank", strPtr(""), storeOrder},
+		{"spaces", strPtr("   "), storeOrder},
+		{"off", strPtr("off"), storeOrder},
+		{"false", strPtr("false"), storeOrder},
+		{"0", strPtr("0"), storeOrder},
+		{"garbage", strPtr("enabled-ish"), storeOrder},
+		{"on", strPtr("on"), shifted},
+		{"true", strPtr("true"), shifted},
+		{"1", strPtr("1"), shifted},
+		{"yes", strPtr("yes"), shifted},
+		{"ON trimmed", strPtr("  ON "), shifted},
+		{"Yes", strPtr("Yes"), shifted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SAGE_RECALL_OUTCOME_RANKING", "")
+			if tc.value == nil {
+				require.NoError(t, os.Unsetenv("SAGE_RECALL_OUTCOME_RANKING"))
+			} else {
+				t.Setenv("SAGE_RECALL_OUTCOME_RANKING", *tc.value)
+			}
+			srv, ts := newOutcomeTestServer(t, 8)
+			a := newOutcomeAgent(t)
+			srv.SetNodeOperatorID(a.id)
+			t0 := time.Now().Add(-time.Hour)
+			for i := 0; i < 4; i++ {
+				agent := "helper-" + strconv.Itoa(i)
+				for j := 0; j < 5; j++ {
+					seedOutcome(t, ts, "m6", agent, store.MemoryOutcomeHelped, t0.Add(time.Duration(j)*time.Minute))
+				}
+			}
+
+			// Recording stays on regardless of the ranking switch. (A single
+			// "unused" has zero strength, so it never moves m2 by itself.)
+			rr := a.do(t, srv, http.MethodPost, "/v1/memory/m2/outcome", MemoryOutcomeRequest{Outcome: "unused"})
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+			ids, results := queryOrder(t, srv, a)
+			require.Equal(t, tc.want, ids)
+			// Counts are returned regardless of the ranking switch.
+			for _, r := range results {
+				switch r.MemoryID {
+				case "m6":
+					require.Equal(t, &MemoryOutcomeCounts{Helped: 20, Agents: 4}, r.Outcomes)
+				case "m2":
+					require.Equal(t, &MemoryOutcomeCounts{Unused: 1, Agents: 1}, r.Outcomes)
+				default:
+					require.Nil(t, r.Outcomes)
+				}
+			}
+		})
+	}
+}
+
+func strPtr(v string) *string { return &v }
+
 func TestMemoryOutcome_UnusedDecaysAndSingleAgentIsCapped(t *testing.T) {
+	t.Setenv("SAGE_RECALL_OUTCOME_RANKING", "on")
 	srv, ts := newOutcomeTestServer(t, 6)
 	a := newOutcomeAgent(t)
 	t0 := time.Now().Add(-24 * time.Hour)

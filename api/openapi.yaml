@@ -4034,10 +4034,11 @@ paths:
       description: >-
         Node-local feedback, never a transaction. The caller must be able to
         read the memory. One report per agent per memory every 10 seconds.
-        Recall (/v1/memory/query, /search, /hybrid) moves a memory with
-        feedback at most 3 places within the page it already returns; set
-        SAGE_RECALL_OUTCOME_RANKING=off to keep the store's order. SQLite
-        backend only.
+        Recall (/v1/memory/query, /search, /hybrid) always returns the
+        counts. Reordering is opt-in: only with SAGE_RECALL_OUTCOME_RANKING=on
+        (or true/1/yes) does recall move a memory with feedback at most 3
+        places within the page it already returns; otherwise the store's order
+        is unchanged. SQLite backend only for now; other backends return 501.
       tags:
         - Memory
       parameters:

@@ -7,9 +7,10 @@ package rest
 // SAGE as experiential memory reports that here: helped, hurt, or unused.
 //
 // The counts are node-local (internal/store/memory_outcome.go): never in a
-// transaction, the AppHash, or a content hash. Recall uses them only to move a
-// memory a few places within the ranked list it already returns, so feedback
-// can neither bury a memory nor pull one in from outside the candidate set.
+// transaction, the AppHash, or a content hash. Recall always reports them; only
+// when an operator opts in (SAGE_RECALL_OUTCOME_RANKING=on) does it also move a
+// memory a few places within the page it already returns, so feedback can
+// neither bury a memory nor pull one in from outside the page.
 
 import (
 	"context"
@@ -70,14 +71,15 @@ type MemoryOutcomeResponse struct {
 }
 
 // outcomeRankingEnabled reports whether feedback reorders recall results.
-// SAGE_RECALL_OUTCOME_RANKING=off (or false/0) turns the reordering off;
-// outcomes are still recorded and reported on results.
+// Reordering is opt-in: only SAGE_RECALL_OUTCOME_RANKING=on (or true/1/yes,
+// case-insensitive) enables it. Outcomes are always recorded and reported on
+// results either way.
 func outcomeRankingEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("SAGE_RECALL_OUTCOME_RANKING"))) {
-	case "off", "false", "0", "no":
-		return false
+	case "on", "true", "1", "yes":
+		return true
 	}
-	return true
+	return false
 }
 
 // outcomeStrength maps aggregate feedback to a strength in (-1, 1). Hurt
@@ -104,7 +106,7 @@ func outcomeCounts(st store.MemoryOutcomeStats) *MemoryOutcomeCounts {
 }
 
 // applyRecallOutcomes attaches outcome counts to local recall results and,
-// unless disabled, reorders them by a bounded per-memory shift. Results must
+// when ranking is opted in, reorders them by a bounded per-memory shift. Results must
 // be in rank order. A store without outcome support, or a read error, leaves
 // the results unchanged.
 func (s *Server) applyRecallOutcomes(ctx context.Context, results []*MemoryResult) []*MemoryResult {
