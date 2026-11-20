@@ -99,6 +99,8 @@ type introState struct {
 	host    map[string]*introHostSession  // by offer id
 	running map[string]context.CancelFunc // guest drivers, by offer id
 	wg      sync.WaitGroup
+	// confirmHold is a test seam run while a confirm owns its session.
+	confirmHold func()
 }
 
 // SetIntroOrgSource installs the org source for the intro wire.

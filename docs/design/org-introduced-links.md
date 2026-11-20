@@ -722,6 +722,12 @@ also starts the handshake driver; the host waits for the guest.
   written to disk before B2a stages it with the intent. The host zeroizes it
   when its write path returns, when the session is replaced, expires or is
   dropped as stale; the guest zeroizes its copy when its attempt returns.
+- Each host session has its own lifecycle lock and state (active →
+  confirming → done, or retired). A confirm takes ownership and works on its
+  own copy of the seed. While it owns the session a replacing request and a
+  second confirm are refused (409, retryable), and a drop or an expiry sweep
+  only flags the session; the confirm then retires and zeroizes it when it
+  finishes. Nothing waits on a session while holding the session map lock.
 
 ### 7.5 Guest driver and window (`internal/federation/intro_guest.go`)
 
@@ -766,7 +772,8 @@ envelope.
   peer card; a stranger CA failing the handshake; bad guest signatures; a
   host card pin that is not the server's CA, and another node answering at
   the host's endpoint, both failing the guest's first request at the
-  handshake; a stale session at confirm; a lost confirm
+  handshake; a stale session at confirm; replacement, drop and expiry
+  racing an in-flight confirm (scripted and unscripted, under `-race`); a lost confirm
   finished by the window's status probe; the window revoking when the host
   lost its session; restart of either side mid-handshake.
 - `org_intro_handler_test.go`: owner accept (Root over loopback only, open

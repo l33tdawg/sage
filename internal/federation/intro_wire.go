@@ -42,6 +42,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -152,6 +153,16 @@ type IntroStatusResp struct {
 var introSessionPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // introHostSession is one host-side session between request and confirm.
+// The fields above mu are fixed at creation. mu guards the lifecycle:
+//
+//	active ─confirm takes ownership→ confirming ─write path ran→ done
+//	                                             └─failed──────→ retired
+//	active / done ─replace, expire, drop→ retired
+//
+// A confirm owns the session while confirming and works on its own copy of
+// the seed. Replacement is refused while a confirm owns it (or once it has a
+// link); expiry and drop only flag it, and the confirm retires and zeroizes
+// it when it finishes. Nothing waits on a session while holding intro.mu.
 type introHostSession struct {
 	orgID, offerID, sessionID string
 	peerChain                 string
@@ -159,16 +170,94 @@ type introHostSession struct {
 	guestCAPEM                []byte
 	transcript                []byte
 	e                         [32]byte
-	seed                      []byte
 	priorTerms                string
 	expiresAt                 int64
-	// confirmMu serializes confirms of one session; linkID is set once the
-	// write path ran far enough to own a row.
-	confirmMu chan struct{}
-	linkID    string
+
+	mu          sync.Mutex
+	state       introSessionState
+	seed        []byte
+	linkID      string
+	retireAsked bool
 }
 
-func (s *introHostSession) zero() { zeroize(s.seed) }
+type introSessionState int
+
+const (
+	introSessActive introSessionState = iota
+	introSessConfirming
+	introSessDone
+	introSessRetired
+)
+
+var (
+	errIntroConfirmBusy    = errors.New("a confirm for this intro session is already in progress")
+	errIntroSessionRetired = errors.New("intro session has ended")
+)
+
+// retire ends the session. It never blocks: while a confirm owns the session
+// it only flags it, and endConfirm finishes the job.
+func (s *introHostSession) retire() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == introSessConfirming {
+		s.retireAsked = true
+		return
+	}
+	s.state = introSessRetired
+	zeroize(s.seed)
+}
+
+// busy reports whether a confirm owns the session or it already has a link.
+func (s *introHostSession) busy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state == introSessConfirming || s.state == introSessDone
+}
+
+// beginConfirm takes ownership for one confirm and returns its own copy of
+// the seed. A session that already ran its write path returns its link id.
+func (s *introHostSession) beginConfirm() (linkID string, seed []byte, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch s.state {
+	case introSessDone:
+		return s.linkID, nil, nil
+	case introSessConfirming:
+		return "", nil, errIntroConfirmBusy
+	case introSessRetired:
+		return "", nil, errIntroSessionRetired
+	}
+	s.state = introSessConfirming
+	return "", append([]byte(nil), s.seed...), nil
+}
+
+// endConfirm releases ownership. With a link id the session is done,
+// otherwise retired; the seed is zeroized either way, and a retire asked for
+// meanwhile takes effect now.
+func (s *introHostSession) endConfirm(linkID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	zeroize(s.seed)
+	s.state = introSessRetired
+	if linkID != "" {
+		s.linkID = linkID
+		if !s.retireAsked {
+			s.state = introSessDone
+		}
+	}
+}
+
+// seedZeroed reports whether the seed is gone (tests).
+func (s *introHostSession) seedZeroed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, b := range s.seed {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
 
 func (m *Manager) putIntroHostSession(s *introHostSession) error {
 	m.intro.mu.Lock()
@@ -179,15 +268,15 @@ func (m *Manager) putIntroHostSession(s *introHostSession) error {
 	now := time.Now().Unix()
 	for id, old := range m.intro.host {
 		if old.expiresAt <= now {
-			old.zero()
 			delete(m.intro.host, id)
+			old.retire()
 		}
 	}
 	if old, ok := m.intro.host[s.offerID]; ok {
-		if old.linkID != "" {
-			return errors.New("this offer already has a link in progress")
+		if old.busy() {
+			return errors.New("this offer has a confirm in progress or a link already")
 		}
-		old.zero()
+		old.retire()
 	} else if len(m.intro.host) >= introMaxHostSessions {
 		return errors.New("too many open intro sessions")
 	}
@@ -200,8 +289,8 @@ func (m *Manager) introHostSessionFor(offerID string) *introHostSession {
 	defer m.intro.mu.Unlock()
 	s := m.intro.host[offerID]
 	if s != nil && s.expiresAt <= time.Now().Unix() {
-		s.zero()
 		delete(m.intro.host, offerID)
+		s.retire()
 		return nil
 	}
 	return s
@@ -209,11 +298,18 @@ func (m *Manager) introHostSessionFor(offerID string) *introHostSession {
 
 func (m *Manager) dropIntroHostSession(s *introHostSession) {
 	m.intro.mu.Lock()
-	defer m.intro.mu.Unlock()
 	if cur := m.intro.host[s.offerID]; cur == s {
 		delete(m.intro.host, s.offerID)
 	}
-	s.zero()
+	m.intro.mu.Unlock()
+	s.retire()
+}
+
+// introConfirmHold is a test seam run while a confirm owns its session.
+func (m *Manager) introConfirmHold() func() {
+	m.intro.mu.Lock()
+	defer m.intro.mu.Unlock()
+	return m.intro.confirmHold
 }
 
 // ---------------------------------------------------------------------------
@@ -470,7 +566,7 @@ func (m *Manager) handleIntroRequest(w http.ResponseWriter, r *http.Request) {
 		peerChain: v.Peer.ChainID, guestPin: peer.pin,
 		guestCAPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: peer.ca.Raw}),
 		transcript: transcript, e: IntroAttestation(transcript), seed: seed,
-		priorTerms: prior, expiresAt: expires, confirmMu: make(chan struct{}, 1),
+		priorTerms: prior, expiresAt: expires,
 	}
 	if err := m.putIntroHostSession(sess); err != nil {
 		zeroize(seed)
@@ -570,17 +666,6 @@ func (m *Manager) handleIntroConfirm(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusForbidden, "intro session belongs to another peer")
 		return
 	}
-	select {
-	case sess.confirmMu <- struct{}{}:
-		defer func() { <-sess.confirmMu }()
-	case <-ctx.Done():
-		httpError(w, http.StatusServiceUnavailable, "confirm in progress")
-		return
-	}
-	if sess.linkID != "" {
-		m.writeIntroRowState(w, ctx, req, sess.linkID)
-		return
-	}
 	tr, err := DecodeIntroTranscript(sess.transcript)
 	if err != nil {
 		m.dropIntroHostSession(sess)
@@ -592,14 +677,37 @@ func (m *Manager) handleIntroConfirm(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusForbidden, "guest signatures do not verify over E_intro")
 		return
 	}
-	if staleErr := m.introHostSessionCheck(ctx, sess); staleErr != nil {
-		m.dropIntroHostSession(sess)
-		httpError(w, http.StatusConflict, "intro session is stale: "+staleErr.Error())
-		return
-	}
 	hostSig, err := SignIntro(m.agentKey, IntroHostAccept, sess.e)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "host signature unavailable")
+		return
+	}
+	done, seed, err := sess.beginConfirm()
+	switch {
+	case errors.Is(err, errIntroConfirmBusy):
+		httpError(w, http.StatusConflict, err.Error()+"; retry")
+		return
+	case errors.Is(err, errIntroSessionRetired):
+		if row := m.introHostRowFor(ctx, req.OfferID, req.SessionID, peer.pin); row != nil {
+			writeJSON(w, http.StatusOK, &IntroConfirmResp{OfferID: req.OfferID, SessionID: req.SessionID, LinkID: row.LinkID, State: row.State, TxHash: row.TxHash})
+			return
+		}
+		httpError(w, http.StatusNotFound, "no such intro session")
+		return
+	case done != "":
+		m.writeIntroRowState(w, ctx, req, done)
+		return
+	}
+	// This confirm owns the session from here; endConfirm releases it.
+	linkID := ""
+	defer func() { sess.endConfirm(linkID) }()
+	defer zeroize(seed)
+	if hold := m.introConfirmHold(); hold != nil {
+		hold()
+	}
+	if staleErr := m.introHostSessionCheck(ctx, sess); staleErr != nil {
+		m.dropIntroHostSession(sess)
+		httpError(w, http.StatusConflict, "intro session is stale: "+staleErr.Error())
 		return
 	}
 	pin, _ := hex.DecodeString(tr.Guest.Pin)
@@ -607,7 +715,7 @@ func (m *Manager) handleIntroConfirm(w http.ResponseWriter, r *http.Request) {
 		Role: "host", OrgID: sess.orgID, SessionID: sess.sessionID, Transcript: sess.transcript,
 		HostAcceptSig: hostSig, GuestAcceptSig: guestSig, GuestAckSig: ackSig,
 		Evidence: introEvidenceOf(tr), RemoteCAPEM: sess.guestCAPEM,
-		Seed: append([]byte(nil), sess.seed...),
+		Seed: append([]byte(nil), seed...),
 		Terms: &tx.CrossFedTerms{
 			RemoteChainID: tr.Guest.ChainID, Endpoint: tr.Guest.Endpoint, PeerPubKey: pin,
 			MaxClearance: tx.ClearanceLevel(trustOnlyJoinScope.MaxClearance), Status: "active",
@@ -616,16 +724,13 @@ func (m *Manager) handleIntroConfirm(w http.ResponseWriter, r *http.Request) {
 		Deadline:         time.Now().Add(m.introWindow()).Unix(),
 		StaleCheck:       m.introStaleCheck(sess.orgID, sess.offerID, "host", tr),
 	}
-	linkID := hex.EncodeToString(sess.e[:])
 	res, err := m.ActivateIntroducedLink(ctx, act)
 	switch {
 	case err == nil:
-		sess.linkID = res.LinkID
-		sess.zero()
+		linkID = res.LinkID
 		writeJSON(w, http.StatusOK, &IntroConfirmResp{OfferID: req.OfferID, SessionID: req.SessionID, LinkID: res.LinkID, State: res.State, TxHash: res.TxHash})
 	case errors.Is(err, ErrIntroPending):
-		sess.linkID = linkID
-		sess.zero()
+		linkID = hex.EncodeToString(sess.e[:])
 		writeJSON(w, http.StatusOK, &IntroConfirmResp{OfferID: req.OfferID, SessionID: req.SessionID, LinkID: linkID, State: store.IntroducedLinkSigned})
 	default:
 		m.dropIntroHostSession(sess)

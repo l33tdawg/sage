@@ -228,7 +228,7 @@ func TestIntroWire_EndToEndActiveOnBoth(t *testing.T) {
 	// The host session's seed is zeroized once its write path ran.
 	sess := p.host.mgr.introHostSessionFor(wireOffer)
 	require.NotNil(t, sess)
-	require.Equal(t, make([]byte, 32), sess.seed)
+	require.True(t, sess.seedZeroed())
 
 	// A replayed confirm reports the row and changes nothing.
 	cfg, err := p.guest.mgr.introClientTLS(mustCA(t, p.host), nil, nil)
@@ -415,7 +415,7 @@ func TestIntroWire_Refusals(t *testing.T) {
 		// The session is unchanged, seed intact, until a valid confirm.
 		sess := p.host.mgr.introHostSessionFor(wireOffer)
 		require.NotNil(t, sess)
-		require.NotEqual(t, make([]byte, 32), sess.seed)
+		require.False(t, sess.seedZeroed())
 	})
 	hs, _ := p.host.counts()
 	require.Equal(t, 0, hs, "no refusal broadcast anything")
@@ -615,4 +615,157 @@ func TestIntroWire_StatusReportsSessionAndRow(t *testing.T) {
 	// A session id that is not the live one is unknown.
 	st, _ = rawIntro(t, p.guest, p.host, http.MethodGet, "/fed/v1/intro/"+wireOffer+"/accept?session_id="+strings.Repeat("0", 32), nil)
 	require.Equal(t, http.StatusNotFound, st)
+}
+
+// confirmSetup opens one host session by a raw request and returns a valid
+// confirm body for it (the guest's real signatures over E_intro).
+func confirmSetup(t *testing.T, p *wirePair) (*IntroRequestResp, []byte) {
+	t.Helper()
+	st, raw := rawIntro(t, p.guest, p.host, http.MethodPost, "/fed/v1/intro/request", guestRequestBody(t, p, nil))
+	require.Equal(t, http.StatusOK, st, string(raw))
+	var resp IntroRequestResp
+	require.NoError(t, json.Unmarshal(raw, &resp))
+	e := IntroAttestation(resp.Transcript)
+	ga, err := SignIntro(p.guest.priv, IntroGuestAccept, e)
+	require.NoError(t, err)
+	gk, err := SignIntro(p.guest.priv, IntroGuestAck, e)
+	require.NoError(t, err)
+	body, err := json.Marshal(&IntroConfirmWire{
+		OfferID: wireOffer, SessionID: resp.SessionID,
+		GuestAcceptSig: hex.EncodeToString(ga), GuestAckSig: hex.EncodeToString(gk),
+	})
+	require.NoError(t, err)
+	return &resp, body
+}
+
+func (n *wireNode) setConfirmHold(f func()) {
+	n.mgr.intro.mu.Lock()
+	n.mgr.intro.confirmHold = f
+	n.mgr.intro.mu.Unlock()
+}
+
+// While a confirm owns a host session, a new request (replacement), a drop
+// and an expiry sweep cannot zeroize the seed under it: replacement is
+// refused, drop and expiry only flag the session, and the confirm finishes
+// on its own seed copy, then retires the session.
+func TestIntroWire_HostSessionLifecycleVsConfirm(t *testing.T) {
+	p := newWirePair(t)
+	accept(p.host)
+	_, body := confirmSetup(t, p)
+	sess := p.host.mgr.introHostSessionFor(wireOffer)
+	require.NotNil(t, sess)
+
+	held, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	p.host.setConfirmHold(func() {
+		once.Do(func() { close(held) })
+		<-release
+	})
+	type result struct {
+		st  int
+		raw []byte
+	}
+	confirmed := make(chan result, 1)
+	go func() {
+		st, raw := rawIntro(t, p.guest, p.host, http.MethodPost, "/fed/v1/intro/confirm", body)
+		confirmed <- result{st, raw}
+	}()
+	<-held
+
+	// A second confirm while the first owns the session: refused, retryable.
+	st, _ := rawIntro(t, p.guest, p.host, http.MethodPost, "/fed/v1/intro/confirm", body)
+	require.Equal(t, http.StatusConflict, st)
+	// A new request would replace the session: refused while confirming.
+	st, raw := rawIntro(t, p.guest, p.host, http.MethodPost, "/fed/v1/intro/request", guestRequestBody(t, p, nil))
+	require.Equal(t, http.StatusConflict, st, string(raw))
+	require.False(t, sess.seedZeroed(), "replacement did not touch the owned session")
+	// Drop and an expiry sweep only flag it.
+	p.host.mgr.dropIntroHostSession(sess)
+	sess.retire()
+	require.False(t, sess.seedZeroed(), "drop/expiry wait for the confirm")
+
+	close(release)
+	r := <-confirmed
+	require.Equal(t, http.StatusOK, r.st, string(r.raw))
+	var cr IntroConfirmResp
+	require.NoError(t, json.Unmarshal(r.raw, &cr))
+	require.Equal(t, store.IntroducedLinkActive, cr.State, "the host activated on a valid seed")
+	require.True(t, sess.seedZeroed(), "the confirm retired and zeroized the session")
+	_, _, err := sess.beginConfirm()
+	require.ErrorIs(t, err, errIntroSessionRetired)
+	hs, _ := p.host.counts()
+	require.Equal(t, 1, hs)
+	// A retried confirm after the session ended reports the row.
+	st, raw = rawIntro(t, p.guest, p.host, http.MethodPost, "/fed/v1/intro/confirm", body)
+	require.Equal(t, http.StatusOK, st, string(raw))
+	require.Contains(t, string(raw), store.IntroducedLinkActive)
+}
+
+// Unscripted: confirms, replacing requests, drops and expiry sweeps hit one
+// offer at once. Whatever wins, the host never activates on a zeroized seed
+// (the plan would refuse a seed that misses its commitment, leaving no
+// active row), broadcasts at most one tx-33, and every ended session is
+// zeroized.
+func TestIntroWire_HostSessionChurnVsConfirm(t *testing.T) {
+	p := newWirePair(t)
+	accept(p.host)
+	var (
+		mu       sync.Mutex
+		sessions []*introHostSession
+		bodies   [][]byte
+	)
+	for i := 0; i < 3; i++ {
+		_, b := confirmSetup(t, p)
+		mu.Lock()
+		bodies = append(bodies, b)
+		if s := p.host.mgr.introHostSessionFor(wireOffer); s != nil {
+			sessions = append(sessions, s)
+		}
+		mu.Unlock()
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(4)
+		go func(i int) {
+			defer wg.Done()
+			_, _ = rawIntro(t, p.guest, p.host, http.MethodPost, "/fed/v1/intro/confirm", bodies[i%len(bodies)])
+		}(i)
+		go func() {
+			defer wg.Done()
+			_, _ = rawIntro(t, p.guest, p.host, http.MethodPost, "/fed/v1/intro/request", guestRequestBody(t, p, nil))
+			if s := p.host.mgr.introHostSessionFor(wireOffer); s != nil {
+				mu.Lock()
+				sessions = append(sessions, s)
+				mu.Unlock()
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if s := p.host.mgr.introHostSessionFor(wireOffer); s != nil {
+				p.host.mgr.dropIntroHostSession(s)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if s := p.host.mgr.introHostSessionFor(wireOffer); s != nil {
+				s.retire() // what an expiry sweep does
+			}
+		}()
+	}
+	wg.Wait()
+	hs, _ := p.host.counts()
+	require.LessOrEqual(t, hs, 1, "at most one host tx-33")
+	if r := p.host.latest(p.guest.chain); r != nil && r.State == store.IntroducedLinkActive {
+		require.Equal(t, 1, hs)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, s := range sessions {
+		s.mu.Lock()
+		ended := s.state == introSessRetired || s.state == introSessDone
+		s.mu.Unlock()
+		if ended {
+			require.True(t, s.seedZeroed(), "an ended session keeps no seed")
+		}
+	}
 }
