@@ -1127,6 +1127,9 @@ func (m *Manager) StartMaintenance(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// RFC #443 B2a: settle introduced-link rows left in flight by a
+		// restart, then keep reconciling on every tick.
+		m.reconcileIntroducedLinksLogged(ctx)
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
 		for {
@@ -1136,6 +1139,7 @@ func (m *Manager) StartMaintenance(ctx context.Context) <-chan struct{} {
 			case now := <-t.C:
 				m.joins.Maintain(now)
 				m.pruneGuestDrafts(now)
+				m.reconcileIntroducedLinksLogged(ctx)
 			}
 		}
 	}()
@@ -1763,6 +1767,19 @@ func (m *Manager) broadcastCrossFedSetLockedAs(
 	controlActorID string,
 	terms *tx.CrossFedTerms,
 ) (string, error) {
+	return m.broadcastCrossFedSetHookedLockedAs(controlActorID, terms, nil)
+}
+
+// broadcastCrossFedSetHookedLockedAs is broadcastCrossFedSetLockedAs with an
+// optional beforeBroadcast hook. The hook runs inside the nonce lease with the
+// exact signed bytes and nonce, after encoding and before the bytes leave the
+// process; an error from it aborts without broadcasting. The introduced-link
+// write path uses it to make intent -> signed durable before any broadcast.
+func (m *Manager) broadcastCrossFedSetHookedLockedAs(
+	controlActorID string,
+	terms *tx.CrossFedTerms,
+	beforeBroadcast func(encoded []byte, nonce uint64) error,
+) (string, error) {
 	signingKey, signingPub, effectiveActorID, root, rootKey, err :=
 		m.localConsensusControlSigner(controlActorID)
 	if err != nil {
@@ -1800,6 +1817,11 @@ func (m *Manager) broadcastCrossFedSetLockedAs(
 		encoded, encodeErr := tx.EncodeTx(ptx)
 		if encodeErr != nil {
 			return fmt.Errorf("encode cross_fed set tx: %w", encodeErr)
+		}
+		if beforeBroadcast != nil {
+			if hookErr := beforeBroadcast(encoded, nonce); hookErr != nil {
+				return hookErr
+			}
 		}
 		var broadcastErr error
 		hash, _, broadcastErr = m.broadcastContext(leaseCtx, signingKey, encoded)

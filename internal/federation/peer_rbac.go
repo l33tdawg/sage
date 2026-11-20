@@ -296,11 +296,26 @@ func (m *Manager) SetPeerRBACPaused(ctx context.Context, remoteChainID string, p
 // snapshot to the newly frozen peer operator. The legacy tx-33 envelope is
 // empty too, so even a failure between delete and replace remains deny-all.
 func (m *Manager) initializePeerRBACPolicy(ctx context.Context, remoteChainID string) error {
+	agreement, err := m.ActiveAgreement(remoteChainID)
+	if err != nil {
+		return err
+	}
+	return m.initializePeerRBACPolicyFor(ctx, agreement)
+}
+
+// initializePeerRBACPolicyFor is initializePeerRBACPolicy for an agreement the
+// caller already resolved. The introduced-link bind uses it: its agreement is
+// on chain but ActiveAgreement still denies it until the row is active.
+func (m *Manager) initializePeerRBACPolicyFor(ctx context.Context, agreement *store.CrossFedRecord) error {
 	ss := m.syncStore()
 	if ss == nil {
 		return fmt.Errorf("peer RBAC requires the SQLite store backend")
 	}
-	peerAgentID, err := m.ResolvePeerOperatorAgentID(ctx, remoteChainID)
+	if agreement == nil {
+		return fmt.Errorf("active federation agreement is required")
+	}
+	remoteChainID := agreement.RemoteChainID
+	peerAgentID, err := m.resolvePeerOperatorAgentID(ctx, agreement)
 	if err != nil {
 		return err
 	}

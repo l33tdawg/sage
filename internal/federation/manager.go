@@ -326,6 +326,12 @@ type Manager struct {
 	joinGateMu sync.RWMutex
 	joinGate   JoinPeerGate
 
+	// introducedLinks / introducedSharingCap are the RFC #443 Phase B
+	// introduced-link hooks (nil: manual agreements only, unchanged).
+	introducedMu         sync.RWMutex
+	introducedLinks      IntroducedLinkSource
+	introducedSharingCap IntroducedSharingCap
+
 	// replayMu guards seenSigs — the federation listener's replay cache,
 	// SHARDED BY PEER CHAIN so one peer's flood can never evict or lock out
 	// another peer (a shared global cap would let any single authenticated peer
@@ -508,6 +514,16 @@ type Manager struct {
 	// (txHash, height). Defaults to broadcastTxCommit; overridable in tests so
 	// the join ceremony can be driven without a live CometBFT node.
 	broadcastFn func(txBytes []byte) (string, int64, error)
+	// introResolveFn resolves a stored introduced-link tx-33 (test seam;
+	// default tx.CometTxResolver(cometRPC)). introPeerStatusFn asks the host
+	// for a guest bound_pending_peer row's status (installed with the B2b
+	// wire; nil = wait for the deadline).
+	introResolveFn    tx.TxResolveFunc
+	introPeerStatusFn func(ctx context.Context, row *store.IntroducedLink) (string, error)
+	// introFaultFn is a test-only crash seam for the introduced-link write
+	// path: returning true at a point stops the call there with no cleanup,
+	// as a process kill would.
+	introFaultFn func(point string) bool
 
 	// agreementMutationMu serializes every local tx-33/tx-34 control surface,
 	// including legacy REST through LockAgreementMutation. A sharing update is a
@@ -878,6 +894,12 @@ func (m *Manager) ActiveAgreement(remoteChainID string) (*store.CrossFedRecord, 
 	if rec.ExpiresAt != 0 && time.Now().Unix() >= rec.ExpiresAt {
 		return nil, fmt.Errorf("agreement %s: expired", remoteChainID)
 	}
+	// RFC #443 Phase B: an org-introduced agreement is usable only while the
+	// newest introduced_link row bound to its generation is active. Manual
+	// agreements have no row for their generation.
+	if err := m.introducedLinkDenial(rec); err != nil {
+		return nil, err
+	}
 	return rec, nil
 }
 
@@ -894,8 +916,18 @@ func (m *Manager) ActiveAgreements() []store.CrossFedRecord {
 		m.logger.Warn().Err(err).Msg("list cross_fed agreements failed")
 		return nil
 	}
+	introduced, hooked, err := m.introducedLinkStates()
+	if err != nil {
+		// Fail closed: without the introduced-link states no agreement can be
+		// told apart from a paused or unbound introduced one.
+		m.logger.Warn().Err(err).Msg("list cross_fed agreements refused: introduced-link state unavailable")
+		return nil
+	}
 	active := make([]store.CrossFedRecord, 0, len(all))
 	for _, rec := range all {
+		if hooked && !introducedStateAllows(introduced, &rec) {
+			continue
+		}
 		if ValidateChainID(rec.RemoteChainID) != nil || rec.RemoteChainID == m.localChainID {
 			continue
 		}

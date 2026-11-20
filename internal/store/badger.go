@@ -2404,6 +2404,22 @@ func (s *BadgerStore) SetCrossFed(remoteChainID, endpoint string, peerPubKey []b
 	})
 }
 
+// HasCrossFed reports whether a cross_fed record (of any status) exists for
+// remoteChainID. A storage failure is an error, never "absent".
+func (s *BadgerStore) HasCrossFed(remoteChainID string) (bool, error) {
+	err := s.view(func(txn *badger.Txn) error {
+		_, getErr := txn.Get(crossFedKey(remoteChainID))
+		return getErr
+	})
+	if errors.Is(err, badger.ErrKeyNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read cross_fed %s: %w", remoteChainID, err)
+	}
+	return true, nil
+}
+
 // GetCrossFed returns the terms record for remoteChainID (surfacing the transport
 // coordinates endpoint/peerPubKey, unlike GetFederation). Returns an error if the
 // agreement does not exist.

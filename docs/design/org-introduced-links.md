@@ -1,7 +1,9 @@
 # Org-introduced federation links (RFC #443, Phase A + B)
 
-Status: Phase A implemented. Contract agreed on #443 (v2 + the two
-implementation points of 2026-11-12). Line refs are main @ 506eb377 (v11.25.8).
+Status: Phase A implemented (v11.25.8). Phase B1 implemented (§5). Phase B2a
+implemented (§6). Contract
+agreed on #443 (v2 + the two implementation points of 2026-11-12). Line refs
+are main @ 506eb377 (v11.25.8).
 Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
 
 ## 0. Scope
@@ -20,13 +22,22 @@ in two PRs:
      and a roster store with `AdmitWithAuthority` semantics plus card checks.
   4. `PeerEligible`: the single eligibility decision for later callers. Nothing
      calls it yet.
-- **A2 (this PR):** the node-self-mint card route (§1.2, decided on #443), and
-  the manual QR JOIN gate with the Root-signed override (§1.5).
+- **A2 (merged, #556):** the node-self-mint card route (§1.2, decided on
+  #443), and the manual QR JOIN gate with the Root-signed override (§1.5).
 
-**Phase B (next PR):** owner envelope, offers, intro handshake routes, the
+**Phase B** adds the owner envelope, offers, intro handshake routes, the
 `introduced_link` record and the intent state machine (§3), and the
-`ActiveAgreement` hook. Only `ask` mode. §3 and §4 are designed here, as agreed,
-so Phase A's stores and caps already fit them.
+`ActiveAgreement` hook. Only `ask` mode. It ships in two PRs:
+
+- **B1 (this PR, §5):** data and local decisions. The owner envelope, the
+  deterministic offers, the `introduced_link` table with its CAS transitions,
+  the fail-closed `ActiveAgreement` / `ActiveAgreements` hook, and the
+  envelope cap on `UpdateAgreementSharingAs`. Nothing signs, broadcasts or
+  activates a link: no code path writes an `introduced_link` row yet.
+- **B2:** activation. `E_intro` and the acceptance signatures, the
+  `/fed/v1/intro/*` routes, owner accept, the §3.3 write path, the §3.4
+  reconciler, the §3.5 crash and stale tests, and applying the pauses B1
+  only reports.
 
 ## 1. Phase A objects
 
@@ -209,6 +220,8 @@ and refuses anything over the cap. None of them reuse `joinBodyCap`.
 | `POST /v1/org/{org}/roster` | 2 MiB | 16 KiB |
 | `POST /v1/org/{org}/card` | 16 KiB | 16 KiB |
 | `POST /v1/federation/join-overrides` | 16 KiB | 4 KiB |
+| `POST /v1/org/{org}/envelope` | 64 KiB | 4 KiB |
+| `POST /v1/org/{org}/offers/{offer_id}/reoffer` | 1 KiB | 4 KiB |
 | `POST /fed/v1/intro/request` (B) | 32 KiB | 32 KiB |
 | `GET /fed/v1/intro/{offer_id}/accept` (B) | — | 8 KiB |
 | `POST /fed/v1/intro/confirm` (B) | 8 KiB | 8 KiB |
@@ -239,7 +252,8 @@ domains. So activation is a durable state machine, not one atomic write.
 - `prior_terms_digest`: chain terms for `remote_chain_id` when the intent was
   written, or `absent`
 - `tx_bytes`, `tx_hash`, `tx_nonce`: NULL until signed
-- `staged_ref`: the staged CA + seed
+- `generation`: the agreement generation `terms` commits, derived by the store (§5.3)
+- `staged_ref`: the staged CA + seed (required, bounded)
 - `created_at`, `deadline`
 - an append-only `introduced_link_history(link_id, at, from, to, reason)`
 
@@ -260,9 +274,10 @@ per remote chain**. That's what rules out a second agreement generation.
 | `aborted(reason)`, `revoked(reason)` | terminal | — |
 
 `ActiveAgreement` (`manager.go:841`) gets one more fail-closed check, after the
-existing ones: if any `introduced_link` row exists for `remote_chain_id` and the
-newest row's state isn't `active`, it denies. `ActiveAgreements` applies the same
-filter. Manual agreements have no row and are unchanged.
+existing ones: if an `introduced_link` row is bound to the agreement's current
+generation (§5.3) and the newest such row's state isn't `active`, it denies.
+`ActiveAgreements` applies the same filter. Manual agreements have no row for
+their generation and are unchanged.
 
 ### 3.3 Write path (both sides, under `LockAgreementMutation`)
 
@@ -412,3 +427,235 @@ below. A2 adds the card route and the JOIN gate items.
   and the allow-list size test flipped. In A2, 7.1 (QR JOIN ignores
   `PeerAllowList`) flips to an enforcement test. The others stay as regression
   guards.
+
+## 5. Phase B1: envelope, offers, record and hook
+
+### 5.1 Owner envelope (`internal/orgpolicy/envelope.go`, `envelope_store.go`)
+
+`sage.org-link-envelope.v1`, one per org per node. Fields:
+- `org_id`, `org_root_key_id` (the accepted policy's `root_key_id`), `scope`
+  (the roster scope it covers);
+- `allowed_domains` (the tx-33 sharing rules: ≤ 64 tags of ≤ 512 bytes, no
+  duplicates, `*` only alone; empty = trust-only links) and `max_clearance`
+  (0–4);
+- `mode` (`ask` only), `revision`, `prev_digest` (empty at revision 1,
+  otherwise the stored envelope's digest), `issued_at` / `expires_at`
+  (≤ 365 d), `root_credential_id`, `sig`.
+
+It is signed by the node's current Root credential, stored only through
+localhost by the current local Root (`POST /v1/org/{org}/envelope`), and
+re-verified at every use against the Root current at that moment, so a Root
+rotation retires it. Admission is conditioned on the exact accepted-policy
+bytes:
+- no stored envelope → revision must be 1;
+- higher revision → `prev_digest` must chain to the stored digest;
+- same revision and digest → no-op;
+- same revision, other digest → refused, durable notice, governance event;
+- lower revision → refused.
+
+Every revision is kept in history.
+
+**Covers** (the check offers and the sharing cap use): verifies under the
+current Root, inside its window, an accepted policy exists for the org with the
+same org root, and the accepted roster's scope equals the envelope scope.
+
+**AllowsSharing:** the agreement's clearance ≤ `max_clearance`, and every
+shared domain is covered by an allowed domain with the agreement-scope
+semantics (`*` covers all, `eng` covers `eng` and `eng.public`, a `*` request
+needs a `*` envelope).
+
+### 5.2 Offers (`internal/orgpolicy/offer.go`)
+
+Roles and `offer_id` follow contract v2 §5: host = lower `agent_pub`, and
+`offer_id` = SHA-256 of `"sage/intro-offer/v1"`, org, host key, guest key, both
+`card_rev`s and the kind. Strings are u32-length-prefixed and revisions are
+big-endian u64. Card revisions come from the accepted roster's copies, which
+both sides hold, so both compute the same id. A roster refresh that changes
+neither card gives the same id.
+
+`GET /v1/org/{org}/offers` (node operator) computes, per roster peer:
+
+| Peer state | When |
+|---|---|
+| `offered` (kind `new`) | no active agreement for the peer chain, the peer is eligible (`PeerEligible` under this org) and its card is current |
+| `none` | not eligible / card not current / own chain; `reason` says why |
+| `manual` | an active agreement exists with no row bound to its generation, a terminal row, or a row introduced by another org |
+| `in_flight` | the chain has an `intent` / `signed` / `committed` / `bound_pending_peer` row |
+| `active` | the row bound to the agreement's generation is active and the peer is still covered |
+| `rekey_required` (kind `rekey`) | active, but the peer card's CA pin differs from the agreement's |
+| `pause_required` | active, but the peer is no longer covered, or the agreement's domains or clearance are outside the current envelope; `reason` says why |
+| `paused` | the row bound to the agreement's generation is paused |
+| `expired` | the local 72 h offer window passed |
+
+Org-level preconditions come first (else `ready: false` with the reason): an
+accepted policy, a current accepted roster that lists this node's card on its
+own chain, and an envelope that covers. A row is read only under the org that
+introduced it. Each node records when it first saw an
+offer, so the 72 h window survives restart. `POST
+/v1/org/{org}/offers/{offer_id}/reoffer` restarts the local window. B1 only
+reports `pause_required`; B2 applies it under the lease.
+
+### 5.3 Record and hook
+
+`introduced_link` and `introduced_link_history` are node-local SQLite tables
+(`internal/store/introduced_link.go`), never Badger. Columns are as in §3.1,
+plus `org_id`, `peer_agent_pub`, `role` and `state_reason`.
+- Each row is bound to one agreement generation: `generation` =
+  `CrossFedGeneration` of the terms it commits, a SHA-256 over every chain term
+  except the outbound `AllowedDomains` snapshot and the status. Domains are left
+  out because `UpdateAgreementSharingAs` rewrites them in place, and for an
+  introduced agreement that rewrite is held inside the envelope. Any other change
+  (endpoint, pin, clearance, departments, expiry) is a new generation the row
+  doesn't govern.
+- The store derives `generation` from `terms` at intent, so the two can't
+  disagree. `terms` must be the canonical tx-33 encoding of active terms for
+  `remote_chain_id`; a caller-supplied `generation` that doesn't match is
+  refused.
+- `intent → signed` decodes `tx_bytes` and refuses them unless they are a
+  validly signed cross_fed set tx whose terms are exactly the row's `terms`.
+- The intent needs a non-empty `staged_ref` of at most 512 bytes: the CA and
+  seed are staged before it is written.
+- `InsertIntroducedLinkIntent` checks the fence inside its write transaction,
+  and the partial unique index on `remote_chain_id` (in-flight states) backs it
+  up.
+- `TransitionIntroducedLink` enforces the §3.2 table. Out of `signed` and later
+  states it is a CAS on the expected state and the stored `tx_hash`.
+  `intent → signed` records the exact bytes, with `tx_hash` = SHA-256 of them.
+  Terminal and paused states need a reason. Each transition appends history in
+  the same transaction.
+
+federation gets `SetIntroducedLinkSource` and `SetIntroducedSharingCap`, and the
+REST layer installs both in `SetFederation`:
+- `ActiveAgreement` denies when the newest row bound to the agreement's current
+  generation isn't `active` (`ErrIntroducedLinkNotActive`).
+  `ActiveAgreements` drops those chains.
+- Rows for other generations of the chain are ignored. An older aborted attempt
+  doesn't block a later manual agreement, and an old active row doesn't
+  authorize a later tx-33 it never introduced.
+- A storage error denies every agreement. Without the rows, a manual link
+  can't be told apart from a paused introduced one.
+- `UpdateAgreementSharingAs` on an agreement whose generation has a row calls
+  the cap: that row's org envelope must cover and `AllowsSharing` must hold. If no cap is
+  installed, the update is refused.
+- Manual agreements and nodes with no node-local store are unchanged.
+
+`GET /v1/federation/introduced-links` (node operator) lists rows and history. It
+never echoes `e_intro` or `tx_bytes`.
+
+## 6. Phase B2a: activation engine
+
+B2a is the §3.3 write path, the §3.4 reconciler and the §3.5 tests. Nothing on
+the wire calls it yet: the `/fed/v1/intro/*` routes, owner accept and the
+host-status poll are B2b, so no link can activate from B2a alone.
+
+### 6.1 Transcript and signatures (`internal/federation/handclasp_intro.go`)
+
+- `IntroTranscript` is E_intro: each side's chain id, card `agent_pub`, CA
+  pin, endpoint, nonce, scope digest, P2P peer id and routes, card and
+  envelope revision + digest; plus org id, org root key id, policy and roster
+  revision + digest (one value each), `offer_id`, kind, and the seed
+  commitment. The seed itself is never in it.
+- It's stored as canonical JSON (the `e_intro` column). Decoding refuses
+  unknown fields, non-canonical order or whitespace, unsorted routes and
+  trailing bytes, and the whole transcript is capped at 16 KiB.
+- `Validate` enforces the §6 caps (8 routes, 255-byte endpoint, 50-byte chain
+  id) and host = the lower `agent_pub`.
+- The attestation is `SHA256("sage/handclasp-intro/E/v1" \0 canonical)`.
+  `host-accept`, `guest-accept` and `guest-ack` are Ed25519 over
+  `tag \0 E`, verified against the card `agent_pub`. None of them verifies
+  as another, or as a manual-JOIN signature over the same bytes.
+
+### 6.2 Write path (`internal/federation/introduced_activation.go`)
+
+`ActivateIntroducedLink(ctx, IntroActivation)` takes one accepted session (the
+transcript, all three signatures, the peer CA, the seed, the exact tx-33 terms,
+the prior-terms digest, a deadline and a `StaleCheck`). Before anything else:
+
+- all three signatures must verify over E_intro;
+- this node's side must name the local chain, agent key and CA pin;
+- the terms must name the peer's chain, endpoint and pin from the transcript,
+  be `active` and trust-only, and match this side's scope digest;
+- the seed must match the commitment;
+- an introduced-link source must be installed, otherwise `ActiveAgreement`
+  couldn't see the row (fail closed).
+
+Then, under `LockAgreementMutation` and one generation mutation for the peer:
+
+1. **Stale gate.** `StaleCheck` (the org-level checks: offer expiry,
+   revisions, `PeerEligible`, envelope coverage), the chain terms against
+   `prior_terms_digest`, and no in-flight row. A refusal is an
+   `*IntroStaleError`; nothing is staged, written or signed, so no row is
+   kept for it.
+2. **Stage** the CA and seed (§6.3).
+3. **Intent** row, then `PrepareSyncControl` (pending).
+4. **Sign** inside the nonce lease. The `intent → signed` CAS stores the exact
+   bytes and nonce from a hook between `EncodeTx` and `broadcastContext`, so
+   the bytes never leave the process before they are durable.
+5. **Broadcast result:**
+   - success → `committed`;
+   - `ErrSubmitIndeterminate` → stays `signed`, and `ErrIntroPending` hands it
+     to the reconciler;
+   - any other error → `aborted(rejected: …)`, staging rolled back and the
+     pending sync control dropped.
+6. **Bind.** The chain must hold exactly the row's terms. Then commit the
+   staged CA and seed, `ActivateSyncControl`, persist the peer route, and
+   install the deny-all peer RBAC snapshot. The host goes to `active`, the
+   guest to `bound_pending_peer`.
+   - The RBAC step resolves the peer operator from the agreement record
+     (`initializePeerRBACPolicyFor`), because `ActiveAgreement` still denies
+     the row here.
+   - Any bind failure sends tx-34 and leaves `revoked(bind_failed: …)`.
+
+Only kind `new` is activated. A rekey replaces an active sync-control binding
+(`PrepareSyncControl` refuses that today) and lands with B2b.
+
+### 6.3 Staging (`internal/federation/introduced_staging.go`)
+
+- The CA and the seed envelope go under
+  `<certs>/federation/<chain>/intro/<link_id>/`.
+- `staged_ref` is `intro/<chain>/<link_id>`. It is compared against the row's
+  own chain and link id, never used as a path.
+- Commit moves both to the live files exactly as JOIN does. The seed epoch
+  follows whatever is live at commit time, and a vault-locked node caches the
+  seed at unlock.
+- Commit is idempotent: with the staged files gone, it accepts a live CA and
+  seed that already match the expected pin and pin-pair, so the reconciler can
+  resume a bind interrupted half-way.
+
+### 6.4 Reconciler (`internal/federation/introduced_reconcile.go`)
+
+`ReconcileIntroducedLinks` runs once when `StartMaintenance` starts and then on
+every tick, per row under the same locks, and follows §3.4:
+
+- `intent` → `aborted(crash_before_broadcast)`.
+- `signed` → the resolver (default `tx.CometTxResolver`) re-submits only the
+  stored bytes, then:
+  - committed with the chain holding the row's terms → bind; with other
+    terms → `aborted(superseded_on_chain)`, chain untouched;
+  - rejected, superseded or abandoned → `aborted(<verdict>)`;
+  - spent with matching terms → `paused(reconcile_spent)`, never
+    auto-activated; otherwise `aborted(spent)`;
+  - unresolved → stays `signed`.
+- `committed` → resume bind.
+- `bound_pending_peer` → `active` once the host reports active (hook installed
+  by B2b, or `GuestIntroConfirmed`). If the host reports aborted or revoked, or
+  the deadline passes → tx-34 → `revoked(peer_not_confirmed)`.
+
+### 6.5 Tests (`introduced_activation_test.go`, `handclasp_intro_test.go`)
+
+- Two real nodes with Badger and SQLite. `restart()` closes and reopens both
+  stores under a fresh Manager.
+- A test-only fault seam (`introFaultFn`) stops the write path with no cleanup
+  at `after_intent`, `after_signed` and `after_commit`.
+- They cover every §3.5 case:
+  - crash before broadcast, both variants;
+  - ambiguous commit: committed, rejected, spent with and without terms,
+    superseded, and unresolved after three passes, each asserting exactly one
+    tx-33 and the stored hash;
+  - crash before bind: resume, and a missing seed → tx-34;
+  - the stale cases;
+  - the guest window: the host refuses, the deadline passes, the host
+    confirms.
+- The org-level stale reasons (offer expiry, roster or policy revision, card
+  removal, allow-list, envelope) reach the engine through `StaleCheck`. Their
+  concrete checks are wired with the routes in B2b.
