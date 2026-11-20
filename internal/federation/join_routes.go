@@ -1130,6 +1130,7 @@ func (m *Manager) StartMaintenance(ctx context.Context) <-chan struct{} {
 		// RFC #443 B2a: settle introduced-link rows left in flight by a
 		// restart, then keep reconciling on every tick.
 		m.reconcileIntroducedLinksLogged(ctx)
+		m.resumeIntroGuests(ctx)
 		t := time.NewTicker(time.Minute)
 		defer t.Stop()
 		for {
@@ -1140,6 +1141,7 @@ func (m *Manager) StartMaintenance(ctx context.Context) <-chan struct{} {
 				m.joins.Maintain(now)
 				m.pruneGuestDrafts(now)
 				m.reconcileIntroducedLinksLogged(ctx)
+				m.resumeIntroGuests(ctx)
 			}
 		}
 	}()

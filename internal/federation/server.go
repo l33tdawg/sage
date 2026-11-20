@@ -109,6 +109,9 @@ func (m *Manager) Router() http.Handler {
 	// The pre-agreement JOIN ceremony routes sit behind joinAuth, NOT peerAuth
 	// (no active agreement exists yet during a join).
 	m.mountJoinRoutes(r)
+	// RFC #443 B2b: the org-introduced handshake, authenticated by roster
+	// card pins instead of a QR code.
+	m.mountIntroRoutes(r)
 	return r
 }
 

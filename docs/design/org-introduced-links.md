@@ -1,7 +1,7 @@
 # Org-introduced federation links (RFC #443, Phase A + B)
 
 Status: Phase A implemented (v11.25.8). Phase B1 implemented (§5). Phase B2a
-implemented (§6). Contract
+implemented (§6). Phase B2b implemented (§7). Contract
 agreed on #443 (v2 + the two implementation points of 2026-11-12). Line refs
 are main @ 506eb377 (v11.25.8).
 Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
@@ -659,3 +659,113 @@ every tick, per row under the same locks, and follows §3.4:
 - The org-level stale reasons (offer expiry, roster or policy revision, card
   removal, allow-list, envelope) reach the engine through `StaleCheck`. Their
   concrete checks are wired with the routes in B2b.
+
+## 7. Phase B2b: the wire
+
+B2b connects the B2a engine to the network. Two enrolled nodes of the same
+org, each holding the same accepted policy and roster and an owner envelope
+that covers the org, can now reach `active` on both sides from two owner
+taps and no QR code. Only kind `new` is wired.
+
+### 7.1 Owner accept (`api/rest/org_intro_handler.go`)
+
+`POST /v1/org/{org_id}/offers/{offer_id}/accept` (current local Root over
+loopback, 1 KiB cap) recomputes the offers, requires the offer to be open and
+of kind `new`, and stores an `IntroAcceptance` (`internal/orgpolicy/intro_accept.go`)
+bound to this node's current envelope revision and digest. A newer envelope
+makes the acceptance stale until the owner accepts again. On the guest it
+also starts the handshake driver; the host waits for the guest.
+
+### 7.2 Routes (`internal/federation/intro_wire.go`)
+
+| Route | Request | Response | Does |
+|---|---|---|---|
+| `POST /fed/v1/intro/request` | 32 KiB | 32 KiB | Guest nonce + evidence in; host nonce + evidence, the 32-byte seed, its commitment, the host CA and E_intro out. |
+| `GET /fed/v1/intro/{offer_id}/accept?session_id=` | — | 8 KiB | `host_accept_sig` (200) once the host owner accepted under the current envelope; 202 while not. |
+| `POST /fed/v1/intro/confirm` | 8 KiB | 8 KiB | Verifies guest-accept + guest-ack over E_intro, then runs the host's §3.3 write path. Idempotent: a replay reports the row. |
+| `GET /fed/v1/intro/{offer_id}/status` | — | 4 KiB | The host's row state for the caller, else `awaiting_accept`, `awaiting_confirm` or `none`. |
+
+- Each cap is checked before decode (`Content-Length`, then
+  `MaxBytesReader`). Bodies decode strictly: unknown fields and trailing data
+  are refused. The client reads every response through `LimitReader(cap+1)`.
+- `policy_mismatch` and `roster_mismatch` are 409 with `retryable: true`.
+- Rate limits share the JOIN per-connection budgets.
+
+### 7.3 Pinning by roster card
+
+- **Host side.** The guest presents its node certificate chained to its own
+  CA. The federation handshake admits such a chain only when that CA's SPKI is
+  the pin of a current roster card of another node, in a current roster of an
+  org this node is enrolled in, and the leaf verifies against it
+  (`introWindowAccepts`, next to the JOIN window in
+  `verifyFederationClientCert`). Every route then requires that pin to be the
+  pin of the offer's peer card, and the CA's CN to be the card's chain id.
+- **Guest side.** The first call does not know the host CA yet, so the guest
+  records the server chain. Before it uses anything in the response it
+  requires the returned CA to carry the host card's pin and chain id and the
+  recorded chain to verify against it. Later calls pin that CA at handshake
+  time. After bind the window probe uses the committed host CA.
+- The guest rebuilds E_intro from its own view (its roster cards, policy,
+  roster, envelope, both nonces, the host's envelope evidence and the seed
+  commitment) and refuses the host's bytes unless they are identical.
+
+### 7.4 Sessions and the seed
+
+- Host sessions live in memory only, one per offer, bounded by the offer
+  expiry and one hour. A restart loses them, and the guest driver starts a
+  new session (new nonces, new E_intro, new seed). Nothing durable is lost:
+  no row exists before both acceptances.
+- The seed is generated on the host inside the pinned session and is never
+  written to disk before B2a stages it with the intent. The host zeroizes it
+  when its write path returns, when the session is replaced, expires or is
+  dropped as stale; the guest zeroizes its copy when its attempt returns.
+
+### 7.5 Guest driver and window (`internal/federation/intro_guest.go`)
+
+- After the owner accepts, the driver runs request → poll accept → verify
+  host-accept → sign guest-accept + guest-ack → `ActivateIntroducedLink(guest)`
+  → confirm. A confirm answer of `active` moves the row to `active`.
+- Transient failures retry with backoff while the offer is open and the
+  acceptance current; a closed offer, a stale acceptance or an activation
+  failure stops the run. The maintenance tick restarts drivers for accepted,
+  open offers, so a guest restart resumes with a fresh session.
+- The B2a `bound_pending_peer` window now asks the host
+  (`GET …/status`). While the host still waits for confirm (a lost confirm),
+  the probe re-sends the stored guest signatures. `active` → active;
+  `aborted`, `revoked` or `none` (the host has no session or row for ours, so
+  it can never confirm) → tx-34 → `revoked(peer_not_confirmed)`; anything else
+  waits for the deadline, which is 15 minutes after the guest activates.
+
+### 7.6 StaleCheck
+
+The engine's `StaleCheck` re-reads the offer under the agreement lease and
+refuses unless the offer is still open (not expired, peer eligible, envelope
+covering, no agreement), the policy and roster revision + digest, the org
+root, both card revisions + digests and this node's envelope revision +
+digest still equal E_intro's, and the owner acceptance names the current
+envelope.
+
+### 7.7 Deferred to B2c
+
+- Applying the pauses B1 only reports (`pause_required`).
+- Rekey: kind `rekey` offers, accepting them, and the epoch rotation of an
+  active binding.
+- Recording stale refusals (today a refusal before the intent keeps no row).
+
+### 7.8 Tests
+
+- `intro_wire_test.go`: two real nodes serving their real routers over mTLS.
+  End to end to `active` on both (one tx-33 each, the same seed committed on
+  both, the host seed zeroized, a replayed confirm is a no-op); the host owner
+  accepting later; an acceptance under an old envelope never signs; policy and
+  roster mismatch; oversized bodies refused before decode; unknown fields and
+  trailing data; expired and closed offers; a caller that is not the offer's
+  peer card; a stranger CA failing the handshake; bad guest signatures; a
+  wrong host pin on the guest; a stale session at confirm; a lost confirm
+  finished by the window's status probe; the window revoking when the host
+  lost its session; restart of either side mid-handshake.
+- `org_intro_handler_test.go`: owner accept (Root over loopback only, open
+  offers only), the org source view, pin lookup, acceptance rebinding after a
+  new envelope.
+- `intro_accept_test.go`: acceptance store and validation.
+

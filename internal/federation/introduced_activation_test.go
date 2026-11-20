@@ -44,6 +44,17 @@ type introNode struct {
 	lastSet  []byte
 	setMode  string // "" ok | "reject" | "indeterminate" | "indeterminate-landed"
 	resolver tx.TxResolveFunc
+	// onOpen runs after every (re)open, for wire tests that install hooks.
+	onOpen func(*Manager)
+	// mgrMu guards mgr for readers on other goroutines (a test listener).
+	mgrMu sync.Mutex
+}
+
+// currentMgr reads mgr for goroutines that race a restart.
+func (n *introNode) currentMgr() *Manager {
+	n.mgrMu.Lock()
+	defer n.mgrMu.Unlock()
+	return n.mgr
 }
 
 func newIntroNode(t *testing.T, chain string, priv ed25519.PrivateKey) *introNode {
@@ -69,13 +80,13 @@ func (n *introNode) open() {
 	require.NoError(t, n.badger.SaveValidators(map[string]int64{"local-validator": 1}))
 	n.sqlite, err = store.NewSQLiteStore(context.Background(), filepath.Join(n.dir, "sage.db"))
 	require.NoError(t, err)
-	n.mgr = NewManager(Config{
+	mgr := NewManager(Config{
 		LocalChainID: n.chain, CertsDir: n.dir, AgentKey: n.priv,
 		Badger: n.badger, MemStore: n.sqlite, Logger: zerolog.Nop(),
 	})
-	n.mgr.SetIntroducedLinkSource(n.sqlite)
-	n.mgr.broadcastFn = n.broadcast
-	n.mgr.introResolveFn = func(ctx context.Context, b []byte) (tx.TxOutcome, error) {
+	mgr.SetIntroducedLinkSource(n.sqlite)
+	mgr.broadcastFn = n.broadcast
+	mgr.introResolveFn = func(ctx context.Context, b []byte) (tx.TxOutcome, error) {
 		n.mu.Lock()
 		r := n.resolver
 		n.mu.Unlock()
@@ -84,9 +95,20 @@ func (n *introNode) open() {
 		}
 		return r(ctx, b)
 	}
+	if n.onOpen != nil {
+		n.onOpen(mgr)
+	}
+	// Publish only a fully configured Manager.
+	n.mgrMu.Lock()
+	n.mgr = mgr
+	n.mgrMu.Unlock()
 }
 
 func (n *introNode) close() {
+	if n.mgr != nil {
+		n.mgr.StopIntroGuests()
+		n.mgr.waitIntroGuests()
+	}
 	if n.badger != nil {
 		_ = n.badger.CloseBadger()
 		n.badger = nil

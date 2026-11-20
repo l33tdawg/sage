@@ -15,9 +15,9 @@ package federation
 // anything but the stored bytes. ActiveAgreement denies the agreement until
 // the row is active (introduced_link_gate.go).
 //
-// Phase B2a ships the engine only: no production path calls
-// ActivateIntroducedLink yet. The /fed/v1/intro/* wire and owner accept
-// (B2b) build an IntroActivation and call it.
+// The /fed/v1/intro/* wire (intro_wire.go, intro_guest.go; Phase B2b)
+// builds the IntroActivation once both owners accepted and calls it: the
+// guest first, then the host when the guest's confirm arrives.
 
 import (
 	"bytes"

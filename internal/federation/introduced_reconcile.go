@@ -182,7 +182,7 @@ func (m *Manager) resumeBindLocked(ctx context.Context, row *store.IntroducedLin
 // guest is never live until the host confirms, and is revoked on chain once
 // the deadline passes without that confirmation.
 func (m *Manager) reconcileGuestWindowLocked(ctx context.Context, row *store.IntroducedLink) error {
-	if probe := m.introPeerStatusFn; probe != nil && time.Now().Unix() < row.Deadline {
+	if probe := m.introPeerStatus(); probe != nil && time.Now().Unix() < row.Deadline {
 		status, err := probe(ctx, row)
 		if err != nil {
 			return fmt.Errorf("host status: %w", err)
@@ -211,8 +211,8 @@ func (m *Manager) revokeGuestWindowLocked(ctx context.Context, row *store.Introd
 }
 
 // GuestIntroConfirmed moves a guest row from bound_pending_peer to active once
-// the host reports the link active (the IntroConfirmWire response or the
-// status poll, wired in B2b).
+// the host reports the link active in its IntroConfirmWire response. The
+// status probe of the guest window covers a lost response.
 func (m *Manager) GuestIntroConfirmed(ctx context.Context, linkID string) error {
 	ss := m.syncStore()
 	if ss == nil {

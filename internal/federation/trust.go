@@ -311,6 +311,13 @@ func (m *Manager) verifyFederationClientCert(rawCerts [][]byte) error {
 	if m.joinWindowAccepts(rawCerts) {
 		return nil
 	}
+	// An org-introduced peer (RFC #443 B2b) presents its CA in the chain; it
+	// gets through only when that CA's SPKI is a current roster card pin and
+	// the leaf verifies against it. The intro routes re-check the pin per
+	// offer.
+	if m.introWindowAccepts(rawCerts) {
+		return nil
+	}
 	return errors.New("federation: client certificate matches no active agreement")
 }
 

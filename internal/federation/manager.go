@@ -516,14 +516,20 @@ type Manager struct {
 	broadcastFn func(txBytes []byte) (string, int64, error)
 	// introResolveFn resolves a stored introduced-link tx-33 (test seam;
 	// default tx.CometTxResolver(cometRPC)). introPeerStatusFn asks the host
-	// for a guest bound_pending_peer row's status (installed with the B2b
-	// wire; nil = wait for the deadline).
+	// for a guest bound_pending_peer row's status (test seam; default: the
+	// B2b status probe over the intro wire).
 	introResolveFn    tx.TxResolveFunc
 	introPeerStatusFn func(ctx context.Context, row *store.IntroducedLink) (string, error)
 	// introFaultFn is a test-only crash seam for the introduced-link write
 	// path: returning true at a point stops the call there with no cleanup,
 	// as a process kill would.
 	introFaultFn func(point string) bool
+	// intro is the RFC #443 B2b intro wire state (host sessions, guest
+	// drivers, the org source). introPoll / introGuestWindow are test seams
+	// (0 = the defaults).
+	intro            introState
+	introPoll        time.Duration
+	introGuestWindow time.Duration
 
 	// agreementMutationMu serializes every local tx-33/tx-34 control surface,
 	// including legacy REST through LockAgreementMutation. A sharing update is a
