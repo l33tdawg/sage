@@ -101,6 +101,9 @@ type introState struct {
 	wg      sync.WaitGroup
 	// confirmHold is a test seam run while a confirm owns its session.
 	confirmHold func()
+	// requestPublished is a test seam run after a request publishes its
+	// session and before it answers.
+	requestPublished func(*introHostSession)
 }
 
 // SetIntroOrgSource installs the org source for the intro wire.

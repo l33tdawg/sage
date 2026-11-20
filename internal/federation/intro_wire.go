@@ -305,6 +305,14 @@ func (m *Manager) dropIntroHostSession(s *introHostSession) {
 	s.retire()
 }
 
+// introRequestPublished is a test seam run between publishing a host
+// session and answering the request.
+func (m *Manager) introRequestPublished() func(*introHostSession) {
+	m.intro.mu.Lock()
+	defer m.intro.mu.Unlock()
+	return m.intro.requestPublished
+}
+
 // introConfirmHold is a test seam run while a confirm owns its session.
 func (m *Manager) introConfirmHold() func() {
 	m.intro.mu.Lock()
@@ -561,17 +569,26 @@ func (m *Manager) handleIntroRequest(w http.ResponseWriter, r *http.Request) {
 	if v.ExpiresAt < expires {
 		expires = v.ExpiresAt
 	}
+	// The response and the session must not share the seed: once published,
+	// a replacement or expiry can retire the session and zeroize its copy
+	// while this handler is still answering.
+	seedHex := hex.EncodeToString(seed)
+	owned := append([]byte(nil), seed...)
+	zeroize(seed)
 	sess := &introHostSession{
 		orgID: req.OrgID, offerID: req.OfferID, sessionID: hex.EncodeToString(sessionID),
 		peerChain: v.Peer.ChainID, guestPin: peer.pin,
 		guestCAPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: peer.ca.Raw}),
-		transcript: transcript, e: IntroAttestation(transcript), seed: seed,
+		transcript: transcript, e: IntroAttestation(transcript), seed: owned,
 		priorTerms: prior, expiresAt: expires,
 	}
 	if err := m.putIntroHostSession(sess); err != nil {
-		zeroize(seed)
+		zeroize(owned)
 		httpError(w, http.StatusConflict, err.Error())
 		return
+	}
+	if hook := m.introRequestPublished(); hook != nil {
+		hook(sess)
 	}
 	m.logger.Info().Str("peer", v.Peer.ChainID).Str("offer", shortID(req.OfferID)).Msg("intro session opened")
 	writeJSON(w, http.StatusOK, &IntroRequestResp{
@@ -581,7 +598,7 @@ func (m *Manager) handleIntroRequest(w http.ResponseWriter, r *http.Request) {
 			RosterRevision: v.RosterRevision, RosterDigest: v.RosterDigest,
 			EnvelopeRev: v.EnvelopeRev, EnvelopeDigest: v.EnvelopeDigest,
 		},
-		Seed: hex.EncodeToString(seed), SeedCommit: commit, HostCAPEM: string(caPEM), Transcript: transcript,
+		Seed: seedHex, SeedCommit: commit, HostCAPEM: string(caPEM), Transcript: transcript,
 	})
 }
 

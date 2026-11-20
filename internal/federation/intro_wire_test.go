@@ -796,3 +796,63 @@ func TestIntroWire_HostSessionChurnVsConfirm(t *testing.T) {
 		}
 	}
 }
+
+// A request's response must carry the seed it committed to even when a
+// replacement or expiry retires the session it just published: retiring
+// zeroizes the session's seed, and the response's copy must not share it.
+func TestIntroWire_HostSessionRequestVsReplacement(t *testing.T) {
+	p := newWirePair(t)
+	body := guestRequestBody(t, p, nil)
+	checkResp := func(raw []byte) {
+		var resp IntroRequestResp
+		if !assert.NoError(t, json.Unmarshal(raw, &resp)) {
+			return
+		}
+		seed, err := hex.DecodeString(resp.Seed)
+		if assert.NoError(t, err) {
+			assert.Equal(t, resp.SeedCommit, SeedCommitHex(seed), "response seed matches its commitment")
+			assert.NotEqual(t, make([]byte, len(seed)), seed, "response seed was zeroized")
+		}
+	}
+
+	t.Run("retired between publish and answer", func(t *testing.T) {
+		var retired *introHostSession
+		p.host.mgr.intro.mu.Lock()
+		p.host.mgr.intro.requestPublished = func(s *introHostSession) { s.retire(); retired = s }
+		p.host.mgr.intro.mu.Unlock()
+		defer func() {
+			p.host.mgr.intro.mu.Lock()
+			p.host.mgr.intro.requestPublished = nil
+			p.host.mgr.intro.mu.Unlock()
+		}()
+		st, raw := rawIntro(t, p.guest, p.host, http.MethodPost, "/fed/v1/intro/request", body)
+		require.Equal(t, http.StatusOK, st, string(raw))
+		checkResp(raw)
+		require.NotNil(t, retired)
+		require.True(t, retired.seedZeroed(), "the retired session keeps no seed")
+	})
+
+	// Repeated concurrent requests and retirements (run under -race).
+	t.Run("concurrent churn", func(t *testing.T) {
+		for round := 0; round < 10; round++ {
+			var wg sync.WaitGroup
+			for i := 0; i < 6; i++ {
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					st, raw := rawIntro(t, p.guest, p.host, http.MethodPost, "/fed/v1/intro/request", body)
+					if st == http.StatusOK {
+						checkResp(raw)
+					}
+				}()
+				go func() {
+					defer wg.Done()
+					if s := p.host.mgr.introHostSessionFor(wireOffer); s != nil {
+						s.retire() // what an expiry sweep or a drop does
+					}
+				}()
+			}
+			wg.Wait()
+		}
+	})
+}
