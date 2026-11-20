@@ -206,6 +206,8 @@ components:
           description: >-
             Number of distinct challenger IDs in the off-chain lifetime audit
             projection. This is evidence history, not an open-vote count.
+        outcomes:
+          $ref: "#/components/schemas/MemoryOutcomeCounts"
         evidence_counts_available:
           type: boolean
           description: >-
@@ -904,6 +906,55 @@ components:
           type: string
         tx_hash:
           type: string
+
+    MemoryOutcomeRequest:
+      type: object
+      required:
+        - outcome
+      properties:
+        outcome:
+          type: string
+          enum: [helped, hurt, unused]
+        source_chain_id:
+          type: string
+          description: >-
+            Set on federated results. Any non-empty value is refused: outcomes
+            are recorded only for memories stored on this node.
+
+    MemoryOutcomeCounts:
+      type: object
+      description: >-
+        Node-local recall feedback for a memory (POST
+        /v1/memory/{memory_id}/outcome). Each count sums the reporting agents'
+        counts, capped at 5 per agent per kind. Never part of consensus state.
+        Omitted on recall results when the memory has no feedback, and never
+        set on federated results.
+      required: [helped, hurt, unused, agents]
+      properties:
+        helped:
+          type: integer
+          minimum: 0
+        hurt:
+          type: integer
+          minimum: 0
+        unused:
+          type: integer
+          minimum: 0
+        agents:
+          type: integer
+          minimum: 0
+
+    MemoryOutcomeResponse:
+      type: object
+      required: [memory_id, outcome, outcomes]
+      properties:
+        memory_id:
+          type: string
+        outcome:
+          type: string
+          enum: [helped, hurt, unused]
+        outcomes:
+          $ref: "#/components/schemas/MemoryOutcomeCounts"
 
     AgentProfile:
       type: object
@@ -3975,6 +4026,55 @@ paths:
           $ref: "#/components/responses/NotFound"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /v1/memory/{memory_id}/outcome:
+    post:
+      operationId: recordMemoryOutcome
+      summary: Report whether a recalled memory helped, hurt, or went unused.
+      description: >-
+        Node-local feedback, never a transaction. The caller must be able to
+        read the memory. One report per agent per memory every 10 seconds.
+        Recall (/v1/memory/query, /search, /hybrid) moves a memory with
+        feedback at most 3 places within the page it already returns; set
+        SAGE_RECALL_OUTCOME_RANKING=off to keep the store's order. SQLite
+        backend only.
+      tags:
+        - Memory
+      parameters:
+        - $ref: "#/components/parameters/memoryId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryOutcomeRequest"
+      responses:
+        "200":
+          description: Outcome recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryOutcomeResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          description: The same agent reported an outcome for this memory too recently.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
 
   /v1/memory/{memory_id}/task-status:
     put:

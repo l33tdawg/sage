@@ -515,7 +515,7 @@ canonical-disclosure backend failures, and ancestor-traversal uncertainty remain
 can fail before policy evaluation.
 
 Sources: `appV30TaintProjectionProblem` (`api/rest/appv30_taint_problem.go:19`),
-`handleGetMemory` (`api/rest/memory_handler.go:3525`), and
+`handleGetMemory` (`api/rest/memory_handler.go:3611`), and
 `ClassifyMemoryProjectionForRead` (`internal/store/memory_disclosure.go:148`).
 
 ---
@@ -763,6 +763,44 @@ Corroborate a memory. Raises confidence via decay model.
 | `evidence` | string | no |
 
 **Response** (HTTP 200): `{"message": "Corroboration recorded successfully.", "tx_hash": "<hex>"}`
+
+---
+
+### `POST /v1/memory/{memory_id}/outcome`
+
+Report whether a memory you recalled helped, hurt, or went unused.
+Corroboration counts agents that agree with a memory; this counts whether
+using it worked.
+
+**Request body:**
+
+| Field | Type | Required |
+|---|---|---|
+| `outcome` | `"helped"`, `"hurt"` or `"unused"` | yes |
+| `source_chain_id` | string | no; any non-empty value is refused |
+
+**Response** (HTTP 200):
+`{"memory_id": "<id>", "outcome": "helped", "outcomes": {"helped": 3, "hurt": 1, "unused": 0, "agents": 2}}`
+
+- **Node-local.** Feedback lives in one off-chain SQLite table on the node that
+  received it. It is never a transaction, never in the AppHash or a content
+  hash, and never carried by state sync, so nodes can differ.
+- **Who can report.** The caller must be able to read the memory (the same gate
+  as `GET /v1/memory/{memory_id}`). Federated results and retained federated
+  copies are refused (`400` / `404` / `409`); report to the memory's home node.
+- **Limits.** One report per agent per memory every 10 seconds (`429` with
+  `Retry-After`). Each agent counts at most 5 per outcome kind when counts are
+  aggregated.
+- **Effect on recall.** `/v1/memory/query`, `/search` and `/hybrid` return the
+  counts as `outcomes` on results that have any, and move such a result within
+  the page they already return. Strength is
+  `(helped - hurt) / (helped + hurt + 0.5 * unused + 2)`, in (-1, 1); the shift
+  is `round(3 * strength)` places, so feedback alone moves a memory at most 3
+  places, and never pulls one in from outside the page or buries one beyond it.
+  "Unused" reports dilute strength back toward zero. Set
+  `SAGE_RECALL_OUTCOME_RANKING=off` to keep the store's order; counts are still
+  recorded and reported.
+- **Backends.** SQLite only; other backends return `501`.
 
 ---
 
@@ -2966,7 +3004,7 @@ address resolved from a bounded legacy-status offline cache can be accepted
 locally while the peer is down. Delivery waits for that peer to return and pass
 the fresh live authorization preflight above.
 
-**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:800-806`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6745` declaration, `:6669` payload, `:6672` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:821-823`) to 413.
+**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:800-806`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6750` declaration, `:6669` payload, `:6672` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:821-823`) to 413.
 
 **Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`). An index-backed COUNT and its INSERT run under the same write critical section, so parallel sends cannot race past either cap. Over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
 
@@ -3178,7 +3216,7 @@ the result over the original agreement-bound return route
 | `source_chain_id` | string | for foreign work | Exact local reply-source chain returned as `reply_source_chain_id` by the pipe status preflight; prevents another node relabeling the signed result |
 | `claimant_session_id` | string | for foreign work; recommended for provider-addressed compatibility work | Opaque 1–128-byte session currently holding the claim. A provider-addressed row claimed by an older sessionless caller is fenced as `legacy`, and an omitted result session selects only that exact fence; it cannot bypass a named sibling session. |
 
-`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:804`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:7011`, mapping `ErrPipeResultTooLarge` at `:6927-6928`).
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:804`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:7016`, mapping `ErrPipeResultTooLarge` at `:6927-6928`).
 
 **Response** (HTTP 200):
 `{"status":"completed","journal_id":"<memory_id or empty>","journaled":true|false}`.

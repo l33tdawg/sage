@@ -378,6 +378,10 @@ type MemoryResult struct {
 	// Foreign federation content is authenticated and policy-filtered, but it
 	// remains external input to the consuming agent.
 	Trust string `json:"trust,omitempty"`
+	// Outcomes is this node's read-only, node-local recall feedback for the
+	// memory (POST /v1/memory/{memory_id}/outcome). Absent when there is none,
+	// and never set on federated results.
+	Outcomes *MemoryOutcomeCounts `json:"outcomes,omitempty"`
 }
 
 // MemoryDetailResponse is a memory record with votes and corroborations.
@@ -2334,6 +2338,9 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 		results = append(results, result)
 	}
 	results = trimRecallResults(results, req.TopK)
+	// Bounded, node-local feedback nudge within the returned page only, so
+	// cursor pagination still sees the store's page boundaries.
+	results = s.applyRecallOutcomes(r.Context(), results)
 
 	// Update agent's last activity timestamp on recall
 	if queryAgentID != "" && s.agentStore != nil {
@@ -3136,6 +3143,9 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		results = append(results, result)
 	}
 	results = trimRecallResults(results, req.TopK)
+	// Bounded, node-local feedback nudge within the returned page only, so
+	// cursor pagination still sees the store's page boundaries.
+	results = s.applyRecallOutcomes(r.Context(), results)
 
 	// Update agent last activity
 	if queryAgentID != "" && s.agentStore != nil {
@@ -3471,6 +3481,9 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 		results = append(results, result)
 	}
 	results = trimRecallResults(results, req.TopK)
+	// Bounded, node-local feedback nudge within the returned page only, so
+	// cursor pagination still sees the store's page boundaries.
+	results = s.applyRecallOutcomes(r.Context(), results)
 
 	if queryAgentID != "" && s.agentStore != nil {
 		if updateErr := s.agentStore.UpdateAgentLastSeen(r.Context(), queryAgentID, time.Now()); updateErr != nil {
@@ -3521,23 +3534,11 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// handleGetMemory handles GET /v1/memory/{memory_id}.
-func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
-	memoryID := chi.URLParam(r, "memory_id")
-	if memoryID == "" {
-		writeProblem(w, http.StatusBadRequest, "Missing memory ID", "memory_id path parameter is required.")
-		return
-	}
-
-	rec, err := s.store.GetMemory(r.Context(), memoryID)
-	if err != nil {
-		writeProblem(w, http.StatusNotFound, "Memory not found",
-			fmt.Sprintf("No memory found with ID %s.", memoryID))
-		return
-	}
-
+// authorizeMemoryRead applies the single-memory read gate (app-v23 disclosure,
+// agent visibility, domain allowlist and classification). On denial it writes
+// the problem response and returns false. The submitting agent always passes.
+func (s *Server) authorizeMemoryRead(w http.ResponseWriter, r *http.Request, agentID string, rec *memory.MemoryRecord) (*uint8, bool) {
 	// Agent isolation RBAC check: can this agent see this memory's author?
-	agentID := middleware.ContextAgentID(r.Context())
 	var appV23Classification *uint8
 	if s.isPostV23ForNextTx() {
 		disclosure, disclosureErr := s.evaluateAppV23RecordDisclosure(
@@ -3545,16 +3546,16 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 		)
 		if disclosureErr != nil {
 			if writeAppV30TaintProjectionProblem(w, disclosureErr) {
-				return
+				return nil, false
 			}
 			writeProblem(w, http.StatusServiceUnavailable, "Authorization unavailable",
 				"Memory authorization state is unavailable; retry later.")
-			return
+			return nil, false
 		}
 		if !disclosure.Allowed {
 			writeProblem(w, http.StatusForbidden, "Access denied",
 				"You do not currently have read access to this memory.")
-			return
+			return nil, false
 		}
 		classification := disclosure.Classification
 		appV23Classification = &classification
@@ -3572,7 +3573,7 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 			if !visible {
 				writeProblem(w, http.StatusForbidden, "Access denied",
 					"You do not have visibility into this agent's memories.")
-				return
+				return nil, false
 			}
 		}
 	}
@@ -3587,21 +3588,44 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 		// sibling handlers. The submitter always retains access to its own memory.
 		if accessErr := s.checkDomainAccess(r.Context(), agentID, rec.DomainTag, "read"); accessErr != nil {
 			writeProblem(w, http.StatusForbidden, "Access denied", accessErr.Error())
-			return
+			return nil, false
 		}
 		// Per-record classification — only when the domain has a registered owner.
 		if s.badgerStore != nil {
 			domainOwner, domainErr := s.badgerStore.GetDomainOwner(rec.DomainTag)
 			if domainErr == nil && domainOwner != "" {
-				classification, _ := s.badgerStore.GetMemoryClassification(memoryID)
+				classification, _ := s.badgerStore.GetMemoryClassification(rec.MemoryID)
 				hasAccess, accessErr := s.hasMemoryReadAccess(rec.DomainTag, agentID, classification, time.Now())
 				if accessErr != nil || !hasAccess {
 					writeProblem(w, http.StatusForbidden, "Access denied",
 						fmt.Sprintf("No read access to domain %s", rec.DomainTag))
-					return
+					return nil, false
 				}
 			}
 		}
+	}
+	return appV23Classification, true
+}
+
+// handleGetMemory handles GET /v1/memory/{memory_id}.
+func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
+	memoryID := chi.URLParam(r, "memory_id")
+	if memoryID == "" {
+		writeProblem(w, http.StatusBadRequest, "Missing memory ID", "memory_id path parameter is required.")
+		return
+	}
+
+	rec, err := s.store.GetMemory(r.Context(), memoryID)
+	if err != nil {
+		writeProblem(w, http.StatusNotFound, "Memory not found",
+			fmt.Sprintf("No memory found with ID %s.", memoryID))
+		return
+	}
+
+	agentID := middleware.ContextAgentID(r.Context())
+	appV23Classification, readable := s.authorizeMemoryRead(w, r, agentID, rec)
+	if !readable {
+		return
 	}
 
 	votes, _ := s.store.GetVotes(r.Context(), memoryID)

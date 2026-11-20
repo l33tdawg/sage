@@ -813,6 +813,7 @@ func (s *Server) setupRouter() chi.Router {
 		r.Post("/v1/memory/{memory_id}/forget", s.handleForgetMemory)
 		r.Post("/v1/memory/{memory_id}/reinstate", s.handleReinstateMemory)
 		r.Post("/v1/memory/{memory_id}/corroborate", s.handleCorroborateMemory)
+		r.Post("/v1/memory/{memory_id}/outcome", s.handleMemoryOutcome)
 		r.Put("/v1/memory/{memory_id}/task-status", s.handleUpdateTaskStatus)
 		r.Post("/v1/memory/link", s.handleLinkMemories)
 		r.Post("/v1/memory/links", s.handleGetLinksAmong)
