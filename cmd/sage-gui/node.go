@@ -1444,6 +1444,9 @@ func runServe(startupProof string) (rerr error) {
 	// Create dashboard handler. Restart requests are routed back to this main
 	// lifecycle so every listener/store/consensus component drains before exec.
 	restartRequested = make(chan preparedRestartRequest, 1)
+	if err := web.MigrateLegacyAutostart(); err != nil {
+		logger.Warn().Err(err).Msg("legacy open-at-login registration could not be migrated")
+	}
 	dashboard := web.NewDashboardHandler(sqliteStore, version)
 	// Two ways to judge memories, in this order: a judge SERVICE when SAGE_HUNCH_URL is set, else
 	// the model this node serves through its own managed Ollama (SAGE_LOCAL_JUDGE_MODEL). A node

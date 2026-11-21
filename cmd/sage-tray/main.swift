@@ -18,10 +18,14 @@ class SAGEApp: NSObject, NSApplicationDelegate {
     private var pendingServerRestart: DispatchWorkItem?
     private var stableServerReset: DispatchWorkItem?
     private var consecutiveServerFailures = 0
+    private var adoptedExternalServer = false
+    private var awaitingExternalServer = false
+    private var conflictAlertShown = false
     private var isTerminating = false
 
     private let healthCheckInterval: TimeInterval = 5
     private let serverStartupGrace: TimeInterval = 45
+    private let externalServerAdoptionGrace: TimeInterval = 60
     private let unhealthyRestartGrace: TimeInterval = 90
     private let terminationGrace: TimeInterval = 45
     private let maximumAutomaticRestarts = 5
@@ -40,14 +44,7 @@ class SAGEApp: NSObject, NSApplicationDelegate {
     var vaultKeyPath: String { sageHome + "/vault.key" }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // If vault.key exists, prompt for passphrase before starting the server.
-        // This ensures encryption is unlocked at startup, not deferred to the web UI.
-        if FileManager.default.fileExists(atPath: vaultKeyPath) {
-            vaultPassphrase = promptPassphrase()
-            // If user cancels, server starts locked — web UI shows lock screen
-        }
-
-        startServer()
+        startOrAdoptServer()
         startHealthMonitor()
 
         // Open dashboard after server has a moment to start
@@ -125,11 +122,44 @@ class SAGEApp: NSObject, NSApplicationDelegate {
 
     // MARK: - Server Management
 
+    private func startOrAdoptServer() {
+        probeServerHealth { [weak self] healthy in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating else { return }
+                if healthy {
+                    self.dashboardAuthRequired { [weak self] required, authenticated in
+                        DispatchQueue.main.async {
+                            guard let self, !self.isTerminating else { return }
+                            if required && !authenticated {
+                                self.promptForPassphraseIfNeeded()
+                            }
+                            self.adoptExternalServer()
+                        }
+                    }
+                } else {
+                    self.promptForPassphraseIfNeeded()
+                    self.startServer()
+                }
+            }
+        }
+    }
+
+    private func promptForPassphraseIfNeeded() {
+        guard vaultPassphrase == nil,
+              FileManager.default.fileExists(atPath: vaultKeyPath) else {
+            return
+        }
+        vaultPassphrase = promptPassphrase()
+    }
+
     func startServer() {
         pendingServerRestart?.cancel()
         pendingServerRestart = nil
         stableServerReset?.cancel()
         stableServerReset = nil
+        adoptedExternalServer = false
+        awaitingExternalServer = false
+        conflictAlertShown = false
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: sageBinary)
@@ -188,10 +218,152 @@ class SAGEApp: NSObject, NSApplicationDelegate {
 
         guard !isTerminating else { return }
         if process.terminationStatus == 73 {
-            appendServerLog("another SAGE daemon already owns the instance lock; supervisor will not respawn")
+            appendServerLog("another SAGE daemon already owns the instance lock; checking whether it can be adopted")
+            beginAdoptionPolling()
             return
         }
         scheduleServerRestart(afterFailure: true)
+    }
+
+    private func beginAdoptionPolling() {
+        guard !awaitingExternalServer else { return }
+        awaitingExternalServer = true
+        pollForAdoptableServer(deadline: Date().addingTimeInterval(externalServerAdoptionGrace))
+    }
+
+    private func pollForAdoptableServer(deadline: Date) {
+        guard !isTerminating else { return }
+        guard Date() < deadline else {
+            awaitingExternalServer = false
+            appendServerLog(
+                "existing SAGE daemon still owns the instance lock but did not become healthy within \(Int(externalServerAdoptionGrace))s"
+            )
+            showLockConflictAlert()
+            return
+        }
+
+        probeServerHealth { [weak self] healthy in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating, self.awaitingExternalServer else { return }
+                if healthy {
+                    self.adoptExternalServer()
+                } else {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+                        self?.pollForAdoptableServer(deadline: deadline)
+                    }
+                }
+            }
+        }
+    }
+
+    private func adoptExternalServer() {
+        awaitingExternalServer = false
+        adoptedExternalServer = true
+        serverProcess = nil
+        serverStartedAt = Date()
+        unhealthySince = nil
+        conflictAlertShown = false
+        appendServerLog("adopted healthy existing SAGE daemon after startup lock arbitration")
+        unlockAdoptedServerIfNeeded()
+    }
+
+    private func unlockAdoptedServerIfNeeded() {
+        guard let passphrase = vaultPassphrase else { return }
+        dashboardAuthRequired { [weak self] required, authenticated in
+            DispatchQueue.main.async {
+                guard let self, !self.isTerminating, self.adoptedExternalServer else { return }
+                guard required, !authenticated else {
+                    self.vaultPassphrase = nil
+                    return
+                }
+                self.loginAdoptedServer(passphrase)
+            }
+        }
+    }
+
+    private func loginAdoptedServer(_ passphrase: String) {
+        guard let url = URL(string: "http://127.0.0.1:8080/v1/dashboard/auth/login") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 10
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["passphrase": passphrase])
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.vaultPassphrase = nil
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                let payload = data.flatMap {
+                    try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+                }
+                let ok = (payload?["ok"] as? Bool) == true
+                if (200..<300).contains(status), ok {
+                    self.appendServerLog("unlocked adopted SAGE daemon with the startup passphrase")
+                    return
+                }
+                self.appendServerLog("could not unlock adopted SAGE daemon (HTTP \(status)); open CEREBRUM to retry")
+                self.showAdoptedUnlockFailureAlert()
+            }
+        }.resume()
+    }
+
+    private func dashboardAuthRequired(completion: @escaping (Bool, Bool) -> Void) {
+        guard let url = URL(string: "http://127.0.0.1:8080/v1/dashboard/auth/check") else {
+            completion(true, false)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+        URLSession.shared.dataTask(with: request) { data, response, _ in
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let data,
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                completion(true, false)
+                return
+            }
+            guard let required = payload["auth_required"] as? Bool,
+                  let authenticated = payload["authenticated"] as? Bool else {
+                completion(true, false)
+                return
+            }
+            completion(required, authenticated)
+        }.resume()
+    }
+
+    private func probeServerHealth(completion: @escaping (Bool) -> Void) {
+        guard let url = URL(string: "http://127.0.0.1:8080/health") else {
+            completion(false)
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2
+        URLSession.shared.dataTask(with: request) { _, response, _ in
+            completion((response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } ?? false)
+        }.resume()
+    }
+
+    private func showLockConflictAlert() {
+        guard !conflictAlertShown else { return }
+        conflictAlertShown = true
+        let alert = NSAlert()
+        alert.messageText = "SAGE is already starting"
+        alert.informativeText = """
+        Another SAGE process owns the local data lock, but it did not become ready.
+        Quit the other SAGE process, then reopen SAGE. See the log for details.
+        """
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
+    private func showAdoptedUnlockFailureAlert() {
+        let alert = NSAlert()
+        alert.messageText = "SAGE could not unlock the existing node"
+        alert.informativeText = "Open CEREBRUM and enter the vault passphrase to try again."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func scheduleServerRestart(afterFailure: Bool) {
@@ -240,13 +412,14 @@ class SAGEApp: NSObject, NSApplicationDelegate {
     private func checkServerHealth() {
         guard !isTerminating,
               !healthProbeInFlight,
-              let process = serverProcess,
-              process.isRunning,
+              adoptedExternalServer || serverProcess?.isRunning == true,
               let startedAt = serverStartedAt,
-              Date().timeIntervalSince(startedAt) >= serverStartupGrace,
               let url = URL(string: "http://127.0.0.1:8080/health") else {
             return
         }
+        let process = serverProcess
+        let startupGrace = adoptedExternalServer ? 0 : serverStartupGrace
+        guard Date().timeIntervalSince(startedAt) >= startupGrace else { return }
 
         healthProbeInFlight = true
         var request = URLRequest(url: url)
@@ -255,7 +428,10 @@ class SAGEApp: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.healthProbeInFlight = false
-                guard self.serverProcess === process, process.isRunning, !self.isTerminating else {
+                let localServerStillOwned = process != nil &&
+                    self.serverProcess === process &&
+                    process?.isRunning == true
+                guard self.adoptedExternalServer || localServerStillOwned, !self.isTerminating else {
                     return
                 }
                 if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
@@ -265,15 +441,35 @@ class SAGEApp: NSObject, NSApplicationDelegate {
 
                 if self.unhealthySince == nil {
                     self.unhealthySince = Date()
-                    self.appendServerLog("daemon pid \(process.processIdentifier) stopped answering health checks")
+                    if let process {
+                        self.appendServerLog("daemon pid \(process.processIdentifier) stopped answering health checks")
+                    } else {
+                        self.appendServerLog("adopted SAGE daemon stopped answering health checks")
+                    }
                     return
                 }
                 if let since = self.unhealthySince,
                    Date().timeIntervalSince(since) >= self.unhealthyRestartGrace {
-                    self.recoverUnresponsiveServer(process)
+                    if let process, !self.adoptedExternalServer {
+                        self.recoverUnresponsiveServer(process)
+                    } else {
+                        self.reportUnresponsiveAdoptedServer()
+                    }
                 }
             }
         }.resume()
+    }
+
+    private func reportUnresponsiveAdoptedServer() {
+        guard !conflictAlertShown else { return }
+        conflictAlertShown = true
+        appendServerLog("adopted SAGE daemon did not recover; leaving its process untouched")
+        let alert = NSAlert()
+        alert.messageText = "SAGE stopped responding"
+        alert.informativeText = "Quit the existing SAGE process, then reopen SAGE or use Activity Monitor."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     private func recoverUnresponsiveServer(_ process: Process) {
