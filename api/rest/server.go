@@ -705,6 +705,13 @@ func (s *Server) SetFederation(f FederationService) {
 		hooked.SetIntroducedLinkSource(introducedLinkSourceAdapter{s: s})
 		hooked.SetIntroducedSharingCap(s.introducedSharingCap)
 	}
+	// RFC #443 Phase B2b: the intro handshake reads offers, cards and owner
+	// acceptances from the node-local org policy store.
+	if wired, ok := f.(interface {
+		SetIntroOrgSource(federation.IntroOrgSource)
+	}); ok {
+		wired.SetIntroOrgSource(introOrgSourceAdapter{s: s})
+	}
 }
 
 // SetNodeOperatorID records the hex-encoded ed25519 public key that
@@ -917,6 +924,8 @@ func (s *Server) setupRouter() chi.Router {
 		r.Get("/v1/org/{org_id}/envelope", s.handleOrgEnvelopeStatus)
 		r.Get("/v1/org/{org_id}/offers", s.handleOrgOffers)
 		r.Post("/v1/org/{org_id}/offers/{offer_id}/reoffer", s.handleOrgReoffer)
+		// RFC #443 Phase B2b: owner accept of an intro offer.
+		r.Post("/v1/org/{org_id}/offers/{offer_id}/accept", s.handleOrgOfferAccept)
 		r.Get("/v1/federation/introduced-links", s.handleIntroducedLinkList)
 		r.Delete("/v1/org/{org_id}/member/{agent_id}", s.handleOrgRemoveMember)
 		r.Post("/v1/org/{org_id}/clearance", s.handleOrgSetClearance)

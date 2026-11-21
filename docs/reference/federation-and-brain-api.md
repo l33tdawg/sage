@@ -490,6 +490,20 @@ timeout does not silently recreate a shorter HTTP deadline
 | `POST /fed/v1/join/abort` | `handleJoinAbort` (`join_routes.go`) | A bound guest propagates Stop to the host. The exact bound client-cert SPKI is required; active connections must use permanent revoke instead. |
 | `POST /fed/v1/join/confirm` | `handleJoinConfirm` (`join_routes.go`) | Guest -> host approval #2. Verifies the guest's signatures over the frozen attestation E, then the host broadcasts its tx-33, commits the staged CA + seed, and marks ACTIVE. An identical confirm from the same bound certificate replays the stored activation result after a lost HTTP response without a second broadcast; changed certificates/signatures still fail. |
 
+Org-introduced links (RFC #443 Phase B2b) use their own routes on the same
+listener, authenticated by roster card pins instead of a QR code: the guest
+presents its node certificate chained to its CA, and the handshake admits the
+chain only when that CA's SPKI is a current roster card pin. Each route then
+requires the pin of the offer's peer card. Caps are checked before decode.
+See `docs/design/org-introduced-links.md` §7.
+
+| Method + path | Handler | Purpose |
+|---|---|---|
+| `POST /fed/v1/intro/request` | `handleIntroRequest` (`intro_wire.go`) | Guest -> host, 32 KiB each way. Checks the offer is open with this node as host, the caller is the peer card's CA, and both nodes hold the same policy and roster (else 409 `policy_mismatch` / `roster_mismatch`, retryable). Returns the host nonce and evidence, a fresh 32-byte seed with its commitment, the host CA and the canonical E_intro. |
+| `GET /fed/v1/intro/{offer_id}/accept?session_id=…` | `handleIntroAccept` (`intro_wire.go`) | The guest polls. 200 with `host_accept_sig` once the host owner accepted under the current envelope, 202 while not, 404 for a session that is not the live one. |
+| `POST /fed/v1/intro/confirm` | `handleIntroConfirm` (`intro_wire.go`) | Guest -> host, 8 KiB each way. Verifies guest-accept and guest-ack over E_intro against the guest card key, then runs the host's introduced-link write path. A replay reports the row without a second broadcast. |
+| `GET /fed/v1/intro/{offer_id}/status` | `handleIntroStatus` (`intro_wire.go`) | 4 KiB. The host's row state for the caller, else `awaiting_accept`, `awaiting_confirm` or `none`. The guest's `bound_pending_peer` window uses it and re-sends confirm while the host waits for it. |
+
 An automatic enrollment with a prepared relay bundle adds
 `x_sage_transport=p2p`, protocol, peer ID, and up to four complete peer
 multiaddrs to the otherwise compatible TOTP URI. Parsing is all-or-nothing: the

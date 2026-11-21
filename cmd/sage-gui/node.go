@@ -2640,6 +2640,7 @@ func runServe(startupProof string) (rerr error) {
 	dashboard.SSE.CloseAll()
 	if fedMgr != nil {
 		fedMgr.StopSyncDrainer()
+		fedMgr.StopIntroGuests()
 	}
 
 	// All listeners get the same full wall-clock budget by draining in parallel;

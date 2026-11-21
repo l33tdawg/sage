@@ -269,6 +269,16 @@ func (m *Manager) ServerTLSConfig() (*tls.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load node certificate for federation listener: %w", err)
 	}
+	// Present our own CA after the leaf (RFC #443 B2b). An org-introduced
+	// guest knows only the CA SPKI pin from our roster card, so it can pin
+	// the server at handshake time only if the CA is in the chain. The CA is
+	// public (JOIN serves it at /fed/v1/join/ca), and verifiers that already
+	// hold it treat the extra certificate as a redundant intermediate.
+	if caPEM, caErr := os.ReadFile(filepath.Join(m.certsDir, tlsca.CACertFile)); caErr == nil { // #nosec G304 -- fixed file in the node's certs dir
+		if blk, _ := pem.Decode(caPEM); blk != nil && blk.Type == "CERTIFICATE" {
+			cert.Certificate = append(cert.Certificate, blk.Bytes)
+		}
+	}
 	return &tls.Config{
 		Certificates:           []tls.Certificate{cert},
 		MinVersion:             tls.VersionTLS13,
@@ -309,6 +319,13 @@ func (m *Manager) verifyFederationClientCert(rawCerts [][]byte) error {
 	// open (deliberately opened by the operator, 15-min TTL). Both close as soon
 	// as the ceremony finishes.
 	if m.joinWindowAccepts(rawCerts) {
+		return nil
+	}
+	// An org-introduced peer (RFC #443 B2b) presents its CA in the chain; it
+	// gets through only when that CA's SPKI is a current roster card pin and
+	// the leaf verifies against it. The intro routes re-check the pin per
+	// offer.
+	if m.introWindowAccepts(rawCerts) {
 		return nil
 	}
 	return errors.New("federation: client certificate matches no active agreement")
