@@ -303,6 +303,7 @@ Vector similarity search. Requires a precomputed embedding.
 | `top_k` | int | no | Max results; default 10 |
 | `cursor` | string | no | Opaque pagination cursor from previous response |
 | `tags` | []string | no | OR-filter by tag on both SQLite and Postgres |
+| `not_tags` | []string | no | Exclude any memory carrying ANY listed tag (SQLite and Postgres). Applied together with `tags`, so `tags:["a"]`, `not_tags:["b"]` means "a and not b". Same limits as `tags`; sorted and de-duplicated. Local recall only: combined with `federated` or `federate_chains` it is refused with 400, never silently dropped. |
 
 **Response** (HTTP 200):
 
@@ -338,7 +339,7 @@ Vector similarity search. Requires a precomputed embedding.
 
 `confidence_score` in the response is the **decayed** value (time decay + corroboration boost applied server-side), not the raw submitted value. `initial_confidence` is the **stored** (undecayed) value — the on-chain confidence set at submission (corroboration never rewrites it) — so a client can see the authoritative floor alongside the decayed score without re-deriving it. It is present for local memories and omitted for federated results (where only the serving peer's already-decayed value is available).
 
-`index_status` is present on an **EMPTY, domain-scoped semantic recall**. `"complete"` and `"incomplete"` are restricted to the exact unnarrowed local `status_filter: "committed"` contract: no provider, tags, minimum confidence, cursor, text arm, or federation request. `"complete"` means every committed/challenged row in that local domain is reachable in the active vector space, so the empty result is genuine local absence. `"incomplete"` means a committed/challenged row has no vector or belongs to a foreign vector space; empty is **not** proof of absence (re-embed the domain, or query the matching space). `"unavailable"` is still emitted for other empty domain-scoped semantic recalls and makes no completeness claim—for example when the query is narrowed or federated, the caller is not proven to see every record, the complete canonical SQL-to-ledger projection audit is not exact, there is no exact active vector space, or the live domain exceeds the bounded scan. The enum is never a count or list and is absent whenever any result is returned. Search/hybrid endpoints normally omit it; the taint-coverage exception below can emit `"unavailable"` on any empty recall.
+`index_status` is present on an **EMPTY, domain-scoped semantic recall**. `"complete"` and `"incomplete"` are restricted to the exact unnarrowed local `status_filter: "committed"` contract: no provider, tags, not_tags, minimum confidence, cursor, text arm, or federation request. `"complete"` means every committed/challenged row in that local domain is reachable in the active vector space, so the empty result is genuine local absence. `"incomplete"` means a committed/challenged row has no vector or belongs to a foreign vector space; empty is **not** proof of absence (re-embed the domain, or query the matching space). `"unavailable"` is still emitted for other empty domain-scoped semantic recalls and makes no completeness claim—for example when the query is narrowed or federated, the caller is not proven to see every record, the complete canonical SQL-to-ledger projection audit is not exact, there is no exact active vector space, or the live domain exceeds the bounded scan. The enum is never a count or list and is absent whenever any result is returned. Search/hybrid endpoints normally omit it; the taint-coverage exception below can emit `"unavailable"` on any empty recall.
 
 If an authorized candidate reaches the bounded taint ancestor-walk limit,
 query/search/hybrid withhold that candidate, return other readable results, and
@@ -418,6 +419,7 @@ Full-text search (FTS5/BM25). Same access control as `/v1/memory/query`.
 | `status_filter` | string | no | |
 | `top_k` | int | no | |
 | `tags` | []string | no | OR-filter; SQLite only |
+| `not_tags` | []string | no | Exclude any memory carrying ANY listed tag; see `/v1/memory/query` |
 
 **Response:** Same shape as `/v1/memory/query`. Not available when vault (content encryption) is active — `GET /v1/embed/info` reports `semantic: true` in that case; use `/v1/memory/query` instead.
 
@@ -441,6 +443,7 @@ Fused FTS5 + vector search via Reciprocal Rank Fusion. Requires at least one of
 | `status_filter` | string | no | |
 | `top_k` | int | no | Applied after RRF fusion across variants |
 | `tags` | []string | no | |
+| `not_tags` | []string | no | Exclude any memory carrying ANY listed tag, in every arm and expansion; see `/v1/memory/query` |
 
 **Response:** Same shape as `/v1/memory/query`.
 
@@ -515,7 +518,7 @@ canonical-disclosure backend failures, and ancestor-traversal uncertainty remain
 can fail before policy evaluation.
 
 Sources: `appV30TaintProjectionProblem` (`api/rest/appv30_taint_problem.go:19`),
-`handleGetMemory` (`api/rest/memory_handler.go:3611`), and
+`handleGetMemory` (`api/rest/memory_handler.go:3635`), and
 `ClassifyMemoryProjectionForRead` (`internal/store/memory_disclosure.go:148`).
 
 ---
@@ -3018,7 +3021,7 @@ address resolved from a bounded legacy-status offline cache can be accepted
 locally while the peer is down. Delivery waits for that peer to return and pass
 the fresh live authorization preflight above.
 
-**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:800-806`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6750` declaration, `:6669` payload, `:6672` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:821-823`) to 413.
+**Size caps → HTTP 413.** `payload` is capped at 256 KiB and `intent` at 8 KiB (`MaxPipeContentBytes`/`MaxPipeIntentBytes`, `internal/store/store.go:800-806`). The REST handler fast-fails an over-cap request with **413** before the store write; the store enforces the same caps at the `InsertPipeline` chokepoint (`internal/store/sqlite.go:6768` declaration, `:6669` payload, `:6672` intent) as defense in depth, mapping `ErrPipePayloadTooLarge`/`ErrPipeIntentTooLarge` (`store.go:821-823`) to 413.
 
 **Open-pipe quota → HTTP 429 + `Retry-After`.** A single verified agent identity may hold at most 256 non-terminal (pending or claimed) pipes open at once, and a node caps 10000 across all requesters (`MaxOpenPipesPerAgent`/`MaxOpenPipesGlobal`). An index-backed COUNT and its INSERT run under the same write critical section, so parallel sends cannot race past either cap. Over-quota inserts are rejected as **429 with `Retry-After`** (`ErrPipeQuotaPerAgent`/`ErrPipeQuotaGlobal`), keyed on the Ed25519-verified `from_agent`, not the spoofable rate-limit header. This mirrors the mempool-full recipe (see `GET /v1/chain/backpressure` below): treat it as backpressure and retry after the hinted interval, not as a per-agent rate-limit breach.
 
@@ -3230,7 +3233,7 @@ the result over the original agreement-bound return route
 | `source_chain_id` | string | for foreign work | Exact local reply-source chain returned as `reply_source_chain_id` by the pipe status preflight; prevents another node relabeling the signed result |
 | `claimant_session_id` | string | for foreign work; recommended for provider-addressed compatibility work | Opaque 1–128-byte session currently holding the claim. A provider-addressed row claimed by an older sessionless caller is fenced as `legacy`, and an omitted result session selects only that exact fence; it cannot bypass a named sibling session. |
 
-`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:804`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:7016`, mapping `ErrPipeResultTooLarge` at `:6927-6928`).
+`result` is capped at 256 KiB (`MaxPipeContentBytes`, `store.go:804`); an over-cap submission is rejected **HTTP 413**, enforced both at the handler and at the `CompletePipeline` store chokepoint (`sqlite.go:7034`, mapping `ErrPipeResultTooLarge` at `:6927-6928`).
 
 **Response** (HTTP 200):
 `{"status":"completed","journal_id":"<memory_id or empty>","journaled":true|false}`.

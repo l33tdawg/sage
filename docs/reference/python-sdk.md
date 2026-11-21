@@ -255,6 +255,7 @@ query(
     status_filter: str | None = None,
     cursor: str | None = None,
     tags: list[str] | None = None,
+    not_tags: list[str] | None = None,
 ) -> MemoryQueryResponse
 ```
 
@@ -263,6 +264,7 @@ query(
 Vector cosine similarity search.
 
 - `tags`: OR semantics — results must match any of the listed tags (source: `client.py:208`).
+- `not_tags`: drops memories tagged with any of the listed tags; combine with `tags` for "a and not b". Local recall only. `hybrid()` takes the same argument. A node without `not_tags` support ignores the field, so check the node version first.
 - `cursor`: opaque pagination token from `next_cursor`.
 
 Returns `MemoryQueryResponse(results: list[MemoryRecord], next_cursor: str | None, total_count: int)`.
@@ -285,6 +287,7 @@ hybrid(
     min_confidence: float | None = None,
     provider: str | None = None,
     tags: list[str] | None = None,
+    not_tags: list[str] | None = None,
     expansions: list[dict[str, Any]] | None = None,
 ) -> MemoryQueryResponse
 ```
@@ -498,6 +501,47 @@ snapshotted electorate. Returns
 An eligible app-v27 static reserved shared-domain record author is included in
 the frozen electorate when a weighted challenge opens and may therefore
 reinstate it. The exception is record-scoped and preserves all hard denials.
+
+---
+
+#### `replace()`
+
+```python
+replace(
+    replaces_memory_id: str,
+    content: str,
+    confidence: float,
+    *,
+    memory_type: MemoryType | str | None = None,
+    domain_tag: str | None = None,
+    embedding: list[float] | None = None,
+    tags: list[str] | None = None,
+    reason: str | None = None,
+) -> dict
+```
+
+Replaces a live memory with corrected content in one call. It has the same contract as MCP
+`sage_remember(replaces_memory_id=...)`:
+
+1. `GET /v1/memory/{id}`: the old memory must be `committed` or `challenged`.
+2. `POST /v1/memory/submit` in the old memory's domain, with its classification
+   and `parent_hash` set to the old content hash. The type defaults to the old type.
+   A different `domain_tag` raises `ValueError`.
+3. Read the replacement back until it is `committed` (bounded wait, about 30 s).
+4. Only then `POST /v1/memory/{old}/challenge`.
+
+An interruption can leave both records, but never neither. The result carries
+`memory_id`, `tx_hash`, `replaces_memory_id`, `replacement_status`,
+`old_memory_status`, and `correction_status`. The status is one of the following:
+
+- `completed`.
+- `replacement_pending`: the old memory is untouched.
+- `replacement_committed_old_retained`: the challenge was refused.
+- `replacement_committed_old_unknown`: the challenge request broke off; re-read the old memory.
+
+The steps run client-side because every on-chain challenge must carry the
+caller's own signed challenge request; a node cannot challenge on the caller's
+behalf from a signed submit. `AsyncSageClient.replace()` is the async twin.
 
 ---
 

@@ -1027,6 +1027,7 @@ def hash_embed(text: str, dim: int = 768) -> list[float]:
 | `GET` | `/v1/memory/{id}` | `get_memory()` |
 | `POST` | `/v1/memory/{id}/forget` | `forget()` |
 | `POST` | `/v1/memory/{id}/reinstate` | `reinstate()` |
+| `GET` + `POST` | `/v1/memory/{id}`, `/v1/memory/submit`, `/v1/memory/{id}/challenge` | `replace()` (commit-first supersede) |
 | `GET` | `/v1/memory/list` | `list_memories()` |
 | `GET` | `/v1/memory/timeline` | `timeline()` |
 | `POST` | `/v1/memory/link` | `link_memories()` |
