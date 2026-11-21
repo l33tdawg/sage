@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -229,6 +230,17 @@ func TestAppV25DomainContinuityRejectedBatchIsolatesOnlyConflictingSingleton(t *
 	require.Equal(t, []string{"b-conflict"}, skipped)
 	require.Equal(t, []string{"a-good", "c-good", "d-good"}, recovered)
 	require.LessOrEqual(t, passes, 8, "bisection must converge without a proposal loop")
+}
+
+func TestAppV25DomainContinuityRetryDelayBacksOffAndCaps(t *testing.T) {
+	require.Equal(t, 30*time.Second, nextAppV25DomainContinuityRetryDelay(0))
+	require.Equal(t, time.Minute, nextAppV25DomainContinuityRetryDelay(30*time.Second))
+	require.Equal(t, 2*time.Minute, nextAppV25DomainContinuityRetryDelay(time.Minute))
+	require.Equal(t, 4*time.Minute, nextAppV25DomainContinuityRetryDelay(2*time.Minute))
+	require.Equal(t, 8*time.Minute, nextAppV25DomainContinuityRetryDelay(4*time.Minute))
+	require.Equal(t, 16*time.Minute, nextAppV25DomainContinuityRetryDelay(8*time.Minute))
+	require.Equal(t, 30*time.Minute, nextAppV25DomainContinuityRetryDelay(16*time.Minute))
+	require.Equal(t, 30*time.Minute, nextAppV25DomainContinuityRetryDelay(30*time.Minute))
 }
 
 func TestAppV25DomainContinuityPlanDigestBindsDomainAndCompleteWriterSet(t *testing.T) {

@@ -25,6 +25,7 @@ import (
 const (
 	appV25DomainContinuityOperationName = "domain_continuity_adopt"
 	appV25DomainContinuityPollInterval  = 30 * time.Second
+	appV25DomainContinuityMaxBackoff    = 30 * time.Minute
 )
 
 type appV25MemoryAdoptionProgressReader interface {
@@ -158,6 +159,7 @@ func (h *DashboardHandler) RunAppV25DomainContinuityWorker(
 		return
 	}
 	run := &appV25DomainContinuityRun{}
+	retryDelay := appV25DomainContinuityPollInterval
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {
@@ -170,13 +172,30 @@ func (h *DashboardHandler) RunAppV25DomainContinuityWorker(
 		if active() {
 			more, err := h.runAppV25DomainContinuityPassWithRun(ctx, logger, run)
 			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.Warn().Err(err).Msg("app-v25 domain-continuity pass deferred")
+				delay = retryDelay
+				retryDelay = nextAppV25DomainContinuityRetryDelay(retryDelay)
+				logger.Warn().Dur("retry_in", delay).Err(err).Msg("app-v25 domain-continuity pass deferred")
 			} else if more {
 				delay = 5 * time.Second
+				retryDelay = appV25DomainContinuityPollInterval
+			} else {
+				retryDelay = appV25DomainContinuityPollInterval
 			}
+		} else {
+			retryDelay = appV25DomainContinuityPollInterval
 		}
 		timer.Reset(delay)
 	}
+}
+
+func nextAppV25DomainContinuityRetryDelay(previous time.Duration) time.Duration {
+	if previous < appV25DomainContinuityPollInterval {
+		return appV25DomainContinuityPollInterval
+	}
+	if previous >= appV25DomainContinuityMaxBackoff/2 {
+		return appV25DomainContinuityMaxBackoff
+	}
+	return previous * 2
 }
 
 func (h *DashboardHandler) runAppV25DomainContinuityPassWithRun(
