@@ -1,4 +1,4 @@
-<!-- Verified against SAGE v11.25.10 code (2026-09-02). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
+<!-- Verified against SAGE v11.25.11 code (2026-09-02). Cite file:line when behavior is non-obvious. This doc covers the v11 federation and brain graph surface; rest-api.md governs the core /v1/* endpoints. -->
 
 # SAGE Federation and Brain HTTP API Reference (v11)
 
@@ -490,12 +490,15 @@ timeout does not silently recreate a shorter HTTP deadline
 | `POST /fed/v1/join/abort` | `handleJoinAbort` (`join_routes.go`) | A bound guest propagates Stop to the host. The exact bound client-cert SPKI is required; active connections must use permanent revoke instead. |
 | `POST /fed/v1/join/confirm` | `handleJoinConfirm` (`join_routes.go`) | Guest -> host approval #2. Verifies the guest's signatures over the frozen attestation E, then the host broadcasts its tx-33, commits the staged CA + seed, and marks ACTIVE. An identical confirm from the same bound certificate replays the stored activation result after a lost HTTP response without a second broadcast; changed certificates/signatures still fail. |
 
-Org-introduced links (RFC #443 Phase B2b) use their own routes on the same
+Org-introduced links (RFC #443 Phase B) use their own routes on the same
 listener, authenticated by roster card pins instead of a QR code: the guest
 presents its node certificate chained to its CA, and the handshake admits the
 chain only when that CA's SPKI is a current roster card pin. Each route then
-requires the pin of the offer's peer card. Caps are checked before decode.
-See `docs/design/org-introduced-links.md` §7.
+requires the pin of the offer's peer card. Caps are checked before decode. The
+Phase B2c policy pass applies owner-envelope and roster pauses, follows
+endpoint-only card changes, requires a fresh owner-accepted handshake for a CA
+pin rekey, and keeps stale-gate refusals in a bounded diagnostics log. See
+`docs/design/org-introduced-links.md` §§7-8.
 
 | Method + path | Handler | Purpose |
 |---|---|---|

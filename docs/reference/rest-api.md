@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.25.10. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.25.11. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -1768,7 +1768,7 @@ Return the stored envelope, its `status` (`covering`, or `not_covering` with a `
 
 ### `GET /v1/org/{org_id}/offers`
 
-Compute this node's per-peer introduction offers for the org from the accepted policy, the accepted roster and the owner envelope. Node operator only. Returns `ready` (with a `reason` when an org-level precondition fails), the roster revision and digest, the envelope revision, and one row per roster peer with `role` (`host` = lower agent key), `state` (`offered`, `none`, `manual`, `in_flight`, `active`, `rekey_required`, `pause_required`, `paused`, `expired`), `reason`, and, for an open offer, `kind` (`new` / `rekey`), the deterministic `offer_id`, `offered_at` and `expires_at` (72 h after this node first saw it). Listing records first sight of new offers; it never signs or broadcasts anything.
+Compute this node's per-peer introduction offers for the org from the accepted policy, the accepted roster and the owner envelope. Node operator only. Returns `ready` (with a `reason` when an org-level precondition fails), the roster revision and digest, the envelope revision, and one row per roster peer with `role` (`host` = lower agent key), `state` (`offered`, `none`, `manual`, `in_flight`, `active`, `rekey_required`, `pause_required`, `paused`, `expired`), `reason`, `resumable` on a paused link that can reactivate without another tap, and, for an open offer, `kind` (`new` / `rekey`), the deterministic `offer_id`, `offered_at` and `expires_at` (72 h after this node first saw it). Listing records first sight of new offers; it never signs or broadcasts anything.
 
 ### `POST /v1/org/{org_id}/offers/{offer_id}/reoffer`
 
@@ -1776,11 +1776,11 @@ Restart the local 72 h window of an offer this node has already listed. Node ope
 
 ### `POST /v1/org/{org_id}/offers/{offer_id}/accept`
 
-The owner accepts one open offer of kind `new`. The authenticated caller must be the current Root and the request must arrive through localhost (403 otherwise); the body is empty (capped at 1 KiB). The acceptance is stored bound to this node's current owner envelope revision and digest, and stops counting once a newer envelope is stored (accept again). Returns the `acceptance` and `handshake`: on the guest (the higher agent key) `started`, because accepting starts the intro handshake with the host; on the host `waiting_for_guest`. 404 for an offer this node does not list, 409 for an offer that is not open, 501 for a `rekey` offer. The link activates only after both owners accepted: see `/fed/v1/intro/*` in the federation API reference.
+The owner accepts one open offer of kind `new` or `rekey`. The authenticated caller must be the current Root and the request must arrive through localhost (403 otherwise); the body is empty (capped at 1 KiB). The acceptance is stored bound to this node's current owner envelope revision and digest, and stops counting once a newer envelope is stored (accept again). Returns the `acceptance` and `handshake`: on the guest (the higher agent key) `started`, because accepting starts the intro handshake with the host; on the host `waiting_for_guest`. 404 for an offer this node does not list, 409 for an offer that is not open. The link or rekey activates only after both owners accepted: see `/fed/v1/intro/*` in the federation API reference.
 
 ### `GET /v1/federation/introduced-links`
 
-List this node's introduced-link records (newest first; optional `remote_chain_id`) with each row's state, reason, evidence, terms and transition history. Node operator only. The intro transcript and signed tx bytes are never echoed.
+Return `links` and `refusals`. Each link (newest first; optional `remote_chain_id`) includes its state, reason, evidence, terms and transition history. `refusals` lists the bounded stale-gate log for accepted sessions that did not activate because policy, roster, envelope, card or CA-pin state moved before activation; a refusal never creates a link row. Node operator only. The intro transcript and signed tx bytes are never echoed.
 
 ---
 
