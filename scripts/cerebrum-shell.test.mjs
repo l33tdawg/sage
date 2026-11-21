@@ -1793,6 +1793,17 @@ test('macOS tray supervises daemon exits and preserves restart diagnostics', () 
         'macOS CI must compile the tray source that supervises the daemon');
 });
 
+test('macOS tray adopts and unlocks an existing daemon after an instance-lock race', () => {
+    assert.match(traySource, /startOrAdoptServer\(\)/,
+        'startup must probe for an existing node before spawning a second daemon');
+    assert.match(traySource, /if process\.terminationStatus == 73[\s\S]*beginAdoptionPolling\(\)/,
+        'an instance-lock conflict must enter adoption polling instead of permanently abandoning supervision');
+    assert.match(traySource, /\/v1\/dashboard\/auth\/login/,
+        'the tray must deliver the startup passphrase to the adopted node');
+    assert.match(traySource, /adoptedExternalServer \? 0 : serverStartupGrace/,
+        'an already-running node must not wait through cold-start health grace');
+});
+
 test('CEREBRUM waits beyond the daemon signing-drain budget before reporting restart failure', () => {
     assert.match(appSource, /const restartDeadline = Date\.now\(\) \+ RESTART_WAIT_MS/,
         'the browser deadline must outlast the three-minute signing drain plus teardown and startup');
