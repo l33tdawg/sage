@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/l33tdawg/sage/internal/store"
-	"github.com/l33tdawg/sage/internal/tx"
 )
 
 const (
@@ -272,17 +271,17 @@ func (m *Manager) introGuestAttempt(ctx context.Context, orgID, offerID string) 
 	if err != nil {
 		return err
 	}
-	pin, _ := hex.DecodeString(host.Pin)
+	terms, err := m.introTermsFor(tr.Kind, tr.Host)
+	if err != nil {
+		return introStop(err)
+	}
 	deadline := time.Now().Add(m.introWindow()).Unix()
 	act := &IntroActivation{
 		Role: "guest", OrgID: orgID, SessionID: resp.SessionID, Transcript: transcript,
 		HostAcceptSig: hostSig, GuestAcceptSig: guestSig, GuestAckSig: ackSig,
 		Evidence: introEvidenceOf(tr), RemoteCAPEM: []byte(resp.HostCAPEM),
-		Seed: append([]byte(nil), seed...),
-		Terms: &tx.CrossFedTerms{
-			RemoteChainID: host.ChainID, Endpoint: host.Endpoint, PeerPubKey: pin,
-			MaxClearance: tx.ClearanceLevel(trustOnlyJoinScope.MaxClearance), Status: "active",
-		},
+		Seed:             append([]byte(nil), seed...),
+		Terms:            terms,
 		PriorTermsDigest: prior, Deadline: deadline, StaleCheck: stale,
 	}
 	res, err := m.ActivateIntroducedLink(ctx, act)

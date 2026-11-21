@@ -311,8 +311,8 @@ func TestIntroducedLink_LatestStatesAndRestart(t *testing.T) {
 	require.Equal(t, "crash_before_broadcast", rows[1].StateReason)
 }
 
-// The generation covers every chain term except the outbound domain snapshot
-// and the status.
+// The generation covers every chain term except the outbound domain snapshot,
+// the endpoint and the status.
 func TestCrossFedGeneration(t *testing.T) {
 	base := CrossFedRecord{
 		RemoteChainID: "chain-b", Endpoint: "https://b:8444", PeerPubKey: []byte{1, 2, 3},
@@ -322,15 +322,15 @@ func TestCrossFedGeneration(t *testing.T) {
 	require.Len(t, g, 64)
 	same := base
 	same.AllowedDomains, same.Status, same.AllowedDepts = []string{"hr", "ops"}, "revoked", []string{"y", "x"}
-	require.Equal(t, g, CrossFedGeneration(same), "domain snapshot, status and dept order do not change the generation")
+	same.Endpoint = "https://b-moved:9444"
+	require.Equal(t, g, CrossFedGeneration(same), "domain snapshot, endpoint, status and dept order do not change the generation")
 	for name, mut := range map[string]func(*CrossFedRecord){
 		"chain":     func(r *CrossFedRecord) { r.RemoteChainID = "chain-c" },
-		"endpoint":  func(r *CrossFedRecord) { r.Endpoint = "https://b:9444" },
 		"pin":       func(r *CrossFedRecord) { r.PeerPubKey = []byte{1, 2, 4} },
 		"clearance": func(r *CrossFedRecord) { r.MaxClearance = 3 },
 		"expiry":    func(r *CrossFedRecord) { r.ExpiresAt = 5001 },
 		"depts":     func(r *CrossFedRecord) { r.AllowedDepts = []string{"x"} },
-		"concat":    func(r *CrossFedRecord) { r.RemoteChainID, r.Endpoint = "chain-bh", "ttps://b:8444" },
+		"concat":    func(r *CrossFedRecord) { r.RemoteChainID, r.PeerPubKey = "chain-b\x01", []byte{2, 3} },
 	} {
 		r := base
 		mut(&r)

@@ -1,7 +1,8 @@
 # Org-introduced federation links (RFC #443, Phase A + B)
 
 Status: Phase A implemented (v11.25.8). Phase B1 implemented (§5). Phase B2a
-implemented (§6). Phase B2b implemented (§7). Contract
+implemented (§6). Phase B2b implemented (§7). Phase B2c implemented (§8).
+Contract
 agreed on #443 (v2 + the two implementation points of 2026-11-12). Line refs
 are main @ 506eb377 (v11.25.8).
 Baseline behaviour is pinned by `TestRFC443Baseline_*` (posted on #443).
@@ -502,11 +503,11 @@ reports `pause_required`; B2 applies it under the lease.
 plus `org_id`, `peer_agent_pub`, `role` and `state_reason`.
 - Each row is bound to one agreement generation: `generation` =
   `CrossFedGeneration` of the terms it commits, a SHA-256 over every chain term
-  except the outbound `AllowedDomains` snapshot and the status. Domains are left
-  out because `UpdateAgreementSharingAs` rewrites them in place, and for an
-  introduced agreement that rewrite is held inside the envelope. Any other change
-  (endpoint, pin, clearance, departments, expiry) is a new generation the row
-  doesn't govern.
+  except the outbound `AllowedDomains` snapshot, the endpoint (since B2c, §8.3)
+  and the status. Domains are left out because `UpdateAgreementSharingAs`
+  rewrites them in place, and for an introduced agreement that rewrite is held
+  inside the envelope. Any other change (pin, clearance, departments, expiry)
+  is a new generation the row doesn't govern.
 - The store derives `generation` from `terms` at intent, so the two can't
   disagree. `terms` must be the canonical tx-33 encoding of active terms for
   `remote_chain_id`; a caller-supplied `generation` that doesn't match is
@@ -606,8 +607,8 @@ Then, under `LockAgreementMutation` and one generation mutation for the peer:
      the row here.
    - Any bind failure sends tx-34 and leaves `revoked(bind_failed: …)`.
 
-Only kind `new` is activated. A rekey replaces an active sync-control binding
-(`PrepareSyncControl` refuses that today) and lands with B2b.
+B2a activated only kind `new`. Rekey landed in B2c (§8.4): it keeps the active
+sync-control binding instead of preparing a new one.
 
 ### 6.3 Staging (`internal/federation/introduced_staging.go`)
 
@@ -756,10 +757,7 @@ envelope.
 
 ### 7.7 Deferred to B2c
 
-- Applying the pauses B1 only reports (`pause_required`).
-- Rekey: kind `rekey` offers, accepting them, and the epoch rotation of an
-  active binding.
-- Recording stale refusals (today a refusal before the intent keeps no row).
+Pauses, rekey and stale refusals: all three landed in B2c (§8).
 
 ### 7.8 Tests
 
@@ -781,3 +779,150 @@ envelope.
   new envelope.
 - `intro_accept_test.go`: acceptance store and validation.
 
+## 8. Phase B2c: pauses, rotation, rekey, refusals
+
+B2c applies what B1 only reported, follows endpoint and route changes of a
+peer card, rekeys a link when a CA pin moves, and records stale refusals. The
+contract is v2 §4 (rotation split) and §5 (states).
+
+### 8.1 Policy pass (`internal/federation/introduced_policy.go`)
+
+`ApplyIntroducedLinkPolicy` runs at start-up, on every maintenance tick, and
+after any applied org admission (policy, roster, envelope, card mint; the REST
+layer calls `NudgeIntroducedLinkPolicy`). For the governing row of each
+introduced agreement (the row `IntroducedLinkForGeneration` returns for the
+chain's current terms) it takes `LockAgreementMutation` and one sync-policy
+generation mutation, re-reads the row, and applies:
+
+| Condition (from `IntroOrgSource.IntroOrgPeers`) | Row |
+|---|---|
+| org not ready: no accepted policy, roster not current, envelope missing, expired or not covering | `active`/`rekey_required` → `paused(org not ready: …)` |
+| the peer card is no longer in the roster | → `paused` |
+| the peer card names another chain id | → `paused` (a chain id change is refused) |
+| `pause_required`: peer left `PeerAllowList`, card expired, envelope no longer allows the agreement's sharing | → `paused(reason)` |
+| `active`, a CA pin moved on either side (§8.4) | → `rekey_required` |
+| `active`, endpoint- or route-only card change | followed in place (§8.3) |
+| `paused`, resumable, and the card digest is the one the link last followed | → `active` |
+
+Pausing needs no tx: `ActiveAgreement` denies a generation whose governing row
+isn't active, so traffic stops at once, and resuming is the reverse CAS. An
+org whose state can't be read leaves its rows as they are.
+
+`paused` → `active` without a tap needs all of:
+- the peer is covered again (`PeerEligible`, card current);
+- the envelope still allows the agreement's domains and clearance;
+- neither CA pin moved (the peer's against the agreement, this node's against
+  the pin it presented in E_intro);
+- the peer card digest equals the one the link last followed.
+
+Anything else needs a new ask. orgpolicy reports the first three as
+`resumable` on a `paused` offer row, with a reason when it isn't; the pass
+checks the digest.
+
+### 8.2 Own-pin rekey signal (`internal/orgpolicy/offer.go`)
+
+`PeerAgreement.OwnPinHex` is the pin this node presented in the governing
+row's E_intro. A rekey is due when the peer card pin differs from the
+agreement's pin (as in B1) or this node's own card pin differs from
+`OwnPinHex`. Without the second check only the peer of the node whose CA
+rotated would ever offer the rekey, and the handshake needs both sides. Both
+sides compute the same kind-`rekey` offer id from the same cards.
+
+### 8.3 Rotation split
+
+- Endpoint-only change (same pin, agent key and chain id): a tx-33 upsert of
+  the current terms with the new endpoint, under the lease. `CrossFedGeneration`
+  no longer covers the endpoint, so the upserted agreement keeps its
+  generation and the same active row keeps governing it. An endpoint is only
+  where to dial; trust is the pin.
+- Route-only change: no tx. The route refresher re-exchanges routes.
+- Either way the link records the card it now follows in
+  `introduced_link_card` (revision + digest) with a history entry
+  (`card_rotated rev N: endpoint|routes`). A card with a lower revision than
+  the followed one is ignored.
+- A pin change goes to `rekey_required`; a chain id change pauses.
+
+The generation change is safe to make now because no production path wrote
+an `introduced_link` row before B2b.
+
+### 8.4 Rekey
+
+- Offers: kind `rekey` in state `rekey_required` is an open offer. Owner
+  accept takes it like a new one, and the wire runs the same handshake with
+  E_intro kind `rekey`.
+- Terms: the chain's current terms for the peer with only the pin and endpoint
+  replaced from the peer's transcript side. Sharing, clearance, departments
+  and expiry carry over, so a rekey never widens or narrows what the owner
+  granted, and the envelope keeps capping it. The trust-only and scope checks
+  apply to kind `new` only.
+- Extra stale gate under the lease (`introRekeyGate`): the chain holds an
+  active agreement governed by an `active` or `rekey_required` row of the
+  same org and peer key, and the terms are exactly the carry-over terms.
+  Otherwise it's a stale refusal (no agreement, a manual or other-org
+  agreement, a paused link, terms that don't carry over).
+- Write path: the same intent → signed → committed → bind machinery, with the
+  same fault points and reconciler. A rekey skips `PrepareSyncControl`.
+- Bind:
+  - the staged CA replaces the live peer CA;
+  - the seed commit rotates the epoch (the current seed becomes the
+    previous one);
+  - `RekeySyncControlPin` moves the active binding's pinned CA, keeping its
+    epoch, controller and delivered policy;
+  - the peer RBAC snapshot and routes are kept, and a route refresh is
+    triggered;
+  - the rows the rekey replaced go to `revoked(superseded_by_rekey: <link>)`.
+- One agreement: the tx-33 upserts the same remote chain id. On the side
+  whose peer's pin moved, that's a new generation. On the side whose own CA
+  moved, the terms keep the peer pin, so the rekey row shares the generation
+  of the link it replaces.
+- Governance: `IntroducedLinkForGeneration` and the `ActiveAgreements` filter
+  skip an aborted rekey row. It never put bytes on chain, so it must not take
+  over a shared generation from the link it failed to replace. An aborted
+  kind-`new` row keeps governing as before.
+- Guest window: unchanged. A guest rekey that the host never confirms is
+  revoked (tx-34) at the deadline, like a new link.
+
+### 8.5 Stale refusals
+
+A stale-gate refusal still writes no `introduced_link` row. It's appended to
+`introduced_link_refusal` (org, offer, remote chain, kind, role, reason, time;
+bounded to 1024 entries, oldest pruned), and `GET
+/v1/federation/introduced-links` returns them as `refusals`. Plan errors that
+never reach the gate aren't recorded.
+
+### 8.6 Decisions for review
+
+1. The endpoint left `CrossFedGeneration` (§8.3). The alternative, a new row
+   per endpoint change, would need a consent record nobody signs.
+2. Rekey terms carry the current sharing over rather than resetting to
+   trust-only (§8.4).
+3. Org not ready pauses every link of the org, including a roster that merely
+   lapsed past its window. That's fail-closed; resume is automatic once a
+   current roster with the same card arrives.
+4. A pin change while paused needs a new ask (no rekey from `paused`).
+5. A guest-side rekey that times out revokes the agreement, as a new link
+   does.
+
+### 8.7 Tests
+
+- `introduced_policy_test.go`:
+  - every pause trigger, each followed by an automatic resume;
+  - resume refusals (not resumable; card changed while paused);
+  - an unreadable org leaves rows alone;
+  - the rotation split: endpoint upsert still governed, route-only, an older
+    card ignored, a pin change to `rekey_required`, `rekey_required` →
+    `paused`;
+  - rekey binding the new pin with one upsert and no second agreement;
+  - crash after commit resumed by the reconciler;
+  - crash before broadcast keeping the old link;
+  - the same-generation guest case (an aborted rekey hands governance back,
+    a retry succeeds);
+  - rekey gate refusals;
+  - the stale refusal record;
+  - the rekey end to end over the wire after a CA rotation, with both sides
+    active on the new pin and the same new seed.
+- `introduced_link_b2c_test.go`: an aborted rekey not governing, the card
+  record, the bounded refusal log, `RekeySyncControlPin`.
+- `offer_test.go`: own-pin rekey, `resumable` and its reasons.
+- `org_intro_b2c_test.go`: the org peers view, accepting a rekey offer, the
+  own pin from the transcript, the admission nudge, refusals in the list.

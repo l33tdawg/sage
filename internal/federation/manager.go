@@ -528,6 +528,7 @@ type Manager struct {
 	// drivers, the org source). introPoll / introGuestWindow are test seams
 	// (0 = the defaults).
 	intro            introState
+	introPolicy      introPolicyGuard // one background B2c policy pass at a time
 	introPoll        time.Duration
 	introGuestWindow time.Duration
 

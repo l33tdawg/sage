@@ -264,3 +264,56 @@ func TestRefreshOffersPauseRequired(t *testing.T) {
 		t.Fatalf("expired peer card: %+v", o)
 	}
 }
+
+// B2c: a rekey is due when either side's card pin moved, and a paused link
+// says whether it may resume without a tap.
+func TestRefreshOffersB2cRekeyAndResume(t *testing.T) {
+	f := newPhaseBFixture(t)
+	f.storeEnvelope(t)
+	peer, own := sampleCard(2, 1, nil), sampleCard(1, 1, nil)
+	chain := peer.ChainID
+	moved := strings.Repeat("cd", 32)
+	cases := []struct {
+		name      string
+		ag        PeerAgreement
+		state     string
+		kind      string
+		resumable bool
+	}{
+		{"own pin unchanged", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, OwnPinHex: own.CASPKIPin, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}, PeerStateActive, "", false},
+		{"own pin moved", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, OwnPinHex: moved, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}, PeerStateRekeyRequired, OfferKindRekey, false},
+		{"paused, nothing moved", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, OwnPinHex: own.CASPKIPin, LinkID: "L", LinkOrgID: "org-acme", LinkState: "paused"}, PeerStatePaused, "", true},
+		{"paused, peer pin moved", PeerAgreement{Exists: true, PinHex: moved, LinkID: "L", LinkOrgID: "org-acme", LinkState: "paused"}, PeerStatePaused, "", false},
+		{"paused, own pin moved", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, OwnPinHex: moved, LinkID: "L", LinkOrgID: "org-acme", LinkState: "paused"}, PeerStatePaused, "", false},
+		{"paused, sharing outside envelope", PeerAgreement{Exists: true, PinHex: peer.CASPKIPin, AllowedDomains: []string{"hr"}, LinkID: "L", LinkOrgID: "org-acme", LinkState: "paused"}, PeerStatePaused, "", false},
+	}
+	for _, tc := range cases {
+		l, err := f.st.RefreshOffers(f.inputs(1, testNow, agreementTable{chain: tc.ag}))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		o := offerFor(t, l, agentHex(2))
+		if o.State != tc.state || o.Kind != tc.kind || o.Resumable != tc.resumable {
+			t.Errorf("%s: state %q kind %q resumable %v, want %q %q %v", tc.name, o.State, o.Kind, o.Resumable, tc.state, tc.kind, tc.resumable)
+		}
+		if tc.state == PeerStatePaused && !tc.resumable && o.Reason == "" {
+			t.Errorf("%s: a paused link that cannot resume must say why", tc.name)
+		}
+	}
+	// Both sides compute the same rekey offer id from the same cards.
+	l1, _ := f.st.RefreshOffers(f.inputs(1, testNow, agreementTable{chain: {Exists: true, PinHex: peer.CASPKIPin, OwnPinHex: moved, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}}))
+	g := newPhaseBFixture(t)
+	g.storeEnvelope(t)
+	l2, _ := g.st.RefreshOffers(g.inputs(2, testNow, agreementTable{own.ChainID: {Exists: true, PinHex: moved, LinkID: "L", LinkOrgID: "org-acme", LinkState: "active"}}))
+	o12, o21 := offerFor(t, l1, agentHex(2)), offerFor(t, l2, agentHex(1))
+	if o12.Kind != OfferKindRekey || o21.Kind != OfferKindRekey || o12.OfferID != o21.OfferID {
+		t.Fatalf("rekey offers differ across the pair: %+v / %+v", o12, o21)
+	}
+	// A paused peer that left the allow-list is not resumable.
+	h := newPhaseBFixture(t, agentHex(1))
+	h.storeEnvelope(t)
+	l3, _ := h.st.RefreshOffers(h.inputs(1, testNow, agreementTable{chain: {Exists: true, PinHex: peer.CASPKIPin, LinkID: "L", LinkOrgID: "org-acme", LinkState: "paused"}}))
+	if o := offerFor(t, l3, agentHex(2)); o.Resumable || o.Reason == "" {
+		t.Fatalf("delisted paused peer: %+v", o)
+	}
+}

@@ -39,6 +39,33 @@ type fakeIntroSource struct {
 	mu   sync.Mutex
 	view *IntroOfferView
 	pins map[string]bool
+	// peers is the org's peer list for the B2c policy pass (nil = an org
+	// view built from view: ready, the one peer active).
+	peers   *IntroOrgPeers
+	peerErr error
+}
+
+func (f *fakeIntroSource) IntroOrgPeers(_ context.Context, orgID string) (*IntroOrgPeers, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.peerErr != nil {
+		return nil, f.peerErr
+	}
+	if f.peers != nil {
+		cp := *f.peers
+		cp.Peers = append([]IntroPeerState(nil), f.peers.Peers...)
+		return &cp, nil
+	}
+	if f.view == nil || f.view.OrgID != orgID {
+		return &IntroOrgPeers{Ready: false, Reason: "no such org"}, nil
+	}
+	return &IntroOrgPeers{Ready: true, Peers: []IntroPeerState{{State: "active", Card: f.view.Peer}}}, nil
+}
+
+func (f *fakeIntroSource) setPeers(p *IntroOrgPeers) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.peers = p
 }
 
 func (f *fakeIntroSource) IntroOffer(_ context.Context, orgID, offerID string) (*IntroOfferView, error) {

@@ -103,6 +103,9 @@ func (s *Server) handleOrgRosterUpdate(w http.ResponseWriter, r *http.Request) {
 	resp := OrgRosterUpdateResponse{Decision: decision, Accepted: accepted, Notice: notice}
 	switch decision {
 	case orgpolicy.DecisionApplied, orgpolicy.DecisionNoOpSameDigest:
+		if decision == orgpolicy.DecisionApplied {
+			s.nudgeIntroducedLinkPolicy()
+		}
 		writeJSON(w, http.StatusOK, resp)
 	case orgpolicy.DecisionRejectedEquivocation:
 		if s.OnEvent != nil && notice != nil {

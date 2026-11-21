@@ -231,6 +231,9 @@ func (s *Server) handleOrgPolicyUpdate(w http.ResponseWriter, r *http.Request) {
 	resp := OrgPolicyUpdateResponse{Decision: decision, Accepted: accepted, Equivocation: notice}
 	switch decision {
 	case orgpolicy.DecisionApplied, orgpolicy.DecisionNoOpSameDigest:
+		if decision == orgpolicy.DecisionApplied {
+			s.nudgeIntroducedLinkPolicy()
+		}
 		writeJSON(w, http.StatusOK, resp)
 	case orgpolicy.DecisionRejectedEquivocation:
 		if s.OnEvent != nil && notice != nil {

@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/l33tdawg/sage/internal/tx"
 )
 
 // IntroCard is one roster card as the wire needs it.
@@ -86,6 +88,30 @@ type IntroOrgSource interface {
 	IntroPeerPinKnown(pin string) bool
 	// AcceptedIntroOffers lists this node's owner acceptances.
 	AcceptedIntroOffers(ctx context.Context) ([]IntroOfferRef, error)
+	// IntroOrgPeers reports every roster peer of one org as this node sees it
+	// now (B2c: applying pauses, rekey_required and card rotation). Ready is
+	// false, with Reason, when the org-level preconditions fail.
+	IntroOrgPeers(ctx context.Context, orgID string) (*IntroOrgPeers, error)
+}
+
+// IntroPeerState is one roster peer: its orgpolicy per-peer state and its
+// current card.
+type IntroPeerState struct {
+	State   string // orgpolicy per-peer state (active, pause_required, rekey_required, paused, ...)
+	Reason  string
+	Kind    string
+	OfferID string
+	// Resumable is the orgpolicy verdict for a paused link (covered again,
+	// sharing inside the envelope, no CA pin moved).
+	Resumable bool
+	Card      IntroCard
+}
+
+// IntroOrgPeers is one org's peers.
+type IntroOrgPeers struct {
+	Ready  bool
+	Reason string
+	Peers  []IntroPeerState
 }
 
 // ErrIntroOfferUnknown means the node holds no such offer.
@@ -156,8 +182,9 @@ func introTranscriptFor(v *IntroOfferView, hostNonce, guestNonce string, peerEnv
 	return tr.Encode()
 }
 
-// introOpenOffer resolves an offer and requires it to be open, of kind new,
-// with this node in role.
+// introOpenOffer resolves an offer and requires it to be open with this node
+// in role: a kind-new offer in state offered, or a kind-rekey offer in state
+// rekey_required (B2c).
 func (m *Manager) introOpenOffer(ctx context.Context, orgID, offerID, role string) (*IntroOfferView, error) {
 	src := m.introOrgSource()
 	if src == nil {
@@ -172,10 +199,9 @@ func (m *Manager) introOpenOffer(ctx context.Context, orgID, offerID, role strin
 		return nil, errors.New("intro offer: source returned a different offer")
 	case v.Role != role:
 		return nil, fmt.Errorf("intro offer: this node is the %s for this offer", v.Role)
-	case v.Kind != introKindNew:
-		// Rekey replaces an active binding; it lands after B2b.
-		return nil, errors.New("intro offer: only kind new is supported")
-	case v.State != "offered":
+	case v.Kind != introKindNew && v.Kind != introKindRekey:
+		return nil, errors.New("intro offer: unknown kind")
+	case v.State != introOpenState(v.Kind):
 		why := v.State
 		if v.Reason != "" {
 			why += ": " + v.Reason
@@ -194,6 +220,53 @@ func (m *Manager) introOpenOffer(ctx context.Context, orgID, offerID, role strin
 		return nil, errors.New("intro offer: this node's roster card pins a different CA")
 	}
 	return v, nil
+}
+
+// introOpenState is the orgpolicy per-peer state of an open offer of kind.
+func introOpenState(kind string) string {
+	if kind == introKindRekey {
+		return "rekey_required"
+	}
+	return "offered"
+}
+
+// introTermsFor builds the exact tx-33 terms this side commits for peer.
+//   - new: trust-only terms (data scope only ever comes through the
+//     envelope-capped UpdateAgreementSharingAs).
+//   - rekey: the chain's current terms for the peer with only the key
+//     material moved: the pin and endpoint from the peer's transcript side.
+//     Sharing, clearance, departments and expiry carry over, so a rekey never
+//     widens or narrows what the owner granted; the envelope still caps it.
+func (m *Manager) introTermsFor(kind string, peer IntroSide) (*tx.CrossFedTerms, error) {
+	pin, err := hex.DecodeString(peer.Pin)
+	if err != nil || len(pin) != 32 {
+		return nil, errors.New("intro terms: bad peer pin")
+	}
+	if kind != introKindRekey {
+		return &tx.CrossFedTerms{
+			RemoteChainID: peer.ChainID, Endpoint: peer.Endpoint, PeerPubKey: pin,
+			MaxClearance: tx.ClearanceLevel(trustOnlyJoinScope.MaxClearance), Status: "active",
+		}, nil
+	}
+	cur, err := m.chainTerms(peer.ChainID)
+	if err != nil {
+		return nil, err
+	}
+	if cur == nil || cur.Status != "active" {
+		return nil, errors.New("intro terms: no active agreement to rekey")
+	}
+	return rekeyTerms(cur, peer.Endpoint, pin), nil
+}
+
+// rekeyTerms is cur with only the endpoint and pin replaced.
+func rekeyTerms(cur *tx.CrossFedTerms, endpoint string, pin []byte) *tx.CrossFedTerms {
+	t := *cur
+	t.Endpoint = endpoint
+	t.PeerPubKey = append([]byte(nil), pin...)
+	t.AllowedDomains = append([]string(nil), cur.AllowedDomains...)
+	t.AllowedDepts = append([]string(nil), cur.AllowedDepts...)
+	t.Status = "active"
+	return &t
 }
 
 // introStaleCheck re-reads the offer under the agreement lease and refuses
