@@ -518,7 +518,18 @@ func (h *DashboardHandler) startPostUnlockRepairs() {
 			_, _ = h.ScopedProjectionRebuildFn(ctx)
 		}
 		_, _ = h.StartEmbeddingRepairIfNeeded(ctx)
+		// Encrypted legacy JSON embeddings can only be rewritten once the
+		// vault is open; the boot pass skips them while locked.
+		if m, ok := h.store.(embeddingEncodingMigrator); ok {
+			_, _ = m.MigrateEmbeddingEncoding(ctx)
+		}
 	})
+}
+
+// embeddingEncodingMigrator is implemented by the SQLite projection, which
+// rewrites legacy JSON embeddings in its packed format.
+type embeddingEncodingMigrator interface {
+	MigrateEmbeddingEncoding(ctx context.Context) (int, error)
 }
 
 // publishUnlockedVault preserves the safety ordering for locked personal-node

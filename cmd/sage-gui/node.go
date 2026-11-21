@@ -1153,6 +1153,17 @@ func runServe(startupProof string) (rerr error) {
 		}
 		logger.Info().Dur("elapsed", time.Since(start)).Msg("FTS5 backfill complete (or already current)")
 	})
+	startWorker(func() {
+		start := time.Now()
+		n, embErr := sqliteStore.MigrateEmbeddingEncoding(ctx)
+		if embErr != nil {
+			logger.Warn().Err(embErr).Int("converted", n).Msg("embedding encoding migration stopped — legacy rows still decode, retried next boot")
+			return
+		}
+		if n > 0 {
+			logger.Info().Int("converted", n).Dur("elapsed", time.Since(start)).Msg("embeddings rewritten as packed float32")
+		}
+	})
 
 	embedProvider := createEmbeddingProvider(cfg, logger)
 	// Detect a store written in a different vector space than the active embedder
