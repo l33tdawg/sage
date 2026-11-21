@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.10`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.11`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,50 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.10 and earlier)</summary>
+<summary>Recent release notes (v11.25.11 and earlier)</summary>
+
+## What's New in v11.25.11
+
+**macOS startup no longer races itself at login.** The open-at-login agent now
+opens `SAGE.app` instead of starting a second `sage-gui serve`. Existing
+direct-daemon launch agents are migrated on the next node start, and the tray
+now adopts an already-running healthy node and delivers the startup passphrase
+to its local vault instead of abandoning supervision. This removes the lock
+conflict that left some MCP clients disconnected until every SAGE process was
+manually killed and restarted.
+
+**RFC #443 Phase B connects roster-introduced links end to end.** One owner
+acceptance on each side now drives the signed introduction wire to an active
+link with no QR exchange. Host and guest pin each other's CA from the roster
+card during the TLS handshake, session state is bounded and restart-safe, and
+the guest retries and reconciles the final binding. The policy pass now applies
+owner-envelope and roster pauses, follows endpoint-only card changes, requires
+owner acceptance for CA rekeys, rotates the pair seed and sync-control pin, and
+reports stale-gate refusals without creating a link.
+
+**Recall outcome feedback is recorded without silently changing ranking.**
+Agents can report whether a recalled memory helped, hurt or was unused through
+the node-local, off-chain outcome route; recall always returns the aggregate
+counts. Reordering remains opt-in with
+`SAGE_RECALL_OUTCOME_RANKING=on`, moves a result at most three places within the
+page already returned, and currently applies to SQLite only.
+
+**Agents can exclude lesson generations and replace memories in one SDK
+call.** Query, search and hybrid recall accept a local-only `not_tags` exclusion
+filter with the same validation as stored tags. The Python SDK adds
+commit-first sync and async `replace()` helpers: the replacement is committed
+before the old memory is challenged, so an interruption can leave both records
+but never neither.
+
+**SQLite vector recall uses packed float32 embeddings.** New vectors take about
+one third of their previous JSON storage and decode without parsing; measured
+recall over 2,000 full-size vectors falls from roughly 1.08 seconds to 80 ms.
+Legacy rows stay readable and are rewritten through a bounded compare-and-set
+migration at boot and after vault unlock.
+
+No consensus state-machine change, app-version change or chain reset. App-v29
+remains active and app30 remains explicit. Container:
+`ghcr.io/l33tdawg/sage:11.25.11`. SDK 11.25.11.
 
 ## What's New in v11.25.10
 
