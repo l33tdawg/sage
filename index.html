@@ -990,15 +990,15 @@ footer a:hover { text-decoration: underline; }
       </div>
       <div class="brand-release">
         <div class="cta-meta">
-          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.10</strong> &middot; signed assets</span>
-          <span class="cta-count" id="minds-freed"><strong id="download-count" data-count="18516" data-updated-at="2026-11-21T06:27:22.614Z">18,516</strong><span>package downloads</span></span>
+          <span class="cta-version">Latest <strong id="latest-version" data-sage-version>v11.25.12</strong> &middot; signed assets</span>
+          <span class="cta-count" id="minds-freed"><strong id="download-count" data-count="19564" data-updated-at="2026-11-21T13:02:59.827Z">19,564</strong><span>package downloads</span></span>
         </div>
         <div class="download-badges">
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-macOS-arm64.dmg" class="badge-link">macOS</a>
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/SAGE-Windows-Setup.exe" class="badge-link">Windows</a>
           <a href="https://github.com/l33tdawg/sage/releases/latest/download/sage-gui-linux-amd64.tar.gz" class="badge-link">Linux</a>
         </div>
-        <p class="cta-fineprint"><span id="download-status" aria-live="polite">Last known count &middot; Nov 21, 2026, 06:27 UTC</span><span class="cta-fineprint-sep" aria-hidden="true">&middot;</span><span>Includes repeats, prereleases and automated downloads. Not unique installs.</span></p>
+        <p class="cta-fineprint"><span id="download-status" aria-live="polite">Last known count &middot; Nov 21, 2026, 13:02 UTC</span><span class="cta-fineprint-sep" aria-hidden="true">&middot;</span><span>Includes repeats, prereleases and automated downloads. Not unique installs.</span></p>
       </div>
     </div>
   </section>
@@ -1153,15 +1153,15 @@ footer a:hover { text-decoration: underline; }
       </div>
 
       <!-- What's New -->
-      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.10">
-        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.10</span></summary>
+      <details class="whats-new reveal brand-release-notes" data-release-notes-version="v11.25.12">
+        <summary>Release notes: changes introduced in <span id="whats-new-version" data-sage-version>v11.25.12</span></summary>
         <div class="release-notes-body">
-        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.10 lets strict MCP hosts connect directly to <code>sage-gui mcp</code> without a protocol shim. It also adds RFC #443 Phase B2a's restart-safe introduced-link activation engine and updates transitive OpenTelemetry modules for GHSA-q7gw-24fr-5p69. B2b wire routes and the owner-offer workflow remain unavailable, so no roster-introduced link can activate from this release alone. No consensus change, app-version change, chain reset, or data migration. Automatic upgrades remain app29; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.10" style="color:var(--accent);">Read the v11.25.10 release notes &rarr;</a></p>
+        <p style="opacity:0.85;margin:0 0 24px 0;">v11.25.12 stops failed domain-continuity maintenance from repeatedly scanning public memory. It also includes recent improvements to macOS startup, roster-introduced federation, recall ranking, SDK memory replacement, and SQLite storage. No consensus state-machine change, app-version change, chain reset, or data migration. Automatic upgrades remain app29; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.12" style="color:var(--accent);">Read the v11.25.12 release notes &rarr;</a></p>
         <div class="new-features">
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Direct MCP compatibility</h4><p>The server answers <code>ping</code>, returns empty discovery lists, and silently accepts standard cancellation, roots-change and progress notifications.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Restart-safe introductions</h4><p>Phase B2a adds bounded introduction transcripts, domain-separated signatures, durable staging, reconciliation and pre-broadcast transaction persistence.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>B2b remains disabled</h4><p>The owner-offer and introduction wire routes are not exposed yet, so this release cannot activate a roster-introduced link on its own.</p></div></div>
-          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Telemetry advisory closed</h4><p>Transitive OpenTelemetry modules move to 1.47.0, fixing the attribute-value length-limit bypass in GHSA-q7gw-24fr-5p69.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--accent);"></div><div><h4>Steadier maintenance</h4><p>Failed continuity checks now use bounded backoff, so one persistent conflict cannot keep scanning the full public-memory index.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:var(--ember);"></div><div><h4>Reliable macOS startup</h4><p>Open at login launches <code>SAGE.app</code>, migrates older launch agents, and can adopt an existing healthy node.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#2dd4bf;"></div><div><h4>Roster-introduced federation</h4><p>Owners can accept a signed introduction on each side, then apply Read/Copy policy without swapping QR codes.</p></div></div>
+          <div class="new-feature"><div class="new-feature-dot" style="background:#fbbf24;"></div><div><h4>Faster recall and storage</h4><p>Recall can opt into outcome ranking, local queries can exclude tags, the SDK safely replaces memories, and SQLite vectors use packed float32.</p></div></div>
         </div>
         </div>
       </details>
@@ -1238,7 +1238,7 @@ footer a:hover { text-decoration: underline; }
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-tag"></use></svg><span>What changed in v11?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
-          <div class="faq-a"><p data-release-notes-version="v11.25.10">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.10 improves compatibility with strict MCP clients and adds the restart-safe RFC #443 Phase B2a activation engine, but B2b wire routes and owner-offer activation remain unavailable. It also patches the transitive OpenTelemetry advisory. No consensus change, app-version change, chain reset, or data migration. Automatic upgrades remain app29; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.10">Read the v11.25.10 release notes</a> for details.</p></div>
+          <div class="faq-a"><p data-release-notes-version="v11.25.12">v11 adds CEREBRUM, guided setup, semantic recall, controlled federation, and in-place upgrades. Recent releases add encrypted agent working state, a deliberate upgrade path with an explicit vote, automatic trusted-node agent messaging, an amid operator surface for fleets without CEREBRUM, and the app-v28 public-memory commitment. v11.25.12 stops deterministic domain-continuity failures from repeatedly scanning public memory. v11.25.11 adds the roster-introduced federation flow, safer macOS startup, opt-in recall outcome ranking, commit-first SDK replacement, and packed SQLite embeddings. Neither release changes consensus state machines, app versions, or chain data. Automatic upgrades remain app29; app30 requires an explicit upgrade. <a href="https://github.com/l33tdawg/sage/releases/tag/v11.25.12">Read the v11.25.12 release notes</a> for details.</p></div>
         </div>
           <div class="faq-item">
           <button class="faq-q" type="button" aria-expanded="false"><span class="faq-q-main"><svg class="ico faq-ico" aria-hidden="true"><use href="#i-federation"></use></svg><span>What does federation mean?</span></span><svg class="faq-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
