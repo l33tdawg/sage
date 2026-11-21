@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.25.11. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.25.12. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 

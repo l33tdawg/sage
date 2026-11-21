@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.11`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.12`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,25 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.11 and earlier)</summary>
+<summary>Recent release notes (v11.25.12 and earlier)</summary>
+
+## What's New in v11.25.12
+
+**Failed domain-continuity maintenance now backs off instead of repeatedly
+minting expensive consensus blocks.** When an app-v25 continuity proposal is
+deterministically refused, the worker waits 30 seconds, then 1, 2, 4, 8 and 16
+minutes, and finally retries at most every 30 minutes. Progress, inactivity or
+a clean pass resets the delay, and each warning reports `retry_in`.
+
+This bounds the CPU cost of a persistent state conflict. Before this fix, one
+rejected proposal could produce two blocks about every 31 seconds, with each
+block rescanning the full public-memory index for the AppHash. The underlying
+conflict still requires repair; this release keeps it from consuming a core
+while it remains unresolved.
+
+No consensus state-machine change, app-version change or chain reset. App-v29
+remains active and app30 remains explicit. Container:
+`ghcr.io/l33tdawg/sage:11.25.12`. SDK 11.25.12.
 
 ## What's New in v11.25.11
 
