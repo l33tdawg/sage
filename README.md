@@ -100,7 +100,7 @@ docker run -d --name sage \
   ghcr.io/l33tdawg/sage:latest
 ```
 
-Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.12`.
+Pin a specific version with `ghcr.io/l33tdawg/sage:11.25.13`.
 
 The SAGE server stays in that container. To give a local MCP client a stdio
 bridge, start a second process **inside the same running container**:
@@ -317,7 +317,26 @@ uses re-enrollment; historical memory authorship is preserved.
 ---
 
 <details>
-<summary>Recent release notes (v11.25.12 and earlier)</summary>
+<summary>Recent release notes (v11.25.13 and earlier)</summary>
+
+## What's New in v11.25.13
+
+**Recall now stops when the caller does.** A cancelled query, text search or
+hybrid request returns immediately after the store lookup instead of computing
+per-result evidence, writing activity and logging a stream of
+`context canceled` warnings for a response nobody will receive. A vector scan
+cut short by cancellation or a read error is now an error rather than a partial
+ranking presented as complete.
+
+**Quotes-only and whitespace-only text searches no longer fail recall.** A
+query with no searchable term now produces no text matches, so hybrid recall
+can still rank its vector leaf instead of failing the whole request with an
+FTS5 syntax error.
+
+The release also clears current Go and Rust advisories and refreshes the pinned
+Go dependencies and GitHub Actions. No consensus state-machine change,
+app-version change or chain reset. App-v29 remains active and app30 remains
+explicit. Container: `ghcr.io/l33tdawg/sage:11.25.13`. SDK 11.25.13.
 
 ## What's New in v11.25.12
 
