@@ -2285,6 +2285,12 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 			return nil, ErrCandidateFilterScanBudgetExceeded
 		}
 	}
+	// rows.Next stops early on a cancelled context or a read error. Without
+	// this check that partial scan would be ranked and returned as a complete
+	// result.
+	if iterErr := rows.Err(); iterErr != nil {
+		return nil, fmt.Errorf("query similar: %w", iterErr)
+	}
 
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].similarity > scored[j].similarity
