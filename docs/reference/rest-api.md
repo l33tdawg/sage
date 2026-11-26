@@ -1,4 +1,4 @@
-<!-- Reconciled through SAGE v11.25.12. Cite file:line when behavior is non-obvious. -->
+<!-- Reconciled through SAGE v11.25.13. Cite file:line when behavior is non-obvious. -->
 
 # SAGE REST API Reference
 
@@ -518,7 +518,7 @@ canonical-disclosure backend failures, and ancestor-traversal uncertainty remain
 can fail before policy evaluation.
 
 Sources: `appV30TaintProjectionProblem` (`api/rest/appv30_taint_problem.go:19`),
-`handleGetMemory` (`api/rest/memory_handler.go:3635`), and
+`handleGetMemory` (`api/rest/memory_handler.go:3644`), and
 `ClassifyMemoryProjectionForRead` (`internal/store/memory_disclosure.go:148`).
 
 ---

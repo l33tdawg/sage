@@ -2285,6 +2285,12 @@ func (s *SQLiteStore) QuerySimilar(ctx context.Context, embedding []float32, opt
 			return nil, ErrCandidateFilterScanBudgetExceeded
 		}
 	}
+	// rows.Next stops early on a cancelled context or a read error. Without
+	// this check that partial scan would be ranked and returned as a complete
+	// result.
+	if iterErr := rows.Err(); iterErr != nil {
+		return nil, fmt.Errorf("query similar: %w", iterErr)
+	}
 
 	sort.Slice(scored, func(i, j int) bool {
 		return scored[i].similarity > scored[j].similarity
@@ -2350,6 +2356,12 @@ func (s *SQLiteStore) SearchByText(ctx context.Context, query string, opts Query
 	// Escape FTS5 special characters by wrapping each term in double quotes.
 	// This prevents query syntax injection while preserving multi-word search.
 	escapedQuery := ftsEscapeQuery(query)
+	if escapedQuery == "" {
+		// Blank or quotes-only input has no term to match. Return no text
+		// hits rather than an FTS5 syntax error, so a hybrid recall still
+		// ranks on its vector leaf.
+		return nil, nil
+	}
 
 	sqlStr := `SELECT m.memory_id, m.submitting_agent, m.content, m.content_hash, m.embedding,
 		m.memory_type, m.domain_tag, m.provider, m.confidence_score, m.status, m.parent_hash,
@@ -2771,17 +2783,17 @@ func (s *SQLiteStore) applyReranker(ctx context.Context, query string, candidate
 }
 
 // ftsEscapeQuery wraps individual words in double quotes to escape FTS5 special characters.
+// It returns "" when the query has no searchable term (blank, or only double
+// quotes): FTS5 rejects an empty MATCH with a syntax error, so callers must
+// treat "" as "no text matches" instead of running the query.
 func ftsEscapeQuery(query string) string {
 	words := strings.Fields(query)
-	if len(words) == 0 {
-		return query
-	}
-	escaped := make([]string, len(words))
-	for i, w := range words {
+	escaped := make([]string, 0, len(words))
+	for _, w := range words {
 		// Remove any existing double quotes to prevent injection
 		w = strings.ReplaceAll(w, `"`, ``)
 		if w != "" {
-			escaped[i] = `"` + w + `"`
+			escaped = append(escaped, `"`+w+`"`)
 		}
 	}
 	return strings.Join(escaped, " ")

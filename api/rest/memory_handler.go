@@ -2220,6 +2220,9 @@ func (s *Server) handleQueryMemory(w http.ResponseWriter, r *http.Request) {
 	if localDomainReadable {
 		records, err = s.store.QuerySimilar(r.Context(), req.Embedding, opts)
 	}
+	if recallCallerGone(r) {
+		return
+	}
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to query memories")
 		if errors.Is(err, errAppV23RecordDisclosureUnavailable) {
@@ -3035,6 +3038,9 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	if localDomainReadable {
 		records, err = s.store.SearchByText(r.Context(), req.Query, opts)
 	}
+	if recallCallerGone(r) {
+		return
+	}
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to search memories")
 		if errors.Is(err, errAppV23RecordDisclosureUnavailable) {
@@ -3380,6 +3386,9 @@ func (s *Server) handleHybridSearchMemory(w http.ResponseWriter, r *http.Request
 	var err error
 	if localDomainReadable {
 		records, err = s.runHybridWithExpansions(r.Context(), req, opts)
+	}
+	if recallCallerGone(r) {
+		return
 	}
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to hybrid-search memories")
@@ -5115,6 +5124,17 @@ func (s *Server) handleTimelineAuth(w http.ResponseWriter, r *http.Request) {
 // once per expansion variant, then fuses the variant rankings into a single
 // list via RRF across variants. With no expansions the call collapses to a
 // single SearchHybrid invocation (zero overhead vs the v7.0 path).
+// recallCallerGone reports whether the caller cancelled the recall request
+// (closed the connection or hit its own timeout) while the store lookup ran.
+// The store work has already stopped, and a cancelled scan may have returned a
+// partial result, so the handler returns at once instead of computing the
+// per-result batches (corroboration, challenge and evidence counts), writing
+// last_seen and serializing a response nobody reads. Those steps would each
+// fail on the cancelled context and log a "context canceled" warning per call.
+func recallCallerGone(r *http.Request) bool {
+	return r.Context().Err() != nil
+}
+
 func (s *Server) runHybridWithExpansions(ctx context.Context, req HybridSearchMemoryRequest, opts store.QueryOptions) ([]*memory.MemoryRecord, error) {
 	if len(req.Expansions) > maxHybridExpansions {
 		return nil, fmt.Errorf(
